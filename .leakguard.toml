@@ -1,0 +1,5 @@
+# This crate names the tracker and the card files.
+allow = [
+    "vissue ",
+    "vissue:",
+]
