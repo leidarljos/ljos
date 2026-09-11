@@ -54,9 +54,13 @@ enum Cmd {
     /// This-session work.
     Claim {
         node: String,
+        #[arg(long)]
+        assignee: String,
     },
     Complete {
         node: String,
+        #[arg(long)]
+        status: Option<String>,
     },
     /// Frozen working core. Read-only. Never extract-on-write.
     Cards {
@@ -97,8 +101,13 @@ fn main() -> Result<()> {
             Some(c) => run("vissue", &["vote", &issue, "--for", &c])?,
             None => run("vissue", &["vote", &issue])?,
         },
-        Cmd::Claim { node } => run("claimdag", &["claim", &node])?,
-        Cmd::Complete { node } => run("claimdag", &["complete", &node])?,
+        Cmd::Claim { node, assignee } => {
+            run("claimdag", &["claim", &node, "--assignee", &assignee])?
+        }
+        Cmd::Complete { node, status } => match status {
+            Some(s) => run("claimdag", &["complete", &node, "--status", &s])?,
+            None => run("claimdag", &["complete", &node])?,
+        },
         Cmd::Cards { dir } => print!("{}", cards(&dir)?),
         Cmd::Policy { argv } => {
             eprintln!("ljos: {POLICY_TCB}");
