@@ -1,5 +1,5 @@
 [package]
-name = "ljos-cli"
+name = "ljos"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
