@@ -8,6 +8,10 @@ repository.workspace = true
 homepage.workspace = true
 description = "ljos: one seat over the five habitats and policyd"
 
+[lib]
+name = "ljos_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ljos"
 path = "src/main.rs"
