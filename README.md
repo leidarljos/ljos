@@ -27,4 +27,9 @@ ljos consensus vissue-xxxx
 
 Other projects may still speak packset, deedar, vissue, or claimdag alone.
 
+
+Unanimous green (two implementers, two reviewers, `ljos consensus`
+is GREEN) lives in [`examples/unanimous-green/`](examples/unanimous-green/).
+A Rhai host, a Task host, and a procedure-file host run the same seats.
+
 Site: <https://leidarljos.github.io>
