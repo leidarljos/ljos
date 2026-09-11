@@ -14,6 +14,7 @@ description = "One seat CLI over cards, packset, deedar, vissue, claimdag, and p
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+packset-client = { git = "https://github.com/leidarljos/packset", package = "packset-client" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 which = "7"

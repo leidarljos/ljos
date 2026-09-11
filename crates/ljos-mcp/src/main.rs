@@ -28,15 +28,18 @@ fn main() -> anyhow::Result<()> {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": { "tools": [
-                    {"name": "ljos_remember", "description": "Standing knowledge. Remember: only. Never extract-on-write.", "inputSchema": {"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},
-                    {"name": "ljos_search", "description": "Retrieve standing knowledge.", "inputSchema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},
+                    {"name": "ljos_remember", "description": "Standing knowledge. Remember: only. POST /v1/atoms. Never extract-on-write.", "inputSchema": {"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},
+                    {"name": "ljos_prefer", "description": "Standing preference. Prefer: only. POST /v1/atoms. Never extract-on-write.", "inputSchema": {"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},
+                    {"name": "ljos_search", "description": "Retrieve standing knowledge via PACKSET_URL.", "inputSchema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},
                     {"name": "ljos_evidence", "description": "deedar evidence for an accession.", "inputSchema": {"type":"object","properties":{"accession":{"type":"string"}},"required":["accession"]}},
+                    {"name": "ljos_current", "description": "deedar current tip for an accession.", "inputSchema": {"type":"object","properties":{"accession":{"type":"string"}},"required":["accession"]}},
                     {"name": "ljos_deed", "description": "Cite an accession on a tracker node.", "inputSchema": {"type":"object","properties":{"issue":{"type":"string"},"add":{"type":"string"}},"required":["issue"]}},
                     {"name": "ljos_recall", "description": "Working set for a tracker node.", "inputSchema": {"type":"object","properties":{"issue":{"type":"string"}},"required":["issue"]}},
                     {"name": "ljos_claim", "description": "Claim a claimdag node. Completing does not close a ticket.", "inputSchema": {"type":"object","properties":{"node":{"type":"string"}},"required":["node"]}},
-                    {"name": "ljos_cards", "description": "Read-only cards. Never write MEMORY.md.", "inputSchema": {"type":"object","properties":{}}},
-                    {"name": "ljos_policy", "description": "Argv law. Not a store.", "inputSchema": {"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}}},"required":["argv"]}},
-                    {"name": "ljos_consensus", "description": "DeGroot/Seldon via the consensus crate. Not a vote count.", "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}
+                    {"name": "ljos_complete", "description": "Complete a claimdag node. Completing does not close a ticket.", "inputSchema": {"type":"object","properties":{"node":{"type":"string"}},"required":["node"]}},
+                    {"name": "ljos_cards", "description": "Read-only cards. USER.md and MEMORY.md only. Never write.", "inputSchema": {"type":"object","properties":{}}},
+                    {"name": "ljos_policy", "description": "Print argv. grok-policyd is the TCB when present. Reloading a pack is not a check.", "inputSchema": {"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}}},"required":["argv"]}},
+                    {"name": "ljos_consensus", "description": "ljos-consensus then vissue consensus. Not a vote count.", "inputSchema": {"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}
                 ]}
             }),
             "tools/call" => {
@@ -68,11 +71,18 @@ fn call(name: &str, args: &serde_json::Value) -> String {
         "ljos_remember" => {
             cmd.arg("remember").arg(args["text"].as_str().unwrap_or(""));
         }
+        "ljos_prefer" => {
+            cmd.arg("prefer").arg(args["text"].as_str().unwrap_or(""));
+        }
         "ljos_search" => {
             cmd.arg("search").arg(args["query"].as_str().unwrap_or(""));
         }
         "ljos_evidence" => {
             cmd.arg("evidence")
+                .arg(args["accession"].as_str().unwrap_or(""));
+        }
+        "ljos_current" => {
+            cmd.arg("current")
                 .arg(args["accession"].as_str().unwrap_or(""));
         }
         "ljos_deed" => {
@@ -86,6 +96,9 @@ fn call(name: &str, args: &serde_json::Value) -> String {
         }
         "ljos_claim" => {
             cmd.arg("claim").arg(args["node"].as_str().unwrap_or(""));
+        }
+        "ljos_complete" => {
+            cmd.arg("complete").arg(args["node"].as_str().unwrap_or(""));
         }
         "ljos_cards" => {
             cmd.arg("cards");

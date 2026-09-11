@@ -15,4 +15,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+packset-client.workspace = true
+serde_json.workspace = true
 which.workspace = true
