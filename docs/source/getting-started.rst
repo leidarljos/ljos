@@ -1,0 +1,131 @@
+===============
+Getting started
+===============
+
+
+Everything below runs on a scratch tracker and a scratch deed store. By the
+end you will have remembered a lesson and been told when to review it. You
+will have settled a vote with learned trust, and handed the work to a
+second seat that checked it.
+
+0. Point the seat at scratch stores
+-----------------------------------
+
+.. code:: console
+
+    $ mkdir -p /tmp/seat && cd /tmp/seat && git init -q
+    $ export VISSUE_ROOT=/tmp/seat/tracker DEEDAR_URL=file:///tmp/seat/deeds
+    $ export PACKSET_URL=$(packset ensure) CLAIMDAG_DIR=/tmp/seat/claims
+    $ ljos doctor
+    ok	vissue	...
+    ok	pack	http://127.0.0.1:8761 workspace default
+    ok	deed store	size=0 root=...
+
+1. The memory loop
+------------------
+
+.. code:: console
+
+    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+    $ ljos prefer "CombMNZ over RRF for fusing two ballots."
+    $ ljos search which fusion
+    9.1000	preference	3f9c...	CombMNZ over RRF for fusing two ballots.
+
+A claim is two sentences at most, stored as written. The pack never mines a
+transcript. Tomorrow, ``ljos due`` lists both claims; read each and grade it:
+
+.. code:: console
+
+    $ ljos graded 3f9c...            # recalled: comes back later
+    $ ljos graded 3f9c... --lapsed   # had to look it up: comes back sooner
+
+A claim you stop reviewing sinks in search as its retrievability falls, and
+a claim shown wrong is retired with the deed that showed it:
+``ljos forget 3f9c... --why deed-...``.
+
+2. The agreement loop
+---------------------
+
+Three identities vote on one issue.
+
+.. code:: console
+
+    $ id=$(vissue create -p demo "Ship the fuse change?" -q)
+    $ VISSUE_AGENT=alice ljos vote $id --for ship
+    $ VISSUE_AGENT=bob   ljos vote $id --for ship
+    $ VISSUE_AGENT=carol ljos vote $id --for hold
+    $ ljos consensus $id
+    ... shares: hold 0.333, ship 0.667 ...
+
+Two settles print: the consensus crate's DeGroot or Friedkin-Johnsen
+model, then the tracker's own verb, both under the same trust rows. With no
+rows every voter weighs the same. Now suppose ``hold`` turned out right:
+
+.. code:: console
+
+    $ ljos learn $id --outcome hold
+    alice weighs bob at 0.500
+    alice weighs carol at 1.000
+    ...
+    $ ljos consensus $id
+    ... shares: hold 0.429, ship 0.571 ...
+
+Every voter the outcome refuted shrank in every other voter's row. The rows
+are ``trust`` atoms in the pack, so they carry a validity window, can be
+superseded, and travel in a handover. A person can also set one by hand:
+``ljos trust alice carol 0.9 --why deed-...``.
+
+3. The work loop
+----------------
+
+.. code:: console
+
+    $ ljos claim $id --assignee you
+    gen=2
+    $ echo 'fn main() {}' > patch.rs
+    $ deedar create file --name "the fuse patch" --path patch.rs --agent you
+    id=deed-file-the-fuse-patch ...
+    $ ljos deed $id --add deed-file-the-fuse-patch
+    $ ljos recall $id
+    $ ljos complete $id
+
+``claim`` takes a session node for the tracker id; ``deed`` cites what the
+work produced on the tracker node; ``recall`` prints the working set. Completing
+the session node does not close the ticket.
+
+4. The handover loop
+--------------------
+
+.. code:: console
+
+    $ ljos handover --out /tmp/bag --issue $id
+    issues=1 deeds=1 files=6
+    2 atoms to /tmp/bag/data/atoms/default.jsonl
+    exported 1 deeds, 4 files
+    unsigned: DEEDAR_HOST_SIGNING_KEY unset
+
+On the receiving seat, with its own stores:
+
+.. code:: console
+
+    $ ljos receive /tmp/bag
+    the payload matches the manifest ...
+    1 deeds proven against a log of 1 entries ...
+    8 atoms enclosed, 6 trust rows
+    $ ljos receive /tmp/bag --import
+    8 atoms imported, 0 refused
+
+The receiver now knows what the sender learned, who the sender trusts, and
+which deeds the work produced, and checked all of it before importing. Set
+``DEEDAR_HOST_SIGNING_KEY`` on the sender to a 32-byte seed and the manifest
+and log head come signed; the receiver accepts the key in its store's
+``layout``.
+
+Where next
+----------
+
+- :doc:`How-to <howto>`: wire the server into an agent runner, sign handovers, read the cards.
+
+- :doc:`Reference <reference>`: every verb and tool.
+
+- :doc:`Explanation <explanation>`: the contracts, and the memory model with its sources.

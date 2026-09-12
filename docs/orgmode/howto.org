@@ -1,0 +1,88 @@
+#+title: How-to
+#+options: toc:nil num:nil
+
+* Wire the seat into an agent runner
+
+=ljos-mcp= speaks the Model Context Protocol (MCP) over stdio. Any runner
+that registers MCP servers can sit in the seat:
+
+#+begin_src json
+{"mcpServers": {"ljos": {"command": "ljos-mcp",
+  "env": {"PACKSET_URL": "http://127.0.0.1:8761", "LJOS_CARDS_DIR": "/path/to/cards"}}}}
+#+end_src
+
+Twenty tools, eleven of them writers, two prompts (=start_a_sitting=,
+=check_a_handover=), and two read-only resources (=ljos://cards/USER.md=,
+=ljos://cards/MEMORY.md=). Each tool says whether it reads or writes.
+
+* Start a sitting
+
+The =start_a_sitting= prompt orders the first calls: read the cards, ask
+the pack, recall the node, grade what is due, claim a session node. On the
+command line the same order is =ljos cards=, =ljos search=, =ljos recall=,
+=ljos due=, =ljos claim=.
+
+* Keep the cards
+
+Cards are two files a person writes: =USER.md= and =MEMORY.md=. The seat
+reads them and never writes them; =ljos cards= prints them. The pack is
+where the seat writes.
+
+* Sign what you hand over
+
+#+begin_src console
+$ head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key
+$ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
+$ ljos doctor | grep 'host key'
+ok	host key	/home/you/.config/deedar/host.key (32-byte seed)
+#+end_src
+
+=handover= then signs the manifest and the log head. A receiver adds
+=signer = ed25519:<hex>= to their deed store's =layout= and =receive=
+reports =(accepted)=.
+
+* Receive from the same sender again
+
+#+begin_src console
+$ ljos receive /tmp/bag2 --since /tmp/bag/head.txt
+#+end_src
+
+The bridge shows the sender's log grew from the head you kept and was not
+rewritten.
+
+* Retire a claim with its reason
+
+#+begin_src console
+$ ljos forget 3f9c... --why deed-review-2026-09
+#+end_src
+
+The pack tombstones the claim and records the deed that withdrew it.
+Disagreeing with a claim is not showing it wrong; a retraction names its
+evidence.
+
+* Set trust by hand
+
+#+begin_src console
+$ ljos trust alice carol 0.9 --why deed-postmortem-2026-09
+#+end_src
+
+One row, one weight in (0, 1], the deeds it rests on. A later row for the
+same pair supersedes it.
+
+* Settle under the pack's trust
+
+=ljos consensus ID= reads the live trust rows and passes them to both
+settles. To anchor voters to their own ballots (Friedkin-Johnsen) on the
+model crate alone, pass the rows as JSON tuples:
+
+#+begin_src console
+$ ljos-consensus settle --issue ID --susceptibility 0.8 --trust '[["alice","carol",0.9]]'
+#+end_src
+
+* Check the seat
+
+#+begin_src console
+$ ljos doctor
+#+end_src
+
+Exit 1 when the tracker, the deed store, or the pack does not answer.
