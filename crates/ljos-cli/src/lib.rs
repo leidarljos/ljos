@@ -1152,7 +1152,10 @@ pub fn format_due(atoms: &[Value]) -> String {
             format!(
                 "{}	{}	{}	{}
 ",
-                a["due_at"].as_str().unwrap_or("unreviewed"),
+                a["due_at"]
+                    .as_str()
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or("unreviewed"),
                 a["kind"].as_str().unwrap_or(""),
                 a["id"].as_str().unwrap_or("-"),
                 a["text"].as_str().unwrap_or("")
@@ -2025,7 +2028,9 @@ mod tests {
         ];
         let due = due_of(&atoms, "2026-06-01T00:00:00.000Z");
         let ids: Vec<&str> = due.iter().map(|a| a["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["late", "later"]);
+        // A claim that never entered the clock is due now, ahead of the
+        // past-due ones; the future one waits.
+        assert_eq!(ids, ["never", "blank", "late", "later"]);
         assert!(now_utc().ends_with(".000Z"));
         assert!(now_utc().as_str() > "2026-01-01T00:00:00.000Z");
     }
