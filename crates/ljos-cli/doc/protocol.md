@@ -128,6 +128,9 @@ under equal weights is a count; under calibrated rows it is not.
 
 - `claim: assignee busy HEX`: you hold that node. `ljos release HEX
   --assignee NAME` hands it back, `ljos complete HEX` finishes it.
+- `already held by NAME; the sitting resumes`: not a refusal. A second
+  `sitting` on the issue you hold renews the lease and goes on. Held by
+  another seat, the claim names that actor and the two verbs that free it.
 - `complete: status not terminal`: the statuses are `done`, `failed`,
   `cancelled`. To stop without finishing, `release`.
 - A claim on an issue whose earlier sitting finished reopens its session

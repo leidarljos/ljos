@@ -2648,6 +2648,15 @@ pub fn packset_search_as_of(
         .context("search: GET /v1/search failed")
 }
 
+/// The actor id in a `claimdag get` line (`assignee=HEX`), if any.
+fn holder_of(get_output: &str) -> Option<String> {
+    get_output
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("assignee="))
+        .filter(|h| h.len() == 32 && *h != "00000000000000000000000000000000")
+        .map(str::to_string)
+}
+
 /// Take a session node, and when the claim graph refuses because the
 /// assignee still holds another node, say which tracker id that is and the
 /// two verbs that free it. The bare refusal names a 32-hex id nobody can
@@ -2672,6 +2681,25 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                 run_captured("claimdag", &["reopen", &id, "--actor", &actor])?;
                 let said = run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
                 return Ok(format!("reopened a finished session node\n{}", said.stdout));
+            }
+            // The node is already claimed. By this name it is a sitting
+            // resumed: renew the lease and go on. By another it is theirs.
+            if text.contains("status claimed") {
+                let got = run_captured("claimdag", &["get", &id])?.stdout;
+                return match holder_of(&got) {
+                    Some(holder) if holder == actor => {
+                        let renewed = run_captured("claimdag", &["renew", &id, "--actor", &actor])
+                            .map(|s| s.stdout)
+                            .unwrap_or_default();
+                        Ok(format!(
+                            "already held by {assignee}; the sitting resumes\n{renewed}"
+                        ))
+                    }
+                    Some(holder) => bail!(
+                        "claim: {node} is held by another seat (actor {holder}); that seat frees it with `ljos release {node}` or `ljos complete {node}`"
+                    ),
+                    None => Err(e),
+                };
             }
             if !text.contains("assignee busy") {
                 return Err(e);
@@ -3459,6 +3487,20 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_holder_is_read_off_a_get_line() {
+        let line = "a25a…  claimed  task  unset  gen=2  assignee=69f917124f757277b806e9a0f48c0318  parent=0  x-1";
+        assert_eq!(
+            holder_of(line).as_deref(),
+            Some("69f917124f757277b806e9a0f48c0318")
+        );
+        assert_eq!(
+            holder_of("a  ready  task  unset  gen=1  assignee=00000000000000000000000000000000"),
+            None
+        );
+        assert_eq!(holder_of("deps  -"), None);
+    }
+
     #[test]
     fn a_registration_carries_the_runners_name() {
         let argv: Vec<String> = ["run", "-e", "LJOS_SEAT={name}", "{server}"]

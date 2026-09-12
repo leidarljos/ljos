@@ -2,6 +2,13 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- A second `sitting` on an issue this name already holds is a sitting
+  resumed: the lease is renewed and the verb goes on, where it refused
+  with `claim: status claimed`. Held by another seat, the refusal names
+  the actor.
+
 ## 0.9.0 (2026-09-12)
 
 - Every recalled memory carries its age: the hook's lines, a brief's
