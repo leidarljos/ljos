@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use ljos_cli::{
     ballots_from_json, cards, consensus_steps, doctor, due, graded, handover, learn, node_for,
     on_path, packset_forget, packset_search, packset_write, policy_line, receive, run_captured,
-    trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
+    trust_from_pack, work_id, write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
