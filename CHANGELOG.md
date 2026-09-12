@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.6.0 (2026-09-12)
 
 - `ljos hubs`: the claims the pack's link graph turns on, highest first.
 - `handover --to user@host:path` copies the sealed, signed bag to another
