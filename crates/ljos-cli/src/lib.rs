@@ -404,7 +404,7 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     match PacksetClient::from_env() {
         Ok(client) => {
             let atoms_dir = out.join("data").join("atoms");
-            let said = run_captured(
+            match run_captured(
                 "packset",
                 &[
                     "export",
@@ -412,9 +412,13 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
                     &atoms_dir.display().to_string(),
                     &client.workspace(),
                 ],
-            )?;
-            cited = said.stdout;
-            lines.push(said.stderr.trim_end().to_string());
+            ) {
+                Ok(said) => {
+                    cited = said.stdout;
+                    lines.push(said.stderr.trim_end().to_string());
+                }
+                Err(e) => lines.push(format!("atoms not enclosed: {e}")),
+            }
         }
         Err(_) => lines.push("no pack: PACKSET_URL unset, atoms not enclosed".into()),
     }
