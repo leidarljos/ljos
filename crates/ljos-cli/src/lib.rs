@@ -21,7 +21,7 @@ pub fn join(parts: &[String]) -> String {
     parts.join(" ")
 }
 
-/// Remember → lesson, Prefer → preference. No other write kinds.
+/// Remember → lesson, Prefer → preference. Trust rows go through [`trust_atom`].
 pub fn atom_kind(label: &str) -> Result<&'static str> {
     match label {
         "Remember" => Ok("lesson"),
@@ -64,6 +64,176 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
         PacksetClient::from_env().context("PACKSET_URL unset; remember/prefer POST /v1/atoms")?;
     let workspace = client.workspace();
     post_claim(&client, label, text, &workspace)
+}
+
+/// One row of the influence graph: `from` listens to `to` with `weight`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trust {
+    pub from: String,
+    pub to: String,
+    pub weight: f64,
+}
+
+/// The factor a refuted voter's rows shrink by (Hedge, doi:10.1006/jcss.1997.1504).
+pub const LEARN_BETA: f64 = 0.5;
+
+/// The least a row can fall to, so a voter who is right again is heard again.
+pub const TRUST_FLOOR: f64 = 0.01;
+
+/// A `trust` atom for one row. `why` are deed accessions it cites.
+pub fn trust_atom(row: &Trust, why: &[String], workspace: &str) -> Result<Value> {
+    let (from, to) = (row.from.trim(), row.to.trim());
+    if from.is_empty() || to.is_empty() {
+        bail!("trust: from and to are required");
+    }
+    if from == to {
+        bail!("trust: {from} cannot weigh itself; self weight is the settle's");
+    }
+    if !(row.weight > 0.0 && row.weight <= 1.0) {
+        bail!("trust: weight {} is not in (0, 1]", row.weight);
+    }
+    let mut atom = atom_body(
+        "trust",
+        &format!("{from} weighs {to} at {:.3}.", row.weight),
+        workspace,
+    );
+    atom["from"] = Value::String(from.into());
+    atom["to"] = Value::String(to.into());
+    atom["weight"] = serde_json::json!(row.weight);
+    if !why.is_empty() {
+        atom["entities"] = Value::Array(why.iter().map(|w| Value::String(w.clone())).collect());
+    }
+    Ok(atom)
+}
+
+/// The live rows in a set of atoms: the latest `trust` atom per `(from, to)`.
+pub fn trust_rows(atoms: &[Value]) -> Vec<Trust> {
+    let mut latest: std::collections::BTreeMap<(String, String), (String, f64)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("trust") {
+            continue;
+        }
+        let (Some(from), Some(to), Some(weight)) = (
+            atom.get("from").and_then(Value::as_str),
+            atom.get("to").and_then(Value::as_str),
+            atom.get("weight").and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let key = (from.to_string(), to.to_string());
+        match latest.get(&key) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(key, (ts, weight));
+            }
+        }
+    }
+    latest
+        .into_iter()
+        .map(|((from, to), (_, weight))| Trust { from, to, weight })
+        .collect()
+}
+
+/// Rows as the consensus takes them: `[[from, to, weight], ...]`.
+pub fn trust_json(rows: &[Trust]) -> String {
+    let tuples: Vec<Value> = rows
+        .iter()
+        .map(|r| serde_json::json!([r.from, r.to, r.weight]))
+        .collect();
+    Value::Array(tuples).to_string()
+}
+
+/// `(agent, choice)` pairs from a tracker's `vote --json`.
+pub fn ballots_from_json(raw: &str) -> Result<Vec<(String, String)>> {
+    let rows: Vec<Value> = serde_json::from_str(raw).context("ballots: not a JSON array")?;
+    rows.iter()
+        .map(|row| {
+            let agent = row.get("agent").and_then(Value::as_str);
+            let choice = row.get("choice").and_then(Value::as_str);
+            match (agent, choice) {
+                (Some(a), Some(c)) => Ok((a.to_string(), c.to_string())),
+                _ => bail!("ballots: a row without agent and choice"),
+            }
+        })
+        .collect()
+}
+
+/// The rows every voter holds on every other after `outcome` is known: a
+/// voter whose ballot was refuted shrinks by `beta`, floored at
+/// [`TRUST_FLOOR`]; a missing row starts at one. Complete, so the settle
+/// sees the whole graph.
+pub fn learn(
+    ballots: &[(String, String)],
+    outcome: &str,
+    rows: &[Trust],
+    beta: f64,
+) -> Result<Vec<Trust>> {
+    if !(beta > 0.0 && beta < 1.0) {
+        bail!("learn: beta {beta} is not in (0, 1)");
+    }
+    let outcome = outcome.trim();
+    if outcome.is_empty() {
+        bail!("learn: an outcome is required");
+    }
+    let mut agents: Vec<&str> = ballots.iter().map(|(a, _)| a.as_str()).collect();
+    agents.sort_unstable();
+    agents.dedup();
+    if agents.len() < 2 {
+        bail!("learn: fewer than two voters, nothing to weigh");
+    }
+    let refuted = |agent: &str| {
+        ballots
+            .iter()
+            .any(|(a, choice)| a == agent && choice != outcome)
+    };
+    let mut out = Vec::new();
+    for from in &agents {
+        for to in &agents {
+            if from == to {
+                continue;
+            }
+            let current = rows
+                .iter()
+                .find(|r| r.from == *from && r.to == *to)
+                .map_or(1.0, |r| r.weight);
+            let next = if refuted(to) {
+                (current * beta).max(TRUST_FLOOR)
+            } else {
+                current
+            };
+            out.push(Trust {
+                from: (*from).to_string(),
+                to: (*to).to_string(),
+                weight: next,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The live trust rows in the seat's pack.
+pub fn trust_from_pack() -> Result<Vec<Trust>> {
+    let client = PacksetClient::from_env().context("PACKSET_URL unset; trust lives in the pack")?;
+    let workspace = client.workspace();
+    let atoms = client
+        .atoms_as_of(&workspace, None)
+        .context("trust: GET /v1/atoms failed")?;
+    Ok(trust_rows(&atoms))
+}
+
+/// POST one trust row.
+pub fn write_trust(row: &Trust, why: &[String]) -> Result<Value> {
+    let client = PacksetClient::from_env().context("PACKSET_URL unset; trust lives in the pack")?;
+    let workspace = client.workspace();
+    client
+        .post_atom(&trust_atom(row, why, &workspace)?)
+        .context("trust: POST /v1/atoms failed")
 }
 
 pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
@@ -114,16 +284,27 @@ pub struct ConsensusStep {
     pub args: Vec<String>,
 }
 
-/// `ljos-consensus` first, then `vissue consensus`. Missing bins are skipped.
-pub fn consensus_steps(id: &str, have_ljos: bool, have_vissue: bool) -> Result<Vec<ConsensusStep>> {
+/// `ljos-consensus` first, with the pack's trust rows when there are any,
+/// then `vissue consensus`. Missing bins are skipped.
+pub fn consensus_steps(
+    id: &str,
+    have_ljos: bool,
+    have_vissue: bool,
+    trust: &[Trust],
+) -> Result<Vec<ConsensusStep>> {
     if !have_ljos && !have_vissue {
         bail!("neither ljos-consensus nor vissue is on PATH");
     }
     let mut steps = Vec::new();
     if have_ljos {
+        let mut args = vec!["settle".to_string(), "--issue".into(), id.into()];
+        if !trust.is_empty() {
+            args.push("--trust".into());
+            args.push(trust_json(trust));
+        }
         steps.push(ConsensusStep {
             bin: "ljos-consensus",
-            args: vec!["settle".into(), "--issue".into(), id.into()],
+            args,
         });
     }
     if have_vissue {
@@ -278,7 +459,7 @@ mod tests {
 
     #[test]
     fn consensus_is_ljos_then_vissue() {
-        let steps = consensus_steps("vissue-1a5a", true, true).unwrap();
+        let steps = consensus_steps("vissue-1a5a", true, true, &[]).unwrap();
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].bin, "ljos-consensus");
         assert_eq!(steps[0].args, vec!["settle", "--issue", "vissue-1a5a"]);
@@ -287,13 +468,112 @@ mod tests {
     }
 
     #[test]
+    fn consensus_carries_the_packs_trust() {
+        let rows = vec![row("a", "b", 0.5)];
+        let steps = consensus_steps("id", true, false, &rows).unwrap();
+        assert_eq!(steps[0].args[3], "--trust");
+        assert_eq!(steps[0].args[4], r#"[["a","b",0.5]]"#);
+    }
+
+    #[test]
     fn consensus_skips_a_missing_bin() {
-        let only_v = consensus_steps("id", false, true).unwrap();
+        let only_v = consensus_steps("id", false, true, &[]).unwrap();
         assert_eq!(only_v.len(), 1);
         assert_eq!(only_v[0].bin, "vissue");
-        let only_l = consensus_steps("id", true, false).unwrap();
+        let only_l = consensus_steps("id", true, false, &[]).unwrap();
         assert_eq!(only_l[0].bin, "ljos-consensus");
-        assert!(consensus_steps("id", false, false).is_err());
+        assert!(consensus_steps("id", false, false, &[]).is_err());
+    }
+
+    fn row(from: &str, to: &str, weight: f64) -> Trust {
+        Trust {
+            from: from.into(),
+            to: to.into(),
+            weight,
+        }
+    }
+
+    #[test]
+    fn a_trust_atom_is_one_edge_with_its_evidence() {
+        let atom = trust_atom(&row("a", "b", 0.25), &["deed-x-y".into()], "ws").unwrap();
+        assert_eq!(atom["kind"], "trust");
+        assert_eq!(atom["from"], "a");
+        assert_eq!(atom["to"], "b");
+        assert_eq!(atom["weight"], 0.25);
+        assert_eq!(atom["entities"], serde_json::json!(["deed-x-y"]));
+        assert_eq!(atom["text"], "a weighs b at 0.250.");
+        assert!(trust_atom(&row("a", "a", 0.5), &[], "ws").is_err());
+        assert!(trust_atom(&row("a", "b", 0.0), &[], "ws").is_err());
+        assert!(trust_atom(&row("a", "b", 1.5), &[], "ws").is_err());
+        assert!(trust_atom(&row("", "b", 0.5), &[], "ws").is_err());
+    }
+
+    #[test]
+    fn the_latest_row_per_pair_wins() {
+        let atoms = vec![
+            serde_json::json!({"kind": "trust", "from": "a", "to": "b", "weight": 0.9, "ts": "2026-01-01T00:00:00Z"}),
+            serde_json::json!({"kind": "trust", "from": "a", "to": "b", "weight": 0.3, "ts": "2026-02-01T00:00:00Z"}),
+            serde_json::json!({"kind": "trust", "from": "b", "to": "a", "weight": 0.7}),
+            serde_json::json!({"kind": "lesson", "text": "not a row"}),
+            serde_json::json!({"kind": "trust", "from": "b", "weight": 0.7}),
+        ];
+        let rows = trust_rows(&atoms);
+        assert_eq!(rows, vec![row("a", "b", 0.3), row("b", "a", 0.7)]);
+        assert_eq!(trust_json(&rows), r#"[["a","b",0.3],["b","a",0.7]]"#);
+    }
+
+    #[test]
+    fn ballots_are_agent_and_choice() {
+        let rows =
+            ballots_from_json(r#"[{"agent":"a","choice":"ship","stamp":"[2026-01-01]"}]"#).unwrap();
+        assert_eq!(rows, vec![("a".to_string(), "ship".to_string())]);
+        assert!(ballots_from_json(r#"[{"agent":"a"}]"#).is_err());
+        assert!(ballots_from_json("{}").is_err());
+    }
+
+    /// A refuted voter loses weight in every other voter's row; a vindicated
+    /// one keeps it; the rows come back complete.
+    #[test]
+    fn learning_downweights_the_refuted_voter() {
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "ship".to_string()),
+            ("c".to_string(), "hold".to_string()),
+        ];
+        let rows = learn(&ballots, "ship", &[], 0.5).unwrap();
+        assert_eq!(rows.len(), 6);
+        let w = |from: &str, to: &str| {
+            rows.iter()
+                .find(|r| r.from == from && r.to == to)
+                .unwrap()
+                .weight
+        };
+        assert_eq!(w("a", "b"), 1.0);
+        assert_eq!(w("a", "c"), 0.5);
+        assert_eq!(w("b", "c"), 0.5);
+        assert_eq!(w("c", "a"), 1.0);
+
+        let again = learn(&ballots, "ship", &rows, 0.5).unwrap();
+        let w2 = |from: &str, to: &str| {
+            again
+                .iter()
+                .find(|r| r.from == from && r.to == to)
+                .unwrap()
+                .weight
+        };
+        assert_eq!(w2("a", "c"), 0.25);
+        assert_eq!(w2("a", "b"), 1.0);
+
+        let floored = learn(&ballots, "ship", &[row("a", "c", 0.015)], 0.5).unwrap();
+        let low = floored
+            .iter()
+            .find(|r| r.from == "a" && r.to == "c")
+            .unwrap();
+        assert_eq!(low.weight, TRUST_FLOOR);
+
+        assert!(learn(&ballots, "ship", &[], 1.0).is_err());
+        assert!(learn(&ballots, "  ", &[], 0.5).is_err());
+        assert!(learn(&ballots[..1], "ship", &[], 0.5).is_err());
     }
 
     fn read_http(s: &mut impl Read) -> String {

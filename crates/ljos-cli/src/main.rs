@@ -3,8 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    cards, consensus_steps, format_hits, join, on_path, packset_search, packset_write, policy_line,
-    run, POLICY_TCB,
+    ballots_from_json, cards, consensus_steps, format_hits, join, learn, on_path, packset_search,
+    packset_write, policy_line, run, run_captured, trust_from_pack, write_trust, Trust, LEARN_BETA,
+    POLICY_TCB,
 };
 use std::path::PathBuf;
 
@@ -71,9 +72,28 @@ enum Cmd {
     Policy {
         argv: Vec<String>,
     },
-    /// DeGroot/Seldon, then the tracker verb.
+    /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
     Consensus {
         id: String,
+    },
+    /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
+    Trust {
+        from: String,
+        to: String,
+        weight: f64,
+        /// Deed accessions this row stands on.
+        #[arg(long)]
+        why: Vec<String>,
+    },
+    /// Reweigh the voters on an issue by what turned out right.
+    Learn {
+        id: String,
+        /// The option that turned out right.
+        #[arg(long)]
+        outcome: String,
+        /// The factor a refuted voter shrinks by.
+        #[arg(long, default_value_t = LEARN_BETA)]
+        beta: f64,
     },
 }
 
@@ -114,10 +134,42 @@ fn main() -> Result<()> {
             println!("{}", policy_line(&argv)?);
         }
         Cmd::Consensus { id } => {
-            for step in consensus_steps(&id, on_path("ljos-consensus"), on_path("vissue"))? {
+            let trust = pack_trust_or_none();
+            for step in consensus_steps(&id, on_path("ljos-consensus"), on_path("vissue"), &trust)?
+            {
                 run(step.bin, &step.args)?;
+            }
+        }
+        Cmd::Trust {
+            from,
+            to,
+            weight,
+            why,
+        } => {
+            let row = Trust { from, to, weight };
+            let v = write_trust(&row, &why)?;
+            println!("{v}");
+        }
+        Cmd::Learn { id, outcome, beta } => {
+            let said = run_captured("vissue", &["vote", &id, "--json"])?;
+            let ballots = ballots_from_json(&said.stdout)?;
+            let rows = learn(&ballots, &outcome, &trust_from_pack()?, beta)?;
+            for row in &rows {
+                write_trust(row, &[])?;
+                println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
             }
         }
     }
     Ok(())
+}
+
+/// The pack's rows, or none with a note: a seat without a pack still settles.
+fn pack_trust_or_none() -> Vec<Trust> {
+    match trust_from_pack() {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("ljos: no trust rows ({e:#}); settling with equal weights");
+            Vec::new()
+        }
+    }
 }

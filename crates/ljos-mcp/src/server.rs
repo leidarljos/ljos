@@ -10,8 +10,9 @@
 use std::path::PathBuf;
 
 use ljos_cli::{
-    cards, consensus_steps, on_path, packset_search, packset_write, policy_line, run_captured,
-    CARD_NAMES, POLICY_TCB,
+    ballots_from_json, cards, consensus_steps, learn, on_path, packset_search, packset_write,
+    policy_line, run_captured, trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA,
+    POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -108,6 +109,39 @@ pub struct ArgvArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct NoArgs {}
 
+/// One trust row.
+#[derive(Deserialize, JsonSchema)]
+pub struct TrustArgs {
+    /// The agent doing the weighing.
+    pub from: String,
+    /// The agent being weighed.
+    pub to: String,
+    /// In (0, 1].
+    pub weight: f64,
+    /// Deed accessions the row stands on.
+    #[serde(default)]
+    pub why: Vec<String>,
+}
+
+/// An issue and what turned out right on it.
+#[derive(Deserialize, JsonSchema)]
+pub struct LearnArgs {
+    /// The tracker id.
+    pub issue: String,
+    /// The option that turned out right.
+    pub outcome: String,
+    /// The factor a refuted voter shrinks by; the seat's default when absent.
+    pub beta: Option<f64>,
+}
+
+/// One row of the influence graph.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TrustRow {
+    pub from: String,
+    pub to: String,
+    pub weight: f64,
+}
+
 // ---- answers ---------------------------------------------------------------
 
 /// What a habitat printed.
@@ -181,7 +215,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Remember one lesson. The text is the claim and is stored as given: two short sentences at most, never a transcript. This is one of the two writes the pack accepts.",
+        description = "Remember one lesson. The text is the claim and is stored as given: two short sentences at most, never a transcript. One of the pack's writes.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -200,7 +234,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Prefer one thing over another, as a standing preference. Stored as given. This is the other write the pack accepts.",
+        description = "Prefer one thing over another, as a standing preference. Stored as given. Another of the pack's writes.",
         annotations(
             title = "Prefer",
             read_only_hint = false,
@@ -410,21 +444,87 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Settle agreement on a node: the consensus model first, DeGroot or Friedkin-Johnsen over the trust graph, then the tracker's own verb. Not a vote count.",
+        description = "Settle agreement on a node: the consensus model first, DeGroot or Friedkin-Johnsen over the trust rows the pack holds, then the tracker's own verb. Not a vote count. With no rows every voter weighs the same.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
         &self,
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Vec<Said>>, McpError> {
-        let steps = consensus_steps(&args.issue, on_path("ljos-consensus"), on_path("vissue"))
-            .map_err(refused)?;
+        let trust = trust_from_pack().unwrap_or_default();
+        let steps = consensus_steps(
+            &args.issue,
+            on_path("ljos-consensus"),
+            on_path("vissue"),
+            &trust,
+        )
+        .map_err(refused)?;
         let mut out = Vec::new();
         for step in steps {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
             out.push(habitat(step.bin, &args)?.0);
         }
         Ok(Json(out))
+    }
+
+    #[tool(
+        description = "Write one trust row to the pack: from weighs to at weight in (0, 1], citing the deeds it stands on. Trust is memory: the row has a validity window and a later row for the same pair supersedes it.",
+        annotations(
+            title = "Trust",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_trust(
+        &self,
+        Parameters(args): Parameters<TrustArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let row = Trust {
+            from: args.from,
+            to: args.to,
+            weight: args.weight,
+        };
+        write_trust(&row, &args.why).map(Json).map_err(refused)
+    }
+
+    #[tool(
+        description = "Reweigh the voters on an issue by what turned out right: every voter whose ballot the outcome refuted shrinks in every other voter's row (Hedge), a vindicated one keeps its weight. Writes the complete set of rows to the pack and returns them.",
+        annotations(
+            title = "Learn",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_learn(
+        &self,
+        Parameters(args): Parameters<LearnArgs>,
+    ) -> Result<Json<Vec<TrustRow>>, McpError> {
+        let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
+        let ballots = ballots_from_json(&said.stdout).map_err(refused)?;
+        let held = trust_from_pack().map_err(refused)?;
+        let rows = learn(
+            &ballots,
+            &args.outcome,
+            &held,
+            args.beta.unwrap_or(LEARN_BETA),
+        )
+        .map_err(refused)?;
+        for row in &rows {
+            write_trust(row, &[]).map_err(refused)?;
+        }
+        Ok(Json(
+            rows.into_iter()
+                .map(|r| TrustRow {
+                    from: r.from,
+                    to: r.to,
+                    weight: r.weight,
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -587,13 +687,13 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every tool is annotated, and the six writers are the contract's six.
+    /// Every tool is annotated, and the writers are the contract's eight.
     #[test]
-    fn the_writers_are_the_six_the_contract_names() {
+    fn the_writers_are_the_eight_the_contract_names() {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            12,
+            14,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -625,8 +725,10 @@ mod tests {
                 "ljos_claim",
                 "ljos_complete",
                 "ljos_deed",
+                "ljos_learn",
                 "ljos_prefer",
                 "ljos_remember",
+                "ljos_trust",
                 "ljos_vote"
             ]
         );
