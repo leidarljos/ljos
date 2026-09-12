@@ -19,6 +19,21 @@ Twenty tools, eleven of them writers, two prompts (``start_a_sitting``,
 ``check_a_handover``), and two read-only resources (``ljos://cards/USER.md``,
 ``ljos://cards/MEMORY.md``). Each tool says whether it reads or writes.
 
+Ask what a task involves
+------------------------
+
+.. code:: text
+
+    $ ljos island "write the handbook tutorial for the seat"
+    1.000  seed  ab8cb4d1bfca05ca60730141343dc177  Encoding under the write lock capped the pack at
+    0.899  seed  51778929d855529fcb8df3f4d1c4d692  A new claim enters the review clock on write. Tr
+    0.890  seed  27e39df0198b67538f8487b1b44e9dfd  The decay slot reads the review clock when PACKS
+
+The first column is activation relative to the strongest; ``seed`` marks a
+claim search found itself, the rest were reached along the pack's links.
+Add ``--fire`` when you go on to use the island: the strongest eight fire
+together and their links gain weight.
+
 Start a sitting
 ---------------
 
@@ -93,8 +108,22 @@ model crate alone, pass the rows as JSON tuples:
 Check the seat
 --------------
 
-.. code:: console
+.. code:: text
 
     $ ljos doctor
+    ok  vissue  ~/.local/bin/vissue
+    ok  deedar  ~/.local/bin/deedar
+    ok  claimdag  ~/.local/bin/claimdag
+    ok  packset  ~/.local/bin/packset
+    ok  packsetd  ~/.local/bin/packsetd
+    ok  ljos-consensus  ~/.local/bin/ljos-consensus
+    ok  ljos-mcp  ~/.local/bin/ljos-mcp
+    ok  pack  http://127.0.0.1:8761 workspace git:github.com/leidarljos/ljos
+    ok  host key  ~/.config/deedar/host.key (32-byte seed)
+    ok  deed store  size=34 root=3d8e015509923724097e9f33d3a044fe0764f17bd5387769530ed5bfb6ada
+    ok  tracker  vissue 0.10.0
+    ok  claim graph  a4a8fa1b8f05d259877be54da99f06bc  claimed  task  69f91712  gen=2  ljos-a6
 
-Exit 1 when the tracker, the deed store, or the pack does not answer.
+Exit 1 when the tracker, the deed store, or the pack does not answer. A
+missing claim graph is reported and is not a failure: the first claim
+creates it.
