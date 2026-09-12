@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ljos_cli::{
     ballots_from_json, calibrate, cards, claim, consensus_steps_for, doctor, due, finish, graded,
-    handover, island_entities, learn_about, node_for, on_path, packset_forget, packset_island,
+    handover, island_entities, learn_and_write, node_for, on_path, packset_forget, packset_island,
     packset_search, packset_write, personas_from_pack, policy_line, receive, release, rows_about,
     run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust, Persona,
     Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
@@ -839,21 +839,16 @@ impl LjosServer {
     ) -> Result<Json<Vec<TrustRow>>, McpError> {
         let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
         let ballots = ballots_from_json(&said.stdout).map_err(refused)?;
-        let held = trust_from_pack().map_err(refused)?;
         // Scoped to what the issue's island is about, so a voter wrong here
-        // keeps its standing elsewhere.
+        // keeps its standing elsewhere; a refuted persona listens more.
         let about = island_entities(&args.issue).unwrap_or_default();
-        let rows = learn_about(
+        let (rows, _moved) = learn_and_write(
             &ballots,
             &args.outcome,
-            &held,
             args.beta.unwrap_or(LEARN_BETA),
             &about,
         )
         .map_err(refused)?;
-        for row in &rows {
-            write_trust(row, &[]).map_err(refused)?;
-        }
         Ok(Json(
             rows.into_iter()
                 .map(|r| TrustRow {

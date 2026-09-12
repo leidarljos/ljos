@@ -86,7 +86,10 @@ every issue; a scoped row applies when one of its domains is a word of the
 issue's title. =learn= writes its rows scoped to the entities of the island
 the issue's title activates, eight at most, so a voter refuted on one topic
 keeps its standing on the rest; a scoped learn starts from the unscoped row
-when it has none of its own and leaves the unscoped row standing.
+when it has none of its own and leaves the unscoped row standing. When
+both apply, the scoped row is the one the settle sees. An outcome also
+moves the anchor of every persona it refuted toward one by =1 - beta= of
+the gap: a persona that keeps being wrong listens more.
 
 A persona is a =persona= atom: a name, an anchor in [0, 1], a view, and the
 domains it speaks to. =consensus= passes every persona's anchor to both

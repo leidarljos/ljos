@@ -1224,10 +1224,77 @@ pub fn topic_words(title: &str) -> Vec<String> {
 /// The rows that apply to an issue about `topic`: every unscoped row, and
 /// every scoped row one of whose domains is among the topic's words.
 pub fn rows_about(rows: &[Trust], topic: &[String]) -> Vec<Trust> {
-    rows.iter()
-        .filter(|r| r.about.is_empty() || r.about.iter().any(|a| topic.contains(a)))
-        .cloned()
+    // A scoped row that applies stands in for the unscoped row of the same
+    // pair, so the settle sees one weight per pair and never a sum of two.
+    let mut chosen: std::collections::BTreeMap<(String, String), Trust> =
+        std::collections::BTreeMap::new();
+    for r in rows {
+        let applies = r.about.is_empty() || r.about.iter().any(|a| topic.contains(a));
+        if !applies {
+            continue;
+        }
+        let key = (r.from.clone(), r.to.clone());
+        match chosen.get(&key) {
+            Some(have) if !have.about.is_empty() && r.about.is_empty() => {}
+            _ => {
+                chosen.insert(key, r.clone());
+            }
+        }
+    }
+    chosen.into_values().collect()
+}
+
+/// The personas after an outcome: one whose ballot the outcome refuted
+/// moves its anchor toward one by `1 - beta` of the gap, so a persona that
+/// keeps being wrong listens more; a vindicated one keeps its anchor. The
+/// personas that voted are the only ones touched. Acemoglu, Como, Fagnani
+/// and Ozdaglar (doi:10.1287/moor.1120.0570) show what a stubborn wrong
+/// voter does to a pool; this is the seat's remedy.
+#[must_use]
+pub fn learn_anchors(
+    personas: &[Persona],
+    ballots: &[(String, String)],
+    outcome: &str,
+    beta: f64,
+) -> Vec<Persona> {
+    let outcome = outcome.trim();
+    personas
+        .iter()
+        .filter(|p| {
+            ballots
+                .iter()
+                .any(|(agent, choice)| *agent == p.name && choice != outcome)
+        })
+        .map(|p| Persona {
+            anchor: (p.anchor + (1.0 - p.anchor) * (1.0 - beta)).min(1.0),
+            ..p.clone()
+        })
         .collect()
+}
+
+/// [`learn_about`] and [`learn_anchors`] together, written to the pack:
+/// the rows, then the personas the outcome moved. Returns what was written.
+///
+/// # Errors
+///
+/// The pack refusing a row or a persona.
+pub fn learn_and_write(
+    ballots: &[(String, String)],
+    outcome: &str,
+    beta: f64,
+    about: &[String],
+) -> Result<(Vec<Trust>, Vec<Persona>)> {
+    let rows = learn_about(ballots, outcome, &trust_from_pack()?, beta, about)?;
+    let moved = learn_anchors(&personas_from_pack()?, ballots, outcome, beta);
+    // Every row lands before anything is printed, so a closed pipe cannot
+    // leave the graph half written.
+    for row in &rows {
+        write_trust(row, &[])?;
+    }
+    for p in &moved {
+        write_persona(p)?;
+    }
+    Ok((rows, moved))
 }
 
 /// The factor a refuted voter's rows shrink by (Hedge, doi:10.1006/jcss.1997.1504).
@@ -1967,7 +2034,12 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// One line per activated memory: activation, seed mark, id, text.
 pub fn format_island(body: &Value) -> String {
     let mut out = String::new();
-    for atom in body["island"].as_array().into_iter().flatten() {
+    for atom in body["island"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| reviewable(a))
+    {
         out.push_str(&format!(
             "{:.3}\t{}\t{}\t{}\n",
             atom["activation"].as_f64().unwrap_or(0.0),
@@ -2158,13 +2230,12 @@ pub fn finish(
         if ballots.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
         } else {
-            let rows = learn(&ballots, option, &trust_from_pack()?, beta)?;
-            for row in &rows {
-                write_trust(row, &[])?;
-            }
+            let about = island_entities(issue).unwrap_or_default();
+            let (rows, moved) = learn_and_write(&ballots, option, beta, &about)?;
             out.push_str(&format!(
-                "learned from outcome {option:?}: {} trust rows rewritten\n",
-                rows.len()
+                "learned from outcome {option:?}: {} trust rows rewritten, {} persona anchors moved\n",
+                rows.len(),
+                moved.len()
             ));
         }
     }
@@ -2564,7 +2635,9 @@ mod tests {
         let rows = vec![everywhere.clone(), on_docs.clone()];
         let topic = topic_words("Rewrite the docs site");
         assert_eq!(topic, ["docs", "rewrite", "site", "the"]);
-        assert_eq!(rows_about(&rows, &topic), rows);
+        // On the docs topic the scoped row stands in for the unscoped one;
+        // elsewhere the unscoped row is the one that applies.
+        assert_eq!(rows_about(&rows, &topic), vec![on_docs.clone()]);
         assert_eq!(
             rows_about(&rows, &topic_words("Fix the fuse")),
             vec![everywhere.clone()]
@@ -2620,6 +2693,16 @@ mod tests {
         assert_eq!(got[0].anchor, 0.4);
         assert_eq!(got[0].entities, ["release"]);
         assert_eq!(anchors_json(&got), r#"{"reviewer":0.4}"#);
+        // A refuted persona listens more next time; a vindicated one does
+        // not move; one that did not vote is untouched.
+        let ballots = vec![
+            ("reviewer".to_string(), "hold".to_string()),
+            ("reader".to_string(), "ship".to_string()),
+        ];
+        let moved = learn_anchors(&got, &ballots, "ship", 0.5);
+        assert_eq!(moved.len(), 1);
+        assert!((moved[0].anchor - 0.7).abs() < 1e-9, "0.4 + 0.6 * 0.5: {moved:?}");
+        assert!(learn_anchors(&got, &ballots, "hold", 0.5).is_empty());
         assert!(persona_atom(
             &Persona {
                 anchor: 1.5,

@@ -9,6 +9,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   anchored model. On a prompt the hook says, once per session, how many
   claims are due for review. `sitting` no longer waits on the runners'
   command lines; `doctor` asks them beside the seat's own rows.
+- `learn` moves a refuted persona's anchor toward one, and a scoped trust
+  row that applies stands in for the unscoped row of its pair instead of
+  adding to it. Islands print claims only; persona and trust atoms are
+  weighed, not recalled.
 - `--version`. A claim on an issue whose earlier sitting finished reopens
   the session node (`claimdag reopen`) and takes it.
 

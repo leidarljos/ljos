@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish,
     format_doctor, format_hits, format_island, format_steps, graded, handover, healthy, hook_call,
-    hook_context, hook_output, island_entities, join, learn_about, node_for, on_path, onboard,
+    hook_context, hook_output, island_entities, join, learn_and_write, node_for, on_path, onboard,
     packset_forget, packset_island, packset_search, packset_write, personas_from_pack,
     policy_with_memory, receive, release, rows_about, run, run_as, run_captured, sitting,
     topic_words, trust_from_pack, write_persona, write_trust, Persona, Trust, HARNESSES_EXAMPLE,
@@ -405,14 +405,12 @@ fn main() -> Result<()> {
             // The rows written are scoped to what the issue's island is
             // about, so a voter wrong here keeps its standing elsewhere.
             let about = island_entities(&id).unwrap_or_default();
-            let rows = learn_about(&ballots, &outcome, &trust_from_pack()?, beta, &about)?;
-            // Every row lands before any is printed, so a closed pipe cannot
-            // leave the graph half written.
-            for row in &rows {
-                write_trust(row, &[])?;
-            }
+            let (rows, moved) = learn_and_write(&ballots, &outcome, beta, &about)?;
             for row in &rows {
                 println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
+            }
+            for p in &moved {
+                println!("{} now holds its ballot at anchor {:.3}", p.name, p.anchor);
             }
         }
     }
