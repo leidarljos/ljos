@@ -2710,15 +2710,19 @@ pub fn packset_search_as_of(
         bail!("search: empty query");
     }
     let as_of = as_of.map(str::trim).filter(|s| !s.is_empty());
-    if let Some(at) = as_of {
-        if days_of_stamp(Some(at)).is_none() {
-            bail!("search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339");
+    let stamp = match as_of {
+        Some(at) if days_of_stamp(Some(at)).is_none() => {
+            bail!("search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339")
         }
-    }
+        // A date alone is its start; the pack wants the instant spelt out.
+        Some(at) if at.len() == 10 => Some(format!("{at}T00:00:00.000Z")),
+        Some(at) => Some(at.to_string()),
+        None => None,
+    };
     let client = pack()?;
     let workspace = client.workspace();
     client
-        .search_opts(&workspace, q, limit, as_of, rerank)
+        .search_opts(&workspace, q, limit, stamp.as_deref(), rerank)
         .context("search: GET /v1/search failed")
 }
 
