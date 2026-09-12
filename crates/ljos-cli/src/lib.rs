@@ -1003,9 +1003,35 @@ pub fn post_claim(
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
+    packset_write_as(label, text, None)
+}
+
+/// The entity a persona's own claims carry, so a brief can find them.
+#[must_use]
+pub fn persona_entity(name: &str) -> String {
+    format!("persona:{}", name.trim().to_lowercase())
+}
+
+/// [`packset_write`] as a persona: the claim carries the persona's entity,
+/// so what a persona learned comes back to it first in its next brief and
+/// stays in the seat's one pack. A persona accumulates its own lessons the
+/// way a reviewer does; the seat still reads them all.
+pub fn packset_write_as(label: &str, text: &str, persona: Option<&str>) -> Result<Value> {
     let client = pack()?;
     let workspace = client.workspace();
-    post_claim(&client, label, text, &workspace)
+    let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) else {
+        return post_claim(&client, label, text, &workspace);
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("{label}: empty text is not a claim");
+    }
+    let kind = atom_kind(label)?;
+    let mut atom = atom_body(kind, trimmed, &workspace);
+    atom["entities"] = Value::Array(vec![Value::String(persona_entity(name))]);
+    client
+        .post_atom(&atom)
+        .with_context(|| format!("{label}: POST /v1/atoms failed"))
 }
 
 /// Retire one atom from the workspace the cwd resolves to, optionally naming
@@ -1184,6 +1210,31 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     );
     let mut seen = std::collections::BTreeSet::new();
     let mut lines = Vec::new();
+    // What this persona remembered itself comes first: its own lessons,
+    // written with `remember --as`, carry its entity.
+    let client = pack()?;
+    let own_tag = persona_entity(&p.name);
+    if let Ok(atoms) = client.atoms_as_of(&client.workspace(), None) {
+        let mut own: Vec<&Value> = atoms
+            .iter()
+            .filter(|a| reviewable(a))
+            .filter(|a| words_of(a.get("entities")).contains(&own_tag))
+            .collect();
+        own.sort_by(|a, b| b["ts"].as_str().cmp(&a["ts"].as_str()));
+        if !own.is_empty() {
+            out.push_str("\nWhat you remembered yourself:\n");
+            for a in own.iter().take(8) {
+                if let Some(id) = a["id"].as_str() {
+                    seen.insert(id.to_string());
+                }
+                out.push_str(&format!(
+                    "- [{}] {}\n",
+                    a["kind"].as_str().unwrap_or("claim"),
+                    a["text"].as_str().unwrap_or("").trim()
+                ));
+            }
+        }
+    }
     let cues: Vec<String> = if p.entities.is_empty() {
         vec![issue_title(issue)?]
     } else {
@@ -1219,8 +1270,9 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     out.push_str("\nThe work:\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     out.push_str(&format!(
-        "\nRead it your way and end with one ballot: `ljos vote {issue} --for OPTION --as {}`.\n",
-        p.name
+        "\nRead it your way and end with one ballot: `ljos vote {issue} --for OPTION --as {}`. \
+         A lesson of your own goes in with `ljos remember --as {} \"...\"`.\n",
+        p.name, p.name
     ));
     Ok(out)
 }
