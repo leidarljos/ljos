@@ -2695,6 +2695,17 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     Ok(run_captured("claimdag", &["release", &id, "--actor", &work_id(assignee)])?.stdout)
 }
 
+/// `; revises N earlier` when the pack closed earlier memories' windows
+/// for this one (same kind, a rewrite of the same claim or an explicit
+/// `supersedes`), else empty. The revision is the pack's; this names it.
+fn revision_note(body: &Value) -> String {
+    match body["supersedes"].as_array().map(Vec::len).unwrap_or(0) {
+        0 => String::new(),
+        1 => "; revises 1 earlier memory, now closed".to_string(),
+        n => format!("; revises {n} earlier memories, now closed"),
+    }
+}
+
 /// The issue's title, for a cue, from the tracker.
 fn issue_title(issue: &str) -> Result<String> {
     let said = run_captured("vissue", &["show", issue, "--json"])?;
@@ -2967,8 +2978,9 @@ pub fn finish(
         Some(text) => {
             let body = packset_write("Remember", text)?;
             out.push_str(&format!(
-                "remembered {}\n",
-                body.get("id").and_then(Value::as_str).unwrap_or("-")
+                "remembered {}{}\n",
+                body.get("id").and_then(Value::as_str).unwrap_or("-"),
+                revision_note(&body)
             ));
         }
         None => out.push_str(

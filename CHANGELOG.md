@@ -13,6 +13,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the cited deeds and the activated memories as one dated list, oldest
   first, each line with its age and the gap since the line before.
   `sitting` prints the last twelve as `== timeline`.
+- `remember` and `finish` say when the pack closed earlier memories for
+  the new one (`revises N earlier memories, now closed`), so a revision is
+  seen as one.
 - `search --as-of TIME` (and `as_of` on the `ljos_search` tool): the pack
   as it stood then, so "what did the seat know when it decided that" has
   an answer.

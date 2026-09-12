@@ -317,6 +317,17 @@ fn main() -> Result<()> {
         Cmd::Remember { text, as_persona } => {
             let body = packset_write_as("Remember", &join(&text), as_persona.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
+            if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
+                eprintln!(
+                    "revises {} earlier memor{}, now closed: {}",
+                    ids.len(),
+                    if ids.len() == 1 { "y" } else { "ies" },
+                    ids.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
         Cmd::Prefer { text, as_persona } => {
             let body = packset_write_as("Prefer", &join(&text), as_persona.as_deref())?;

@@ -76,7 +76,7 @@ host key at `~/.config/deedar/host.key` when it exists.
 
 `remember` / `prefer` POST `/v1/atoms` against `PACKSET_URL` (`INSIDE_MEMORY_URL` is an alias). They write one explicit claim. They do not extract from a transcript.
 
-`forget ID` POSTs `/v1/atoms/delete` and is the other direction. The pack tombstones rather than erases, so the claim stops being recalled and the record that it was held and withdrawn stays; `packset atoms --as-of TS` reads it back through the window it was live in. `--why` names the deed the retraction stands on, citing deeds the same way `trust` does, and the pack refuses free text in its place.
+A lesson that rewrites an earlier one of the same kind (the pack reads a token overlap of six tenths, a correction sharing an entity, or an explicit `supersedes` as a rewrite) closes the earlier one's validity window rather than sitting beside it; `remember` and `finish` say `revises N earlier memories, now closed` when that happened, and `search --as-of` still finds the closed one at the time it was live. `forget ID` POSTs `/v1/atoms/delete` and is the other direction. The pack tombstones rather than erases, so the claim stops being recalled and the record that it was held and withdrawn stays; `packset atoms --as-of TS` reads it back through the window it was live in. `--why` names the deed the retraction stands on, citing deeds the same way `trust` does, and the pack refuses free text in its place.
 
 `cards` prints `USER.md` and `MEMORY.md` only. It never writes them.
 
