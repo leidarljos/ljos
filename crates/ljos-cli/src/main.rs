@@ -42,6 +42,9 @@ enum Cmd {
     /// The memories a task activates: search hits as seeds, spread along the pack's links.
     Island {
         cue: Vec<String>,
+        /// The strongest eight fired together: their links gain weight.
+        #[arg(long)]
+        fire: bool,
     },
     /// Frozen product.
     Evidence {
@@ -156,7 +159,9 @@ fn main() -> Result<()> {
             let body = packset_forget(&id, why.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
-        Cmd::Island { cue } => print!("{}", format_island(&packset_island(&join(&cue))?)),
+        Cmd::Island { cue, fire } => {
+            print!("{}", format_island(&packset_island(&join(&cue), fire)?));
+        }
         Cmd::Search { query } => {
             print!("{}", format_hits(&packset_search(&join(&query))?));
         }

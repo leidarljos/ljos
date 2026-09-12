@@ -184,6 +184,9 @@ pub struct GradeArgs {
 pub struct CueArgs {
     /// What the seat is about to work on, in its own words.
     pub cue: String,
+    /// Fire the strongest eight together so their links gain weight; say
+    /// true when the island is the one you go on to use.
+    pub fire: Option<bool>,
 }
 
 /// One memory an island holds.
@@ -703,14 +706,20 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The memories a task activates: the top search hits as seeds, spread two hops along the pack's links, strongest first. Not a persona or a view; the cluster this task touches. Read it before starting the work.",
-        annotations(title = "Island", read_only_hint = true, open_world_hint = false)
+        description = "The memories a task activates: the top search hits as seeds, spread two hops along the pack's links, strongest first. Not a persona or a view; the cluster this task touches. Read it before starting the work; pass fire when you go on to use it, so those links gain weight.",
+        annotations(
+            title = "Island",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn ljos_island(
         &self,
         Parameters(args): Parameters<CueArgs>,
     ) -> Result<Json<Vec<IslandRow>>, McpError> {
-        let body = packset_island(&args.cue).map_err(refused)?;
+        let body = packset_island(&args.cue, args.fire.unwrap_or(false)).map_err(refused)?;
         Ok(Json(
             body["island"]
                 .as_array()
@@ -931,7 +940,7 @@ mod tests {
 
     /// Every tool is annotated, and the writers are the contract's twelve.
     #[test]
-    fn the_writers_are_the_twelve_the_contract_names() {
+    fn the_writers_are_the_thirteen_the_contract_names() {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
@@ -972,6 +981,7 @@ mod tests {
                 "ljos_forget",
                 "ljos_graded",
                 "ljos_handover",
+                "ljos_island",
                 "ljos_learn",
                 "ljos_prefer",
                 "ljos_receive",

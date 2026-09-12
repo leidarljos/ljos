@@ -41,13 +41,13 @@ ljos doctor
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp", "env": {"PACKSET_URL": "http://127.0.0.1:8761"}}}}
 ```
 
-`ljos island CUE` asks the pack which memories a task activates: the top search hits seed a two-hop spread along the pack's entity links, and the cluster comes back strongest first. Not a persona or a view; the island this task touches.
+`ljos island CUE` asks the pack which memories a task activates: the top search hits seed a two-hop spread along the pack's entity links, and the cluster comes back strongest first. Not a persona or a view; the island this task touches. `--fire` says the seat went on to use it: the strongest eight fire together and their links gain weight, so the next cue like it walks a heavier path.
 
 `ljos due` lists the atoms whose review clock has run out; `ljos graded ID` marks one recalled (`--lapsed` for the other answer) and the pack reschedules it. This is the spaced-review loop the pack already keeps, reached from the seat.
 
