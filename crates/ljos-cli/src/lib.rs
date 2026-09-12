@@ -493,6 +493,9 @@ fn hook_installed(file: &Path) -> bool {
 pub struct HookCall {
     pub event: String,
     pub cue: String,
+    /// The runner's session, when it says: each memory is injected once
+    /// per session, so the same lesson does not arrive on every command.
+    pub session: Option<String>,
 }
 
 /// Read a hook call from the runner's JSON, or from plain text (an argv
@@ -505,8 +508,13 @@ pub fn hook_call(input: &str) -> HookCall {
         return HookCall {
             event: "argv".into(),
             cue: trimmed.to_string(),
+            session: None,
         };
     };
+    let session = v["session_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let event = v["hook_event_name"]
         .as_str()
         .unwrap_or("PreToolUse")
@@ -523,48 +531,109 @@ pub fn hook_call(input: &str) -> HookCall {
     } else {
         String::new()
     };
-    HookCall { event, cue }
+    HookCall {
+        event,
+        cue,
+        session,
+    }
 }
+
+/// Where the ids already injected in a session are kept: the runtime
+/// directory, so they go with the login and never into the pack.
+fn seen_path(session: &str) -> Option<PathBuf> {
+    let safe: String = session
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ljos");
+    Some(dir.join(format!("hook-seen-{safe}")))
+}
+
+fn seen_ids(session: Option<&str>) -> std::collections::BTreeSet<String> {
+    session
+        .and_then(seen_path)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn mark_seen(session: Option<&str>, ids: &[String]) {
+    let Some(path) = session.and_then(seen_path) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    for id in ids {
+        text.push_str(id);
+        text.push('\n');
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// The floor a hit must reach, as a share of the strongest hit's score, to
+/// be injected. A command line matches many claims weakly; only the ones
+/// that match it as well as the best does are worth the agent's context.
+pub const HOOK_SCORE_FLOOR: f64 = 0.6;
 
 /// The context the hook injects: the island the cue activates, standing
 /// preferences first because they bear on what to do, then lessons. Empty
 /// when the pack holds nothing on it or does not answer; a hook that fails
 /// must not stop the runner, so this never errors.
 #[must_use]
-pub fn hook_context(cue: &str, limit: usize) -> String {
-    let cue = cue.trim();
+pub fn hook_context(call: &HookCall, limit: usize) -> String {
+    let cue = call.cue.trim();
     if cue.len() < 3 {
         return String::new();
     }
-    let Ok(body) = packset_island(cue, false) else {
+    let Ok(hits) = packset_search(cue) else {
         return String::new();
     };
-    let mut rows: Vec<&Value> = body["island"].as_array().into_iter().flatten().collect();
+    let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
+    if top <= 0.0 {
+        return String::new();
+    }
+    let seen = seen_ids(call.session.as_deref());
+    let mut rows: Vec<&Hit> = hits
+        .iter()
+        .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
+        .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+        .collect();
     rows.sort_by(|a, b| {
-        let pa = a["kind"].as_str() == Some("preference");
-        let pb = b["kind"].as_str() == Some("preference");
+        let pa = a.kind == "preference";
+        let pb = b.kind == "preference";
         pb.cmp(&pa).then(
-            b["activation"]
-                .as_f64()
-                .unwrap_or(0.0)
-                .partial_cmp(&a["activation"].as_f64().unwrap_or(0.0))
+            b.score
+                .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
+    let rows: Vec<&Hit> = rows.into_iter().take(limit).collect();
     let lines: Vec<String> = rows
         .iter()
-        .take(limit)
-        .map(|a| {
+        .map(|h| {
             format!(
                 "- [{}] {}",
-                a["kind"].as_str().unwrap_or("claim"),
-                a["text"].as_str().unwrap_or("").trim()
+                if h.kind.is_empty() { "claim" } else { &h.kind },
+                h.text.trim()
             )
         })
         .collect();
     if lines.is_empty() {
         return String::new();
     }
+    mark_seen(
+        call.session.as_deref(),
+        &rows.iter().filter_map(|h| h.id.clone()).collect::<Vec<_>>(),
+    );
     format!(
         "What this seat already knows that bears on this (from the pack; `ljos search` for more):\n{}",
         lines.join("\n")
@@ -2078,7 +2147,12 @@ pub fn policy_line(argv: &[String]) -> Result<String> {
 /// pack is down; the memory is the part that may be empty.
 pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let line = policy_line(argv)?;
-    let context = hook_context(&line, 8);
+    let call = HookCall {
+        event: "argv".into(),
+        cue: line.clone(),
+        session: None,
+    };
+    let context = hook_context(&call, 5);
     Ok(if context.is_empty() {
         format!("{line}\n")
     } else {
@@ -2233,6 +2307,18 @@ mod tests {
         assert_eq!(prompt.cue, "fix the fuse");
         let argv = hook_call("rm -rf build");
         assert_eq!(argv.event, "argv");
+        assert_eq!(argv.session, None);
+        let with_session = hook_call(
+            r#"{"session_id":"abc/../x 1","hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#,
+        );
+        assert_eq!(with_session.session.as_deref(), Some("abc/../x 1"));
+        assert!(seen_path("abc/../x 1")
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("hook-seen-abcx1"));
+        assert_eq!(seen_path("/../"), None);
         assert_eq!(hook_output(&argv, ""), "");
         assert_eq!(hook_output(&argv, "- [lesson] x"), "- [lesson] x\n");
         let out = hook_output(&tool, "- [preference] y");
@@ -2243,7 +2329,15 @@ mod tests {
             "- [preference] y"
         );
         assert!(
-            hook_context("ab", 8).is_empty(),
+            hook_context(
+                &HookCall {
+                    event: "argv".into(),
+                    cue: "ab".into(),
+                    session: None
+                },
+                8
+            )
+            .is_empty(),
             "a cue too short asks nothing"
         );
     }

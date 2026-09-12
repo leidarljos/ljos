@@ -28,7 +28,7 @@
 | =complete ID [--status done\vert failed\vert cancelled]= | claim graph | finish the session node |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =policy ARGV...= | policy, pack | the line as it would run, then what the pack knows that bears on it |
-| =hook [--limit N]= | pack | the memory hook: hook JSON or argv on stdin, the memories the action activates on stdout |
+| =hook [--limit N]= | pack | the memory hook: hook JSON or argv on stdin; the hits scoring at least 0.6 of the best, preferences first, five at most, each once per runner session |
 | =handover --out DIR [--project P]... [--issue I]...= | all | pack, seal, sign |
 | =receive DIR [--since BRIDGE] [--import]= | all | check, and import the atoms |
 | =doctor= | all | which habitats answer, and whether the harnesses found are onboarded |
