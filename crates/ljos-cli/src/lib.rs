@@ -2640,8 +2640,16 @@ mod tests {
         // has no such model, is left as it was.
         let broad =
             consensus_steps_for("x-1", true, true, &[], &got, &["broad".to_string()]).unwrap();
-        assert!(broad[0].args.contains(&"--epsilon".to_string()), "{:?}", broad[0]);
-        assert!(!broad[1].args.contains(&"--epsilon".to_string()), "{:?}", broad[1]);
+        assert!(
+            broad[0].args.contains(&"--epsilon".to_string()),
+            "{:?}",
+            broad[0]
+        );
+        assert!(
+            !broad[1].args.contains(&"--epsilon".to_string()),
+            "{:?}",
+            broad[1]
+        );
         assert!(settle_flags_for(&["feature".to_string()]).is_empty());
     }
 
