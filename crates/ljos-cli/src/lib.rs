@@ -2332,6 +2332,12 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
         }
         lines.push(format!("{kept} atoms imported, {} refused", refused.len()));
         lines.extend(refused.into_iter().take(5));
+        if kept > 0 {
+            lines.push(
+                "imported claims may rewrite held ones; `ljos consolidate` reports the pairs, `--apply` closes them"
+                    .to_string(),
+            );
+        }
     }
     Ok(lines)
 }
