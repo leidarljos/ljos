@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use ljos_cli::{
     ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish,
     graded, handover, island_entities, learn_and_write, node_for, on_path, packset_forget,
-    packset_island, packset_search, packset_write_as, personas_from_pack, policy_line, receive,
+    age_of, now_utc, packset_island, packset_search, packset_search_as_of, packset_write_as, personas_from_pack, policy_line, receive,
     release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
     write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
     POLICY_TCB, PROTOCOL,
@@ -55,6 +55,11 @@ pub struct ClaimArgs {
 pub struct SearchArgs {
     /// What to ask the seat's standing knowledge.
     pub query: String,
+    /// Ask the pack as it stood at this time (`YYYY-MM-DD` or RFC 3339):
+    /// what the seat knew then, memories withdrawn since included, memories
+    /// learnt since left out. Omit for now.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 /// One atom to retire, and what withdrew it.
@@ -297,6 +302,8 @@ pub struct IslandRow {
     pub activation: f64,
     /// Whether search found it, or activation reached it.
     pub seed: bool,
+    /// How long ago it was written, in words; empty when unstamped.
+    pub age: String,
 }
 
 /// One habitat and whether it answers.
@@ -346,6 +353,11 @@ pub struct HitRow {
     pub text: String,
     /// The pack's score for it.
     pub score: f64,
+    /// When it was written, RFC 3339; absent on a card paragraph.
+    pub ts: Option<String>,
+    /// How long ago that was, in words: `today`, `3 weeks ago`. Read the
+    /// hits as a timeline: a later lesson revises an earlier one.
+    pub age: String,
 }
 
 /// The argv law's answer.
@@ -481,7 +493,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words: what the seat already knows, ranked. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: `packset ensure` starts one. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words: what the seat already knows, ranked, each hit with its age so the list reads as a timeline. Pass as_of to ask what the seat knew at an earlier time. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: `packset ensure` starts one. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -492,7 +504,9 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<Vec<HitRow>>, McpError> {
-        let hits = packset_search(&args.query).map_err(refused)?;
+        let hits = packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false)
+            .map_err(refused)?;
+        let now = args.as_of.clone().unwrap_or_else(now_utc);
         Ok(Json(
             hits.into_iter()
                 .map(|h| HitRow {
@@ -500,6 +514,8 @@ impl LjosServer {
                     kind: h.kind,
                     text: h.text,
                     score: h.score,
+                    age: age_of(h.ts.as_deref(), &now),
+                    ts: h.ts,
                 })
                 .collect(),
         ))
@@ -1036,6 +1052,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<CueArgs>,
     ) -> Result<Json<Vec<IslandRow>>, McpError> {
+        let now = now_utc();
         let body = packset_island(&args.cue, args.fire.unwrap_or(false)).map_err(refused)?;
         Ok(Json(
             body["island"]
@@ -1048,6 +1065,7 @@ impl LjosServer {
                     text: a["text"].as_str().unwrap_or("").to_string(),
                     activation: a["activation"].as_f64().unwrap_or(0.0),
                     seed: a["seed"].as_bool().unwrap_or(false),
+                    age: age_of(a["ts"].as_str(), &now),
                 })
                 .collect(),
         ))

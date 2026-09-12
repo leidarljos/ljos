@@ -58,6 +58,9 @@ enum Cmd {
         /// Rerank the top hits with the writer's cross-encoder; slower, sharper.
         #[arg(long)]
         rerank: bool,
+        /// Ask the pack as it stood then (YYYY-MM-DD or RFC 3339): what the seat knew at that time, withdrawn memories included, later ones left out.
+        #[arg(long, value_name = "TIME")]
+        as_of: Option<String>,
     },
     /// What this seat's memory turns on: the claims most linked to, by a weighted PageRank over the pack's links.
     Hubs {
@@ -323,10 +326,16 @@ fn main() -> Result<()> {
             query,
             limit,
             rerank,
+            as_of,
         } => {
             print!(
                 "{}",
-                format_hits(&packset_search_opts(&join(&query), limit, rerank)?)
+                format_hits(&packset_search_as_of(
+                    &join(&query),
+                    limit,
+                    as_of.as_deref(),
+                    rerank
+                )?)
             );
         }
         Cmd::Evidence { accession } => run("deedar", &["evidence", &accession])?,

@@ -2426,7 +2426,9 @@ pub fn graded(id: &str, recalled: bool) -> Result<Value> {
         .with_context(|| format!("graded: POST /v1/grade failed for {id}"))
 }
 
-fn now_utc() -> String {
+/// Now, RFC 3339 UTC to the second, the stamp the pack writes.
+#[must_use]
+pub fn now_utc() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2594,14 +2596,34 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
 /// costs a model call and buys precision. For a brief or a person reading,
 /// not for the hook.
 pub fn packset_search_opts(query: &str, limit: u32, rerank: bool) -> Result<Vec<Hit>> {
+    packset_search_as_of(query, limit, None, rerank)
+}
+
+/// [`packset_search_opts`] asked of the pack as it stood at `as_of` (RFC
+/// 3339; a date alone reads as its start): only memories live then answer,
+/// what was withdrawn since included and what was learnt since left out.
+/// `None` is now. This is the question "what did the seat know when it
+/// decided that", and the pack keeps every record so it can be asked.
+pub fn packset_search_as_of(
+    query: &str,
+    limit: u32,
+    as_of: Option<&str>,
+    rerank: bool,
+) -> Result<Vec<Hit>> {
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
     }
+    let as_of = as_of.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(at) = as_of {
+        if days_of_stamp(Some(at)).is_none() {
+            bail!("search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339");
+        }
+    }
     let client = pack()?;
     let workspace = client.workspace();
     client
-        .search_opts(&workspace, q, limit, None, rerank)
+        .search_opts(&workspace, q, limit, as_of, rerank)
         .context("search: GET /v1/search failed")
 }
 

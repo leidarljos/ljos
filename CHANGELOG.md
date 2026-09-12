@@ -9,6 +9,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `6 months ago` beside the kind, and the hook's lessons run oldest to
   newest behind the preferences. The reader lays what it recalls on a
   timeline instead of a bag.
+- `search --as-of TIME` (and `as_of` on the `ljos_search` tool): the pack
+  as it stood then, so "what did the seat know when it decided that" has
+  an answer.
 
 ## 0.8.0 (2026-09-12)
 

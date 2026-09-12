@@ -35,7 +35,8 @@ hand. Each answers something the next one needs.
    you grade.
 4. `ljos search TOPIC`, then `ljos island TASK` with the task in your own
    words. The island is the cluster of memories this task touches, the hits
-   are only its seeds.
+   are only its seeds. Every row carries its age; read them as a timeline.
+   `ljos search TOPIC --as-of TIME` asks what the seat knew then.
 5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 6. `ljos claim ISSUE --assignee NAME`. One live claim per name. `busy` means
