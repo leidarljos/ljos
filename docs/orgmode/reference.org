@@ -12,6 +12,7 @@
 | =prefer TEXT= | pack | one standing preference |
 | =forget ID [--why DEED]= | pack | tombstone a claim, naming the deed that withdrew it |
 | =search QUERY [-n N] [--rerank]= | pack | ranked claims; =--rerank= scores the top hits with the writer's cross-encoder |
+| =hubs [-n N]= | pack | the claims this seat's memory turns on, highest first: a weighted PageRank over the links |
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
 | =due= | pack | claims whose review is due, unreviewed ones first, then one line on the clock |
 | =graded ID [--lapsed]= | pack | one review graded |

@@ -17,7 +17,7 @@ schemars = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-packset-client = { git = "https://github.com/leidarljos/packset", version = "0.4.0" }
+packset-client = { git = "https://github.com/leidarljos/packset", version = "0.5.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

@@ -3,14 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
-    finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
-    hook_call, hook_context, hook_output_ruled, island_entities, join, learn_and_write, node_for,
-    on_path, onboard, pack, packset_forget, packset_island, packset_search_opts, packset_write_as,
-    panel, panel_steps, personas_from_pack, policy_with_memory, predictions_of, receive, release,
-    rows_about, rules_from_pack, run, run_as, run_captured, sitting, topic_words, trust_from_pack,
-    verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
-    HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish, format_doctor, format_hits, format_hubs, format_island, format_steps, graded, handover, healthy, hook_call, hook_context, hook_output_ruled, island_entities, join, learn_and_write, node_for, on_path, onboard, pack, packset_forget, packset_hubs, packset_island, packset_search_opts, packset_write_as, panel, panel_steps, personas_from_pack, policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as, run_captured, sitting, topic_words, trust_from_pack, verdict_for, write_persona, write_prediction, write_rule, write_trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL, Persona, Rule, Trust,
 };
 use std::path::PathBuf;
 
@@ -57,6 +50,12 @@ enum Cmd {
         /// Rerank the top hits with the writer's cross-encoder; slower, sharper.
         #[arg(long)]
         rerank: bool,
+    },
+    /// What this seat's memory turns on: the claims most linked to, by a weighted PageRank over the pack's links.
+    Hubs {
+        /// Most hubs to print.
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: usize,
     },
     /// The memories a task activates: search hits as seeds, spread along the pack's links.
     Island {
@@ -299,6 +298,7 @@ fn main() -> Result<()> {
             let body = packset_forget(&id, why.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
+        Cmd::Hubs { limit } => print!("{}", format_hubs(&packset_hubs(limit)?)),
         Cmd::Island { cue, fire } => {
             print!("{}", format_island(&packset_island(&join(&cue), fire)?));
         }

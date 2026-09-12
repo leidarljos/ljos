@@ -2390,6 +2390,36 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
         .context("island: GET /v1/activate failed")
 }
 
+/// The claims the pack's link graph turns on, highest first: what matters
+/// in this seat's memory by its own connections, before any query.
+pub fn packset_hubs(limit: usize) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    client
+        .hubs(&workspace, limit)
+        .context("hubs: GET /v1/hubs failed")
+}
+
+/// One line per hub: score, links, id, text.
+pub fn format_hubs(body: &Value) -> String {
+    let mut out = String::new();
+    for hub in body["hubs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| reviewable(a))
+    {
+        out.push_str(&format!(
+            "{:.4}\t{}\t{}\t{}\n",
+            hub["score"].as_f64().unwrap_or(0.0),
+            hub["links"].as_u64().unwrap_or(0),
+            hub["id"].as_str().unwrap_or("-"),
+            hub["text"].as_str().unwrap_or("")
+        ));
+    }
+    out
+}
+
 /// One line per activated memory: activation, seed mark, id, text.
 pub fn format_island(body: &Value) -> String {
     let mut out = String::new();
