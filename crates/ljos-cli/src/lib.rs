@@ -2708,7 +2708,14 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
     out.push_str(&due_report()?);
     let title = issue_title(issue)?;
     out.push_str(&format!("== island: {title}\n"));
-    out.push_str(&format_island(&packset_island(&title, false)?));
+    // The strongest eight: a sitting wants orientation, not the whole
+    // cluster; `ljos island` prints it all.
+    let island = packset_island(&title, false)?;
+    let mut top = island.clone();
+    if let Some(rows) = top["island"].as_array_mut() {
+        rows.truncate(8);
+    }
+    out.push_str(&format_island(&top));
     out.push_str("== recall\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     out.push_str("== claim\n");
