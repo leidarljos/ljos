@@ -1384,7 +1384,10 @@ mod tests {
         let declared = LjosServer::prompt_router().list_all();
         let mut names: Vec<&str> = declared.iter().map(|p| p.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, ["check_a_handover", "run_a_panel", "start_a_sitting"]);
+        assert_eq!(
+            names,
+            ["check_a_handover", "run_a_panel", "start_a_sitting"]
+        );
         let panel = server
             .run_a_panel_prompt(Parameters(IssueArgs {
                 issue: "proj-1a2b".into(),
@@ -1395,7 +1398,13 @@ mod tests {
         assert!(said.contains("proj-1a2b"), "{said}");
         ordered(
             said,
-            &["`ljos_recall`", "`ljos_vote`", "`ljos_consensus`", "`ljos_learn`", "`ljos_calibrate`"],
+            &[
+                "`ljos_recall`",
+                "`ljos_vote`",
+                "`ljos_consensus`",
+                "`ljos_learn`",
+                "`ljos_calibrate`",
+            ],
         );
         let server = LjosServer::at(std::env::temp_dir());
         let begun = server
