@@ -810,14 +810,31 @@ fn due_nudge(call: &HookCall) -> String {
         return String::new();
     };
     let due = due_of(&atoms, &now_utc()).len();
-    if due == 0 {
+    // Pairs the replacement rule would close, read without writing: the
+    // consolidation nobody runs is the one nobody was told about.
+    let pending = client
+        .consolidate(&client.workspace(), false)
+        .ok()
+        .and_then(|b| b["closed"].as_u64())
+        .unwrap_or(0);
+    if due == 0 && pending == 0 {
         return String::new();
     }
     mark_seen(call.session.as_deref(), &[key]);
-    format!(
-        "{due} claim{} due for review in this seat: `ljos due`, read each, then `ljos graded ID` (or `--lapsed`).",
-        if due == 1 { " is" } else { "s are" }
-    )
+    let mut out = Vec::new();
+    if due > 0 {
+        out.push(format!(
+            "{due} claim{} due for review in this seat: `ljos due`, read each, then `ljos graded ID` (or `--lapsed`).",
+            if due == 1 { " is" } else { "s are" }
+        ));
+    }
+    if pending > 0 {
+        out.push(format!(
+            "{pending} pair{} of memories where a later one rewrites an earlier: `ljos consolidate` shows them, `--apply` closes the earlier.",
+            if pending == 1 { "" } else { "s" }
+        ));
+    }
+    out.join("\n")
 }
 
 /// The hook's answer in the runner's JSON: `additionalContext` under the
@@ -3187,16 +3204,22 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
     Ok(rows)
 }
 
-/// One line per hit: score, kind, id, age, text. The age is the one
-/// column a reader needs to lay the hits on a timeline.
+/// One line per hit: score, how many scorers named it out of how many
+/// ran, kind, id, age, text. The age is the one column a reader needs to
+/// lay the hits on a timeline; the count is what the hook keys on.
 pub fn format_hits(hits: &[Hit]) -> String {
     let now = now_utc();
     let mut out = String::new();
     for h in hits {
         let id = h.id.as_deref().unwrap_or("-");
+        let named = match (h.ballots, h.of) {
+            (Some(b), Some(of)) => format!("{b}/{of}"),
+            _ => "-".to_string(),
+        };
         out.push_str(&format!(
-            "{:.4}\t{}\t{}\t{}\t{}\n",
+            "{:.4}\t{}\t{}\t{}\t{}\t{}\n",
             h.score,
+            named,
             h.kind,
             id,
             age_of(h.ts.as_deref(), &now),

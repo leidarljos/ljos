@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `search` prints how many scorers named each hit; the prompt nudge counts
+  the pairs `consolidate` would close beside the claims due.
 - `consolidate` (and the `ljos_consolidate` tool): the pack's replacement
   rule run over what it holds, pairs reported, `--apply` to write.
 - The hook injects only hits at least two of the pack's scorers named
