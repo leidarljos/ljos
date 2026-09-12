@@ -357,7 +357,10 @@ fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<S
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
-        return Err(refused(anyhow::anyhow!("{bin} exited {}: {stderr}", out.status)));
+        return Err(refused(anyhow::anyhow!(
+            "{bin} exited {}: {stderr}",
+            out.status
+        )));
     }
     Ok(said(ljos_cli::Said { stdout, stderr }))
 }

@@ -1951,17 +1951,29 @@ mod tests {
         let topic = topic_words("Rewrite the docs site");
         assert_eq!(topic, ["docs", "rewrite", "site", "the"]);
         assert_eq!(rows_about(&rows, &topic), rows);
-        assert_eq!(rows_about(&rows, &topic_words("Fix the fuse")), vec![everywhere.clone()]);
+        assert_eq!(
+            rows_about(&rows, &topic_words("Fix the fuse")),
+            vec![everywhere.clone()]
+        );
 
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "hold".to_string()),
         ];
         let learned = learn_about(&ballots, "ship", &rows, 0.5, &["fuse".to_string()]).unwrap();
-        let ab = learned.iter().find(|r| r.from == "a" && r.to == "b").unwrap();
+        let ab = learned
+            .iter()
+            .find(|r| r.from == "a" && r.to == "b")
+            .unwrap();
         assert_eq!(ab.about, ["fuse"]);
-        assert!((ab.weight - 0.45).abs() < 1e-9, "starts from the unscoped 0.9: {ab:?}");
-        let ba = learned.iter().find(|r| r.from == "b" && r.to == "a").unwrap();
+        assert!(
+            (ab.weight - 0.45).abs() < 1e-9,
+            "starts from the unscoped 0.9: {ab:?}"
+        );
+        let ba = learned
+            .iter()
+            .find(|r| r.from == "b" && r.to == "a")
+            .unwrap();
         assert!((ba.weight - 1.0).abs() < 1e-9, "a was right: {ba:?}");
 
         // Rows read back keep scoped and unscoped apart, latest per scope.
@@ -2004,7 +2016,10 @@ mod tests {
         .is_err());
         let steps = consensus_steps_anchored("x-1", true, true, &[], &got).unwrap();
         for step in &steps {
-            assert!(step.args.contains(&"--susceptibility-of".to_string()), "{step:?}");
+            assert!(
+                step.args.contains(&"--susceptibility-of".to_string()),
+                "{step:?}"
+            );
         }
     }
 
