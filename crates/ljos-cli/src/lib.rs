@@ -444,9 +444,13 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
-        let present = groups
-            .iter()
-            .any(|g| g["hooks"].as_array().into_iter().flatten().any(is_seat_hook));
+        let present = groups.iter().any(|g| {
+            g["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(is_seat_hook)
+        });
         if present {
             continue;
         }
@@ -464,7 +468,13 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
             continue;
         };
         let before = groups.len();
-        groups.retain(|g| !g["hooks"].as_array().into_iter().flatten().any(is_seat_hook));
+        groups.retain(|g| {
+            !g["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(is_seat_hook)
+        });
         if groups.len() != before {
             removed.push(event.clone());
         }
@@ -527,7 +537,13 @@ fn hook_installed(file: &Path, events: &[String]) -> bool {
             .as_array()
             .into_iter()
             .flatten()
-            .any(|g| g["hooks"].as_array().into_iter().flatten().any(is_seat_hook))
+            .any(|g| {
+                g["hooks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(is_seat_hook)
+            })
     })
 }
 
