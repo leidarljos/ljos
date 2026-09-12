@@ -146,7 +146,8 @@ under equal weights is a count; under calibrated rows it is not.
   then what the pack knows that bears on it. It is not a check.
 - `ljos hook` is the memory hook: a runner or a policy layer pipes the
   action about to happen (its hook JSON, or the plain argv) and gets back
-  the memories that action activates, preferences first, then lessons
+  the memories that action activates, what two of the pack's scorers
+  agreed on, preferences first, then lessons
   oldest to newest, each with its age (`[lesson, 3 weeks ago]`), so a
   later lesson reads as a revision of an earlier one. When the session
   ends, the memories it injected fire together, so what served one sitting

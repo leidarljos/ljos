@@ -740,6 +740,7 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
         .iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
         .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
+        .filter(|h| agreed(h))
         .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
         .collect();
     rows.sort_by(|a, b| {
@@ -777,6 +778,18 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
         out.push_str(&nudge);
     }
     out
+}
+
+/// Whether the pack's scorers agreed on a hit: named by at least two of
+/// the ballots that ran. When one ballot ran, or the hit carries no
+/// count, it stands. A command line matches many claims weakly on one
+/// scorer; what reaches the agent unasked should be what two scorers
+/// found.
+fn agreed(h: &Hit) -> bool {
+    match (h.ballots, h.of) {
+        (Some(named), Some(of)) if of >= 2 => named >= 2,
+        _ => true,
+    }
 }
 
 /// On a prompt, once per session: how many claims are due for review. The
@@ -3488,6 +3501,23 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_hook_keeps_what_two_scorers_agreed_on() {
+        let hit = |ballots, of| Hit {
+            id: None,
+            text: "x".into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            ballots,
+            of,
+        };
+        assert!(agreed(&hit(Some(2), Some(3))));
+        assert!(!agreed(&hit(Some(1), Some(3))));
+        assert!(agreed(&hit(Some(1), Some(1))));
+        assert!(agreed(&hit(None, None)));
+    }
+
+    #[test]
     fn the_holder_is_read_off_a_get_line() {
         let line = "a25a…  claimed  task  unset  gen=2  assignee=69f917124f757277b806e9a0f48c0318  parent=0  x-1";
         assert_eq!(
@@ -3605,6 +3635,8 @@ mod tests {
             score: 1.0,
             kind: "lesson".into(),
             ts: Some("2026-09-10T00:00:00.000Z".into()),
+            ballots: None,
+            of: None,
         };
         assert_eq!(
             hit_line(&h, "2026-09-12T00:00:00.000Z"),
@@ -3616,6 +3648,8 @@ mod tests {
             score: 1.0,
             kind: String::new(),
             ts: None,
+            ballots: None,
+            of: None,
         };
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }

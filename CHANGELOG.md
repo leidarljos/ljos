@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The hook injects only hits at least two of the pack's scorers named
+  (`ballots` of `of` on a hit), when more than one ran; a claim one
+  scorer alone matched on a command line stays in the pack.
 - A second `sitting` on an issue this name already holds is a sitting
   resumed: the lease is renewed and the verb goes on, where it refused
   with `claim: status claimed`. Held by another seat, the refusal names
