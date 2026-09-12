@@ -18,7 +18,13 @@ fails, run `doctor` before drawing any conclusion.
 
 ## Before the work: a sitting
 
-Run these in this order. Each one answers something the next one needs.
+One verb runs the whole opening in order and stops at the first store that
+does not answer:
+
+    ljos sitting ISSUE --assignee NAME
+
+It prints six sections, and each one is a step you would otherwise run by
+hand. Each answers something the next one needs.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packset ensure` starts a pack writer. Do not proceed on a `no`.
@@ -54,6 +60,15 @@ Every piece of work has an issue before it has a claim.
 
 ## After the work
 
+One verb closes the sitting:
+
+    ljos finish ISSUE --status done --lesson "..." [--outcome OPTION]
+
+It remembers the lesson, fires the island, completes the session node, and
+learns from the outcome when one is named. Without `--lesson` it says so;
+a sitting that taught nothing worth two sentences is rare. By hand, the
+same four steps are:
+
 1. `ljos island TASK --fire` when the island served: the strongest memories
    fire together and their links gain weight.
 2. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
@@ -63,6 +78,17 @@ Every piece of work has an issue before it has a claim.
    right. Every voter it refuted shrinks in every other voter's row.
 4. `ljos handover --out DIR --issue ISSUE` when another seat takes over;
    the receiver runs `ljos receive DIR`, then `--import`.
+
+## When nobody names an outcome
+
+Most issues close without anyone saying which option was right, and then
+`learn` never runs and every voter keeps the same weight. `ljos calibrate
+--project PROJECT` reads every issue of the project with two or more
+ballots and estimates each voter's accuracy from how often it agrees with
+the answer the other voters make likely (Dawid and Skene), then writes
+those accuracies back as trust rows. Run it once per project after a few
+issues have been voted on, and again when many more have. A consensus
+under equal weights is a count; under calibrated rows it is not.
 
 ## Refusals worth knowing
 
@@ -74,6 +100,9 @@ Every piece of work has an issue before it has a claim.
   from `deedar`, never free text.
 - `the pack writer did not answer`: the pack is down, not empty.
   `packset ensure`.
+- `ljos due` prints `0 due; nothing scheduled`: the seat has remembered
+  nothing, and the review loop has nothing to run on. Remember something.
+  `0 due; N scheduled, next at T` is a clock that is running.
 - `ljos policy ARGV` prints the line a command would run under argv law. It
   is not part of a sitting and it is not a check.
 

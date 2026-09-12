@@ -10,10 +10,10 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, cards, claim, consensus_steps, doctor, due, graded, handover, learn,
-    node_for, on_path, packset_forget, packset_island, packset_search, packset_write, policy_line,
-    receive, release, run_captured, trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    ballots_from_json, calibrate, cards, claim, consensus_steps, doctor, due, finish, graded,
+    handover, learn, node_for, on_path, packset_forget, packset_island, packset_search,
+    packset_write, policy_line, receive, release, run_captured, sitting, trust_from_pack,
+    write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -181,6 +181,39 @@ pub struct GradeArgs {
     pub id: String,
     /// False when the claim had to be looked up again.
     pub recalled: Option<bool>,
+}
+
+/// A sitting to open.
+#[derive(Deserialize, JsonSchema)]
+pub struct SittingArgs {
+    /// The tracker id of the issue (`proj-1a2b`).
+    pub issue: String,
+    /// Your name. One live claim per name.
+    pub assignee: String,
+}
+
+/// A sitting to close.
+#[derive(Deserialize, JsonSchema)]
+pub struct FinishSittingArgs {
+    /// The tracker id of the issue.
+    pub issue: String,
+    /// `done` (the default), `failed`, or `cancelled`.
+    pub status: Option<String>,
+    /// The lesson this sitting taught, two sentences at most. Omit only
+    /// when there was none; the report says so.
+    pub lesson: Option<String>,
+    /// The option that turned out right, when the ballots are in and the
+    /// world has said. Omit when nobody knows yet.
+    pub outcome: Option<String>,
+}
+
+/// A project whose history calibrates the voters.
+#[derive(Deserialize, JsonSchema)]
+pub struct CalibrateArgs {
+    /// The tracker project.
+    pub project: String,
+    /// Expectation-maximisation rounds; twenty when absent.
+    pub rounds: Option<usize>,
 }
 
 /// A cue: the task or question at hand.
@@ -491,6 +524,75 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         let text = claim(&args.node, &args.assignee).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, and the claim under your name. Prefer it to calling the six tools one by one.",
+        annotations(
+            title = "Open a sitting",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_sitting(
+        &self,
+        Parameters(args): Parameters<SittingArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = sitting(&args.issue, &args.assignee, &self.cards_dir).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this when the work on an issue ends; it is the whole closing of a sitting: remember the lesson, fire the island so its links gain weight, complete the session node, and learn from the outcome when one is named. Pass the lesson: a sitting that taught nothing worth two sentences is rare, and the report says so when none is given.",
+        annotations(
+            title = "Close a sitting",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_finish(
+        &self,
+        Parameters(args): Parameters<FinishSittingArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = finish(
+            &args.issue,
+            args.status.as_deref().unwrap_or("done"),
+            args.lesson.as_deref(),
+            args.outcome.as_deref(),
+            LEARN_BETA,
+        )
+        .map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this once a project has a few voted issues, and again when it has many more: estimate each voter's accuracy from the project's voting history with no truth labels (Dawid and Skene) and write the accuracies back as trust rows, so a consensus stops being a count even when nobody named an outcome.",
+        annotations(
+            title = "Calibrate the voters",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_calibrate(
+        &self,
+        Parameters(args): Parameters<CalibrateArgs>,
+    ) -> Result<Json<Vec<TrustRow>>, McpError> {
+        let rows = calibrate(&args.project, args.rounds.unwrap_or(20)).map_err(refused)?;
+        Ok(Json(
+            rows.into_iter()
+                .map(|r| TrustRow {
+                    from: r.from,
+                    to: r.to,
+                    weight: r.weight,
+                })
+                .collect(),
+        ))
     }
 
     #[tool(
@@ -891,10 +993,15 @@ impl ServerHandler for LjosServer {
         .with_instructions(
             "One seat over five habitats: tracker, pack, deed store, claim graph, \
              consensus. Read ljos://protocol first; it says which store answers \
-             which question and the order of tools in a sitting: ljos_doctor, \
-             ljos_cards, ljos_due then ljos_graded, ljos_search then ljos_island, \
-             ljos_recall, ljos_claim; during the work ljos_deed, ljos_remember, \
-             ljos_vote; after it ljos_island with fire, ljos_complete, ljos_learn. \
+             which question and the order of tools in a sitting. ljos_sitting \
+             runs the whole opening (doctor, cards, due, island, recall, claim) \
+             and ljos_finish the whole closing (remember, fire, complete, learn); \
+             prefer them. By hand: ljos_doctor, ljos_cards, ljos_due then \
+             ljos_graded, ljos_search then ljos_island, ljos_recall, ljos_claim; \
+             during the work ljos_deed, ljos_remember, ljos_vote; after it \
+             ljos_island with fire, ljos_complete, ljos_learn. ljos_calibrate \
+             moves the trust rows from a project's history when nobody names an \
+             outcome. \
              The pack is written by remember, prefer, trust, learn, graded and an \
              imported handover; the text is the claim. Cards are read at \
              ljos://cards/ and never written. Citing a deed on a node names an \
@@ -978,7 +1085,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            23,
+            26,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1009,9 +1116,11 @@ mod tests {
         assert_eq!(
             writers,
             [
+                "ljos_calibrate",
                 "ljos_claim",
                 "ljos_complete",
                 "ljos_deed",
+                "ljos_finish",
                 "ljos_forget",
                 "ljos_graded",
                 "ljos_handover",
@@ -1021,6 +1130,7 @@ mod tests {
                 "ljos_receive",
                 "ljos_release",
                 "ljos_remember",
+                "ljos_sitting",
                 "ljos_trust",
                 "ljos_vote"
             ]

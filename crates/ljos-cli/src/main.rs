@@ -3,10 +3,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, cards, claim, consensus_steps, doctor, due, format_doctor, format_due,
+    ballots_from_json, calibrate, cards, claim, consensus_steps, doctor, due_report, finish,
+    format_doctor,
     format_hits, format_island, format_steps, graded, handover, healthy, join, learn, node_for,
     on_path, onboard, packset_forget, packset_island, packset_search, packset_write, policy_line,
-    receive, release, run, run_captured, trust_from_pack, write_trust, Trust, HARNESSES_EXAMPLE,
+    receive, release, run, run_captured, sitting, trust_from_pack, write_trust, Trust,
+    HARNESSES_EXAMPLE,
     LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
@@ -139,8 +141,45 @@ enum Cmd {
         #[arg(long)]
         import: bool,
     },
-    /// Atoms whose review is due.
+    /// Atoms whose review is due, then one line on the state of the clock.
     Due,
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, recall, claim.
+    Sitting {
+        /// The tracker id of the issue.
+        issue: String,
+        /// Your name; one live claim per name.
+        #[arg(long)]
+        assignee: String,
+        /// Where the cards are read from.
+        #[arg(long, default_value = ".")]
+        cards: PathBuf,
+    },
+    /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
+    Finish {
+        /// The tracker id of the issue.
+        issue: String,
+        /// done, failed, or cancelled.
+        #[arg(long, default_value = "done")]
+        status: String,
+        /// The lesson this sitting taught, two sentences at most.
+        #[arg(long)]
+        lesson: Option<String>,
+        /// The option that turned out right, when the ballots are in and the world has said.
+        #[arg(long)]
+        outcome: Option<String>,
+        /// The factor a refuted voter shrinks by when an outcome is named.
+        #[arg(long, default_value_t = LEARN_BETA)]
+        beta: f64,
+    },
+    /// Write trust rows from a project's voting history: Dawid-Skene accuracy per voter, no truth labels.
+    Calibrate {
+        /// The tracker project whose settled issues to read.
+        #[arg(short, long)]
+        project: String,
+        /// Expectation-maximisation rounds.
+        #[arg(long, default_value_t = 20)]
+        rounds: usize,
+    },
     /// Grade one review; recalled unless --lapsed.
     Graded {
         id: String,
@@ -260,7 +299,29 @@ fn main() -> Result<()> {
                 println!("{line}");
             }
         }
-        Cmd::Due => print!("{}", format_due(&due()?)),
+        Cmd::Due => print!("{}", due_report()?),
+        Cmd::Sitting {
+            issue,
+            assignee,
+            cards: cards_dir,
+        } => print!("{}", sitting(&issue, &assignee, &cards_dir)?),
+        Cmd::Finish {
+            issue,
+            status,
+            lesson,
+            outcome,
+            beta,
+        } => print!(
+            "{}",
+            finish(&issue, &status, lesson.as_deref(), outcome.as_deref(), beta)?
+        ),
+        Cmd::Calibrate { project, rounds } => {
+            let rows = calibrate(&project, rounds)?;
+            for row in &rows {
+                println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
+            }
+        }
+
         Cmd::Graded { id, lapsed } => {
             let v = graded(&id, !lapsed)?;
             println!("{}", v["due_at"].as_str().unwrap_or("graded"));

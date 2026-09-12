@@ -73,14 +73,53 @@ claim search found itself, the rest were reached along the pack's links.
 Add =--fire= when you go on to use the island: the strongest eight fire
 together and their links gain weight.
 
-* Start a sitting
+* Start a sitting, and end one
 
-The =start_a_sitting= prompt orders the first calls: read the cards, ask
-the pack, recall the node, grade what is due, claim a session node. On the
-command line the same order is =ljos doctor=, =ljos cards=, =ljos due=,
-=ljos search=, =ljos island=, =ljos recall=, =ljos claim=. A claim refused as
-busy names the issue you still hold; =ljos complete= finishes it and
-=ljos release= hands it back.
+#+begin_src console
+$ ljos sitting proj-1a2b --assignee you
+== doctor
+ok	vissue	...
+== cards
+== due
+unreviewed	conclusion	3f9c...	The lexical default is BM25+.
+1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
+== island: Ship the fuse change?
+1.000	seed	ab8c...	CombMNZ over RRF for fusing two ballots.
+== recall
+...
+== claim
+gen=2
+#+end_src
+
+One verb, six sections, in the protocol's order; it stops at the first
+store that does not answer and claims nothing. The =start_a_sitting=
+prompt gives the same order to a runner that prefers single tools. A claim
+refused as busy names the issue you still hold; =ljos complete= finishes it
+and =ljos release= hands it back.
+
+#+begin_src console
+$ ljos finish proj-1a2b --lesson "CombMNZ held on turns. RRF lost two points." --outcome ship
+remembered 51778929d855529fcb8df3f4d1c4d692
+fired the island for "Ship the fuse change?": 8 memories
+completed the session node for proj-1a2b as done
+learned from outcome "ship": 6 trust rows rewritten
+the ticket stays proj-1a2b's state; `vissue update proj-1a2b -s DONE` closes it
+#+end_src
+
+* Move the trust rows without an outcome
+
+#+begin_src console
+$ ljos calibrate -p demo
+alice weighs bob at 0.917
+alice weighs carol at 0.643
+...
+#+end_src
+
+Every issue of the project with two or more ballots is an item; Dawid and
+Skene's estimate gives each voter an accuracy from how often it agrees with
+the answer the others make likely, and each accuracy becomes the weight
+every other voter gives that voter. Run it once a project has a few voted
+issues, and again when it has many more.
 
 * Keep the cards
 

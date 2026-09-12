@@ -4,6 +4,22 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+The loop runs every time:
+
+- `ljos sitting ISSUE --assignee NAME` opens a sitting in the protocol's
+  order (doctor, cards, due, island, recall, claim) and stops at the first
+  store down; `ljos finish ISSUE [--lesson] [--outcome]` closes it
+  (remember, fire, complete, learn) and says when no lesson was given.
+  Both over MCP as `ljos_sitting` and `ljos_finish`.
+- `ljos calibrate -p PROJECT` writes trust rows from the project's voting
+  history with no truth labels (Dawid and Skene, through
+  `ljos-consensus reliability`), so weights move when nobody names an
+  outcome.
+- `ljos due` lists claims that never entered the review clock as due, and
+  ends with one line on the clock: due, scheduled, next.
+- `ljos onboard` writes the seat's host key when there is none, so
+  handovers go out signed.
+
 For an agent, or the person running one:
 
 - `ljos protocol` prints the sitting protocol: which store answers which

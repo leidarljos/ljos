@@ -328,7 +328,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
         );
     };
     let server = server_path()?;
-    let mut steps = vec![register_step(h, &server, dry)];
+    let mut steps = vec![host_key_step(dry), register_step(h, &server, dry)];
     match &h.skills {
         Some(dir) => steps.push(write_skill(&expand(dir), dry)),
         None => steps.push(Step {
@@ -423,17 +423,83 @@ fn harness_rows() -> Vec<Habitat> {
     rows
 }
 
+/// Make the seat's host key at `~/.config/deedar/host.key` when there is
+/// none, so handovers go out signed from the first one. An existing key, or
+/// one named by `DEEDAR_HOST_SIGNING_KEY`, is left alone.
+fn host_key_step(dry: bool) -> Step {
+    if let Some(path) = host_key_path() {
+        return Step {
+            what: "host key".into(),
+            detail: format!("{} exists", path.display()),
+            ok: true,
+        };
+    }
+    if std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some_and(|r| r == "off") {
+        return Step {
+            what: "host key".into(),
+            detail: "DEEDAR_HOST_SIGNING_KEY=off; handovers go out unsigned on purpose".into(),
+            ok: true,
+        };
+    }
+    let Some(path) = default_host_key_path() else {
+        return Step {
+            what: "host key".into(),
+            detail: "no home directory to keep a key in".into(),
+            ok: false,
+        };
+    };
+    if dry {
+        return Step {
+            what: "host key".into(),
+            detail: format!("would write a 32-byte seed to {}", path.display()),
+            ok: true,
+        };
+    }
+    let made = (|| -> std::io::Result<()> {
+        use std::io::Read;
+        let mut seed = [0u8; 32];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, seed)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    })();
+    match made {
+        Ok(()) => Step {
+            what: "host key".into(),
+            detail: format!("wrote a 32-byte seed to {}", path.display()),
+            ok: true,
+        },
+        Err(e) => Step {
+            what: "host key".into(),
+            detail: format!("{}: {e}", path.display()),
+            ok: false,
+        },
+    }
+}
+
+/// `$XDG_CONFIG_HOME/deedar/host.key`, whether or not it exists.
+fn default_host_key_path() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().ok().map(|h| h.join(".config")))?;
+    Some(config.join("deedar").join("host.key"))
+}
+
 /// The host key `deedar` will sign with: `DEEDAR_HOST_SIGNING_KEY`, else
 /// `~/.config/deedar/host.key` when it exists. `off` is no key on purpose.
 fn host_key_path() -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("DEEDAR_HOST_SIGNING_KEY").filter(|r| !r.is_empty()) {
         return (raw != "off").then(|| PathBuf::from(raw));
     }
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|r| !r.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| home().ok().map(|h| h.join(".config")))?;
-    let path = config.join("deedar").join("host.key");
+    let path = default_host_key_path()?;
     path.is_file().then_some(path)
 }
 
@@ -1001,19 +1067,73 @@ pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// Kinds that are weighed, not recalled, and so never come up for review.
+const UNREVIEWED_KINDS: &[&str] = &["trust", "persona"];
+
+/// Whether an atom is a claim the review clock should hold at all.
+fn reviewable(a: &Value) -> bool {
+    !UNREVIEWED_KINDS.contains(&a.get("kind").and_then(Value::as_str).unwrap_or(""))
+}
+
 /// The live atoms whose review is due at `now` (RFC 3339 UTC), soonest first.
+/// A claim that has never entered the review clock has no `due_at`; it is
+/// due now, and grading it puts it on the clock. Trust and persona rows are
+/// weighed, not recalled, and never come up.
 pub fn due_of(atoms: &[Value], now: &str) -> Vec<Value> {
     let mut due: Vec<Value> = atoms
         .iter()
+        .filter(|a| reviewable(a))
         .filter(|a| {
             a.get("due_at")
                 .and_then(Value::as_str)
-                .is_some_and(|d| !d.is_empty() && d <= now)
+                .is_none_or(|d| d.is_empty() || d <= now)
         })
         .cloned()
         .collect();
-    due.sort_by(|a, b| a["due_at"].as_str().cmp(&b["due_at"].as_str()));
+    due.sort_by(|a, b| {
+        a["due_at"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["due_at"].as_str().unwrap_or(""))
+    });
     due
+}
+
+/// One line on the state of the review clock: how many are due, how many
+/// are scheduled, and when the next one comes up. An empty `due` with a
+/// next date is a clock that is running; an empty `due` with nothing
+/// scheduled is a seat that has remembered nothing.
+pub fn review_summary(atoms: &[Value], now: &str) -> String {
+    let due = due_of(atoms, now).len();
+    let mut later: Vec<&str> = atoms
+        .iter()
+        .filter(|a| reviewable(a))
+        .filter_map(|a| a.get("due_at").and_then(Value::as_str))
+        .filter(|d| !d.is_empty() && *d > now)
+        .collect();
+    later.sort_unstable();
+    match later.first() {
+        Some(next) => format!(
+            "{due} due; {} scheduled, next at {next}",
+            later.len()
+        ),
+        None if due == 0 => "0 due; nothing scheduled: this seat has remembered nothing yet".into(),
+        None => format!("{due} due; nothing else scheduled"),
+    }
+}
+
+/// The review clock as `ljos due` prints it: the due atoms, then the summary.
+pub fn due_report() -> Result<String> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("due: GET /v1/atoms failed")?;
+    let now = now_utc();
+    Ok(format!(
+        "{}{}\n",
+        format_due(&due_of(&atoms, &now)),
+        review_summary(&atoms, &now)
+    ))
 }
 
 /// What the pack holds for review now.
@@ -1032,7 +1152,7 @@ pub fn format_due(atoms: &[Value]) -> String {
             format!(
                 "{}	{}	{}	{}
 ",
-                a["due_at"].as_str().unwrap_or(""),
+                a["due_at"].as_str().unwrap_or("unreviewed"),
                 a["kind"].as_str().unwrap_or(""),
                 a["id"].as_str().unwrap_or("-"),
                 a["text"].as_str().unwrap_or("")
@@ -1247,6 +1367,165 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     Ok(run_captured("claimdag", &["release", &id, "--actor", &work_id(assignee)])?.stdout)
 }
 
+/// The issue's title, for a cue, from the tracker.
+fn issue_title(issue: &str) -> Result<String> {
+    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    Ok(v.get("title")
+        .and_then(Value::as_str)
+        .unwrap_or(issue)
+        .to_string())
+}
+
+/// Open a sitting on an issue, in the protocol's order, and stop at the
+/// first habitat that does not answer: doctor, cards, the review clock,
+/// the island the issue's title activates, the working set, the claim.
+/// One verb, so the loop that makes the seat a memory runs every time and
+/// not only when somebody remembers to run it.
+///
+/// # Errors
+///
+/// A required habitat down, or the claim refused (the refusal names what
+/// the assignee still holds).
+pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> {
+    let mut out = String::new();
+    let rows = doctor();
+    out.push_str("== doctor\n");
+    out.push_str(&format_doctor(&rows));
+    if !healthy(&rows) {
+        bail!("{out}sitting: a required habitat does not answer; nothing was claimed");
+    }
+    out.push_str("== cards\n");
+    out.push_str(&cards(cards_dir)?);
+    out.push_str("== due\n");
+    out.push_str(&due_report()?);
+    let title = issue_title(issue)?;
+    out.push_str(&format!("== island: {title}\n"));
+    out.push_str(&format_island(&packset_island(&title, false)?));
+    out.push_str("== recall\n");
+    out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
+    out.push_str("== claim\n");
+    out.push_str(&claim(issue, assignee)?);
+    Ok(out)
+}
+
+/// Close a sitting: remember the lesson when there is one, fire the island
+/// the issue's title activates, complete the session node, and learn from
+/// the outcome when one is named. Without a lesson the report says so,
+/// because a sitting that taught nothing worth two sentences is rare and
+/// worth noticing.
+///
+/// # Errors
+///
+/// Any habitat refusing; the pack refuses a lesson longer than two
+/// sentences, the claim graph a status that is not terminal.
+pub fn finish(
+    issue: &str,
+    status: &str,
+    lesson: Option<&str>,
+    outcome: Option<&str>,
+    beta: f64,
+) -> Result<String> {
+    let mut out = String::new();
+    match lesson.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(text) => {
+            let body = packset_write("Remember", text)?;
+            out.push_str(&format!(
+                "remembered {}\n",
+                body.get("id").and_then(Value::as_str).unwrap_or("-")
+            ));
+        }
+        None => out.push_str(
+            "no lesson remembered this sitting; `ljos remember` takes one in two sentences\n",
+        ),
+    }
+    let title = issue_title(issue)?;
+    let island = packset_island(&title, true)?;
+    let fired = island["island"].as_array().map_or(0, Vec::len);
+    out.push_str(&format!("fired the island for {title:?}: {fired} memories\n"));
+    let terminal = ["done", "failed", "cancelled"];
+    if !terminal.contains(&status) {
+        bail!("finish: status {status:?} is not one of done, failed, cancelled");
+    }
+    run_captured("claimdag", &["complete", &node_for(issue)?, "--status", status])?;
+    out.push_str(&format!("completed the session node for {issue} as {status}\n"));
+    if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
+        let said = run_captured("vissue", &["vote", issue, "--json"])?;
+        let ballots = ballots_from_json(&said.stdout)?;
+        if ballots.len() < 2 {
+            out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
+        } else {
+            let rows = learn(&ballots, option, &trust_from_pack()?, beta)?;
+            for row in &rows {
+                write_trust(row, &[])?;
+            }
+            out.push_str(&format!(
+                "learned from outcome {option:?}: {} trust rows rewritten\n",
+                rows.len()
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "the ticket stays {issue}'s state; `vissue update {issue} -s DONE` closes it\n"
+    ));
+    Ok(out)
+}
+
+/// Turn a project's voting history into trust rows without anyone naming
+/// an outcome: Dawid and Skene's accuracy per voter
+/// (doi:10.2307/2346806), from `ljos-consensus reliability`, written as the
+/// weight every other voter gives that voter. That is the weight a linear
+/// opinion pool gives a source believed that reliable (Genest and Zidek,
+/// doi:10.1214/ss/1177013825). Rows are complete and floored at
+/// [`TRUST_FLOOR`], so the settle sees the whole graph.
+///
+/// # Errors
+///
+/// No issue with two or more ballots, the consensus binary absent, or the
+/// pack refusing a row.
+pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
+    let said = run_captured(
+        "ljos-consensus",
+        &[
+            "reliability",
+            "--project",
+            project,
+            "--rounds",
+            &rounds.to_string(),
+        ],
+    )?;
+    let v: Value = serde_json::from_str(&said.stdout).context("reliability: not JSON")?;
+    let accuracy = v
+        .get("accuracy")
+        .and_then(Value::as_object)
+        .context("reliability: no accuracy object")?;
+    let mut voters: Vec<(&str, f64)> = accuracy
+        .iter()
+        .filter_map(|(k, val)| val.as_f64().map(|a| (k.as_str(), a)))
+        .collect();
+    voters.sort_by(|a, b| a.0.cmp(b.0));
+    if voters.len() < 2 {
+        bail!("calibrate: fewer than two voters in {project}");
+    }
+    let mut rows = Vec::new();
+    for (from, _) in &voters {
+        for (to, acc) in &voters {
+            if from == to {
+                continue;
+            }
+            rows.push(Trust {
+                from: (*from).to_string(),
+                to: (*to).to_string(),
+                weight: acc.clamp(TRUST_FLOOR, 1.0),
+            });
+        }
+    }
+    for row in &rows {
+        write_trust(row, &[])?;
+    }
+    Ok(rows)
+}
+
 pub fn format_hits(hits: &[Hit]) -> String {
     let mut out = String::new();
     for h in hits {
@@ -1381,6 +1660,36 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A claim that never entered the clock is due now; a scheduled one is
+    /// not; trust rows never are; and the summary says whether the clock runs.
+    #[test]
+    fn unreviewed_claims_are_due_and_the_summary_says_if_the_clock_runs() {
+        let atoms = vec![
+            serde_json::json!({"id": "a", "kind": "conclusion", "text": "old", "due_at": ""}),
+            serde_json::json!({"id": "b", "kind": "conclusion", "text": "older"}),
+            serde_json::json!({"id": "c", "kind": "conclusion", "text": "later",
+                "due_at": "2030-01-01T00:00:00Z"}),
+            serde_json::json!({"id": "d", "kind": "conclusion", "text": "past",
+                "due_at": "2020-01-01T00:00:00Z"}),
+            serde_json::json!({"id": "t", "kind": "trust", "text": "x weighs y"}),
+        ];
+        let now = "2026-01-01T00:00:00Z";
+        let due: Vec<String> = super::due_of(&atoms, now)
+            .iter()
+            .map(|a| a["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(due, ["a", "b", "d"], "unreviewed first, then the past-due one");
+        assert_eq!(
+            super::review_summary(&atoms, now),
+            "3 due; 1 scheduled, next at 2030-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            super::review_summary(&[atoms[4].clone()], now),
+            "0 due; nothing scheduled: this seat has remembered nothing yet"
+        );
+        assert!(super::format_due(&super::due_of(&atoms, now)).starts_with("unreviewed\t"));
+    }
+
     /// The example file parses, and onboarding a config-file runner from it
     /// appends the entry once and writes the skill once; a dry run writes
     /// nothing; an unnamed runner is refused with the names the file holds.

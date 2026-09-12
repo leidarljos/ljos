@@ -74,19 +74,32 @@ superseded, and travel in a handover. A person can also set one by hand:
 * 3. The work loop
 
 #+begin_src console
-$ ljos claim $id --assignee you
+$ ljos sitting $id --assignee you
+== doctor
+...
+== due
+2 due; 0 scheduled
+== island: Ship the fuse change?
+1.000	seed	...	CombMNZ over RRF for fusing two ballots.
+== claim
 gen=2
 $ echo 'fn main() {}' > patch.rs
 $ deedar create file --name "the fuse patch" --path patch.rs --agent you
 id=deed-file-the-fuse-patch ...
 $ ljos deed $id --add deed-file-the-fuse-patch
-$ ljos recall $id
-$ ljos complete $id --status done
+$ ljos finish $id --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold
+remembered ...
+fired the island for "Ship the fuse change?": 3 memories
+completed the session node for demo-... as done
+learned from outcome "hold": 6 trust rows rewritten
 #+end_src
 
-=claim= takes a session node for the tracker id; =deed= cites what the
-work produced on the tracker node; =recall= prints the working set. Completing
-the session node does not close the ticket. To stop without finishing,
+=sitting= opens: it runs =doctor=, prints the cards and what is due,
+activates the island the issue's title touches, recalls the working set,
+and claims a session node. =deed= cites what the work produced. =finish=
+closes: the lesson is remembered, the island fires, the node completes,
+and the outcome reweighs the voters as in step 2. Completing the session
+node does not close the ticket. To stop without finishing,
 =ljos release $id --assignee you= hands the node back; until then a second
 =claim= under the same name is refused, and the refusal names this issue.
 

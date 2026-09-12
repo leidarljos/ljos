@@ -5,6 +5,9 @@ One seat over five habitats and argv law. It does not own them.
 Citation is not a merge. Completing a claimdag node does not close a ticket. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
+ljos sitting vissue-xxxx --assignee you        # doctor, cards, due, island, recall, claim
+ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # remember, fire, complete, learn
+ljos calibrate -p project                      # trust rows from the voting history, no truth labels
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
 ljos search fuse
@@ -29,6 +32,14 @@ ljos protocol
 ljos onboard --harness RUNNER
 ```
 
+## The loop, in two verbs
+
+`ljos sitting ISSUE --assignee NAME` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, the claim. `ljos finish ISSUE [--status done] --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, and when an outcome is named the voters it refuted shrink. A finish without a lesson says so. The point is that the loop that makes the seat a memory runs every time, not only when somebody remembers it.
+
+`ljos due` ends with one line on the clock: `0 due; 12 scheduled, next at ...` is a clock that runs; `0 due; nothing scheduled` is a seat that has remembered nothing. A claim that never entered the clock is due now.
+
+`ljos calibrate -p PROJECT` moves the trust rows when nobody names an outcome: Dawid and Skene's estimate of each voter's accuracy from the project's voting history (doi:10.2307/2346806), written back as the weight every other voter gives that voter (a linear pool's weight for a source that reliable, Genest and Zidek, doi:10.1214/ss/1177013825). Under equal rows a consensus is a count; after `calibrate` or `learn` it is not.
+
 ## For an agent, or the person running one
 
 `ljos protocol` prints the sitting protocol: which store answers which
@@ -40,7 +51,9 @@ either as a command that registers servers or as a config file to append an
 entry to, plus the directory the runner loads skills from;
 `ljos onboard --example` prints the file's shape, and `--harness json` prints
 the server entry to paste into any runner by hand. `--dry-run` reports
-without writing. `ljos doctor` then shows whether each runner named is
+without writing. `onboard` also writes the seat's host key at
+`~/.config/deedar/host.key` when there is none, so handovers go out signed
+from the first. `ljos doctor` then shows whether each runner named is
 onboarded. The server serves the same text at `ljos://protocol`.
 
 Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
@@ -63,7 +76,7 @@ Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`. `ljos onboard` writes the registration; by hand it is
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_sitting`, `ljos_finish`, `ljos_calibrate`, `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`. `ljos onboard` writes the registration; by hand it is
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
