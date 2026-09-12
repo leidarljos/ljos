@@ -1958,13 +1958,21 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
 /// The refusal, explained, or any other failure of the claim graph.
 pub fn claim(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
-    match run_captured(
-        "claimdag",
-        &["claim", &id, "--assignee", &work_id(assignee)],
-    ) {
+    let actor = work_id(assignee);
+    match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
         Ok(said) => Ok(said.stdout),
         Err(e) => {
             let text = e.to_string();
+            // A tracker id maps to one node. When an earlier sitting finished
+            // it, this is a new sitting on the same work: reopen, then claim.
+            if ["status done", "status failed", "status cancelled"]
+                .iter()
+                .any(|s| text.contains(s))
+            {
+                run_captured("claimdag", &["reopen", &id, "--actor", &actor])?;
+                let said = run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
+                return Ok(format!("reopened a finished session node\n{}", said.stdout));
+            }
             if !text.contains("assignee busy") {
                 return Err(e);
             }

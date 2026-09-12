@@ -2,6 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `--version`. A claim on an issue whose earlier sitting finished reopens
+  the session node (`claimdag reopen`) and takes it.
+
 ## 0.3.0 (2026-09-12)
 
 Memory at the point of action:

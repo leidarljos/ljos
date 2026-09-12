@@ -16,6 +16,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "ljos",
+    version,
     about = "One seat over cards, packset, deedar, vissue, claimdag, and policyd"
 )]
 struct Cli {

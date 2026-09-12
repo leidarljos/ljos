@@ -70,7 +70,7 @@ host key at `~/.config/deedar/host.key` when it exists.
 
 `cards` prints `USER.md` and `MEMORY.md` only. It never writes them.
 
-`ljos claim ID --assignee NAME`, `ljos release ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A claim refused as busy names the tracker id the assignee still holds and the two verbs that free it; `release` hands a node back unfinished. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
+`ljos claim ID --assignee NAME`, `ljos release ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A claim refused as busy names the tracker id the assignee still holds and the two verbs that free it; `release` hands a node back unfinished; a claim on an issue whose earlier sitting finished reopens the node and takes it. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
 
 `ljos policy ARGV` prints the argv line, then what the pack knows that bears on it. It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
 

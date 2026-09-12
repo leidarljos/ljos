@@ -108,6 +108,8 @@ under equal weights is a count; under calibrated rows it is not.
   --assignee NAME` hands it back, `ljos complete HEX` finishes it.
 - `complete: status not terminal`: the statuses are `done`, `failed`,
   `cancelled`. To stop without finishing, `release`.
+- A claim on an issue whose earlier sitting finished reopens its session
+  node and takes it: a new sitting on old work, with the ledger kept.
 - `not a deed accession`: `--why` on `forget` and `trust` takes accessions
   from `deedar`, never free text.
 - `the pack writer did not answer`: the pack is down, not empty.
