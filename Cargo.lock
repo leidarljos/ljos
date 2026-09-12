@@ -668,7 +668,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "packset-client"
 version = "0.3.0"
-source = "git+https://github.com/leidarljos/packset#eaf87ee3162f13302a31c7aa2438d195dd058307"
+source = "git+https://github.com/leidarljos/packset#1bfc05b88ba87e78caa074cabcac38e8305ff01a"
 dependencies = [
  "packset-core",
  "serde",
@@ -680,7 +680,7 @@ dependencies = [
 [[package]]
 name = "packset-core"
 version = "0.3.0"
-source = "git+https://github.com/leidarljos/packset#eaf87ee3162f13302a31c7aa2438d195dd058307"
+source = "git+https://github.com/leidarljos/packset#1bfc05b88ba87e78caa074cabcac38e8305ff01a"
 dependencies = [
  "rust-stemmers",
  "serde",
