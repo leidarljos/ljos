@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.5.0 (2026-09-12)
 
 - `ljos search -n N --rerank`: the writer's cross-encoder over the top hits.
 - `ljos panel ISSUE --out DIR`: every persona's brief as a file, so a runner
