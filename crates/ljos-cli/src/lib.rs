@@ -682,6 +682,37 @@ pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said>
     Ok(Said { stdout, stderr })
 }
 
+/// A claimdag id for a name: the name itself when it is already 32 hex, else
+/// FNV-1a 128 of it. One tracker id maps to one node; one assignee to one actor.
+pub fn work_id(name: &str) -> String {
+    let name = name.trim();
+    if name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return name.to_ascii_lowercase();
+    }
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    let mut h = OFFSET;
+    for b in name.bytes() {
+        h ^= u128::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    format!("{h:032x}")
+}
+
+/// The claimdag node standing for `issue`, minted with the tracker id as its
+/// summary when the graph does not hold it yet.
+pub fn node_for(issue: &str) -> Result<String> {
+    let id = work_id(issue);
+    if id != issue.trim() && run_captured("claimdag", &["get", &id]).is_err() {
+        run_captured(
+            "claimdag",
+            &["upsert", "--id", &id, "--summary", issue.trim()],
+        )
+        .with_context(|| format!("claim: could not mint a node for {issue}"))?;
+    }
+    Ok(id)
+}
+
 pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -1021,6 +1052,17 @@ mod tests {
         assert!(learn(&ballots, "ship", &[], 1.0).is_err());
         assert!(learn(&ballots, "  ", &[], 0.5).is_err());
         assert!(learn(&ballots[..1], "ship", &[], 0.5).is_err());
+    }
+
+    #[test]
+    fn a_name_is_one_work_id_and_hex_passes_through() {
+        let a = work_id("demo-riml");
+        assert_eq!(a.len(), 32);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(a, work_id(" demo-riml "));
+        assert_ne!(a, work_id("demo-rimm"));
+        assert_eq!(work_id(&a.to_ascii_uppercase()), a);
+        assert_ne!(work_id("seat"), work_id("reader"));
     }
 
     #[test]

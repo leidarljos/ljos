@@ -30,6 +30,8 @@ ljos doctor
 
 `cards` prints `USER.md` and `MEMORY.md` only. It never writes them.
 
+`ljos claim ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
+
 `ljos policy` prints the argv. It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
 
 `ljos consensus` reads the pack's live `trust` rows, execs `ljos-consensus settle --issue --trust` with them, then `vissue consensus`. No rows: every voter weighs the same.

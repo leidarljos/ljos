@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, cards, consensus_steps, doctor, due, format_doctor, format_due, format_hits,
     graded, handover, healthy, join, learn, on_path, packset_forget, packset_search, packset_write,
-    policy_line, receive, run, run_captured, trust_from_pack, write_trust, Trust, LEARN_BETA,
-    POLICY_TCB,
+    policy_line, receive, run, run_captured, trust_from_pack, work_id, write_trust, Trust,
+    LEARN_BETA, POLICY_TCB,
 };
 use std::path::PathBuf;
 
@@ -161,12 +161,18 @@ fn main() -> Result<()> {
             Some(c) => run("vissue", &["vote", &issue, "--for", &c])?,
             None => run("vissue", &["vote", &issue])?,
         },
-        Cmd::Claim { node, assignee } => {
-            run("claimdag", &["claim", &node, "--assignee", &assignee])?
-        }
+        Cmd::Claim { node, assignee } => run(
+            "claimdag",
+            &[
+                "claim",
+                &node_for(&node)?,
+                "--assignee",
+                &work_id(&assignee),
+            ],
+        )?,
         Cmd::Complete { node, status } => match status {
-            Some(s) => run("claimdag", &["complete", &node, "--status", &s])?,
-            None => run("claimdag", &["complete", &node])?,
+            Some(s) => run("claimdag", &["complete", &node_for(&node)?, "--status", &s])?,
+            None => run("claimdag", &["complete", &node_for(&node)?])?,
         },
         Cmd::Cards { dir } => print!("{}", cards(&dir)?),
         Cmd::Policy { argv } => {

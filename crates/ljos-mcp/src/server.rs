@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, cards, consensus_steps, doctor, due, graded, handover, learn, on_path,
-    packset_forget, packset_search, packset_write, policy_line, receive, run_captured,
+    ballots_from_json, cards, consensus_steps, doctor, due, graded, handover, learn, node_for,
+    on_path, packset_forget, packset_search, packset_write, policy_line, receive, run_captured,
     trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
@@ -465,7 +465,12 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         habitat(
             "claimdag",
-            &["claim", &args.node, "--assignee", &args.assignee],
+            &[
+                "claim",
+                &node_for(&args.node).map_err(refused)?,
+                "--assignee",
+                &work_id(&args.assignee),
+            ],
         )
     }
 
@@ -484,8 +489,19 @@ impl LjosServer {
         Parameters(args): Parameters<FinishArgs>,
     ) -> Result<Json<Said>, McpError> {
         match &args.status {
-            Some(s) => habitat("claimdag", &["complete", &args.node, "--status", s]),
-            None => habitat("claimdag", &["complete", &args.node]),
+            Some(s) => habitat(
+                "claimdag",
+                &[
+                    "complete",
+                    &node_for(&args.node).map_err(refused)?,
+                    "--status",
+                    s,
+                ],
+            ),
+            None => habitat(
+                "claimdag",
+                &["complete", &node_for(&args.node).map_err(refused)?],
+            ),
         }
     }
 
