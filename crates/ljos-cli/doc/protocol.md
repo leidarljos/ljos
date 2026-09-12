@@ -68,7 +68,9 @@ Every piece of work has an issue before it has a claim.
   A panel is one subagent per persona, each started from
   `ljos brief NAME ISSUE` (the view, what the seat knows on its domains,
   the working set), each casting one ballot as itself, then
-  `ljos consensus`; over MCP the `run_a_panel` prompt orders it. The kind of work sets the dynamics: tag
+  `ljos consensus`; over MCP the `run_a_panel` prompt orders it. A panel
+  member's own lesson goes in with `ljos remember --as NAME "..."` and
+  comes back to it first in its next brief; the seat still reads it. The kind of work sets the dynamics: tag
   the issue `broad` when the panel is a broad audience, and the settle runs
   bounded confidence, so clusters are allowed and reported instead of being
   averaged into one position.

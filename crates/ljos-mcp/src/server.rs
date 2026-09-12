@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use ljos_cli::{
     ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish,
     graded, handover, island_entities, learn_and_write, node_for, on_path, packset_forget,
-    packset_island, packset_search, packset_write, personas_from_pack, policy_line, receive,
+    packset_island, packset_search, packset_write_as, personas_from_pack, policy_line, receive,
     release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
     write_trust, Persona, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
@@ -43,6 +43,10 @@ pub struct ClaimArgs {
     /// The claim, as it will be stored. Two short sentences at most; the pack
     /// refuses more. Not a transcript, not a summary of one.
     pub text: String,
+    /// Remember as this persona: the claim comes back to it first in its
+    /// next brief. Absent, the seat's own.
+    #[serde(rename = "as")]
+    pub as_persona: Option<String>,
 }
 
 /// A question for the pack.
@@ -409,7 +413,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ClaimArgs>,
     ) -> Result<Json<serde_json::Value>, McpError> {
-        packset_write("Remember", &args.text)
+        packset_write_as("Remember", &args.text, args.as_persona.as_deref())
             .map(Json)
             .map_err(refused)
     }
@@ -428,7 +432,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ClaimArgs>,
     ) -> Result<Json<serde_json::Value>, McpError> {
-        packset_write("Prefer", &args.text)
+        packset_write_as("Prefer", &args.text, args.as_persona.as_deref())
             .map(Json)
             .map_err(refused)
     }

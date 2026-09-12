@@ -6,7 +6,7 @@ use ljos_cli::{
     ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
     finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
     hook_call, hook_context, hook_output, island_entities, join, learn_and_write, node_for,
-    on_path, onboard, packset_forget, packset_island, packset_search, packset_write,
+    on_path, onboard, packset_forget, packset_island, packset_search, packset_write_as,
     personas_from_pack, policy_with_memory, receive, release, rows_about, run, run_as,
     run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust, Persona,
     Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
@@ -27,9 +27,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson that will still be true next sitting. Two sentences at most.
-    Remember { text: Vec<String> },
+    Remember {
+        text: Vec<String>,
+        /// Remember as this persona: the lesson comes back to it first in its next brief.
+        #[arg(long = "as")]
+        as_persona: Option<String>,
+    },
     /// Prefer one way over another, as a standing preference. Stored as written.
-    Prefer { text: Vec<String> },
+    Prefer {
+        text: Vec<String>,
+        /// Prefer as this persona.
+        #[arg(long = "as")]
+        as_persona: Option<String>,
+    },
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
         id: String,
@@ -239,12 +249,12 @@ fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     match Cli::parse().cmd {
-        Cmd::Remember { text } => {
-            let body = packset_write("Remember", &join(&text))?;
+        Cmd::Remember { text, as_persona } => {
+            let body = packset_write_as("Remember", &join(&text), as_persona.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
-        Cmd::Prefer { text } => {
-            let body = packset_write("Prefer", &join(&text))?;
+        Cmd::Prefer { text, as_persona } => {
+            let body = packset_write_as("Prefer", &join(&text), as_persona.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
         Cmd::Forget { id, why } => {
