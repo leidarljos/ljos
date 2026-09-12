@@ -100,15 +100,42 @@ Put it where the agent reads its instructions.
 
 #+begin_src text
 $ ljos island "write the handbook tutorial for the seat"
-1.000  seed  ab8cb4d1bfca05ca60730141343dc177  Encoding under the write lock capped the pack at
-0.899  seed  51778929d855529fcb8df3f4d1c4d692  A new claim enters the review clock on write. Tr
-0.890  seed  27e39df0198b67538f8487b1b44e9dfd  The decay slot reads the review clock when PACKS
+1.000  seed  ab8cb4d1bfca05ca60730141343dc177  3 weeks ago  Encoding under the write lock capped the pack at
+0.899  seed  51778929d855529fcb8df3f4d1c4d692  yesterday    A new claim enters the review clock on write. Tr
+0.890  seed  27e39df0198b67538f8487b1b44e9dfd  today        The decay slot reads the review clock when PACKS
 #+end_src
 
 The first column is activation relative to the strongest; =seed= marks a
-claim search found itself, the rest were reached along the pack's links.
-Add =--fire= when you go on to use the island: the strongest eight fire
-together and their links gain weight.
+claim search found itself, the rest were reached along the pack's links;
+the age column says when each was written. Add =--fire= when you go on to
+use the island: the strongest eight fire together and their links gain
+weight.
+
+* Ask when
+
+#+begin_src console
+$ ljos timeline proj-1a2b
+timeline of proj-1a2b: Ship the fuse change?
+2026-08-30 	13 days ago		tracker	created
+2026-09-02 09:14	10 days ago	+3 d	memory	[lesson] RRF lost two points to CombMNZ on turns.
+2026-09-02 11:48	10 days ago	same day	tracker	TODO -> STARTED
+2026-09-02 11:48	10 days ago	same day	tracker	claimed by you
+2026-09-05 16:02	7 days ago	+3 d	deed	deed-run-fuse-at-ten produced by you
+2026-09-12 08:30	today	+7 d	tracker	note: the fused panel held at ten conversations
+#+end_src
+
+Three stores, one dated list, oldest first: the tracker's logbook, the
+deeds the issue cites with the time each was produced, and the memories the
+issue's title activates with the time each was written. Each line carries
+its date, its age, the gap since the line before, and the store it came
+from. The reader gets time as data rather than stamps to subtract, and a
+later line supersedes an earlier one on the same matter. =ljos sitting=
+prints the last twelve as its =timeline= section.
+
+=ljos search TOPIC --as-of 2026-09-01= asks the pack as it stood then:
+memories withdrawn since included, memories written since left out. The
+pack tombstones rather than erases, which is what makes the question
+answerable.
 
 * Start a sitting, and end one
 
@@ -121,14 +148,18 @@ ok	vissue	...
 unreviewed	conclusion	3f9c...	The lexical default is BM25+.
 1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
 == island: Ship the fuse change?
-1.000	seed	ab8c...	CombMNZ over RRF for fusing two ballots.
+1.000	seed	ab8c...	3 weeks ago	CombMNZ over RRF for fusing two ballots.
 == recall
+...
+== timeline
+timeline of proj-1a2b: Ship the fuse change?
+2026-08-30 	13 days ago		tracker	created
 ...
 == claim
 gen=2
 #+end_src
 
-One verb, six sections, in the protocol's order; it stops at the first
+One verb, seven sections, in the protocol's order; it stops at the first
 store that does not answer and claims nothing. The =start_a_sitting=
 prompt gives the same order to a runner that prefers single tools. A claim
 refused as busy names the issue you still hold; =ljos complete= finishes it

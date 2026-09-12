@@ -73,6 +73,28 @@ walks fade without being deleted. Activation spreads in proportion to
 weight, so the next cue like this one walks a heavier path. The weights are
 on the atom beside the links and travel in a handover.
 
+* Time as data
+
+Every record in the seat is dated: an atom carries the writer's clock and,
+when it was retired, the window it was live in; a deed carries the time it
+was produced; the tracker's logbook carries the time of each note, state
+change and claim. The seat hands that to the reader as data rather than as
+stamps to subtract. Every recalled memory, in the hook, a brief, =ljos
+search=, the island in =ljos sitting=, carries its age in words (=today=,
+=3 weeks ago=), and the hook's lessons run oldest to newest behind the
+preferences, so a later lesson reads as a revision of an earlier one. =ljos
+timeline ISSUE= merges the three stores into one dated list with the gap
+between consecutive lines, and =ljos search --as-of TIME= asks the pack as
+it stood at an earlier time.
+
+The design came out of measurement. On a public long-conversation
+benchmark the seat's retrieval finds the right session at the top for nine
+questions in ten, and the answers a small reader gives over those sessions
+fall furthest on the questions about time: handed raw dates it did the
+arithmetic itself and got a third of them. A reader is a poor calendar; a
+store that already knows every date is a good one, so the store does the
+arithmetic and the reader reads the order.
+
 * Agreement that learns
 
 A tally counts, and a count is right only when every voter is worth the
