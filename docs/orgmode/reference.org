@@ -64,8 +64,9 @@ when to call it.
 A runner's table in =harnesses.toml= may name =hooks=, a JSON settings
 file of the shape ={"hooks": {"<Event>": [{"matcher": "...", "hooks":
 [{"type": "command", "command": "..."}]}]}}=. =onboard= merges
-=ljos hook= into it on the tool-call event (matcher =Bash=) and the prompt
-event (matcher =*=), once each. The hook reads the runner's JSON on stdin
+=ljos hook= into it on the prompt event (matcher =*=) by default, or on
+the events the table's =hook_events= lists (=PreToolUse= takes the matcher
+=Bash=), once each, and drops it from events no longer listed. The hook reads the runner's JSON on stdin
 (=hook_event_name=, =tool_input.command=, =prompt=) and answers
 ={"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}=,
 or nothing when the pack holds nothing on the cue. Plain text on stdin is

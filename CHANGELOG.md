@@ -9,8 +9,9 @@ Memory at the point of action:
 - `ljos hook` reads a runner's hook JSON (or an argv line) on stdin and
   answers with the memories the action activates, preferences first, in the
   runner's `additionalContext` shape or plain lines. `onboard` installs it
-  on a runner's tool-call and prompt events when its table names a `hooks`
-  file; `doctor` shows the row. `ljos policy` prints the memory beside the
+  on a runner's prompt event when its table names a `hooks` file, or on the
+  events `hook_events` lists, and drops it from the rest; `doctor` shows
+  the row. The default was settled by a panel of the seat's personas. `ljos policy` prints the memory beside the
   argv line.
 
 Personas and scoped trust:

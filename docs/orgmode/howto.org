@@ -66,13 +66,16 @@ hooks = "~/.runner/settings.json"
 $ ljos onboard --harness runner-with-a-command
 ok	host key	/home/you/.config/deedar/host.key exists
 ok	runner-with-a-command mcp	ljos registered
-ok	hook	added the memory hook on PreToolUse, UserPromptSubmit to /home/you/.runner/settings.json
+ok	hook	memory hook: add it on UserPromptSubmit in /home/you/.runner/settings.json
 ok	skill	/home/you/.runner/skills/ljos/SKILL.md is current
 #+end_src
 
-From then on, before each shell command and each prompt, the runner pipes
-the action to =ljos hook= and the memories it activates come back as
-context, preferences first. A policy daemon does the same with the argv:
+From then on, before each prompt, the runner pipes it to =ljos hook= and
+the memories it activates come back as context, preferences first. Add
+=hook_events = ["UserPromptSubmit", "PreToolUse"]= to the table to inject
+before each shell command as well; a panel of this seat's personas settled
+on the prompt alone, since a turn issues many commands and one prompt. A
+policy daemon does the same with the argv:
 
 #+begin_src console
 $ echo "cargo test --release" | ljos hook
