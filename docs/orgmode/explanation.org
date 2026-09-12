@@ -173,7 +173,11 @@ Hedge (doi:10.1006/jcss.1997.1504), so a voter who is repeatedly wrong
 loses influence and one who is right keeps it. A person can also set a row
 and cite the deed behind it. When nobody names an outcome, =calibrate=
 estimates each voter's accuracy from the project's history (Dawid and
-Skene, doi:10.2307/2346806) and writes it as the rows.
+Skene, doi:10.2307/2346806) and writes the rows as the log odds of that
+accuracy, the weight under which a weighted majority of independent
+voters is the maximum-likelihood decision (Nitzan and Paroush,
+doi:10.2307/2526438): nine right in ten outweighs six in ten by five to
+one, and chance earns the floor.
 
 A panel of subagents that each read the work and vote is the seat's form
 of the parallel agents the products run (self-consistency,
