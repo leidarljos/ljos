@@ -5,6 +5,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - `ljos hubs`: the claims the pack's link graph turns on, highest first.
+- `handover --to user@host:path` copies the sealed, signed bag to another
+  seat over ssh; the receiver runs `ljos receive`.
 - `predict ISSUE --expect OPTION` records a forecast of the others; with
   two or more, `consensus` prints the surprisingly popular answer (Prelec,
   Seung and McCoy) and, with trust rows, each voter's EigenTrust standing.

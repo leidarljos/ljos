@@ -104,8 +104,9 @@ same four steps are:
 3. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter it refuted shrinks in every other voter's row, and a
    persona it refuted holds its next ballot less firmly.
-4. `ljos handover --out DIR --issue ISSUE` when another seat takes over;
-   the receiver runs `ljos receive DIR`, then `--import`.
+4. `ljos handover --out DIR --issue ISSUE [--to user@host:path]` when
+   another seat takes over; the receiver runs `ljos receive DIR`, then
+   `--import`.
 
 ## When nobody names an outcome
 

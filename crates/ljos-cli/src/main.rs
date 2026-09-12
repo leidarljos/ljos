@@ -214,12 +214,18 @@ enum Cmd {
     },
     /// Pack a slice of the seat: satchel, atoms, the deeds both cite; sealed and signed.
     Handover {
+        /// Where to write the satchel.
         #[arg(long)]
         out: PathBuf,
+        /// Projects to take whole.
         #[arg(long)]
         project: Vec<String>,
+        /// Issues to take, with what they stand on.
         #[arg(long)]
         issue: Vec<String>,
+        /// Copy the sealed satchel to another seat over ssh, as `user@host:path`; the receiver runs `ljos receive`.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Check a satchel that arrived; --import puts its atoms in this seat's pack.
     Receive {
@@ -481,9 +487,17 @@ fn main() -> Result<()> {
             out,
             project,
             issue,
+            to,
         } => {
             for line in handover(&out, &project, &issue)? {
                 println!("{line}");
+            }
+            if let Some(dest) = to {
+                // The bag is sealed and signed before it moves; the copy is
+                // the runner's scp, so the receiving seat's keys and hosts
+                // apply as they would by hand.
+                run_captured("scp", &["-rq", &out.display().to_string(), &dest])?;
+                println!("copied to {dest}; there, `ljos receive {}`", out.file_name().map_or_else(|| "DIR".into(), |n| n.to_string_lossy().into_owned()));
             }
         }
         Cmd::Receive { dir, since, import } => {
