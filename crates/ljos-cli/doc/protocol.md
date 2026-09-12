@@ -138,7 +138,9 @@ under equal weights is a count; under calibrated rows it is not.
   then what the pack knows that bears on it. It is not a check.
 - `ljos hook` is the memory hook: a runner or a policy layer pipes the
   action about to happen (its hook JSON, or the plain argv) and gets back
-  the memories that action activates, preferences first. `ljos onboard`
+  the memories that action activates, preferences first. When the session
+  ends, the memories it injected fire together, so what served one sitting
+  is wired for the next. `ljos onboard`
   installs it on the runner's tool-call and prompt events, so the seat's
   memory reaches the agent at the point of action without being asked.
 

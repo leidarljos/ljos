@@ -2,6 +2,12 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The hook fires the memories it injected during a session together when
+  the session ends (the runner's `SessionEnd` event, on by default), so
+  what served one sitting is wired for the next.
+
 ## 0.6.0 (2026-09-12)
 
 - `ljos hubs`: the claims the pack's link graph turns on, highest first.

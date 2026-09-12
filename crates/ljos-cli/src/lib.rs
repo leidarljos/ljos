@@ -363,10 +363,14 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
 /// carries the command about to run and is a cue too; a runner asks for it
 /// with `hook_events`. The default came out of a panel of this seat's
 /// personas: a turn issues many shell commands and one prompt.
-pub const HOOK_EVENTS: &[&str] = &["UserPromptSubmit"];
+pub const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "SessionEnd"];
 
 /// The events the hook knows a matcher for; any other event takes `*`.
-pub const HOOK_MATCHERS: &[(&str, &str)] = &[("PreToolUse", "Bash"), ("UserPromptSubmit", "*")];
+pub const HOOK_MATCHERS: &[(&str, &str)] = &[
+    ("PreToolUse", "Bash"),
+    ("UserPromptSubmit", "*"),
+    ("SessionEnd", "*"),
+];
 
 fn hook_matcher(event: &str) -> &'static str {
     HOOK_MATCHERS
@@ -623,6 +627,50 @@ fn seen_ids(session: Option<&str>) -> std::collections::BTreeSet<String> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| t.lines().map(str::to_string).collect())
         .unwrap_or_default()
+}
+
+/// The memories injected during a session, in the order they arrived, and
+/// the file they were kept in. The nudge marker is not a memory.
+fn injected_ids(session: &str) -> (Vec<String>, Option<PathBuf>) {
+    let path = seen_path(session);
+    let ids: Vec<String> = path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && *l != "due-nudge")
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    (ids, path)
+}
+
+/// When a session ends, the memories injected during it fire together:
+/// they served one sitting, so their links gain weight and the next
+/// sitting like it walks a heavier path (Hebb, through the pack's `fire`).
+/// The seen file goes with the session. Returns how many fired; nothing to
+/// fire, or no pack, is zero and not an error, since a hook must not stop
+/// a runner from ending.
+pub fn session_end(session: Option<&str>) -> usize {
+    let Some(session) = session else {
+        return 0;
+    };
+    let (ids, path) = injected_ids(session);
+    let fired = if ids.len() >= 2 {
+        let top: Vec<String> = ids.into_iter().take(8).collect();
+        pack()
+            .ok()
+            .and_then(|c| c.fire(&c.workspace(), &top).ok())
+            .map_or(0, |_| top.len())
+    } else {
+        0
+    };
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
+    fired
 }
 
 fn mark_seen(session: Option<&str>, ids: &[String]) {
@@ -3001,6 +3049,21 @@ mod tests {
             .is_empty(),
             "a cue too short asks nothing"
         );
+    }
+
+    /// The injected ids of a session are read back without the nudge marker,
+    /// and the seen file goes with the session.
+    #[test]
+    fn a_sessions_injected_memories_are_read_back_and_cleared() {
+        let session = format!("end-test-{}", std::process::id());
+        mark_seen(Some(&session), &["a".to_string(), "due-nudge".to_string(), "b".to_string()]);
+        let (ids, path) = injected_ids(&session);
+        assert_eq!(ids, ["a", "b"]);
+        assert!(path.as_ref().is_some_and(|p| p.is_file()));
+        // No pack in a unit test: nothing fires, the file still goes.
+        let _ = session_end(Some(&session));
+        assert!(!path.unwrap().is_file());
+        assert_eq!(session_end(None), 0);
     }
 
     /// The memory hook merges into a runner's hooks file once per event and
