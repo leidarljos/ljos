@@ -10,9 +10,10 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, cards, consensus_steps, doctor, due, graded, handover, learn, node_for,
-    on_path, packset_forget, packset_island, packset_search, packset_write, policy_line, receive,
-    run_captured, trust_from_pack, work_id, write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
+    ballots_from_json, cards, claim, consensus_steps, doctor, due, graded, handover, learn,
+    node_for, on_path, packset_forget, packset_island, packset_search, packset_write, policy_line,
+    receive, release, run_captured, trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -24,6 +25,8 @@ use serde::{Deserialize, Serialize};
 
 /// The scheme the cards are addressable under.
 const SCHEME: &str = "ljos";
+/// Where the sitting protocol is read from.
+const PROTOCOL_URI: &str = "ljos://protocol";
 
 #[derive(Clone)]
 pub struct LjosServer {
@@ -92,21 +95,22 @@ pub struct VoteArgs {
     pub choice: Option<String>,
 }
 
-/// A session node to take.
+/// A session node to take or hand back.
 #[derive(Deserialize, JsonSchema)]
 pub struct TakeArgs {
-    /// The node id, 32 hex.
+    /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
     pub node: String,
-    /// The assignee, 32 hex. One live claim per assignee.
+    /// Your name. One live claim per name; the name maps to one actor id.
     pub assignee: String,
 }
 
 /// A session node to finish.
 #[derive(Deserialize, JsonSchema)]
 pub struct FinishArgs {
-    /// The node id, 32 hex.
+    /// The tracker id of the issue, or a 32-hex claim-graph id.
     pub node: String,
-    /// A terminal status. Defaults to the graph's own default.
+    /// `done` (the default), `failed`, or `cancelled`. To stop without
+    /// finishing, use `ljos_release` instead.
     pub status: Option<String>,
 }
 
@@ -299,7 +303,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Remember one lesson. The text is the claim and is stored as given: two short sentences at most, never a transcript. One of the pack's writes.",
+        description = "Call this when the work taught something that will still be true next sitting: one lesson, two short sentences at most, stored as given. Never a transcript or a summary of the session. Not for progress notes; those go on the issue.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -318,7 +322,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Prefer one thing over another, as a standing preference. Stored as given. Another of the pack's writes.",
+        description = "Call this when a choice between two ways was settled and should hold from now on: one standing preference, stored as given. A lesson that is not a choice is ljos_remember.",
         annotations(
             title = "Prefer",
             read_only_hint = false,
@@ -337,7 +341,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Retire one atom by id, so the seat stops recalling it. The pack tombstones rather than erases and keeps the record, and `why` names the deed the retraction stands on. Forget a claim that turned out wrong; do not forget one merely because this sitting disagrees with it.",
+        description = "Call this when the work showed a standing claim wrong, with the deed that showed it: retire the atom by id, so the seat stops recalling it. The pack tombstones rather than erases and keeps the record, and `why` names the deed the retraction stands on. Forget a claim that turned out wrong; do not forget one merely because this sitting disagrees with it.",
         annotations(
             title = "Forget",
             read_only_hint = false,
@@ -356,7 +360,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "What the seat knows, standing. Asks the pack; does not open a deed. An empty list means the pack holds nothing matching, and a failure means the writer is not running, which is a different thing: `packset ensure` starts one.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words: what the seat already knows, ranked. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: `packset ensure` starts one. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -383,7 +387,7 @@ impl LjosServer {
     // ---- the deed store ----------------------------------------------------
 
     #[tool(
-        description = "Whether a deed's bytes are intact and its sources are too. The deed store answers; an accession it does not hold is a failure, not an empty answer.",
+        description = "Call this before standing on a deed somebody cited: whether its bytes are intact and its sources are too. The deed store answers; an accession it does not hold is a failure, not an empty answer.",
         annotations(
             title = "Evidence a deed",
             read_only_hint = true,
@@ -398,7 +402,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Whether a deed is still the tip or a later take superseded it. A citation that resolves and is stale is worse than one that fails, because nothing complains.",
+        description = "Call this on every deed a handover or an issue names: whether it is still the tip or a later take superseded it. A citation that resolves and is stale is worse than one that fails, because nothing complains.",
         annotations(
             title = "Is a deed current",
             read_only_hint = true,
@@ -415,7 +419,7 @@ impl LjosServer {
     // ---- the tracker ---------------------------------------------------------
 
     #[tool(
-        description = "Cite a deed on a tracker node, or list what the node cites. A citation names the accession; it does not paste the product into the ticket. Citation is not a merge.",
+        description = "Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. Omit the accession to list what the issue cites. A citation names the accession and never pastes the product; citation is not a merge.",
         annotations(
             title = "Cite a deed",
             read_only_hint = false,
@@ -435,7 +439,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The working set for a tracker node: its plan, what its inputs produced, and its own deeds. Read this before starting the work.",
+        description = "Call this before claiming an issue: its plan, what its inputs produced, and the deeds it has cited so far. The issue id is the tracker id (proj-1a2b).",
         annotations(
             title = "Recall a node",
             read_only_hint = true,
@@ -450,7 +454,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Cast this identity's ballot on a node, or read the tally. One ballot per identity; a recast replaces. A tally is a count and is not the consensus model.",
+        description = "Call this when a decision on an issue has more than one defensible answer: cast this identity's ballot for an option, or omit the option to read the tally. One ballot per identity (VISSUE_AGENT); a recast replaces. Then ljos_consensus settles it; the tally is only a count.",
         annotations(
             title = "Vote",
             read_only_hint = false,
@@ -472,7 +476,7 @@ impl LjosServer {
     // ---- the session graph --------------------------------------------------
 
     #[tool(
-        description = "Take a session node. One live claim per assignee; a second is refused with the node already held. Completing a node later does not close a ticket.",
+        description = "Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. One live claim per name; when you still hold another node the refusal names it and the two tools that free it (ljos_complete, ljos_release). Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
             read_only_hint = false,
@@ -485,19 +489,30 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        habitat(
-            "claimdag",
-            &[
-                "claim",
-                &node_for(&args.node).map_err(refused)?,
-                "--assignee",
-                &work_id(&args.assignee),
-            ],
-        )
+        let text = claim(&args.node, &args.assignee).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(
-        description = "Finish a session node. Completing is not closing: the ticket the node cites stays open until the tracker says otherwise.",
+        description = "Call this when you stop working on an issue without finishing it: the session node goes back to ready, your name is free to claim again, and the generation moves. Not for finished work; that is ljos_complete.",
+        annotations(
+            title = "Hand a node back",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_release(
+        &self,
+        Parameters(args): Parameters<TakeArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = release(&args.node, &args.assignee).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this when the work on an issue is finished, failed, or cancelled: the session node goes terminal. Completing is not closing; the ticket stays open until the tracker changes its state. To stop without finishing, ljos_release.",
         annotations(
             title = "Complete a node",
             read_only_hint = false,
@@ -530,7 +545,7 @@ impl LjosServer {
     // ---- cards, policy, consensus -------------------------------------------
 
     #[tool(
-        description = "The cards: what the human froze. USER.md and MEMORY.md from the cards directory, read-only. A missing card prints nothing. Nothing here writes one.",
+        description = "Call this second in a sitting, after ljos_doctor: the cards, what the human froze. USER.md and MEMORY.md from the cards directory, read-only. A missing card prints nothing. Nothing here writes one.",
         annotations(
             title = "Read the cards",
             read_only_hint = true,
@@ -563,7 +578,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Settle agreement on a node: the consensus model first, DeGroot or Friedkin-Johnsen over the trust rows the pack holds, then the tracker's own verb. Not a vote count. With no rows every voter weighs the same.",
+        description = "Call this after the ballots are in on an issue: the consensus model first, DeGroot or Friedkin-Johnsen over the trust rows the pack holds, then the tracker's own verb. Not a vote count. With no rows every voter weighs the same.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
@@ -587,7 +602,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Write one trust row to the pack: from weighs to at weight in (0, 1], citing the deeds it stands on. Trust is memory: the row has a validity window and a later row for the same pair supersedes it.",
+        description = "Call this when a person or a checked outcome says how much one voter should weigh another: write one trust row to the pack, from weighs to at weight in (0, 1], citing the deeds it stands on. Trust is memory: the row has a validity window and a later row for the same pair supersedes it.",
         annotations(
             title = "Trust",
             read_only_hint = false,
@@ -609,7 +624,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Reweigh the voters on an issue by what turned out right: every voter whose ballot the outcome refuted shrinks in every other voter's row (Hedge), a vindicated one keeps its weight. Writes the complete set of rows to the pack and returns them.",
+        description = "Call this when the world has said which option on an issue was right: reweigh the voters by it; every voter whose ballot the outcome refuted shrinks in every other voter's row (Hedge), a vindicated one keeps its weight. Writes the complete set of rows to the pack and returns them.",
         annotations(
             title = "Learn",
             read_only_hint = false,
@@ -647,7 +662,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Which habitats answer: the binaries on PATH, the pack over PACKSET_URL, the deed store, the tracker, the claim graph. Ask this first when another verb fails.",
+        description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this harness is onboarded. A tool failing is a habitat down or refusing, never an empty answer.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_doctor(&self) -> Result<Json<Vec<HabitatRow>>, McpError> {
@@ -664,7 +679,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Pack a slice of the seat for somebody else: the tracker's satchel for the projects and issues named, the pack's atoms (trust rows included), the deeds both cite with their receipts, sealed, and signed when the host has a key.",
+        description = "Call this when another seat takes the work over: pack a slice of this seat for it, the tracker's satchel for the projects and issues named, the pack's atoms (trust rows included), the deeds both cite with their receipts, sealed, and signed when the host has a key.",
         annotations(
             title = "Handover",
             read_only_hint = false,
@@ -683,7 +698,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Check a satchel that arrived: manifest, deed receipts against the head in the bag (and the bridge from a kept head when given), the signature, and what the atoms hold. With import, the atoms go into this seat's pack.",
+        description = "Call this when a handover directory arrived from another seat, before anything in it is trusted: check the satchel, manifest, deed receipts against the head in the bag (and the bridge from a kept head when given), the signature, and what the atoms hold. With import, the atoms go into this seat's pack.",
         annotations(
             title = "Receive",
             read_only_hint = false,
@@ -706,7 +721,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The memories a task activates: the top search hits as seeds, spread two hops along the pack's links, strongest first. Not a persona or a view; the cluster this task touches. Read it before starting the work; pass fire when you go on to use it, so those links gain weight.",
+        description = "Call this after ljos_search with the task in your own words: the memories the task activates, the top search hits as seeds, spread two hops along the pack's links, strongest first. Not a persona or a view; the cluster this task touches. Read it before starting the work; pass fire when you go on to use it, so those links gain weight.",
         annotations(
             title = "Island",
             read_only_hint = false,
@@ -737,7 +752,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The claims whose review is due, soonest first. Read each; then grade it recalled or lapsed so the review clock moves.",
+        description = "Call this at the start of a sitting, after the cards: the claims whose review is due, soonest first. Read each, then ljos_graded it recalled or lapsed; the review clock moves only when you grade.",
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_due(&self) -> Result<Json<Vec<DueRow>>, McpError> {
@@ -756,7 +771,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Grade one review: recalled (default) pushes the next review out, lapsed brings it back sooner. Returns the atom with its new due_at.",
+        description = "Call this for each claim ljos_due listed once you have read it: recalled (default) pushes the next review out, lapsed brings it back sooner. Returns the atom with its new due_at.",
         annotations(
             title = "Graded",
             read_only_hint = false,
@@ -874,26 +889,39 @@ impl ServerHandler for LjosServer {
         )
         .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "One seat over five habitats. The pack is written by remember, prefer, \
-             trust, learn, graded and an imported handover; the text is the claim. \
-             Cards are read at ljos://cards/ and \
-             never written. Citing a deed on a node names an accession and does not \
-             paste the product. Completing a session node does not close a ticket. \
-             A tool that fails means a habitat refused or is not running; it is not \
+            "One seat over five habitats: tracker, pack, deed store, claim graph, \
+             consensus. Read ljos://protocol first; it says which store answers \
+             which question and the order of tools in a sitting: ljos_doctor, \
+             ljos_cards, ljos_due then ljos_graded, ljos_search then ljos_island, \
+             ljos_recall, ljos_claim; during the work ljos_deed, ljos_remember, \
+             ljos_vote; after it ljos_island with fire, ljos_complete, ljos_learn. \
+             The pack is written by remember, prefer, trust, learn, graded and an \
+             imported handover; the text is the claim. Cards are read at \
+             ljos://cards/ and never written. Citing a deed on a node names an \
+             accession and does not paste the product. Completing a session node \
+             does not close a ticket; ljos_release hands one back unfinished. A \
+             tool that fails means a habitat refused or is not running; it is not \
              an empty answer.",
         )
     }
 
-    /// The two cards, and nothing else.
+    /// The two cards and the protocol, and nothing else.
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
+        let mut protocol = Resource::new(PROTOCOL_URI, "protocol".to_string());
+        protocol.title = Some("The seat protocol".into());
+        protocol.description = Some(
+            "Which store answers which question, the order of tools before, during and \
+             after the work, and the refusals worth knowing. Read this first."
+                .into(),
+        );
+        protocol.mime_type = Some("text/markdown".to_string());
         Ok(ListResourcesResult::with_all_items(
-            CARD_NAMES
-                .iter()
-                .map(|name| {
+            std::iter::once(protocol)
+                .chain(CARD_NAMES.iter().map(|name| {
                     let mut resource =
                         Resource::new(format!("{SCHEME}://cards/{name}"), (*name).to_string());
                     resource.title = Some(format!("{name}, frozen by the human"));
@@ -903,7 +931,7 @@ impl ServerHandler for LjosServer {
                     );
                     resource.mime_type = Some("text/markdown".to_string());
                     resource
-                })
+                }))
                 .collect(),
         ))
     }
@@ -914,9 +942,17 @@ impl ServerHandler for LjosServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri.clone();
+        if uri == PROTOCOL_URI {
+            return Ok(
+                ReadResourceResult::new(vec![ResourceContents::text(PROTOCOL, uri)]).into(),
+            );
+        }
         let name = card_named(&uri).ok_or_else(|| {
             McpError::resource_not_found(
-                format!("{uri}: the cards are {SCHEME}://cards/USER.md and MEMORY.md"),
+                format!(
+                    "{uri}: the resources are {PROTOCOL_URI}, {SCHEME}://cards/USER.md and \
+                     {SCHEME}://cards/MEMORY.md"
+                ),
                 None,
             )
         })?;
@@ -944,7 +980,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            22,
+            23,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -985,6 +1021,7 @@ mod tests {
                 "ljos_learn",
                 "ljos_prefer",
                 "ljos_receive",
+                "ljos_release",
                 "ljos_remember",
                 "ljos_trust",
                 "ljos_vote"
@@ -1032,6 +1069,39 @@ mod tests {
         assert_eq!(card_named("ljos://cards/NOTES.md"), None);
         assert_eq!(card_named("ljos://cards/../USER.md"), None);
         assert_eq!(card_named("file:///etc/passwd"), None);
+    }
+
+    /// The protocol is a resource every harness can read, and it names the
+    /// tools in the order a sitting calls them.
+    #[test]
+    fn the_protocol_is_served_and_orders_the_sitting() {
+        assert_eq!(card_named(PROTOCOL_URI), None, "the protocol is not a card");
+        for verb in [
+            "ljos doctor",
+            "ljos cards",
+            "ljos due",
+            "ljos search",
+            "ljos island",
+            "ljos recall",
+            "ljos claim",
+        ] {
+            assert!(PROTOCOL.contains(verb), "{verb} missing from the protocol");
+        }
+        let order: Vec<usize> = ["## Before the work", "## During the work", "## After the work"]
+            .iter()
+            .map(|h| PROTOCOL.find(h).unwrap_or_else(|| panic!("{h} missing")))
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]));
+        // Every tool the server declares is named in the protocol, so a reader
+        // of the protocol has heard of everything the server can do.
+        for tool in LjosServer::tool_router().list_all() {
+            let verb = tool.name.trim_start_matches("ljos_").to_string();
+            assert!(
+                PROTOCOL.contains(&format!("`{verb}`"))
+                    || PROTOCOL.contains(&format!("ljos {verb}")),
+                "tool {verb} is not in the protocol"
+            );
+        }
     }
 
     /// Every prompt renders from what it declares.

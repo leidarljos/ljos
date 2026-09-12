@@ -3,10 +3,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, cards, consensus_steps, doctor, due, format_doctor, format_due, format_hits,
-    format_island, graded, handover, healthy, join, learn, node_for, on_path, packset_forget,
-    packset_island, packset_search, packset_write, policy_line, receive, run, run_captured,
-    trust_from_pack, work_id, write_trust, Trust, LEARN_BETA, POLICY_TCB,
+    ballots_from_json, cards, claim, consensus_steps, doctor, due, format_doctor, format_due,
+    format_hits, format_island, format_steps, graded, handover, healthy, join, learn, node_for,
+    on_path, onboard, packset_forget, packset_island, packset_search, packset_write, policy_line,
+    receive, release, run, run_captured, trust_from_pack, write_trust, Trust, LEARN_BETA,
+    HARNESSES_EXAMPLE, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -22,10 +23,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Standing knowledge. Remember: / Prefer: only. POST /v1/atoms.
+    /// Remember one lesson that will still be true next sitting. Two sentences at most.
     Remember {
         text: Vec<String>,
     },
+    /// Prefer one way over another, as a standing preference. Stored as written.
     Prefer {
         text: Vec<String>,
     },
@@ -36,6 +38,7 @@ enum Cmd {
         #[arg(long)]
         why: Option<String>,
     },
+    /// What the seat knows about a topic, ranked. Empty means the pack holds nothing on it.
     Search {
         query: Vec<String>,
     },
@@ -46,35 +49,53 @@ enum Cmd {
         #[arg(long)]
         fire: bool,
     },
-    /// Frozen product.
+    /// Whether a deed's bytes are intact and its sources are too.
     Evidence {
         accession: String,
     },
+    /// Whether a deed is still the tip, or a later take superseded it.
     Current {
         accession: String,
     },
-    /// Graph and agreement.
+    /// Cite a deed on an issue, or list what it cites. Citation is not a merge.
     Deed {
         issue: String,
+        /// The accession to cite, from `deedar create`.
         #[arg(long)]
         add: Option<String>,
     },
+    /// The working set for an issue: plan, its inputs' deeds, its own citations.
     Recall {
         issue: String,
     },
+    /// Cast this identity's ballot (VISSUE_AGENT), or read the tally with no --for.
     Vote {
         issue: String,
+        /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
     },
-    /// This-session work.
+    /// Take a session node for an issue. One live claim per assignee.
     Claim {
+        /// A tracker id, or a 32-hex claim-graph id.
         node: String,
+        /// Your name; mapped to one actor id.
         #[arg(long)]
         assignee: String,
     },
-    Complete {
+    /// Hand a session node back unfinished: ready again, generation moved.
+    Release {
+        /// A tracker id, or a 32-hex claim-graph id.
         node: String,
+        /// The name that holds it.
+        #[arg(long)]
+        assignee: String,
+    },
+    /// Finish a session node. Does not close the ticket.
+    Complete {
+        /// A tracker id, or a 32-hex claim-graph id.
+        node: String,
+        /// done (default), failed, or cancelled.
         #[arg(long)]
         status: Option<String>,
     },
@@ -102,6 +123,20 @@ enum Cmd {
     },
     /// Which habitats answer. Exit 1 when a required one does not.
     Doctor,
+    /// Print the sitting protocol: which store answers what, and the order of verbs.
+    Protocol,
+    /// Register ljos-mcp with an agent runner and install the protocol as its skill.
+    Onboard {
+        /// A runner named in ~/.config/ljos/harnesses.toml, or json to print the server entry.
+        #[arg(long, default_value = "json")]
+        harness: String,
+        /// Report what would be written and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print an example harnesses.toml and stop.
+        #[arg(long)]
+        example: bool,
+    },
     /// Pack a slice of the seat: satchel, atoms, the deeds both cite; sealed and signed.
     Handover {
         #[arg(long)]
@@ -176,15 +211,8 @@ fn main() -> Result<()> {
             Some(c) => run("vissue", &["vote", &issue, "--for", &c])?,
             None => run("vissue", &["vote", &issue])?,
         },
-        Cmd::Claim { node, assignee } => run(
-            "claimdag",
-            &[
-                "claim",
-                &node_for(&node)?,
-                "--assignee",
-                &work_id(&assignee),
-            ],
-        )?,
+        Cmd::Claim { node, assignee } => print!("{}", claim(&node, &assignee)?),
+        Cmd::Release { node, assignee } => print!("{}", release(&node, &assignee)?),
         Cmd::Complete { node, status } => match status {
             Some(s) => run("claimdag", &["complete", &node_for(&node)?, "--status", &s])?,
             None => run("claimdag", &["complete", &node_for(&node)?])?,
@@ -215,6 +243,22 @@ fn main() -> Result<()> {
             let rows = doctor();
             print!("{}", format_doctor(&rows));
             if !healthy(&rows) {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Protocol => print!("{PROTOCOL}"),
+        Cmd::Onboard {
+            harness,
+            dry_run,
+            example,
+        } => {
+            if example {
+                print!("{HARNESSES_EXAMPLE}");
+                return Ok(());
+            }
+            let steps = onboard(&harness, dry_run)?;
+            print!("{}", format_steps(&steps));
+            if steps.iter().any(|s| !s.ok) {
                 std::process::exit(1);
             }
         }

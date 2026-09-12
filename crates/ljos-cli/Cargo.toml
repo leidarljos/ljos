@@ -21,5 +21,7 @@ libc = "0.2"
 anyhow.workspace = true
 clap.workspace = true
 packset-client.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 which.workspace = true

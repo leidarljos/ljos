@@ -13,9 +13,428 @@ use serde_json::Value;
 /// Working-core files this seat will print. Nothing else, and never write.
 pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
 
+/// The sitting protocol: which store answers which question, the order of
+/// verbs before, during and after the work, and the refusals worth knowing.
+/// `ljos protocol` prints it, `ljos onboard` installs it as a skill, and the
+/// server serves it at `ljos://protocol`. Harness agnostic on purpose.
+pub const PROTOCOL: &str = include_str!("../doc/protocol.md");
+
+/// The skill file a harness loads: front matter, then the protocol.
+#[must_use]
+pub fn skill_text() -> String {
+    format!(
+        "---\nname: ljos\ndescription: >\n  The seat protocol for vissue, packset, deedar, claimdag and \
+consensus through ljos: which store answers which question, the order of verbs in a \
+sitting, and the refusals worth knowing. Load before any work that touches an issue, \
+a memory, a deed, a claim or a vote.\n---\n\n{PROTOCOL}"
+    )
+}
+
+/// One step an onboarding took, or would take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub what: String,
+    pub detail: String,
+    pub ok: bool,
+}
+
+/// One agent runner, as the seat's own configuration describes it. The seat
+/// ships no runner's name: the file at [`harnesses_path`] names them, one
+/// table each, and `onboard` and `doctor` read it.
+///
+/// A runner registers MCP servers one of two ways. `register` is a command
+/// that does it (`{server}` is replaced by the path to `ljos-mcp`) and
+/// `registered` a command that exits 0 once it is done. Or `config` is a
+/// file the runner reads, `marker` a line that means the entry is present,
+/// and `snippet` what to append when it is not. `skills` is the directory
+/// the runner loads skills from; the protocol goes to `<skills>/ljos/SKILL.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Harness {
+    pub name: String,
+    #[serde(default)]
+    pub register: Vec<String>,
+    #[serde(default)]
+    pub registered: Vec<String>,
+    #[serde(default)]
+    pub config: Option<String>,
+    #[serde(default)]
+    pub marker: Option<String>,
+    #[serde(default)]
+    pub snippet: Option<String>,
+    #[serde(default)]
+    pub skills: Option<String>,
+}
+
+/// The whole file: `[[harness]]` tables.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Harnesses {
+    #[serde(default)]
+    pub harness: Vec<Harness>,
+}
+
+/// An example of the file, with placeholder names. `ljos onboard --example`
+/// prints it; the two shapes are a registering command and a config file.
+pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: the agent runners on this machine.
+# {server} is replaced by the path to ljos-mcp. Paths may start with ~.
+
+[[harness]]
+name = "runner-with-a-command"
+register = ["runner", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
+registered = ["runner", "mcp", "get", "ljos"]
+skills = "~/.runner/skills"
+
+[[harness]]
+name = "runner-with-a-config-file"
+config = "~/.other/config.toml"
+marker = "[mcp_servers.ljos]"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\n"
+skills = "~/.other/skills"
+"#;
+
+fn home() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME unset; onboard needs a home directory")
+}
+
+/// `~` at the start of a configured path is the home directory.
+fn expand(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home().map_or_else(|_| PathBuf::from(path), |h| h.join(rest)),
+        None => PathBuf::from(path),
+    }
+}
+
+/// Where the runners are described: `$XDG_CONFIG_HOME/ljos/harnesses.toml`.
+#[must_use]
+pub fn harnesses_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().ok().map(|h| h.join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("ljos")
+        .join("harnesses.toml")
+}
+
+/// Parse the runners file. An absent file is no runners, not an error.
+///
+/// # Errors
+///
+/// A file that is present and not this shape.
+pub fn harnesses_from(path: &Path) -> Result<Harnesses> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("{}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Harnesses::default()),
+        Err(e) => Err(e).with_context(|| format!("{}", path.display())),
+    }
+}
+
+/// Where `ljos-mcp` is, as the runner will start it.
+fn server_path() -> Result<PathBuf> {
+    which::which("ljos-mcp").context("ljos-mcp not on PATH; install it beside ljos")
+}
+
+/// The MCP server entry any runner that reads JSON accepts.
+pub fn server_entry() -> Result<Value> {
+    Ok(serde_json::json!({
+        "mcpServers": {
+            "ljos": {
+                "type": "stdio",
+                "command": server_path()?.display().to_string(),
+                "args": [],
+                "env": {}
+            }
+        }
+    }))
+}
+
+fn write_skill(dir: &Path, dry: bool) -> Step {
+    let path = dir.join("ljos").join("SKILL.md");
+    let text = skill_text();
+    if std::fs::read_to_string(&path).is_ok_and(|have| have == text) {
+        return Step {
+            what: "skill".into(),
+            detail: format!("{} is current", path.display()),
+            ok: true,
+        };
+    }
+    if dry {
+        return Step {
+            what: "skill".into(),
+            detail: format!("would write {}", path.display()),
+            ok: true,
+        };
+    }
+    let written = std::fs::create_dir_all(path.parent().unwrap_or(dir))
+        .and_then(|()| std::fs::write(&path, text));
+    match written {
+        Ok(()) => Step {
+            what: "skill".into(),
+            detail: format!("wrote {}", path.display()),
+            ok: true,
+        },
+        Err(e) => Step {
+            what: "skill".into(),
+            detail: format!("{}: {e}", path.display()),
+            ok: false,
+        },
+    }
+}
+
+fn filled(argv: &[String], server: &Path) -> Vec<String> {
+    argv.iter()
+        .map(|a| a.replace("{server}", &server.display().to_string()))
+        .collect()
+}
+
+/// Whether a runner with a `registered` command already has the server.
+fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
+    if !h.registered.is_empty() {
+        let argv = filled(&h.registered, server);
+        return Some(argv.first().is_some_and(|bin| on_path(bin)) && {
+            let (bin, rest) = (&argv[0], &argv[1..]);
+            run_captured(bin, rest).is_ok()
+        });
+    }
+    if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
+        return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
+    }
+    None
+}
+
+fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
+    let what = format!("{} mcp", h.name);
+    match is_registered(h, server) {
+        Some(true) => Step {
+            what,
+            detail: "ljos registered".into(),
+            ok: true,
+        },
+        None => Step {
+            what,
+            detail: "no register or config in harnesses.toml; paste `ljos onboard --harness json`"
+                .into(),
+            ok: false,
+        },
+        Some(false) if !h.register.is_empty() => {
+            let argv = filled(&h.register, server);
+            if !on_path(&argv[0]) {
+                return Step {
+                    what,
+                    detail: format!("{} not on PATH", argv[0]),
+                    ok: false,
+                };
+            }
+            if dry {
+                return Step {
+                    what,
+                    detail: format!("would run {}", argv.join(" ")),
+                    ok: true,
+                };
+            }
+            match run_captured(&argv[0], &argv[1..]) {
+                Ok(_) => Step {
+                    what,
+                    detail: format!("ran {}", argv.join(" ")),
+                    ok: true,
+                },
+                Err(e) => Step {
+                    what,
+                    detail: e.to_string().lines().next().unwrap_or("").to_string(),
+                    ok: false,
+                },
+            }
+        }
+        Some(false) => {
+            let config = expand(h.config.as_deref().unwrap_or_default());
+            let snippet = h
+                .snippet
+                .as_deref()
+                .unwrap_or_default()
+                .replace("{server}", &server.display().to_string());
+            if snippet.is_empty() {
+                return Step {
+                    what,
+                    detail: format!("no snippet to append to {}", config.display()),
+                    ok: false,
+                };
+            }
+            if dry {
+                return Step {
+                    what,
+                    detail: format!("would append the entry to {}", config.display()),
+                    ok: true,
+                };
+            }
+            let mut text = std::fs::read_to_string(&config).unwrap_or_default();
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&snippet);
+            let written = config
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&config, text));
+            match written {
+                Ok(()) => Step {
+                    what,
+                    detail: format!("appended the entry to {}", config.display()),
+                    ok: true,
+                },
+                Err(e) => Step {
+                    what,
+                    detail: format!("{}: {e}", config.display()),
+                    ok: false,
+                },
+            }
+        }
+    }
+}
+
+/// Register the server and install the skill for one runner named in the
+/// runners file. `json` registers nothing and returns the entry to paste.
+/// `dry` reports without writing.
+///
+/// # Errors
+///
+/// No such runner in the file, no home directory, or `ljos-mcp` not on `PATH`.
+pub fn onboard(harness: &str, dry: bool) -> Result<Vec<Step>> {
+    onboard_from(&harnesses_path(), harness, dry)
+}
+
+pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> {
+    if harness == "json" {
+        return Ok(vec![Step {
+            what: "json".into(),
+            detail: serde_json::to_string_pretty(&server_entry()?)?,
+            ok: true,
+        }]);
+    }
+    let all = harnesses_from(file)?;
+    let Some(h) = all.harness.iter().find(|h| h.name == harness) else {
+        let names: Vec<&str> = all.harness.iter().map(|h| h.name.as_str()).collect();
+        bail!(
+            "onboard: no runner {harness:?} in {}; it names {}. `ljos onboard --example` \
+             prints the file's shape, and `--harness json` prints the entry to paste anywhere.",
+            file.display(),
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
+        );
+    };
+    let server = server_path()?;
+    let mut steps = vec![register_step(h, &server, dry)];
+    match &h.skills {
+        Some(dir) => steps.push(write_skill(&expand(dir), dry)),
+        None => steps.push(Step {
+            what: "skill".into(),
+            detail: "no skills directory in harnesses.toml; `ljos protocol` prints the text"
+                .into(),
+            ok: false,
+        }),
+    }
+    Ok(steps)
+}
+
+pub fn format_steps(steps: &[Step]) -> String {
+    steps
+        .iter()
+        .map(|s| {
+            format!(
+                "{}\t{}\t{}\n",
+                if s.ok { "ok" } else { "no" },
+                s.what,
+                s.detail
+            )
+        })
+        .collect()
+}
+
+/// The runner rows for `doctor`, one pair per runner the file names.
+fn harness_rows() -> Vec<Habitat> {
+    let path = harnesses_path();
+    let all = match harnesses_from(&path) {
+        Ok(all) => all,
+        Err(e) => {
+            return vec![Habitat {
+                name: "runners",
+                state: format!("{e:#}"),
+                ok: false,
+            }]
+        }
+    };
+    if all.harness.is_empty() {
+        return vec![Habitat {
+            name: "runners",
+            state: format!(
+                "none named in {}; `ljos onboard --example` prints the shape",
+                path.display()
+            ),
+            ok: false,
+        }];
+    }
+    let server = server_path().unwrap_or_else(|_| PathBuf::from("ljos-mcp"));
+    let mut rows = Vec::new();
+    for h in &all.harness {
+        let registered = is_registered(h, &server) == Some(true);
+        rows.push(Habitat {
+            name: "runner mcp",
+            state: if registered {
+                format!("{}: ljos registered", h.name)
+            } else {
+                format!("{}: not registered; ljos onboard --harness {}", h.name, h.name)
+            },
+            ok: registered,
+        });
+        let skill = h
+            .skills
+            .as_deref()
+            .map(|d| expand(d).join("ljos").join("SKILL.md"));
+        let current = skill
+            .as_ref()
+            .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t == skill_text()));
+        rows.push(Habitat {
+            name: "runner skill",
+            state: match (&skill, current) {
+                (Some(p), true) => format!("{}: {}", h.name, p.display()),
+                (Some(p), false) if p.is_file() => {
+                    format!("{}: {} is stale; ljos onboard --harness {}", h.name, p.display(), h.name)
+                }
+                (Some(_), false) => format!("{}: absent; ljos onboard --harness {}", h.name, h.name),
+                (None, _) => format!("{}: no skills directory named", h.name),
+            },
+            ok: current,
+        });
+    }
+    rows
+}
+
+/// The host key `deedar` will sign with: `DEEDAR_HOST_SIGNING_KEY`, else
+/// `~/.config/deedar/host.key` when it exists. `off` is no key on purpose.
+fn host_key_path() -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os("DEEDAR_HOST_SIGNING_KEY").filter(|r| !r.is_empty()) {
+        return (raw != "off").then(|| PathBuf::from(raw));
+    }
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().ok().map(|h| h.join(".config")))?;
+    let path = config.join("deedar").join("host.key");
+    path.is_file().then_some(path)
+}
+
 /// Printed on stderr. `grok-policyd` is the TCB when it exists.
 pub const POLICY_TCB: &str =
     "argv law. grok-policyd is the TCB when present. Reloading a pack is not a check.";
+
+/// The pack client. With nothing set it speaks to `127.0.0.1:8761`;
+/// `PACKSET_URL` points elsewhere, and `off` is the one way to have no pack.
+pub fn pack() -> Result<PacksetClient> {
+    PacksetClient::from_env().context("PACKSET_URL=off: this seat has no pack on purpose")
+}
 
 pub fn join(parts: &[String]) -> String {
     parts.join(" ")
@@ -61,7 +480,7 @@ pub fn post_claim(
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     let client =
-        PacksetClient::from_env().context("PACKSET_URL unset; remember/prefer POST /v1/atoms")?;
+        pack()?;
     let workspace = client.workspace();
     post_claim(&client, label, text, &workspace)
 }
@@ -91,7 +510,7 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
     }
     let why = why.map(str::trim).filter(|w| !w.is_empty());
     let client =
-        PacksetClient::from_env().context("PACKSET_URL unset; forget POSTs /v1/atoms/delete")?;
+        pack()?;
     let workspace = client.workspace();
     client
         .delete_atom(&workspace, trimmed, why)
@@ -251,7 +670,7 @@ pub fn learn(
 
 /// The live trust rows in the seat's pack.
 pub fn trust_from_pack() -> Result<Vec<Trust>> {
-    let client = PacksetClient::from_env().context("PACKSET_URL unset; trust lives in the pack")?;
+    let client = pack()?;
     let workspace = client.workspace();
     let atoms = client
         .atoms_as_of(&workspace, None)
@@ -261,7 +680,7 @@ pub fn trust_from_pack() -> Result<Vec<Trust>> {
 
 /// POST one trust row.
 pub fn write_trust(row: &Trust, why: &[String]) -> Result<Value> {
-    let client = PacksetClient::from_env().context("PACKSET_URL unset; trust lives in the pack")?;
+    let client = pack()?;
     let workspace = client.workspace();
     client
         .post_atom(&trust_atom(row, why, &workspace)?)
@@ -316,13 +735,12 @@ pub fn doctor() -> Vec<Habitat> {
         },
         Err(_) => Habitat {
             name: "pack",
-            state: "PACKSET_URL unset".into(),
+            state: "PACKSET_URL=off: no pack on purpose".into(),
             ok: false,
         },
     });
-    out.push(match std::env::var_os("DEEDAR_HOST_SIGNING_KEY") {
+    out.push(match host_key_path() {
         Some(path) => {
-            let path = PathBuf::from(path);
             let seed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 32;
             Habitat {
                 name: "host key",
@@ -336,7 +754,9 @@ pub fn doctor() -> Vec<Habitat> {
         }
         None => Habitat {
             name: "host key",
-            state: "DEEDAR_HOST_SIGNING_KEY unset; handovers go out unsigned".into(),
+            state: "none at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
+                    handovers go out unsigned"
+                .into(),
             ok: false,
         },
     });
@@ -358,6 +778,7 @@ pub fn doctor() -> Vec<Habitat> {
             },
         });
     }
+    out.extend(harness_rows());
     out
 }
 
@@ -449,7 +870,7 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
                 Err(e) => lines.push(format!("atoms not enclosed: {e}")),
             }
         }
-        Err(_) => lines.push("no pack: PACKSET_URL unset, atoms not enclosed".into()),
+        Err(_) => lines.push("no pack: PACKSET_URL=off, atoms not enclosed".into()),
     }
 
     let description = std::fs::read_to_string(out.join("data").join("satchel.json"))
@@ -540,7 +961,7 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
     ));
     if import {
         let client =
-            PacksetClient::from_env().context("PACKSET_URL unset; import POSTs /v1/atoms")?;
+            pack()?;
         let (mut kept, mut refused) = (0usize, Vec::new());
         for atom in &atoms {
             match client.post_atom(atom) {
@@ -589,7 +1010,7 @@ pub fn due_of(atoms: &[Value], now: &str) -> Vec<Value> {
 
 /// What the pack holds for review now.
 pub fn due() -> Result<Vec<Value>> {
-    let client = PacksetClient::from_env().context("PACKSET_URL unset; due reads /v1/atoms")?;
+    let client = pack()?;
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
         .context("due: GET /v1/atoms failed")?;
@@ -618,7 +1039,7 @@ pub fn graded(id: &str, recalled: bool) -> Result<Value> {
     if id.is_empty() {
         bail!("graded: an atom id is required");
     }
-    let client = PacksetClient::from_env().context("PACKSET_URL unset; graded POSTs /v1/grade")?;
+    let client = pack()?;
     client
         .grade(&client.workspace(), id, recalled)
         .with_context(|| format!("graded: POST /v1/grade failed for {id}"))
@@ -721,7 +1142,7 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
         bail!("island: pass the task or question at hand");
     }
     let client =
-        PacksetClient::from_env().context("PACKSET_URL unset; island is GET /v1/activate")?;
+        pack()?;
     let workspace = client.workspace();
     client
         .activate(&workspace, cue, 24, fire)
@@ -753,11 +1174,68 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
         bail!("search: empty query");
     }
     let client =
-        PacksetClient::from_env().context("PACKSET_URL unset; search is GET /v1/search")?;
+        pack()?;
     let workspace = client.workspace();
     client
         .search(&workspace, q, 10)
         .context("search: GET /v1/search failed")
+}
+
+/// Take a session node, and when the claim graph refuses because the
+/// assignee still holds another node, say which tracker id that is and the
+/// two verbs that free it. The bare refusal names a 32-hex id nobody can
+/// act on.
+///
+/// # Errors
+///
+/// The refusal, explained, or any other failure of the claim graph.
+pub fn claim(node: &str, assignee: &str) -> Result<String> {
+    let id = node_for(node)?;
+    match run_captured("claimdag", &["claim", &id, "--assignee", &work_id(assignee)]) {
+        Ok(said) => Ok(said.stdout),
+        Err(e) => {
+            let text = e.to_string();
+            if !text.contains("assignee busy") {
+                return Err(e);
+            }
+            let held: Vec<String> = text
+                .split_whitespace()
+                .filter(|w| w.len() == 32 && w.chars().all(|c| c.is_ascii_hexdigit()))
+                .map(str::to_string)
+                .collect();
+            let mut lines = vec![format!(
+                "claim: {assignee} already holds a live node; one live claim per assignee."
+            )];
+            for hex in &held {
+                let name = run_captured("claimdag", &["get", hex])
+                    .ok()
+                    .and_then(|s| {
+                        s.stdout
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().last())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| hex.clone());
+                lines.push(format!(
+                    "  holds {name}: `ljos complete {name} --status done` finishes it, \
+                     `ljos release {name} --assignee {assignee}` hands it back"
+                ));
+            }
+            bail!("{}", lines.join("\n"))
+        }
+    }
+}
+
+/// Hand a session node back before it is terminal: ready again, assignee
+/// cleared, generation moved.
+///
+/// # Errors
+///
+/// The claim graph's refusal: not held, or held by somebody else.
+pub fn release(node: &str, assignee: &str) -> Result<String> {
+    let id = node_for(node)?;
+    Ok(run_captured("claimdag", &["release", &id, "--actor", &work_id(assignee)])?.stdout)
 }
 
 pub fn format_hits(hits: &[Hit]) -> String {
@@ -894,6 +1372,68 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// The example file parses, and onboarding a config-file runner from it
+    /// appends the entry once and writes the skill once; a dry run writes
+    /// nothing; an unnamed runner is refused with the names the file holds.
+    #[test]
+    fn onboarding_a_config_file_runner_writes_once() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        assert_eq!(all.harness.len(), 2);
+        assert_eq!(all.harness[1].marker.as_deref(), Some("[mcp_servers.ljos]"));
+
+        let dir = std::env::temp_dir().join(format!("ljos-onboard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let config = dir.join("config.toml");
+        let skills = dir.join("skills");
+        let file = dir.join("harnesses.toml");
+        std::fs::write(
+            &file,
+            format!(
+                "[[harness]]\nname = \"r\"\nconfig = {config:?}\nmarker = \"[mcp_servers.ljos]\"\n\
+                 snippet = \"\\n[mcp_servers.ljos]\\ncommand = \\\"{{server}}\\\"\\n\"\nskills = {skills:?}\n",
+                config = config.display().to_string(),
+                skills = skills.display().to_string(),
+            ),
+        )
+        .expect("write");
+
+        let refused = super::onboard_from(&file, "nobody", true).unwrap_err().to_string();
+        assert!(refused.contains("no runner \"nobody\"") && refused.contains("names r"), "{refused}");
+
+        let steps = match super::onboard_from(&file, "r", true) {
+            Ok(steps) => steps,
+            // Without ljos-mcp on PATH there is nothing to register; the
+            // refusal says so and the rest of the check needs the binary.
+            Err(e) => {
+                assert!(e.to_string().contains("ljos-mcp not on PATH"), "{e}");
+                return;
+            }
+        };
+        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
+        assert!(steps[0].detail.starts_with("would append"), "{}", steps[0].detail);
+        assert!(!config.exists() && !skills.exists(), "a dry run wrote");
+
+        let steps = super::onboard_from(&file, "r", false).expect("onboards");
+        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
+        let written = std::fs::read_to_string(&config).expect("config written");
+        assert_eq!(written.matches("[mcp_servers.ljos]").count(), 1);
+        assert!(written.contains("ljos-mcp"), "{written}");
+        let skill = std::fs::read_to_string(skills.join("ljos/SKILL.md")).expect("skill written");
+        assert!(skill.starts_with("---\nname: ljos\n"));
+        assert!(skill.contains("## Before the work"));
+
+        let again = super::onboard_from(&file, "r", false).expect("onboards again");
+        assert_eq!(again[0].detail, "ljos registered");
+        assert!(again[1].detail.ends_with("is current"), "{}", again[1].detail);
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config").matches("[mcp_servers.ljos]").count(),
+            1,
+            "the entry was appended twice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;

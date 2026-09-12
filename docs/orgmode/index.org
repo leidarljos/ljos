@@ -52,12 +52,15 @@ $ cargo install --git https://github.com/leidarljos/vissue vissue-cli
 $ cargo install --git https://github.com/leidarljos/deedar deedar-cli
 $ cargo install --git https://github.com/leidarljos/packset packset-cli packset-daemon
 $ cargo install --git https://github.com/leidarljos/claimdag claimdag-cli
-$ export PACKSET_URL=$(packset ensure)
+$ packset ensure
 $ ljos doctor
+$ ljos onboard --harness json
 #+end_src
 
 =doctor= names each habitat and whether it answers. The seat works with the
-habitats it has; a missing one is reported, not guessed around.
+habitats it has; a missing one is reported, not guessed around. =onboard=
+registers the server with an agent runner and installs the sitting protocol
+as its skill; =ljos protocol= prints that protocol for any other.
 
 * First minute
 

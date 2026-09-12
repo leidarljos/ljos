@@ -3,17 +3,61 @@
 
 * Wire the seat into an agent runner
 
-=ljos-mcp= speaks the Model Context Protocol (MCP) over stdio. Any runner
-that registers MCP servers can sit in the seat:
+Describe the runners on the machine once, in
+=~/.config/ljos/harnesses.toml=. A runner registers MCP servers either
+through a command of its own or through a config file it reads; the file
+holds one table per runner, in one of those two shapes, plus the directory
+it loads skills from. =ljos onboard --example= prints the shape:
 
-#+begin_src json
-{"mcpServers": {"ljos": {"command": "ljos-mcp",
-  "env": {"PACKSET_URL": "http://127.0.0.1:8761", "LJOS_CARDS_DIR": "/path/to/cards"}}}}
+#+begin_src toml
+[[harness]]
+name = "runner-with-a-command"
+register = ["runner", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
+registered = ["runner", "mcp", "get", "ljos"]
+skills = "~/.runner/skills"
+
+[[harness]]
+name = "runner-with-a-config-file"
+config = "~/.other/config.toml"
+marker = "[mcp_servers.ljos]"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\n"
+skills = "~/.other/skills"
 #+end_src
 
-Twenty tools, eleven of them writers, two prompts (=start_a_sitting=,
-=check_a_handover=), and two read-only resources (=ljos://cards/USER.md=,
-=ljos://cards/MEMORY.md=). Each tool says whether it reads or writes.
+Then one verb per runner:
+
+#+begin_src console
+$ ljos onboard --harness runner-with-a-command
+ok	runner-with-a-command mcp	ran runner mcp add -s user ljos -- /home/you/.cargo/bin/ljos-mcp
+ok	skill	wrote /home/you/.runner/skills/ljos/SKILL.md
+$ ljos doctor | grep runner
+ok	runner mcp	runner-with-a-command: ljos registered
+ok	runner skill	runner-with-a-command: /home/you/.runner/skills/ljos/SKILL.md
+#+end_src
+
+=--dry-run= reports what would be written. For a runner not in the file,
+=ljos onboard --harness json= prints the server entry to paste:
+
+#+begin_src json
+{"mcpServers": {"ljos": {"type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {}}}}
+#+end_src
+
+The skill is the protocol =ljos protocol= prints, under a front matter the
+runner reads. The server serves the same text at =ljos://protocol= and
+names it in its instructions, so a runner that loads neither skills nor
+resources still reads it first. Twenty-three tools, fourteen of them
+writers, two prompts (=start_a_sitting=, =check_a_handover=), three
+read-only resources. Each tool description opens with when to call it.
+
+* Give an agent the protocol without a runner
+
+#+begin_src console
+$ ljos protocol > instructions.md
+#+end_src
+
+The text is plain markdown: which store answers which question, the order
+of verbs before, during and after the work, and the refusals worth knowing.
+Put it where the agent reads its instructions.
 
 * Ask what a task involves
 
@@ -33,8 +77,10 @@ together and their links gain weight.
 
 The =start_a_sitting= prompt orders the first calls: read the cards, ask
 the pack, recall the node, grade what is due, claim a session node. On the
-command line the same order is =ljos cards=, =ljos search=, =ljos recall=,
-=ljos due=, =ljos claim=.
+command line the same order is =ljos doctor=, =ljos cards=, =ljos due=,
+=ljos search=, =ljos island=, =ljos recall=, =ljos claim=. A claim refused as
+busy names the issue you still hold; =ljos complete= finishes it and
+=ljos release= hands it back.
 
 * Keep the cards
 

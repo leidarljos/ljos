@@ -12,7 +12,9 @@ ljos island "rebuild the packset site"
 ljos evidence deed-…
 ljos deed vissue-xxxx --add deed-…
 ljos recall vissue-xxxx
-ljos claim <node>
+ljos claim <node> --assignee you
+ljos release <node> --assignee you
+ljos complete <node> --status done
 ljos cards
 ljos policy -- ls
 ljos consensus vissue-xxxx
@@ -23,7 +25,27 @@ ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
 ljos doctor
+ljos protocol
+ljos onboard --harness RUNNER
 ```
+
+## For an agent, or the person running one
+
+`ljos protocol` prints the sitting protocol: which store answers which
+question, the order of verbs before, during and after the work, and the
+refusals worth knowing. `ljos onboard --harness RUNNER` registers `ljos-mcp`
+with an agent runner and installs the protocol as its `ljos` skill. The
+runners are described in `~/.config/ljos/harnesses.toml`, one table each,
+either as a command that registers servers or as a config file to append an
+entry to, plus the directory the runner loads skills from;
+`ljos onboard --example` prints the file's shape, and `--harness json` prints
+the server entry to paste into any runner by hand. `--dry-run` reports
+without writing. `ljos doctor` then shows whether each runner named is
+onboarded. The server serves the same text at `ljos://protocol`.
+
+Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
+(`PACKSET_URL` points elsewhere, `off` means no pack), the host key at
+`~/.config/deedar/host.key` when it exists.
 
 `remember` / `prefer` POST `/v1/atoms` against `PACKSET_URL` (`INSIDE_MEMORY_URL` is an alias). They write one explicit claim. They do not extract from a transcript.
 
@@ -31,7 +53,7 @@ ljos doctor
 
 `cards` prints `USER.md` and `MEMORY.md` only. It never writes them.
 
-`ljos claim ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
+`ljos claim ID --assignee NAME`, `ljos release ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A claim refused as busy names the tracker id the assignee still holds and the two verbs that free it; `release` hands a node back unfinished. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
 
 `ljos policy` prints the argv. It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
 
@@ -41,10 +63,10 @@ ljos doctor
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`. `ljos onboard` writes the registration; by hand it is
 
 ```json
-{"mcpServers": {"ljos": {"command": "ljos-mcp", "env": {"PACKSET_URL": "http://127.0.0.1:8761"}}}}
+{"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
 ```
 
 `ljos island CUE` asks the pack which memories a task activates: the top search hits seed a two-hop spread along the pack's entity links, and the cluster comes back strongest first. Not a persona or a view; the island this task touches. `--fire` says the seat went on to use it: the strongest eight fire together and their links gain weight, so the next cue like it walks a heavier path.
@@ -53,7 +75,7 @@ ljos doctor
 
 `ljos handover --out DIR` runs the tracker's satchel, `packset export` into `DIR/data/atoms`, `deedar export` of every deed the satchel needs or the pack cites into `DIR/data/deeds`, then seals, and signs the manifest when `DEEDAR_HOST_SIGNING_KEY` is set. `ljos receive DIR` verifies the manifest, checks the deed receipts (`--since` for the bridge from a kept head), checks the signature when there is one, counts the atoms and trust rows, and with `--import` posts the atoms into this seat's pack.
 
-`ljos doctor` says which habitats answer and exits 1 when the tracker, the deed store, or the pack does not. It also says whether `DEEDAR_HOST_SIGNING_KEY` names a 32-byte seed; without one a handover goes out unsigned.
+`ljos doctor` says which habitats answer and exits 1 when the tracker, the deed store, or the pack does not. It also says whether a host key is found (`~/.config/deedar/host.key`, or `DEEDAR_HOST_SIGNING_KEY`), without which a handover goes out unsigned, and whether each harness it finds on the machine has the server registered and the skill installed.
 
 Other projects may still speak packset, deedar, vissue, or claimdag alone.
 

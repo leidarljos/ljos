@@ -1,0 +1,86 @@
+# The seat protocol
+
+One seat, five stores, five questions. Ask the store that owns the question.
+`ljos` is the one command in front of them; `ljos-mcp` serves the same verbs
+over the Model Context Protocol (MCP). Every verb below has a tool of the same
+name with the prefix `ljos_`.
+
+| question | store | verbs |
+|---|---|---|
+| what is the work, what blocks it, who agrees | tracker (vissue) | `recall`, `vote`, `consensus`, `deed`; `vissue create`, `vissue note`, `vissue update` |
+| what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
+| what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
+| which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
+| how do the voters weigh each other | pack, trust rows | `trust`, `learn` |
+
+A failure is a store not answering. It is never an empty answer. When a verb
+fails, run `doctor` before drawing any conclusion.
+
+## Before the work: a sitting
+
+Run these in this order. Each one answers something the next one needs.
+
+1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
+   `packset ensure` starts a pack writer. Do not proceed on a `no`.
+2. `ljos cards`. What the human froze. Read, never write.
+3. `ljos due`. Read every claim listed, then `ljos graded ID` for each one,
+   `--lapsed` when you had to look it up. The review clock moves only when
+   you grade.
+4. `ljos search TOPIC`, then `ljos island TASK` with the task in your own
+   words. The island is the cluster of memories this task touches, the hits
+   are only its seeds.
+5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
+   cited so far.
+6. `ljos claim ISSUE --assignee NAME`. One live claim per name. `busy` means
+   you still hold another node: `ljos complete` it, or `ljos release` it.
+
+No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
+Every piece of work has an issue before it has a claim.
+
+## During the work
+
+- Every artefact the work produces is a deed, then a citation:
+  `deedar create file --name NAME --path PATH --agent NAME` prints an
+  accession; `ljos deed ISSUE --add ACCESSION` cites it on the issue.
+  Citation is not a merge, and the product is never pasted into the ticket.
+- Every lesson that will still be true next sitting is one `ljos remember`
+  of two short sentences at most. A standing choice between two ways is one
+  `ljos prefer`. Never a transcript, never a summary of the session.
+- Every decision with more than one defensible answer is a ballot:
+  `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
+  `ljos consensus ISSUE`. A tally is a count; the consensus is the settle
+  under the trust rows.
+- Progress goes on the issue, dated: `vissue note ISSUE "..."`.
+
+## After the work
+
+1. `ljos island TASK --fire` when the island served: the strongest memories
+   fire together and their links gain weight.
+2. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
+   the session node does not close the ticket: `vissue update ISSUE -s DONE`
+   does, when the work is accepted.
+3. `ljos learn ISSUE --outcome OPTION` when the world says which option was
+   right. Every voter it refuted shrinks in every other voter's row.
+4. `ljos handover --out DIR --issue ISSUE` when another seat takes over;
+   the receiver runs `ljos receive DIR`, then `--import`.
+
+## Refusals worth knowing
+
+- `claim: assignee busy HEX`: you hold that node. `ljos release HEX
+  --assignee NAME` hands it back, `ljos complete HEX` finishes it.
+- `complete: status not terminal`: the statuses are `done`, `failed`,
+  `cancelled`. To stop without finishing, `release`.
+- `not a deed accession`: `--why` on `forget` and `trust` takes accessions
+  from `deedar`, never free text.
+- `the pack writer did not answer`: the pack is down, not empty.
+  `packset ensure`.
+- `ljos policy ARGV` prints the line a command would run under argv law. It
+  is not part of a sitting and it is not a check.
+
+## Identity and environment
+
+Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`,
+the deed store and claim graph in the user's state directories, the tracker
+at the root `vissue identity` prints, and the host key at
+`~/.config/deedar/host.key` when it exists. `VISSUE_AGENT` names the identity
+a ballot or claim is recorded under; set it when you vote as more than one.

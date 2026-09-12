@@ -19,13 +19,16 @@
 | =recall ID= | tracker | the working set |
 | =vote ID [--for OPTION]= | tracker | cast, or read the tally |
 | =consensus ID= | consensus, tracker | settle under the pack's trust rows |
-| =claim ID --assignee NAME= | claim graph | a session node for a tracker id |
-| =complete ID [--status S]= | claim graph | finish the session node |
+| =claim ID --assignee NAME= | claim graph | a session node for a tracker id; a busy refusal names what the name still holds |
+| =release ID --assignee NAME= | claim graph | hand the session node back unfinished: ready, generation moved |
+| =complete ID [--status done\vert failed\vert cancelled]= | claim graph | finish the session node |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =policy ARGV...= | policy | print the line as it would run |
 | =handover --out DIR [--project P]... [--issue I]...= | all | pack, seal, sign |
 | =receive DIR [--since BRIDGE] [--import]= | all | check, and import the atoms |
-| =doctor= | all | which habitats answer |
+| =doctor= | all | which habitats answer, and whether the harnesses found are onboarded |
+| =protocol= | none | print the sitting protocol |
+| =onboard [--harness NAME\vert json] [--dry-run] [--example]= | runner | register =ljos-mcp= with a runner named in =~/.config/ljos/harnesses.toml= and install the protocol as its skill; =json= prints the entry |
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.
@@ -34,21 +37,23 @@ to one actor; a 32-hex id passes through.
 
 Writers: =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
 =ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_claim=,
-=ljos_complete=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search=,
+=ljos_release=, =ljos_complete=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search=,
 =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
 =ljos_consensus=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
-=ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:
-=start_a_sitting=, =check_a_handover=.
+=ljos://protocol=, =ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:
+=start_a_sitting=, =check_a_handover=. Every tool description opens with
+when to call it.
 
 * Environment
 
 | Variable | Read by |
 |---+---|
-| =PACKSET_URL= | the pack client; required for pack verbs |
+| =PACKSET_URL= | the pack client; unset, =http://127.0.0.1:8761= (=PACKSET_PORT= moves the port); =off= means no pack |
 | =VISSUE_ROOT=, =VISSUE_AGENT= | the tracker |
-| =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers |
+| =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |
 | =LJOS_CARDS_DIR= | the server's cards directory |
+| =XDG_CONFIG_HOME= | where =ljos/harnesses.toml= is read from; =~/.config= when unset |
 
 * The learning rule
 

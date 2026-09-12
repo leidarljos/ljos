@@ -105,3 +105,11 @@ Org headings, one JSON object a line, a content-addressed directory, a
 Cap'n Proto snapshot. Any agent that can run a command or call a Model Context Protocol tool
 can work the seat, and a person can do the same from a shell or an editor.
 A read-only viewer over the four stores is the open work.
+
+The agent is told how, in one text. The protocol =ljos protocol= prints is
+the same text =ljos onboard= installs as a skill and the server serves at
+=ljos://protocol=: which store answers which question, the order of verbs
+in a sitting, and the refusals. An agent that misuses the seat has, in
+every case seen so far, not been handed that text: it asked the pack for
+a deed, claimed with a hex id, or read a failure as an empty answer. The
+tool descriptions open with when to call each one for the same reason.

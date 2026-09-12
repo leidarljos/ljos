@@ -11,7 +11,8 @@ second seat that checked it.
 #+begin_src console
 $ mkdir -p /tmp/seat && cd /tmp/seat && git init -q
 $ export VISSUE_ROOT=/tmp/seat/tracker DEEDAR_URL=file:///tmp/seat/deeds
-$ export PACKSET_URL=$(packset ensure) CLAIMDAG_DIR=/tmp/seat/claims
+$ export CLAIMDAG_DIR=/tmp/seat/claims
+$ packset ensure
 $ ljos doctor
 ok	vissue	...
 ok	pack	http://127.0.0.1:8761 workspace default
@@ -80,12 +81,14 @@ $ deedar create file --name "the fuse patch" --path patch.rs --agent you
 id=deed-file-the-fuse-patch ...
 $ ljos deed $id --add deed-file-the-fuse-patch
 $ ljos recall $id
-$ ljos complete $id
+$ ljos complete $id --status done
 #+end_src
 
 =claim= takes a session node for the tracker id; =deed= cites what the
 work produced on the tracker node; =recall= prints the working set. Completing
-the session node does not close the ticket.
+the session node does not close the ticket. To stop without finishing,
+=ljos release $id --assignee you= hands the node back; until then a second
+=claim= under the same name is refused, and the refusal names this issue.
 
 * 4. The handover loop
 
@@ -113,6 +116,23 @@ which deeds the work produced, and checked all of it before importing. Set
 =DEEDAR_HOST_SIGNING_KEY= on the sender to a 32-byte seed and the manifest
 and log head come signed; the receiver accepts the key in its store's
 =layout=.
+
+* 5. Hand the protocol to an agent
+
+#+begin_src console
+$ ljos protocol | head -3
+# The seat protocol
+
+One seat, five stores, five questions. Ask the store that owns the question.
+$ ljos onboard --harness json
+{ "mcpServers": { "ljos": { "type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", ... } } }
+#+end_src
+
+That entry goes into any runner that registers MCP servers by hand. A
+runner described in =~/.config/ljos/harnesses.toml= is onboarded in one
+verb, =ljos onboard --harness NAME=, which registers the server and installs
+the protocol as the runner's skill; the [[file:howto.org][how-to]] shows the
+file. The agent's next sitting then runs in the order above.
 
 * Where next
 
