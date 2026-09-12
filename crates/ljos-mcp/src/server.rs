@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, calibrate, cards, claim, consensus_steps_for, doctor, due, finish, graded,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish, graded,
     handover, island_entities, learn_and_write, node_for, on_path, packset_forget, packset_island,
     packset_search, packset_write, personas_from_pack, policy_line, receive, release, rows_about,
     run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust, Persona,
@@ -98,6 +98,15 @@ pub struct VoteArgs {
     /// the seat's own identity.
     #[serde(rename = "as")]
     pub as_persona: Option<String>,
+}
+
+/// A persona and the issue it will read.
+#[derive(Deserialize, JsonSchema)]
+pub struct BriefArgs {
+    /// The persona's name, as written with `ljos_persona`.
+    pub name: String,
+    /// The tracker id of the issue.
+    pub issue: String,
 }
 
 /// A voter with a view.
@@ -801,6 +810,18 @@ impl LjosServer {
     }
 
     #[tool(
+        description = "Call this to start a subagent that plays a persona on an issue: the text it should begin from. The persona's view and anchor, what the seat knows on its domains (preferences first), the issue's working set, and the one ballot it must end with. Read-only.",
+        annotations(title = "Brief a persona", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_brief(
+        &self,
+        Parameters(args): Parameters<BriefArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = brief(&args.name, &args.issue).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
         description = "Call this when the work wants a voter with a view of its own, such as a reviewer for a broad audience or a domain expert: write a persona with a name, an anchor in [0, 1] for how far it moves off its ballot in a settle (0 never moves), a sentence or two on how it reads the work, and the domains it speaks to. Then vote with `as` set to its name; ljos_consensus reads its anchor.",
         annotations(
             title = "Write a persona",
@@ -1086,10 +1107,11 @@ impl LjosServer {
             "Run a panel on {issue}.\n\n\
              The personas in this seat's pack:\n{roster}\n\n\
              1. `ljos_recall` on {issue}, and `ljos_search` for what the seat knows about it.\n\
-             2. For each persona, start one subagent with the persona's view as its brief and \
-                the recall as its material. Each subagent reads the work in its own way and \
-                ends by casting exactly one ballot: `ljos_vote` on {issue} with `as` set to \
-                the persona's name, for the option it would defend. Subagents run in \
+             2. For each persona, `ljos_brief` with its name and {issue}, and start one \
+                subagent with that text as its whole brief: the persona's view, what the seat \
+                knows on its domains, the working set. Each subagent reads the work in its own \
+                way and ends by casting exactly one ballot: `ljos_vote` on {issue} with `as` \
+                set to the persona's name, for the option it would defend. Subagents run in \
                 parallel and do not see each other's ballots.\n\
              3. `ljos_consensus` on {issue}. The settle weighs the ballots by the trust rows \
                 the pack holds and holds each persona to its ballot by its anchor; it \
@@ -1235,7 +1257,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            27,
+            28,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1406,6 +1428,7 @@ mod tests {
             said,
             &[
                 "`ljos_recall`",
+                "`ljos_brief`",
                 "`ljos_vote`",
                 "`ljos_consensus`",
                 "`ljos_learn`",

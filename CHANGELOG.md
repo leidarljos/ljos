@@ -13,6 +13,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   row that applies stands in for the unscoped row of its pair instead of
   adding to it. Islands print claims only; persona and trust atoms are
   weighed, not recalled.
+- `ljos brief NAME ISSUE` and `ljos_brief`: the text a subagent playing a
+  persona starts from; `run_a_panel` starts each member from it.
 - `--version`. A claim on an issue whose earlier sitting finished reopens
   the session node (`claimdag reopen`) and takes it.
 

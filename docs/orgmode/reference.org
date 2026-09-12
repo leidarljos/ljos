@@ -17,6 +17,7 @@
 | =graded ID [--lapsed]= | pack | one review graded |
 | =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
 | =persona NAME --anchor A --view TEXT [--about DOMAIN]...= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot |
+| =brief NAME ISSUE= | pack, tracker | what a subagent playing the persona starts from: view, what the seat knows on its domains, the working set |
 | =learn ID --outcome OPTION [--beta B]= | tracker, pack | reweigh voters by what turned out right |
 | =evidence ACCESSION= / =current ACCESSION= | deed store | intact; still the tip |
 | =deed ID [--add ACCESSION]= | tracker | cite a deed on a node, or list citations |
@@ -44,7 +45,7 @@ Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_
 =ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_claim=,
 =ljos_release=, =ljos_complete=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search=,
 =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
-=ljos_consensus=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
+=ljos_consensus=, =ljos_brief=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
 =ljos://protocol=, =ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:
 =start_a_sitting=, =run_a_panel=, =check_a_handover=. Every tool description opens with
 when to call it.

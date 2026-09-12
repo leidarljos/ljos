@@ -23,6 +23,7 @@ ljos policy -- ls
 ljos consensus vissue-xxxx
 ljos trust alice bob 0.8 --why deed-… [--about docs]
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
+ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos vote vissue-xxxx --for hold --as reviewer
 ljos learn vissue-xxxx --outcome ship
 ljos due
@@ -82,7 +83,7 @@ host key at `~/.config/deedar/host.key` when it exists.
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_sitting`, `ljos_finish`, `ljos_calibrate`, `ljos_persona`, `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `run_a_panel` (one subagent per persona in the pack, one ballot each as itself, then the settle), `check_a_handover`. `ljos onboard` writes the registration; by hand it is
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_sitting`, `ljos_finish`, `ljos_calibrate`, `ljos_persona`, `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `run_a_panel` (one subagent per persona in the pack, each started from `ljos_brief`, one ballot each as itself, then the settle), `check_a_handover`. `ljos onboard` writes the registration; by hand it is
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
