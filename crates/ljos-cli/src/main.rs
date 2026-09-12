@@ -497,7 +497,11 @@ fn main() -> Result<()> {
                 // the runner's scp, so the receiving seat's keys and hosts
                 // apply as they would by hand.
                 run_captured("scp", &["-rq", &out.display().to_string(), &dest])?;
-                println!("copied to {dest}; there, `ljos receive {}`", out.file_name().map_or_else(|| "DIR".into(), |n| n.to_string_lossy().into_owned()));
+                println!(
+                    "copied to {dest}; there, `ljos receive {}`",
+                    out.file_name()
+                        .map_or_else(|| "DIR".into(), |n| n.to_string_lossy().into_owned())
+                );
             }
         }
         Cmd::Receive { dir, since, import } => {
