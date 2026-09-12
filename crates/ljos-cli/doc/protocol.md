@@ -67,7 +67,10 @@ Every piece of work has an issue before it has a claim.
   island is about, so being wrong on one topic costs nothing elsewhere.
   A panel is one subagent per persona, briefed with the persona's view,
   each casting one ballot as itself, then `ljos consensus`; over MCP the
-  `run_a_panel` prompt orders it.
+  `run_a_panel` prompt orders it. The kind of work sets the dynamics: tag
+  the issue `broad` when the panel is a broad audience, and the settle runs
+  bounded confidence, so clusters are allowed and reported instead of being
+  averaged into one position.
 - Progress goes on the issue, dated: `vissue note ISSUE "..."`.
 
 ## After the work

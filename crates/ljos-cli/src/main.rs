@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, calibrate, cards, claim, consensus_steps_anchored, doctor, due_report,
+    ballots_from_json, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
     finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
     hook_call, hook_context, hook_output, island_entities, join, learn_about, node_for, on_path,
     onboard, packset_forget, packset_island, packset_search, packset_write, personas_from_pack,
@@ -303,16 +303,18 @@ fn main() -> Result<()> {
         }
         Cmd::Consensus { id } => {
             // Rows scoped to a domain apply when the issue is about it; the
-            // personas' anchors go to both settles.
-            let topic = issue_topic(&id);
+            // personas' anchors go to both settles; the issue's tags pick
+            // the model.
+            let (topic, tags) = issue_topic_and_tags(&id);
             let trust = rows_about(&pack_trust_or_none(), &topic);
             let personas = personas_from_pack().unwrap_or_default();
-            for step in consensus_steps_anchored(
+            for step in consensus_steps_for(
                 &id,
                 on_path("ljos-consensus"),
                 on_path("vissue"),
                 &trust,
                 &personas,
+                &tags,
             )? {
                 run(step.bin, &step.args)?;
             }
@@ -417,14 +419,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The words an issue is about, from its title; none when the tracker does
-/// not answer, which scopes nothing out.
-fn issue_topic(id: &str) -> Vec<String> {
-    run_captured("vissue", &["show", id, "--json"])
+/// The words an issue is about, from its title, and its tags; none of
+/// either when the tracker does not answer, which scopes nothing out.
+fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
+    let Some(v) = run_captured("vissue", &["show", id, "--json"])
         .ok()
         .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok())
-        .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(topic_words))
-        .unwrap_or_default()
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let topic = v
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(topic_words)
+        .unwrap_or_default();
+    let tags = v
+        .get("org_tags")
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.as_str())
+        .map(str::to_lowercase)
+        .collect();
+    (topic, tags)
 }
 
 /// The pack's rows, or none with a note: a seat without a pack still settles.

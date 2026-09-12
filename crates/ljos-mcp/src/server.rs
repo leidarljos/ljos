@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, calibrate, cards, claim, consensus_steps_anchored, doctor, due, finish,
+    ballots_from_json, calibrate, cards, claim, consensus_steps_for, doctor, due, finish,
     graded, handover, island_entities, learn_about, node_for, on_path, packset_forget,
     packset_island, packset_search, packset_write, personas_from_pack, policy_line, receive,
     release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
@@ -744,19 +744,29 @@ impl LjosServer {
     ) -> Result<Json<Vec<Said>>, McpError> {
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.
-        let topic = run_captured("vissue", &["show", &args.issue, "--json"])
+        let shown = run_captured("vissue", &["show", &args.issue, "--json"])
             .ok()
-            .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok())
+            .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok());
+        let topic = shown
+            .as_ref()
             .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(topic_words))
             .unwrap_or_default();
+        let tags: Vec<String> = shown
+            .as_ref()
+            .and_then(|v| v.get("org_tags").and_then(|t| t.as_array()).cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.as_str().map(str::to_lowercase))
+            .collect();
         let trust = rows_about(&trust_from_pack().unwrap_or_default(), &topic);
         let personas = personas_from_pack().unwrap_or_default();
-        let steps = consensus_steps_anchored(
+        let steps = consensus_steps_for(
             &args.issue,
             on_path("ljos-consensus"),
             on_path("vissue"),
             &trust,
             &personas,
+            &tags,
         )
         .map_err(refused)?;
         let mut out = Vec::new();

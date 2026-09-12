@@ -697,9 +697,42 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
         call.session.as_deref(),
         &rows.iter().filter_map(|h| h.id.clone()).collect::<Vec<_>>(),
     );
-    format!(
+    let mut out = format!(
         "What this seat already knows that bears on this (from the pack; `ljos search` for more):\n{}",
         lines.join("\n")
+    );
+    if !nudge.is_empty() {
+        out.push('\n');
+        out.push_str(&nudge);
+    }
+    out
+}
+
+/// On a prompt, once per session: how many claims are due for review. The
+/// review loop runs only when somebody grades, and nobody grades what they
+/// were not told about.
+fn due_nudge(call: &HookCall) -> String {
+    if call.event != "UserPromptSubmit" {
+        return String::new();
+    }
+    let key = "due-nudge".to_string();
+    if seen_ids(call.session.as_deref()).contains(&key) {
+        return String::new();
+    }
+    let Ok(client) = pack() else {
+        return String::new();
+    };
+    let Ok(atoms) = client.atoms_as_of(&client.workspace(), None) else {
+        return String::new();
+    };
+    let due = due_of(&atoms, &now_utc()).len();
+    if due == 0 {
+        return String::new();
+    }
+    mark_seen(call.session.as_deref(), &[key]);
+    format!(
+        "{due} claim{} due for review in this seat: `ljos due`, read each, then `ljos graded ID` (or `--lapsed`).",
+        if due == 1 { " is" } else { "s are" }
     )
 }
 
@@ -2261,6 +2294,47 @@ pub fn consensus_steps(
     consensus_steps_anchored(id, have_ljos, have_vissue, trust, &[])
 }
 
+/// The tag on an issue that asks for bounded confidence: a panel for a
+/// broad audience is allowed to settle into clusters, and the settle says
+/// how far apart they are, where a single-position model would average
+/// them away. Without it the anchored model runs.
+pub const BROAD_TAG: &str = "broad";
+
+/// The confidence bound a `broad` issue settles under: voters within this
+/// L1 distance of each other's opinion listen to each other.
+pub const BROAD_EPSILON: f64 = 1.0;
+
+/// The model flags an issue's tags ask for, beside the rows and anchors.
+/// The kind of work sets the dynamics: `broad` runs bounded confidence.
+#[must_use]
+pub fn settle_flags_for(tags: &[String]) -> Vec<String> {
+    if tags.iter().any(|t| t == BROAD_TAG) {
+        vec!["--epsilon".into(), BROAD_EPSILON.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// [`consensus_steps_anchored`] with the model flags the issue's tags ask
+/// for on the model crate's settle.
+pub fn consensus_steps_for(
+    id: &str,
+    have_ljos: bool,
+    have_vissue: bool,
+    trust: &[Trust],
+    personas: &[Persona],
+    tags: &[String],
+) -> Result<Vec<ConsensusStep>> {
+    let mut steps = consensus_steps_anchored(id, have_ljos, have_vissue, trust, personas)?;
+    let flags = settle_flags_for(tags);
+    if !flags.is_empty() {
+        for step in steps.iter_mut().filter(|s| s.bin == "ljos-consensus") {
+            step.args.extend(flags.iter().cloned());
+        }
+    }
+    Ok(steps)
+}
+
 /// [`consensus_steps`] passing the personas' anchors to both settles as
 /// `--susceptibility-of`, so a persona holds its ballot as much as it says.
 pub fn consensus_steps_anchored(
@@ -2561,6 +2635,14 @@ mod tests {
                 "{step:?}"
             );
         }
+        // The kind of work sets the dynamics: a broad-audience issue runs
+        // bounded confidence on the model crate, and the tracker verb, which
+        // has no such model, is left as it was.
+        let broad =
+            consensus_steps_for("x-1", true, true, &[], &got, &["broad".to_string()]).unwrap();
+        assert!(broad[0].args.contains(&"--epsilon".to_string()), "{:?}", broad[0]);
+        assert!(!broad[1].args.contains(&"--epsilon".to_string()), "{:?}", broad[1]);
+        assert!(settle_flags_for(&["feature".to_string()]).is_empty());
     }
 
     /// A claim that never entered the clock is due now; a scheduled one is

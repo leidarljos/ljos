@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The kind of work sets the dynamics: an issue tagged `broad` settles
+  under bounded confidence on the model crate; untagged issues run the
+  anchored model. On a prompt the hook says, once per session, how many
+  claims are due for review. `sitting` no longer waits on the runners'
+  command lines; `doctor` asks them beside the seat's own rows.
 - `--version`. A claim on an issue whose earlier sitting finished reopens
   the session node (`claimdag reopen`) and takes it.
 

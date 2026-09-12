@@ -22,7 +22,7 @@
 | =deed ID [--add ACCESSION]= | tracker | cite a deed on a node, or list citations |
 | =recall ID= | tracker | the working set |
 | =vote ID [--for OPTION] [--as PERSONA]= | tracker | cast, as the seat or as a persona, or read the tally |
-| =consensus ID= | consensus, tracker | settle under the pack's rows that apply to the issue, with every persona's anchor |
+| =consensus ID= | consensus, tracker | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged =broad= runs bounded confidence |
 | =claim ID --assignee NAME= | claim graph | a session node for a tracker id; a busy refusal names what the name still holds |
 | =release ID --assignee NAME= | claim graph | hand the session node back unfinished: ready, generation moved |
 | =complete ID [--status done\vert failed\vert cancelled]= | claim graph | finish the session node |
