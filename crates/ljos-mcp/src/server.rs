@@ -1,0 +1,702 @@
+//! The seat as an agent surface.
+//!
+//! The command line's twelve verbs, none owned here: a pack write is an HTTP
+//! call, everything else execs the habitat's own binary and hands back what
+//! it said. Every tool says whether it writes; a habitat that refused is an
+//! error; the cards are read-only resources under `ljos://cards/`; the
+//! sequences that cross habitats are prompts. The pack is written only by
+//! Remember and Prefer, and the text is the claim.
+
+use std::path::PathBuf;
+
+use ljos_cli::{
+    cards, consensus_steps, on_path, packset_search, packset_write, policy_line, run_captured,
+    CARD_NAMES, POLICY_TCB,
+};
+use rmcp::{
+    handler::server::wrapper::Json, handler::server::wrapper::Parameters,
+    handler::server::ServerHandler, model::*, prompt, prompt_handler, prompt_router, tool,
+    tool_handler, tool_router, ErrorData as McpError,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// The scheme the cards are addressable under.
+const SCHEME: &str = "ljos";
+
+#[derive(Clone)]
+pub struct LjosServer {
+    /// Where the cards are read from. The command line's `--dir`.
+    cards_dir: PathBuf,
+}
+
+// ---- arguments -------------------------------------------------------------
+
+/// One explicit claim.
+#[derive(Deserialize, JsonSchema)]
+pub struct ClaimArgs {
+    /// The claim, as it will be stored. Two short sentences at most; the pack
+    /// refuses more. Not a transcript, not a summary of one.
+    pub text: String,
+}
+
+/// A question for the pack.
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchArgs {
+    /// What to ask the seat's standing knowledge.
+    pub query: String,
+}
+
+/// One deed accession.
+#[derive(Deserialize, JsonSchema)]
+pub struct AccessionArgs {
+    /// `deed-<kind>-<slug>`, or `sha256:` of the deed or of a product path.
+    pub accession: String,
+}
+
+/// A tracker node, and optionally a deed to cite on it.
+#[derive(Deserialize, JsonSchema)]
+pub struct DeedArgs {
+    /// The issue id.
+    pub issue: String,
+    /// An accession to cite. Absent, the tool lists what the issue cites.
+    pub add: Option<String>,
+}
+
+/// A tracker node.
+#[derive(Deserialize, JsonSchema)]
+pub struct IssueArgs {
+    /// The issue id.
+    pub issue: String,
+}
+
+/// A ballot, or a request for the tally.
+#[derive(Deserialize, JsonSchema)]
+pub struct VoteArgs {
+    /// The issue id.
+    pub issue: String,
+    /// `accept` or `reject`. Absent, the tool shows the tally.
+    pub choice: Option<String>,
+}
+
+/// A session node to take.
+#[derive(Deserialize, JsonSchema)]
+pub struct TakeArgs {
+    /// The node id, 32 hex.
+    pub node: String,
+    /// The assignee, 32 hex. One live claim per assignee.
+    pub assignee: String,
+}
+
+/// A session node to finish.
+#[derive(Deserialize, JsonSchema)]
+pub struct FinishArgs {
+    /// The node id, 32 hex.
+    pub node: String,
+    /// A terminal status. Defaults to the graph's own default.
+    pub status: Option<String>,
+}
+
+/// An argv to check.
+#[derive(Deserialize, JsonSchema)]
+pub struct ArgvArgs {
+    /// The command line, one element per argument.
+    pub argv: Vec<String>,
+}
+
+/// No arguments.
+#[derive(Deserialize, JsonSchema)]
+pub struct NoArgs {}
+
+// ---- answers ---------------------------------------------------------------
+
+/// What a habitat printed.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Said {
+    /// The habitat's answer, as it printed it.
+    pub text: String,
+    /// What it said aside, when anything.
+    pub aside: Option<String>,
+}
+
+/// One remembered thing.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HitRow {
+    /// The atom's id, when it has one.
+    pub id: Option<String>,
+    /// `lesson` or `preference`, or another kind the pack holds.
+    pub kind: String,
+    /// The claim as it was stored.
+    pub text: String,
+    /// The pack's score for it.
+    pub score: f64,
+}
+
+/// The argv law's answer.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PolicyRow {
+    /// The line as it would run.
+    pub argv: String,
+    /// What this process is not: a check. Reloading a pack is not one either.
+    pub note: String,
+}
+
+fn said(out: ljos_cli::Said) -> Json<Said> {
+    let aside = out.stderr.trim();
+    Json(Said {
+        text: out.stdout,
+        aside: (!aside.is_empty()).then(|| aside.to_string()),
+    })
+}
+
+/// A refusal, as the protocol carries one.
+fn refused(e: anyhow::Error) -> McpError {
+    McpError::internal_error(format!("{e:#}"), None)
+}
+
+/// Run a habitat's verb and hand back what it said.
+fn habitat(bin: &str, args: &[&str]) -> Result<Json<Said>, McpError> {
+    run_captured(bin, args).map(said).map_err(refused)
+}
+
+#[tool_router]
+impl LjosServer {
+    /// Read the cards directory from `LJOS_CARDS_DIR`, or the working directory,
+    /// the same default the command line has.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let cards_dir = std::env::var_os("LJOS_CARDS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self { cards_dir }
+    }
+
+    /// Open on a named cards directory, for a test.
+    #[cfg(test)]
+    #[must_use]
+    pub fn at(cards_dir: PathBuf) -> Self {
+        Self { cards_dir }
+    }
+
+    // ---- the pack --------------------------------------------------------
+
+    #[tool(
+        description = "Remember one lesson. The text is the claim and is stored as given: two short sentences at most, never a transcript. This is one of the two writes the pack accepts.",
+        annotations(
+            title = "Remember",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_remember(
+        &self,
+        Parameters(args): Parameters<ClaimArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        packset_write("Remember", &args.text)
+            .map(Json)
+            .map_err(refused)
+    }
+
+    #[tool(
+        description = "Prefer one thing over another, as a standing preference. Stored as given. This is the other write the pack accepts.",
+        annotations(
+            title = "Prefer",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_prefer(
+        &self,
+        Parameters(args): Parameters<ClaimArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        packset_write("Prefer", &args.text)
+            .map(Json)
+            .map_err(refused)
+    }
+
+    #[tool(
+        description = "What the seat knows, standing. Asks the pack; does not open a deed. An empty list means the pack holds nothing matching, and a failure means the writer is not running, which is a different thing: `packset ensure` starts one.",
+        annotations(
+            title = "Search the pack",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_search(
+        &self,
+        Parameters(args): Parameters<SearchArgs>,
+    ) -> Result<Json<Vec<HitRow>>, McpError> {
+        let hits = packset_search(&args.query).map_err(refused)?;
+        Ok(Json(
+            hits.into_iter()
+                .map(|h| HitRow {
+                    id: h.id,
+                    kind: h.kind,
+                    text: h.text,
+                    score: h.score,
+                })
+                .collect(),
+        ))
+    }
+
+    // ---- the deed store ----------------------------------------------------
+
+    #[tool(
+        description = "Whether a deed's bytes are intact and its sources are too. The deed store answers; an accession it does not hold is a failure, not an empty answer.",
+        annotations(
+            title = "Evidence a deed",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_evidence(
+        &self,
+        Parameters(args): Parameters<AccessionArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        habitat("deedar", &["evidence", &args.accession])
+    }
+
+    #[tool(
+        description = "Whether a deed is still the tip or a later take superseded it. A citation that resolves and is stale is worse than one that fails, because nothing complains.",
+        annotations(
+            title = "Is a deed current",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_current(
+        &self,
+        Parameters(args): Parameters<AccessionArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        habitat("deedar", &["current", &args.accession])
+    }
+
+    // ---- the tracker ---------------------------------------------------------
+
+    #[tool(
+        description = "Cite a deed on a tracker node, or list what the node cites. A citation names the accession; it does not paste the product into the ticket. Citation is not a merge.",
+        annotations(
+            title = "Cite a deed",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_deed(
+        &self,
+        Parameters(args): Parameters<DeedArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        match &args.add {
+            Some(a) => habitat("vissue", &["deed", &args.issue, "--add", a]),
+            None => habitat("vissue", &["deed", &args.issue]),
+        }
+    }
+
+    #[tool(
+        description = "The working set for a tracker node: its plan, what its inputs produced, and its own deeds. Read this before starting the work.",
+        annotations(
+            title = "Recall a node",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_recall(
+        &self,
+        Parameters(args): Parameters<IssueArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        habitat("vissue", &["recall", &args.issue])
+    }
+
+    #[tool(
+        description = "Cast this identity's ballot on a node, or read the tally. One ballot per identity; a recast replaces. A tally is a count and is not the consensus model.",
+        annotations(
+            title = "Vote",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_vote(
+        &self,
+        Parameters(args): Parameters<VoteArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        match &args.choice {
+            Some(c) => habitat("vissue", &["vote", &args.issue, "--for", c]),
+            None => habitat("vissue", &["vote", &args.issue]),
+        }
+    }
+
+    // ---- the session graph --------------------------------------------------
+
+    #[tool(
+        description = "Take a session node. One live claim per assignee; a second is refused with the node already held. Completing a node later does not close a ticket.",
+        annotations(
+            title = "Claim a node",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_claim(
+        &self,
+        Parameters(args): Parameters<TakeArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        habitat(
+            "claimdag",
+            &["claim", &args.node, "--assignee", &args.assignee],
+        )
+    }
+
+    #[tool(
+        description = "Finish a session node. Completing is not closing: the ticket the node cites stays open until the tracker says otherwise.",
+        annotations(
+            title = "Complete a node",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_complete(
+        &self,
+        Parameters(args): Parameters<FinishArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        match &args.status {
+            Some(s) => habitat("claimdag", &["complete", &args.node, "--status", s]),
+            None => habitat("claimdag", &["complete", &args.node]),
+        }
+    }
+
+    // ---- cards, policy, consensus -------------------------------------------
+
+    #[tool(
+        description = "The cards: what the human froze. USER.md and MEMORY.md from the cards directory, read-only. A missing card prints nothing. Nothing here writes one.",
+        annotations(
+            title = "Read the cards",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_cards(&self, Parameters(_): Parameters<NoArgs>) -> Result<Json<Said>, McpError> {
+        cards(&self.cards_dir)
+            .map(|text| Json(Said { text, aside: None }))
+            .map_err(refused)
+    }
+
+    #[tool(
+        description = "Argv law: print the line as it would run. This is not a check, and reloading a policy pack is not one either; grok-policyd is the trusted base when it exists.",
+        annotations(
+            title = "Print an argv",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_policy(
+        &self,
+        Parameters(args): Parameters<ArgvArgs>,
+    ) -> Result<Json<PolicyRow>, McpError> {
+        let argv = policy_line(&args.argv).map_err(refused)?;
+        Ok(Json(PolicyRow {
+            argv,
+            note: POLICY_TCB.to_string(),
+        }))
+    }
+
+    #[tool(
+        description = "Settle agreement on a node: the consensus model first, DeGroot or Friedkin-Johnsen over the trust graph, then the tracker's own verb. Not a vote count.",
+        annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_consensus(
+        &self,
+        Parameters(args): Parameters<IssueArgs>,
+    ) -> Result<Json<Vec<Said>>, McpError> {
+        let steps = consensus_steps(&args.issue, on_path("ljos-consensus"), on_path("vissue"))
+            .map_err(refused)?;
+        let mut out = Vec::new();
+        for step in steps {
+            let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+            out.push(habitat(step.bin, &args)?.0);
+        }
+        Ok(Json(out))
+    }
+}
+
+// ---- prompts ---------------------------------------------------------------
+
+/// A node to pick up.
+#[derive(Deserialize, JsonSchema)]
+pub struct PickUpArgs {
+    /// The tracker id of the work, when known.
+    pub issue: Option<String>,
+}
+
+/// A handover to check.
+#[derive(Deserialize, JsonSchema)]
+pub struct HandoverArgs {
+    /// The satchel directory that arrived.
+    pub dir: String,
+}
+
+fn asked(text: String) -> Vec<PromptMessage> {
+    vec![PromptMessage::new_text(Role::User, text)]
+}
+
+#[prompt_router(vis = "pub(crate)")]
+impl LjosServer {
+    /// Start a sitting: read the cards, ask the pack, then take the work.
+    #[prompt(name = "start_a_sitting")]
+    pub async fn start_a_sitting_prompt(
+        &self,
+        Parameters(args): Parameters<PickUpArgs>,
+    ) -> Result<Vec<PromptMessage>, McpError> {
+        let work = args.issue.filter(|i| !i.trim().is_empty()).map_or_else(
+            || "what the tracker says is ready".to_string(),
+            |i| format!("tracker node {i}"),
+        );
+        Ok(asked(format!(
+            "Begin a sitting on {work}.\n\
+             \n\
+             Four habitats answer four different questions, and the order matters:\n\
+             \n\
+             1. `ljos_cards`. What the human froze. Read them first and leave them\n\
+                as they are; if they are empty, they are empty.\n\
+             2. `ljos_search` for what the seat already knows about this work. An\n\
+                empty list means the pack holds nothing; a failure means the writer\n\
+                is down, which is a different thing.\n\
+             3. `ljos_recall` on the node. What it stands on, what its inputs\n\
+                produced, and what it has cited so far.\n\
+             4. `ljos_claim` a session node for it. One live claim per assignee.\n\
+             \n\
+             When something is learned that will still be true next sitting, say it\n\
+             with `ljos_remember` in two short sentences. When the work produces\n\
+             something, mint the deed in the deed store and `ljos_deed` it on the\n\
+             node. Completing the session node does not close the ticket."
+        )))
+    }
+
+    /// Check a handover somebody sent, in the order the questions come.
+    #[prompt(name = "check_a_handover")]
+    pub async fn check_a_handover_prompt(
+        &self,
+        Parameters(args): Parameters<HandoverArgs>,
+    ) -> Result<Vec<PromptMessage>, McpError> {
+        let dir = args.dir;
+        Ok(asked(format!(
+            "Check the handover at {dir}.\n\
+             \n\
+             Three questions, each unanswered by the one before it:\n\
+             \n\
+             1. Did it arrive as written. `vissue satchel --verify {dir}` checks the\n\
+                payload against the manifest and says what it did not check.\n\
+             2. Who wrote it. `deedar vouch check` on the manifest, against the\n\
+                keys this seat accepts.\n\
+             3. Do the deeds predate the asking. `deedar check {dir}` walks every\n\
+                receipt to the log head, and refuses the bag whole if one fails.\n\
+             \n\
+             Then, for each deed the bag names, `ljos_current`: a deed that arrived\n\
+             intact and is no longer the tip is a different finding from one that\n\
+             failed. Report which of the three questions passed. A bag that passes\n\
+             the first two and fails the third is not a bag that mostly checked out."
+        )))
+    }
+}
+
+#[tool_handler]
+#[prompt_handler(router = Self::prompt_router())]
+impl ServerHandler for LjosServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_prompts()
+                .build(),
+        )
+        .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "One seat over five habitats. The pack is written only by remember and \
+             prefer, and the text is the claim. Cards are read at ljos://cards/ and \
+             never written. Citing a deed on a node names an accession and does not \
+             paste the product. Completing a session node does not close a ticket. \
+             A tool that fails means a habitat refused or is not running; it is not \
+             an empty answer.",
+        )
+    }
+
+    /// The two cards, and nothing else.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult::with_all_items(
+            CARD_NAMES
+                .iter()
+                .map(|name| {
+                    let mut resource =
+                        Resource::new(format!("{SCHEME}://cards/{name}"), (*name).to_string());
+                    resource.title = Some(format!("{name}, frozen by the human"));
+                    resource.description = Some(
+                        "A card. Read-only; overflow is an error, not a prompt to write more."
+                            .into(),
+                    );
+                    resource.mime_type = Some("text/markdown".to_string());
+                    resource
+                })
+                .collect(),
+        ))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        let uri = request.uri.clone();
+        let name = card_named(&uri).ok_or_else(|| {
+            McpError::resource_not_found(
+                format!("{uri}: the cards are {SCHEME}://cards/USER.md and MEMORY.md"),
+                None,
+            )
+        })?;
+        let path = self.cards_dir.join(name);
+        // A missing card is an empty card, which is what the command line prints
+        // for it too: nothing is created to fill the gap.
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        Ok(ReadResourceResponse::from(ReadResourceResult {
+            contents: vec![ResourceContents::text(text, uri)],
+        }))
+    }
+}
+
+/// The card a resource uri names; anything else, including a third file in
+/// the same directory, is nothing.
+fn card_named(uri: &str) -> Option<&'static str> {
+    let name = uri.strip_prefix(&format!("{SCHEME}://cards/"))?;
+    CARD_NAMES.iter().copied().find(|card| *card == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every tool is annotated, and the six writers are the contract's six.
+    #[test]
+    fn the_writers_are_the_six_the_contract_names() {
+        let tools = LjosServer::tool_router().list_all();
+        assert_eq!(
+            tools.len(),
+            12,
+            "{:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        let mut writers: Vec<String> = Vec::new();
+        for tool in &tools {
+            let hints = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} carries no annotations", tool.name));
+            assert_eq!(hints.open_world_hint, Some(false), "{}", tool.name);
+            match hints.read_only_hint {
+                Some(true) => {}
+                Some(false) => {
+                    assert_eq!(
+                        hints.destructive_hint,
+                        Some(false),
+                        "{} destroys",
+                        tool.name
+                    );
+                    writers.push(tool.name.to_string());
+                }
+                None => panic!("{} does not say whether it writes", tool.name),
+            }
+        }
+        writers.sort();
+        assert_eq!(
+            writers,
+            [
+                "ljos_claim",
+                "ljos_complete",
+                "ljos_deed",
+                "ljos_prefer",
+                "ljos_remember",
+                "ljos_vote"
+            ]
+        );
+    }
+
+    /// A refusal is an error, not a success carrying an error message.
+    #[tokio::test]
+    async fn a_refusal_is_an_error() {
+        let server = LjosServer::at(std::env::temp_dir());
+        let Err(err) = server
+            .ljos_evidence(Parameters(AccessionArgs {
+                accession: "deed-file-nobody-minted-this".into(),
+            }))
+            .await
+        else {
+            panic!("a missing deed came back as an answer");
+        };
+        let said = format!("{err:?}");
+        assert!(
+            said.contains("not on PATH") || said.contains("exited") || said.contains("not found"),
+            "{said}"
+        );
+    }
+
+    /// Cards are the two named files; nothing is created; nothing else reads.
+    #[tokio::test]
+    async fn cards_are_read_and_never_made() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("USER.md"), "the user\n").expect("write");
+        let server = LjosServer::at(dir.path().to_path_buf());
+        let out = server
+            .ljos_cards(Parameters(NoArgs {}))
+            .await
+            .expect("reads");
+        assert!(out.0.text.contains("the user"));
+        assert!(
+            !dir.path().join("MEMORY.md").exists(),
+            "a missing card was created"
+        );
+
+        assert_eq!(card_named("ljos://cards/USER.md"), Some("USER.md"));
+        assert_eq!(card_named("ljos://cards/MEMORY.md"), Some("MEMORY.md"));
+        assert_eq!(card_named("ljos://cards/NOTES.md"), None);
+        assert_eq!(card_named("ljos://cards/../USER.md"), None);
+        assert_eq!(card_named("file:///etc/passwd"), None);
+    }
+
+    /// Every prompt renders from what it declares.
+    #[tokio::test]
+    async fn every_prompt_renders() {
+        let declared = LjosServer::prompt_router().list_all();
+        let mut names: Vec<&str> = declared.iter().map(|p| p.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["check_a_handover", "start_a_sitting"]);
+        let server = LjosServer::at(std::env::temp_dir());
+        let begun = server
+            .start_a_sitting_prompt(Parameters(PickUpArgs {
+                issue: Some("proj-1a2b".into()),
+            }))
+            .await
+            .expect("renders");
+        let text = format!("{:?}", begun[0].content);
+        assert!(text.contains("proj-1a2b"), "{text}");
+        assert!(text.contains("does not close the ticket"), "{text}");
+        let checked = server
+            .check_a_handover_prompt(Parameters(HandoverArgs {
+                dir: "/tmp/bag".into(),
+            }))
+            .await
+            .expect("renders");
+        assert!(format!("{:?}", checked[0].content).contains("/tmp/bag"));
+    }
+}

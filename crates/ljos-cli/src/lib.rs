@@ -157,6 +157,39 @@ pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
     Ok(())
 }
 
+/// What a habitat printed, kept for a caller that has to hand it on. A
+/// non-zero exit is an error carrying stderr.
+pub struct Said {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
+    use std::process::{Command, Stdio};
+    let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
+    let mut cmd = Command::new(path);
+    for a in args {
+        cmd.arg(a.as_ref());
+    }
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("{bin}: could not start"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        let why = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        bail!("{bin} exited {}: {why}", out.status);
+    }
+    Ok(Said { stdout, stderr })
+}
+
 pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
     CARD_NAMES.iter().map(|n| dir.join(n)).collect()
 }
@@ -167,6 +200,18 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+
+    /// A non-zero exit is an error carrying what was said on stderr.
+    #[test]
+    fn a_refusal_is_an_error_not_an_answer() {
+        let err = run_captured("false", &[] as &[&str]).unwrap_err();
+        assert!(err.to_string().contains("false exited"), "{err}");
+        let said = run_captured("sh", &["-c", "echo answered; echo aside >&2"]).unwrap();
+        assert_eq!(said.stdout.trim(), "answered");
+        assert_eq!(said.stderr.trim(), "aside");
+        let said = run_captured("sh", &["-c", "echo reason >&2; exit 3"]).unwrap_err();
+        assert!(said.to_string().contains("reason"), "{said}");
+    }
 
     #[test]
     fn join_keeps_spaces() {
