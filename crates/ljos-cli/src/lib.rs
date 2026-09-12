@@ -713,8 +713,9 @@ pub fn node_for(issue: &str) -> Result<String> {
     Ok(id)
 }
 
-/// The memories a task activates: the pack's island around the cue.
-pub fn packset_island(cue: &str) -> Result<Value> {
+/// The memories a task activates: the pack's island around the cue. With
+/// `fire`, the strongest of them fire together and their links gain weight.
+pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -723,7 +724,7 @@ pub fn packset_island(cue: &str) -> Result<Value> {
         PacksetClient::from_env().context("PACKSET_URL unset; island is GET /v1/activate")?;
     let workspace = client.workspace();
     client
-        .activate(&workspace, cue, 24)
+        .activate(&workspace, cue, 24, fire)
         .context("island: GET /v1/activate failed")
 }
 
