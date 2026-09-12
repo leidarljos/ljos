@@ -73,6 +73,15 @@ walks fade without being deleted. Activation spreads in proportion to
 weight, so the next cue like this one walks a heavier path. The weights are
 on the atom beside the links and travel in a handover.
 
+The island was measured as a ranking on LongMemEval and lost: sessions
+linked to their five nearest by dense cosine, the fused top ten seeding
+the same spreading activation the writer runs, hit@1 0.377 against the
+fused panel's 0.889 over 470 questions, recall@10 unchanged at 0.981.
+Activation flows to the well-connected, which is what a hub is and not
+what a question asks for. The negative fixes the island's place: what the
+seat prints beside the hits at a sitting, for orientation, and what fires
+together after use; never the order the hits come in.
+
 * Time as data
 
 Every record in the seat is dated: an atom carries the writer's clock and,
