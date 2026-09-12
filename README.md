@@ -72,7 +72,9 @@ host key at `~/.config/deedar/host.key` when it exists.
 
 `ljos claim ID --assignee NAME`, `ljos release ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A claim refused as busy names the tracker id the assignee still holds and the two verbs that free it; `release` hands a node back unfinished. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
 
-`ljos policy` prints the argv. It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
+`ljos policy ARGV` prints the argv line, then what the pack knows that bears on it. It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
+
+`ljos hook` is the memory hook for a policy layer or a runner: it reads the action about to happen on stdin (the runner's hook JSON with `tool_input.command` or `prompt`, or a plain argv line) and prints the memories that action activates, standing preferences first, as the runner's `additionalContext` JSON or as plain lines. Nothing to say is no output, so the hook never blocks an action. `ljos onboard` merges it into a runner whose runners-file entry names a `hooks` settings file, on the tool-call and prompt events; `ljos doctor` shows a `runner hook` row. This is how what the seat knows is injected at the point of action rather than waiting to be searched for.
 
 `ljos consensus` reads the pack's live `trust` rows and passes them to both `ljos-consensus settle --issue --trust` and `vissue consensus --trust`, so the two settles weigh the same graph. No rows: every voter weighs the same.
 

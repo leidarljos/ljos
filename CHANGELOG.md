@@ -4,6 +4,15 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+Memory at the point of action:
+
+- `ljos hook` reads a runner's hook JSON (or an argv line) on stdin and
+  answers with the memories the action activates, preferences first, in the
+  runner's `additionalContext` shape or plain lines. `onboard` installs it
+  on a runner's tool-call and prompt events when its table names a `hooks`
+  file; `doctor` shows the row. `ljos policy` prints the memory beside the
+  argv line.
+
 Personas and scoped trust:
 
 - `ljos persona NAME --anchor A --view TEXT [--about DOMAIN]` writes a voter

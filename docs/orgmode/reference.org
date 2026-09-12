@@ -27,7 +27,8 @@
 | =release ID --assignee NAME= | claim graph | hand the session node back unfinished: ready, generation moved |
 | =complete ID [--status done\vert failed\vert cancelled]= | claim graph | finish the session node |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
-| =policy ARGV...= | policy | print the line as it would run |
+| =policy ARGV...= | policy, pack | the line as it would run, then what the pack knows that bears on it |
+| =hook [--limit N]= | pack | the memory hook: hook JSON or argv on stdin, the memories the action activates on stdout |
 | =handover --out DIR [--project P]... [--issue I]...= | all | pack, seal, sign |
 | =receive DIR [--since BRIDGE] [--import]= | all | check, and import the atoms |
 | =doctor= | all | which habitats answer, and whether the harnesses found are onboarded |
@@ -59,6 +60,17 @@ when to call it.
 | =CLAIMDAG_DIR= | the claim graph |
 | =LJOS_CARDS_DIR= | the server's cards directory |
 | =XDG_CONFIG_HOME= | where =ljos/harnesses.toml= is read from; =~/.config= when unset |
+
+A runner's table in =harnesses.toml= may name =hooks=, a JSON settings
+file of the shape ={"hooks": {"<Event>": [{"matcher": "...", "hooks":
+[{"type": "command", "command": "..."}]}]}}=. =onboard= merges
+=ljos hook= into it on the tool-call event (matcher =Bash=) and the prompt
+event (matcher =*=), once each. The hook reads the runner's JSON on stdin
+(=hook_event_name=, =tool_input.command=, =prompt=) and answers
+={"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}=,
+or nothing when the pack holds nothing on the cue. Plain text on stdin is
+read as an argv line and answered in plain lines, which is the shape a
+policy daemon takes.
 
 * The learning rules
 

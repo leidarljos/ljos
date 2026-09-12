@@ -6,9 +6,10 @@ use ljos_cli::{
     ballots_from_json, calibrate, cards, claim, consensus_steps_anchored, doctor, due_report,
     finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
     island_entities, join, learn_about, node_for, on_path, onboard, packset_forget, packset_island,
-    packset_search, packset_write, personas_from_pack, policy_line, receive, release, rows_about,
-    run, run_as, run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust,
-    Persona, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    packset_search, packset_write, personas_from_pack, policy_with_memory, receive, release,
+    rows_about, run, run_as, run_captured, sitting, topic_words, trust_from_pack, write_persona,
+    write_trust, hook_call, hook_context, hook_output, Persona, Trust, HARNESSES_EXAMPLE,
+    LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -109,8 +110,15 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Argv law. Not a store. Does not reload a pack.
+    /// Argv law: the line as it would run, then what the pack knows that bears on it.
     Policy { argv: Vec<String> },
+    /// The memory hook a runner or a policy layer calls before an action: reads the
+    /// hook JSON (or plain text) on stdin, answers with the memories the action activates.
+    Hook {
+        /// Most memories to inject.
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
     /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
     Consensus { id: String },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
@@ -283,7 +291,14 @@ fn main() -> Result<()> {
         Cmd::Cards { dir } => print!("{}", cards(&dir)?),
         Cmd::Policy { argv } => {
             eprintln!("ljos: {POLICY_TCB}");
-            println!("{}", policy_line(&argv)?);
+            print!("{}", policy_with_memory(&argv)?);
+        }
+        Cmd::Hook { limit } => {
+            use std::io::Read;
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let call = hook_call(&input);
+            print!("{}", hook_output(&call, &hook_context(&call.cue, limit)));
         }
         Cmd::Consensus { id } => {
             // Rows scoped to a domain apply when the issue is about it; the

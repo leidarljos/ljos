@@ -112,8 +112,13 @@ under equal weights is a count; under calibrated rows it is not.
 - `ljos due` prints `0 due; nothing scheduled`: the seat has remembered
   nothing, and the review loop has nothing to run on. Remember something.
   `0 due; N scheduled, next at T` is a clock that is running.
-- `ljos policy ARGV` prints the line a command would run under argv law. It
-  is not part of a sitting and it is not a check.
+- `ljos policy ARGV` prints the line a command would run under argv law,
+  then what the pack knows that bears on it. It is not a check.
+- `ljos hook` is the memory hook: a runner or a policy layer pipes the
+  action about to happen (its hook JSON, or the plain argv) and gets back
+  the memories that action activates, preferences first. `ljos onboard`
+  installs it on the runner's tool-call and prompt events, so the seat's
+  memory reaches the agent at the point of action without being asked.
 
 ## Identity and environment
 

@@ -49,6 +49,40 @@ resources still reads it first. Twenty-three tools, fourteen of them
 writers, two prompts (=start_a_sitting=, =check_a_handover=), three
 read-only resources. Each tool description opens with when to call it.
 
+* Inject memory at the point of action
+
+Add =hooks= to the runner's table and onboard again:
+
+#+begin_src toml
+[[harness]]
+name = "runner-with-a-command"
+register = ["runner", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
+registered = ["runner", "mcp", "get", "ljos"]
+skills = "~/.runner/skills"
+hooks = "~/.runner/settings.json"
+#+end_src
+
+#+begin_src console
+$ ljos onboard --harness runner-with-a-command
+ok	host key	/home/you/.config/deedar/host.key exists
+ok	runner-with-a-command mcp	ljos registered
+ok	hook	added the memory hook on PreToolUse, UserPromptSubmit to /home/you/.runner/settings.json
+ok	skill	/home/you/.runner/skills/ljos/SKILL.md is current
+#+end_src
+
+From then on, before each shell command and each prompt, the runner pipes
+the action to =ljos hook= and the memories it activates come back as
+context, preferences first. A policy daemon does the same with the argv:
+
+#+begin_src console
+$ echo "cargo test --release" | ljos hook
+- [preference] Build and test on the cluster through Slurm, never on the laptop.
+- [lesson] The lme dense run needs 40G and sessions only; windows and sessions ran past four hours.
+$ ljos policy cargo test --release
+cargo test --release
+What this seat already knows that bears on this ...
+#+end_src
+
 * Give an agent the protocol without a runner
 
 #+begin_src console

@@ -63,6 +63,13 @@ pub struct Harness {
     pub snippet: Option<String>,
     #[serde(default)]
     pub skills: Option<String>,
+    /// A JSON settings file the runner reads hooks from, in the shape
+    /// `{"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type":
+    /// "command", "command": "..."}]}]}}`. `onboard` merges the seat's
+    /// memory hook into it, so what the seat knows about a command or a
+    /// prompt reaches the agent at the point of action.
+    #[serde(default)]
+    pub hooks: Option<String>,
 }
 
 /// The whole file: `[[harness]]` tables.
@@ -82,6 +89,7 @@ name = "runner-with-a-command"
 register = ["runner", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
 registered = ["runner", "mcp", "get", "ljos"]
 skills = "~/.runner/skills"
+hooks = "~/.runner/settings.json"
 
 [[harness]]
 name = "runner-with-a-config-file"
@@ -329,6 +337,9 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
     };
     let server = server_path()?;
     let mut steps = vec![host_key_step(dry), register_step(h, &server, dry)];
+    if let Some(file) = &h.hooks {
+        steps.push(hook_step(&expand(file), dry));
+    }
     match &h.skills {
         Some(dir) => steps.push(write_skill(&expand(dir), dry)),
         None => steps.push(Step {
@@ -338,6 +349,242 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
         }),
     }
     Ok(steps)
+}
+
+/// The events the memory hook is installed on, with the matcher each takes.
+/// A tool call carries the command about to run; a prompt carries the task
+/// in the person's words. Both are cues the pack can answer.
+pub const HOOK_EVENTS: &[(&str, &str)] = &[("PreToolUse", "Bash"), ("UserPromptSubmit", "*")];
+
+/// The command the runner's hook runs.
+fn hook_command() -> String {
+    which::which("ljos").map_or_else(
+        |_| "ljos hook".to_string(),
+        |p| format!("{} hook", p.display()),
+    )
+}
+
+/// Merge the seat's memory hook into a runner's hooks file, once per event.
+/// The file is JSON with a `hooks` object of event name to matcher groups;
+/// a group whose command is the seat's is left alone, so the step is
+/// idempotent.
+fn hook_step(file: &Path, dry: bool) -> Step {
+    let what = "hook".to_string();
+    let mut root: Value = match std::fs::read_to_string(file) {
+        Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Step {
+                    what,
+                    detail: format!("{}: not JSON: {e}", file.display()),
+                    ok: false,
+                }
+            }
+        },
+        _ => serde_json::json!({}),
+    };
+    let command = hook_command();
+    let Some(obj) = root.as_object_mut() else {
+        return Step {
+            what,
+            detail: format!("{}: not a JSON object", file.display()),
+            ok: false,
+        };
+    };
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(hooks) = hooks.as_object_mut() else {
+        return Step {
+            what,
+            detail: format!("{}: hooks is not an object", file.display()),
+            ok: false,
+        };
+    };
+    let mut added = Vec::new();
+    for (event, matcher) in HOOK_EVENTS {
+        let groups = hooks
+            .entry((*event).to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+        let present = groups.iter().any(|g| {
+            g["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(" hook")) && h["command"].as_str().is_some_and(|c| c.contains("ljos")))
+        });
+        if present {
+            continue;
+        }
+        groups.push(serde_json::json!({
+            "matcher": matcher,
+            "hooks": [{"type": "command", "command": command, "timeout": 20}]
+        }));
+        added.push(*event);
+    }
+    if added.is_empty() {
+        return Step {
+            what,
+            detail: format!("{} carries the memory hook", file.display()),
+            ok: true,
+        };
+    }
+    if dry {
+        return Step {
+            what,
+            detail: format!("would add the memory hook on {} to {}", added.join(", "), file.display()),
+            ok: true,
+        };
+    }
+    let written = file
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| serde_json::to_string_pretty(&root).map_err(std::io::Error::other))
+        .and_then(|text| std::fs::write(file, text + "\n"));
+    match written {
+        Ok(()) => Step {
+            what,
+            detail: format!("added the memory hook on {} to {}", added.join(", "), file.display()),
+            ok: true,
+        },
+        Err(e) => Step {
+            what,
+            detail: format!("{}: {e}", file.display()),
+            ok: false,
+        },
+    }
+}
+
+/// Whether a runner's hooks file carries the memory hook on every event.
+fn hook_installed(file: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    HOOK_EVENTS.iter().all(|(event, _)| {
+        root["hooks"][*event]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|g| {
+                g["hooks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|h| h["command"].as_str().is_some_and(|c| c.contains("ljos") && c.ends_with(" hook")))
+            })
+    })
+}
+
+/// What the runner's hook hands the seat: the event, and the text worth
+/// asking the pack about. From a tool call, the command about to run; from
+/// a prompt, the prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCall {
+    pub event: String,
+    pub cue: String,
+}
+
+/// Read a hook call from the runner's JSON, or from plain text (an argv
+/// under argv law). Fields: `hook_event_name`, `tool_name`, `tool_input`
+/// (its `command`, else every string value joined), `prompt`.
+#[must_use]
+pub fn hook_call(input: &str) -> HookCall {
+    let trimmed = input.trim();
+    let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+        return HookCall {
+            event: "argv".into(),
+            cue: trimmed.to_string(),
+        };
+    };
+    let event = v["hook_event_name"]
+        .as_str()
+        .unwrap_or("PreToolUse")
+        .to_string();
+    let cue = if let Some(p) = v["prompt"].as_str() {
+        p.to_string()
+    } else if let Some(c) = v["tool_input"]["command"].as_str() {
+        c.to_string()
+    } else if let Some(map) = v["tool_input"].as_object() {
+        map.values()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        String::new()
+    };
+    HookCall { event, cue }
+}
+
+/// The context the hook injects: the island the cue activates, standing
+/// preferences first because they bear on what to do, then lessons. Empty
+/// when the pack holds nothing on it or does not answer; a hook that fails
+/// must not stop the runner, so this never errors.
+#[must_use]
+pub fn hook_context(cue: &str, limit: usize) -> String {
+    let cue = cue.trim();
+    if cue.len() < 3 {
+        return String::new();
+    }
+    let Ok(body) = packset_island(cue, false) else {
+        return String::new();
+    };
+    let mut rows: Vec<&Value> = body["island"].as_array().into_iter().flatten().collect();
+    rows.sort_by(|a, b| {
+        let pa = a["kind"].as_str() == Some("preference");
+        let pb = b["kind"].as_str() == Some("preference");
+        pb.cmp(&pa).then(
+            b["activation"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&a["activation"].as_f64().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+    let lines: Vec<String> = rows
+        .iter()
+        .take(limit)
+        .map(|a| {
+            format!(
+                "- [{}] {}",
+                a["kind"].as_str().unwrap_or("claim"),
+                a["text"].as_str().unwrap_or("").trim()
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "What this seat already knows that bears on this (from the pack; `ljos search` for more):\n{}",
+        lines.join("\n")
+    )
+}
+
+/// The hook's answer in the runner's JSON: `additionalContext` under the
+/// event that fired. Empty context is no output, which the runner reads as
+/// no opinion.
+#[must_use]
+pub fn hook_output(call: &HookCall, context: &str) -> String {
+    if context.is_empty() {
+        return String::new();
+    }
+    if call.event == "argv" {
+        return format!("{context}\n");
+    }
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": call.event,
+            "additionalContext": context
+        }
+    })
+    .to_string()
+        + "\n"
 }
 
 pub fn format_steps(steps: &[Step]) -> String {
@@ -400,6 +647,19 @@ fn harness_rows() -> Vec<Habitat> {
         let current = skill
             .as_ref()
             .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t == skill_text()));
+        if let Some(file) = &h.hooks {
+            let path = expand(file);
+            let installed = hook_installed(&path);
+            rows.push(Habitat {
+                name: "runner hook",
+                state: if installed {
+                    format!("{}: memory hook on {}", h.name, path.display())
+                } else {
+                    format!("{}: no memory hook; ljos onboard --harness {}", h.name, h.name)
+                },
+                ok: installed,
+            });
+        }
         rows.push(Habitat {
             name: "runner skill",
             state: match (&skill, current) {
@@ -1805,6 +2065,19 @@ pub fn policy_line(argv: &[String]) -> Result<String> {
     Ok(argv.join(" "))
 }
 
+/// The argv line, then what the pack knows that bears on it: the memory a
+/// policy layer injects beside its verdict. The line prints even when the
+/// pack is down; the memory is the part that may be empty.
+pub fn policy_with_memory(argv: &[String]) -> Result<String> {
+    let line = policy_line(argv)?;
+    let context = hook_context(&line, 8);
+    Ok(if context.is_empty() {
+        format!("{line}\n")
+    } else {
+        format!("{line}\n{context}\n")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsensusStep {
     pub bin: &'static str,
@@ -1939,6 +2212,56 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A hook call is read from the runner's JSON or from plain text, and
+    /// the answer is the runner's shape only when there is something to say.
+    #[test]
+    fn hook_calls_are_read_and_answered_in_the_runners_shape() {
+        let tool = hook_call(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test","description":"run"}}"#,
+        );
+        assert_eq!(tool.event, "PreToolUse");
+        assert_eq!(tool.cue, "cargo test");
+        let prompt = hook_call(r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the fuse"}"#);
+        assert_eq!(prompt.cue, "fix the fuse");
+        let argv = hook_call("rm -rf build");
+        assert_eq!(argv.event, "argv");
+        assert_eq!(hook_output(&argv, ""), "");
+        assert_eq!(hook_output(&argv, "- [lesson] x"), "- [lesson] x\n");
+        let out = hook_output(&tool, "- [preference] y");
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "- [preference] y");
+        assert!(hook_context("ab", 8).is_empty(), "a cue too short asks nothing");
+    }
+
+    /// The memory hook merges into a runner's hooks file once per event and
+    /// is not added twice.
+    #[test]
+    fn the_memory_hook_is_merged_once() {
+        let dir = std::env::temp_dir().join(format!("ljos-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(
+            &file,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"other"}]}]},"theme":"dark"}"#,
+        )
+        .unwrap();
+        assert!(!hook_installed(&file));
+        let dry = hook_step(&file, true);
+        assert!(dry.ok && dry.detail.starts_with("would add"), "{dry:?}");
+        let step = hook_step(&file, false);
+        assert!(step.ok, "{step:?}");
+        assert!(hook_installed(&file));
+        let again = hook_step(&file, false);
+        assert!(again.detail.ends_with("carries the memory hook"), "{again:?}");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark", "the rest of the file is kept");
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2, "the other hook stays");
+        assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A scoped row applies when the issue is about one of its domains; an
     /// unscoped row applies everywhere; a scoped learn starts from the
     /// unscoped row and leaves it standing.
