@@ -719,12 +719,15 @@ impl LjosServer {
                 is down, which is a different thing.\n\
              3. `ljos_recall` on the node. What it stands on, what its inputs\n\
                 produced, and what it has cited so far.\n\
-             4. `ljos_claim` a session node for it. One live claim per assignee.\n\
+             4. `ljos_due` for the claims whose review is due; read each and\n\
+                `ljos_graded` it, recalled or lapsed, so the clock moves.\n\
+             5. `ljos_claim` a session node for it. One live claim per assignee.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
              with `ljos_remember` in two short sentences. When the work produces\n\
              something, mint the deed in the deed store and `ljos_deed` it on the\n\
-             node. Completing the session node does not close the ticket."
+             node. Completing the session node does not close the ticket. A tool\n\
+             that fails is a habitat refusing or down: `ljos_doctor` says which."
         )))
     }
 
@@ -738,19 +741,18 @@ impl LjosServer {
         Ok(asked(format!(
             "Check the handover at {dir}.\n\
              \n\
-             Three questions, each unanswered by the one before it:\n\
-             \n\
-             1. Did it arrive as written. `vissue satchel --verify {dir}` checks the\n\
-                payload against the manifest and says what it did not check.\n\
-             2. Who wrote it. `deedar vouch check` on the manifest, against the\n\
-                keys this seat accepts.\n\
-             3. Do the deeds predate the asking. `deedar check {dir}` walks every\n\
-                receipt to the log head, and refuses the bag whole if one fails.\n\
+             `ljos_receive` on {dir} answers three questions in order, each\n\
+             unanswered by the one before it: did it arrive as written (the\n\
+             manifest), do the deeds predate the asking (every receipt to the head\n\
+             in the bag, and the bridge from a kept head when `since` is given),\n\
+             and who wrote it (the signature, when there is one). Pass `since` when\n\
+             this sender has handed over before.\n\
              \n\
              Then, for each deed the bag names, `ljos_current`: a deed that arrived\n\
              intact and is no longer the tip is a different finding from one that\n\
-             failed. Report which of the three questions passed. A bag that passes\n\
-             the first two and fails the third is not a bag that mostly checked out."
+             failed. Report which questions passed; a bag that fails one has not\n\
+             mostly checked out. Only when all pass, `ljos_receive` again with\n\
+             `import` so the atoms, trust rows included, join this seat's pack."
         )))
     }
 }
@@ -768,8 +770,9 @@ impl ServerHandler for LjosServer {
         )
         .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "One seat over five habitats. The pack is written only by remember and \
-             prefer, and the text is the claim. Cards are read at ljos://cards/ and \
+            "One seat over five habitats. The pack is written by remember, prefer, \
+             trust, learn, graded and an imported handover; the text is the claim. \
+             Cards are read at ljos://cards/ and \
              never written. Citing a deed on a node names an accession and does not \
              paste the product. Completing a session node does not close a ticket. \
              A tool that fails means a habitat refused or is not running; it is not \
