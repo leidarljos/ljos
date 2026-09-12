@@ -78,7 +78,7 @@ enum Cmd {
         #[arg(long)]
         view: String,
         /// Domains it speaks to; a trust row scoped to one of them applies when the issue is about it.
-        #[arg(long)]
+        #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
     /// Take a session node for an issue. One live claim per assignee.
@@ -115,8 +115,8 @@ enum Cmd {
     /// The memory hook a runner or a policy layer calls before an action: reads the
     /// hook JSON (or plain text) on stdin, answers with the memories the action activates.
     Hook {
-        /// Most memories to inject.
-        #[arg(long, default_value_t = 8)]
+        /// Most memories to inject per call; each is injected once per session.
+        #[arg(long, default_value_t = 5)]
         limit: usize,
     },
     /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
@@ -130,7 +130,7 @@ enum Cmd {
         #[arg(long)]
         why: Vec<String>,
         /// Domains this row is scoped to; none means it applies everywhere.
-        #[arg(long)]
+        #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
     /// Which habitats answer. Exit 1 when a required one does not.
@@ -298,7 +298,7 @@ fn main() -> Result<()> {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let call = hook_call(&input);
-            print!("{}", hook_output(&call, &hook_context(&call.cue, limit)));
+            print!("{}", hook_output(&call, &hook_context(&call, limit)));
         }
         Cmd::Consensus { id } => {
             // Rows scoped to a domain apply when the issue is about it; the
