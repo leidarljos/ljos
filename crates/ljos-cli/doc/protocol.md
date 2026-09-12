@@ -108,8 +108,10 @@ under equal weights is a count; under calibrated rows it is not.
 
 ## Identity and environment
 
-Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`,
-the deed store and claim graph in the user's state directories, the tracker
-at the root `vissue identity` prints, and the host key at
-`~/.config/deedar/host.key` when it exists. `VISSUE_AGENT` names the identity
+Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`
+and the seat's memory is one workspace, `seat`, whatever directory you
+stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
+graph live in the user's state directories, the tracker at the root
+`vissue identity` prints, and the host key at `~/.config/deedar/host.key`
+when it exists. `VISSUE_AGENT` names the identity
 a ballot or claim is recorded under; set it when you vote as more than one.

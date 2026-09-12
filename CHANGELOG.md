@@ -35,8 +35,9 @@ For an agent, or the person running one:
   back unfinished. A claim refused as busy now names the tracker id the
   name still holds and the two verbs that free it.
 - Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
-  (`PACKSET_URL=off` means no pack) and the host key at
-  `~/.config/deedar/host.key`.
+  (`PACKSET_URL=off` means no pack), the seat's memory is the one
+  workspace `seat` from any directory (`PACKSET_WORKSPACE` names another),
+  and the host key at `~/.config/deedar/host.key`.
 - Every verb and flag has help; every tool description opens with when to
   call it; the claim and finish arguments say they take tracker ids.
 

@@ -507,10 +507,24 @@ fn host_key_path() -> Option<PathBuf> {
 pub const POLICY_TCB: &str =
     "argv law. grok-policyd is the TCB when present. Reloading a pack is not a check.";
 
-/// The pack client. With nothing set it speaks to `127.0.0.1:8761`;
-/// `PACKSET_URL` points elsewhere, and `off` is the one way to have no pack.
+/// The workspace the seat's memory lives in when nothing names one. The
+/// pack's command line keys a workspace to the repository it stands in;
+/// a seat is one memory across every repository it works in, so the seat
+/// pins one. `PACKSET_WORKSPACE` overrides it.
+pub const SEAT_WORKSPACE: &str = "seat";
+
+/// The pack client. With nothing set it speaks to `127.0.0.1:8761` about
+/// the `seat` workspace; `PACKSET_URL` points elsewhere, `PACKSET_WORKSPACE`
+/// names another workspace, and `PACKSET_URL=off` is the one way to have no
+/// pack.
 pub fn pack() -> Result<PacksetClient> {
-    PacksetClient::from_env().context("PACKSET_URL=off: this seat has no pack on purpose")
+    let workspace = std::env::var("PACKSET_WORKSPACE")
+        .ok()
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
+    Ok(PacksetClient::from_env()
+        .context("PACKSET_URL=off: this seat has no pack on purpose")?
+        .with_workspace(workspace))
 }
 
 pub fn join(parts: &[String]) -> String {

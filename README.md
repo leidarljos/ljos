@@ -57,8 +57,10 @@ from the first. `ljos doctor` then shows whether each runner named is
 onboarded. The server serves the same text at `ljos://protocol`.
 
 Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
-(`PACKSET_URL` points elsewhere, `off` means no pack), the host key at
-`~/.config/deedar/host.key` when it exists.
+(`PACKSET_URL` points elsewhere, `off` means no pack) and the seat's memory
+is the one workspace `seat` from any directory (`PACKSET_WORKSPACE` names
+another; the pack's own command line keys workspaces to repositories), the
+host key at `~/.config/deedar/host.key` when it exists.
 
 `remember` / `prefer` POST `/v1/atoms` against `PACKSET_URL` (`INSIDE_MEMORY_URL` is an alias). They write one explicit claim. They do not extract from a transcript.
 

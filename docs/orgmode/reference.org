@@ -52,6 +52,7 @@ when to call it.
 | Variable | Read by |
 |---+---|
 | =PACKSET_URL= | the pack client; unset, =http://127.0.0.1:8761= (=PACKSET_PORT= moves the port); =off= means no pack |
+| =PACKSET_WORKSPACE= | the pack workspace; unset, =seat=, whatever directory the seat stands in |
 | =VISSUE_ROOT=, =VISSUE_AGENT= | the tracker |
 | =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |
