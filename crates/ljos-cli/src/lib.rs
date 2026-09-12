@@ -1150,6 +1150,78 @@ pub fn personas_from_pack() -> Result<Vec<Persona>> {
     Ok(personas_of(&atoms))
 }
 
+/// The brief a subagent playing a persona starts from: the persona's view
+/// and domains, what the seat knows on those domains (preferences first),
+/// and the issue's working set. One text, so a panel member reads the
+/// same seat the rest do and still reads it its own way.
+///
+/// # Errors
+///
+/// No such persona in the pack, or the tracker or pack not answering.
+pub fn brief(name: &str, issue: &str) -> Result<String> {
+    let personas = personas_from_pack()?;
+    let Some(p) = personas.iter().find(|p| p.name == name) else {
+        let names: Vec<&str> = personas.iter().map(|p| p.name.as_str()).collect();
+        bail!(
+            "brief: no persona {name:?} in the pack; the pack holds {}",
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
+        );
+    };
+    let mut out = format!(
+        "You are {}. {}\nYou hold your ballot at anchor {:.2}{}.\n",
+        p.name,
+        p.view,
+        p.anchor,
+        if p.entities.is_empty() {
+            String::new()
+        } else {
+            format!("; you speak to {}", p.entities.join(", "))
+        }
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lines = Vec::new();
+    let cues: Vec<String> = if p.entities.is_empty() {
+        vec![issue_title(issue)?]
+    } else {
+        p.entities.clone()
+    };
+    for cue in &cues {
+        let Ok(hits) = packset_search(cue) else {
+            continue;
+        };
+        for h in hits.into_iter().take(5) {
+            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) {
+                continue;
+            }
+            if let Some(id) = &h.id {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+            }
+            lines.push((h.kind == "preference", format!("- [{}] {}", h.kind, h.text.trim())));
+        }
+    }
+    lines.sort_by(|a, b| b.0.cmp(&a.0));
+    if !lines.is_empty() {
+        out.push_str("\nWhat this seat knows on your domains:\n");
+        for (_, l) in lines.iter().take(8) {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out.push_str("\nThe work:\n");
+    out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
+    out.push_str(&format!(
+        "\nRead it your way and end with one ballot: `ljos vote {issue} --for OPTION --as {}`.\n",
+        p.name
+    ));
+    Ok(out)
+}
+
 /// Anchors as the settles take them: `{"name": anchor, ...}`.
 pub fn anchors_json(personas: &[Persona]) -> String {
     let map: serde_json::Map<String, Value> = personas

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish,
     format_doctor, format_hits, format_island, format_steps, graded, handover, healthy, hook_call,
     hook_context, hook_output, island_entities, join, learn_and_write, node_for, on_path, onboard,
     packset_forget, packset_island, packset_search, packset_write, personas_from_pack,
@@ -68,6 +68,13 @@ enum Cmd {
         /// Cast as this persona instead of the seat's identity.
         #[arg(long = "as")]
         as_persona: Option<String>,
+    },
+    /// The brief a subagent playing a persona starts from: view, domains, what the seat knows there, the work.
+    Brief {
+        /// The persona's name.
+        name: String,
+        /// The tracker id of the issue.
+        issue: String,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
     Persona {
@@ -269,6 +276,7 @@ fn main() -> Result<()> {
             )?,
             None => run("vissue", &["vote", &issue])?,
         },
+        Cmd::Brief { name, issue } => print!("{}", brief(&name, &issue)?),
         Cmd::Persona {
             name,
             anchor,
