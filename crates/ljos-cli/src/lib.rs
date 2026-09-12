@@ -391,9 +391,7 @@ fn hook_step(file: &Path, dry: bool) -> Step {
             ok: false,
         };
     };
-    let hooks = obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     let Some(hooks) = hooks.as_object_mut() else {
         return Step {
             what,
@@ -410,11 +408,10 @@ fn hook_step(file: &Path, dry: bool) -> Step {
             continue;
         };
         let present = groups.iter().any(|g| {
-            g["hooks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(" hook")) && h["command"].as_str().is_some_and(|c| c.contains("ljos")))
+            g["hooks"].as_array().into_iter().flatten().any(|h| {
+                h["command"].as_str().is_some_and(|c| c.ends_with(" hook"))
+                    && h["command"].as_str().is_some_and(|c| c.contains("ljos"))
+            })
         });
         if present {
             continue;
@@ -435,7 +432,11 @@ fn hook_step(file: &Path, dry: bool) -> Step {
     if dry {
         return Step {
             what,
-            detail: format!("would add the memory hook on {} to {}", added.join(", "), file.display()),
+            detail: format!(
+                "would add the memory hook on {} to {}",
+                added.join(", "),
+                file.display()
+            ),
             ok: true,
         };
     }
@@ -447,7 +448,11 @@ fn hook_step(file: &Path, dry: bool) -> Step {
     match written {
         Ok(()) => Step {
             what,
-            detail: format!("added the memory hook on {} to {}", added.join(", "), file.display()),
+            detail: format!(
+                "added the memory hook on {} to {}",
+                added.join(", "),
+                file.display()
+            ),
             ok: true,
         },
         Err(e) => Step {
@@ -472,11 +477,11 @@ fn hook_installed(file: &Path) -> bool {
             .into_iter()
             .flatten()
             .any(|g| {
-                g["hooks"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|h| h["command"].as_str().is_some_and(|c| c.contains("ljos") && c.ends_with(" hook")))
+                g["hooks"].as_array().into_iter().flatten().any(|h| {
+                    h["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("ljos") && c.ends_with(" hook"))
+                })
             })
     })
 }
@@ -655,7 +660,10 @@ fn harness_rows() -> Vec<Habitat> {
                 state: if installed {
                     format!("{}: memory hook on {}", h.name, path.display())
                 } else {
-                    format!("{}: no memory hook; ljos onboard --harness {}", h.name, h.name)
+                    format!(
+                        "{}: no memory hook; ljos onboard --harness {}",
+                        h.name, h.name
+                    )
                 },
                 ok: installed,
             });
@@ -2230,8 +2238,14 @@ mod tests {
         let out = hook_output(&tool, "- [preference] y");
         let v: Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
-        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "- [preference] y");
-        assert!(hook_context("ab", 8).is_empty(), "a cue too short asks nothing");
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            "- [preference] y"
+        );
+        assert!(
+            hook_context("ab", 8).is_empty(),
+            "a cue too short asks nothing"
+        );
     }
 
     /// The memory hook merges into a runner's hooks file once per event and
@@ -2254,10 +2268,17 @@ mod tests {
         assert!(step.ok, "{step:?}");
         assert!(hook_installed(&file));
         let again = hook_step(&file, false);
-        assert!(again.detail.ends_with("carries the memory hook"), "{again:?}");
+        assert!(
+            again.detail.ends_with("carries the memory hook"),
+            "{again:?}"
+        );
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(v["theme"], "dark", "the rest of the file is kept");
-        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2, "the other hook stays");
+        assert_eq!(
+            v["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            2,
+            "the other hook stays"
+        );
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

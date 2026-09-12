@@ -5,10 +5,10 @@ use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, calibrate, cards, claim, consensus_steps_anchored, doctor, due_report,
     finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
-    island_entities, join, learn_about, node_for, on_path, onboard, packset_forget, packset_island,
-    packset_search, packset_write, personas_from_pack, policy_with_memory, receive, release,
-    rows_about, run, run_as, run_captured, sitting, topic_words, trust_from_pack, write_persona,
-    write_trust, hook_call, hook_context, hook_output, Persona, Trust, HARNESSES_EXAMPLE,
+    hook_call, hook_context, hook_output, island_entities, join, learn_about, node_for, on_path,
+    onboard, packset_forget, packset_island, packset_search, packset_write, personas_from_pack,
+    policy_with_memory, receive, release, rows_about, run, run_as, run_captured, sitting,
+    topic_words, trust_from_pack, write_persona, write_trust, Persona, Trust, HARNESSES_EXAMPLE,
     LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
