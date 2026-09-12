@@ -55,7 +55,9 @@ Every piece of work has an issue before it has a claim.
   Citation is not a merge, and the product is never pasted into the ticket.
 - Every lesson that will still be true next sitting is one `ljos remember`
   of two short sentences at most. A standing choice between two ways is one
-  `ljos prefer`. Never a transcript, never a summary of the session.
+  `ljos prefer`. Never a transcript, never a summary of the session. A
+  lesson that rewrites an earlier one closes the earlier one's window; the
+  verb says `revises N earlier memories` when it did.
 - Every decision with more than one defensible answer is a ballot:
   `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
   `ljos consensus ISSUE`. A tally is a count; the consensus is the settle
