@@ -1050,9 +1050,16 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
     ));
     if import {
         let client = pack()?;
+        let workspace = client.workspace();
         let (mut kept, mut refused) = (0usize, Vec::new());
         for atom in &atoms {
-            match client.post_atom(atom) {
+            // The atoms arrive stamped with the sender's workspace; they join
+            // this seat's, or the import lands in a workspace nobody reads.
+            let mut atom = atom.clone();
+            if let Some(map) = atom.as_object_mut() {
+                map.insert("workspace".into(), Value::String(workspace.clone()));
+            }
+            match client.post_atom(&atom) {
                 Ok(_) => kept += 1,
                 Err(e) => refused.push(e.to_string()),
             }
