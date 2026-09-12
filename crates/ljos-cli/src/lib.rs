@@ -2575,6 +2575,44 @@ pub fn packset_hubs(limit: usize) -> Result<Value> {
         .context("hubs: GET /v1/hubs failed")
 }
 
+/// Consolidate the seat's memory: every claim that replaces an earlier
+/// one (a rewrite, a new object under the same head, a correction, an
+/// explicit supersedes) closes the earlier one's window and names it.
+/// The rule a write applies on arrival, run over what the pack already
+/// holds. Without `apply` nothing is written; the pairs are reported.
+pub fn packset_consolidate(apply: bool) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    client
+        .consolidate(&workspace, apply)
+        .context("consolidate: POST /v1/consolidate failed")
+}
+
+/// The pairs a consolidation closed or would close, one a line, then the
+/// count and whether it was applied.
+pub fn format_consolidation(body: &Value) -> String {
+    let mut out = String::new();
+    for pair in body["pairs"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "closes {}  {}\n    for {}  {}\n",
+            pair["old"].as_str().unwrap_or("-"),
+            pair["old_text"].as_str().unwrap_or("").trim(),
+            pair["new"].as_str().unwrap_or("-"),
+            pair["new_text"].as_str().unwrap_or("").trim()
+        ));
+    }
+    let closed = body["closed"].as_u64().unwrap_or(0);
+    let live = body["live"].as_u64().unwrap_or(0);
+    if body["applied"].as_bool().unwrap_or(false) {
+        out.push_str(&format!("{closed} of {live} live memories closed\n"));
+    } else {
+        out.push_str(&format!(
+            "{closed} of {live} live memories would close; `ljos consolidate --apply` closes them\n"
+        ));
+    }
+    out
+}
+
 /// One line per hub: score, links, id, text.
 pub fn format_hubs(body: &Value) -> String {
     let mut out = String::new();
@@ -3500,6 +3538,30 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_consolidation_report_names_the_pairs() {
+        let body = serde_json::json!({"live": 5, "closed": 1, "applied": false, "pairs": [
+            {"old": "a", "old_text": "The default fuse is Borda.", "new": "b", "new_text": "The default fuse is CombMNZ."}
+        ]});
+        let text = format_consolidation(&body);
+        assert!(
+            text.starts_with(
+                "closes a  The default fuse is Borda.\n    for b  The default fuse is CombMNZ.\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "1 of 5 live memories would close; `ljos consolidate --apply` closes them\n"
+            ),
+            "{text}"
+        );
+        let applied = format_consolidation(
+            &serde_json::json!({"live": 5, "closed": 0, "applied": true, "pairs": []}),
+        );
+        assert_eq!(applied, "0 of 5 live memories closed\n");
+    }
+
     #[test]
     fn the_hook_keeps_what_two_scorers_agreed_on() {
         let hit = |ballots, of| Hit {
