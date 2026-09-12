@@ -817,10 +817,12 @@ fn due_nudge(call: &HookCall) -> String {
         .ok()
         .and_then(|b| b["closed"].as_u64())
         .unwrap_or(0);
+    // Counted once a session either way; a quiet seat is not re-counted on
+    // every prompt.
+    mark_seen(call.session.as_deref(), &[key]);
     if due == 0 && pending == 0 {
         return String::new();
     }
-    mark_seen(call.session.as_deref(), &[key]);
     let mut out = Vec::new();
     if due > 0 {
         out.push(format!(
