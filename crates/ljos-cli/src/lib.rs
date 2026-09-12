@@ -755,7 +755,10 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
     if call.event == "argv" {
         let mut out = String::new();
         if let Some(r) = verdict {
-            out.push_str(&format!("{}: {} (rule `{}`)\n", r.verdict, r.reason, r.pattern));
+            out.push_str(&format!(
+                "{}: {} (rule `{}`)\n",
+                r.verdict, r.reason, r.pattern
+            ));
         }
         if !context.is_empty() {
             out.push_str(context);
@@ -1448,7 +1451,11 @@ pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
             Some(Rule {
                 pattern: a.get("pattern")?.as_str()?.to_string(),
                 verdict: a.get("verdict")?.as_str()?.to_string(),
-                reason: a.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                reason: a
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             })
         })
         .collect()
@@ -3040,10 +3047,18 @@ mod tests {
                 reason: "Never force push.".into(),
             },
         ];
-        assert_eq!(verdict_for(&rules, "git push --force").unwrap().verdict, "deny");
-        assert_eq!(verdict_for(&rules, "git push origin x").unwrap().verdict, "ask");
+        assert_eq!(
+            verdict_for(&rules, "git push --force").unwrap().verdict,
+            "deny"
+        );
+        assert_eq!(
+            verdict_for(&rules, "git push origin x").unwrap().verdict,
+            "ask"
+        );
         assert!(verdict_for(&rules, "cargo test").is_none());
-        let call = hook_call(r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}"#);
+        let call = hook_call(
+            r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}"#,
+        );
         let out = hook_output_ruled(&call, "", verdict_for(&rules, &call.cue));
         let v: Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
@@ -3057,12 +3072,22 @@ mod tests {
             cue: "git push origin x".into(),
             session: None,
         };
-        assert!(hook_output_ruled(&argv, "", verdict_for(&rules, &argv.cue)).starts_with("ask: A push"));
+        assert!(
+            hook_output_ruled(&argv, "", verdict_for(&rules, &argv.cue)).starts_with("ask: A push")
+        );
         let steps = panel_steps("x-1", true, &[], &[]);
         assert!(steps.is_empty());
         let preds = vec![
-            Prediction { issue: "x-1".into(), agent: "a".into(), expect: Value::String("ship".into()) },
-            Prediction { issue: "x-1".into(), agent: "b".into(), expect: serde_json::json!({"ship": 0.6, "hold": 0.4}) },
+            Prediction {
+                issue: "x-1".into(),
+                agent: "a".into(),
+                expect: Value::String("ship".into()),
+            },
+            Prediction {
+                issue: "x-1".into(),
+                agent: "b".into(),
+                expect: serde_json::json!({"ship": 0.6, "hold": 0.4}),
+            },
         ];
         let steps = panel_steps("x-1", true, &[row("a", "b", 0.5)], &preds);
         assert_eq!(steps.len(), 2);
