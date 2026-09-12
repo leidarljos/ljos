@@ -19,7 +19,8 @@ ljos doctor | grep -q '^ok	pack' || fail "the pack does not answer"
 ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns." | grep -q '"kind": "lesson"' || fail remember
 ljos prefer "CombMNZ over RRF for fusing two ballots." | grep -q '"kind": "preference"' || fail prefer
 ljos search fuse | grep -q CombMNZ || fail search
-ljos search fuse --as-of 2000-01-01 | grep -q CombMNZ && fail "an as-of read before the write found it"
+before=$(ljos search fuse --as-of 2000-01-01) || fail "an as-of search was refused"
+echo "$before" | grep -q CombMNZ && fail "an as-of read before the write found it"
 ljos due | grep -q 'scheduled' || fail due
 # A rewrite of the same claim closes the earlier one on arrival; the seat
 # says so, and a consolidation finds nothing left to close.
