@@ -134,6 +134,11 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
+    // SAFETY: resetting a signal disposition before any thread is spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     match Cli::parse().cmd {
         Cmd::Remember { text } => {
             let body = packset_write("Remember", &join(&text))?;

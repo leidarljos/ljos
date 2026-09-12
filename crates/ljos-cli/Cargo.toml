@@ -17,6 +17,7 @@ name = "ljos"
 path = "src/main.rs"
 
 [dependencies]
+libc = "0.2"
 anyhow.workspace = true
 clap.workspace = true
 packset-client.workspace = true
