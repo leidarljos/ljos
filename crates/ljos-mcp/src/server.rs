@@ -1388,6 +1388,7 @@ mod tests {
             names,
             ["check_a_handover", "run_a_panel", "start_a_sitting"]
         );
+        let server = LjosServer::at(std::env::temp_dir());
         let panel = server
             .run_a_panel_prompt(Parameters(IssueArgs {
                 issue: "proj-1a2b".into(),
