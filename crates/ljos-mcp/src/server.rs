@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 
 use ljos_cli::{
     age_of, ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due,
-    finish, graded, handover, island_entities, learn_and_write, node_for, now_utc, on_path,
-    packset_forget, packset_island, packset_search_as_of, packset_write_as, personas_from_pack,
-    policy_line, receive, release, rows_about, run_captured, sitting, timeline, topic_words,
-    trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
-    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    finish, graded, handover, identity_or_seat, island_entities, learn_and_write, node_for,
+    now_utc, on_path, packset_forget, packset_island, packset_search_as_of, packset_write_as,
+    personas_from_pack, policy_line, receive, release, rows_about, run_captured, seat_name,
+    sitting, timeline, topic_words, trust_from_pack, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -164,7 +164,9 @@ pub struct TakeArgs {
     /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
     pub node: String,
     /// Your name. One live claim per name; the name maps to one actor id.
-    pub assignee: String,
+    /// Absent, the runner's seat name (`LJOS_SEAT` from its registration).
+    #[serde(default)]
+    pub assignee: Option<String>,
 }
 
 /// A session node to finish.
@@ -254,8 +256,10 @@ pub struct GradeArgs {
 pub struct SittingArgs {
     /// The tracker id of the issue (`proj-1a2b`).
     pub issue: String,
-    /// Your name. One live claim per name.
-    pub assignee: String,
+    /// Your name. One live claim per name. Absent, the runner's seat name
+    /// (`LJOS_SEAT` from its registration).
+    #[serde(default)]
+    pub assignee: Option<String>,
 }
 
 /// A sitting to close.
@@ -390,7 +394,7 @@ fn habitat(bin: &str, args: &[&str]) -> Result<Json<Said>, McpError> {
 /// [`habitat`] with `VISSUE_AGENT` set, so a ballot is recorded under a
 /// persona's name.
 fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<Said>, McpError> {
-    let Some(who) = identity.map(str::trim).filter(|w| !w.is_empty()) else {
+    let Some(who) = identity_or_seat(identity) else {
         return habitat(bin, args);
     };
     use std::process::{Command, Stdio};
@@ -646,7 +650,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = claim(&args.node, &args.assignee).map_err(refused)?;
+        let text = claim(&args.node, &args.assignee.unwrap_or_else(seat_name)).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -664,7 +668,12 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SittingArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = sitting(&args.issue, &args.assignee, &self.cards_dir).map_err(refused)?;
+        let text = sitting(
+            &args.issue,
+            &args.assignee.unwrap_or_else(seat_name),
+            &self.cards_dir,
+        )
+        .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -733,7 +742,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = release(&args.node, &args.assignee).map_err(refused)?;
+        let text =
+            release(&args.node, &args.assignee.unwrap_or_else(seat_name)).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 

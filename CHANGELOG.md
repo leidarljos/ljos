@@ -13,6 +13,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the cited deeds and the activated memories as one dated list, oldest
   first, each line with its age and the gap since the line before.
   `sitting` prints the last twelve as `== timeline`.
+- Two runners on one host: `--assignee` defaults to `LJOS_SEAT`, then
+  `VISSUE_AGENT`, then `seat`; a ballot cast without a persona is cast as
+  `LJOS_SEAT` when set; the runners file may write `{name}` in `register`
+  and `snippet`, so a registration passes `LJOS_SEAT={name}` to the server.
 - `remember` and `finish` say when the pack closed earlier memories for
   the new one (`revises N earlier memories, now closed`), so a revision is
   seen as one.

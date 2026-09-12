@@ -158,5 +158,8 @@ and the seat's memory is one workspace, `seat`, whatever directory you
 stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
 graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`
-when it exists. `VISSUE_AGENT` names the identity
-a ballot or claim is recorded under; set it when you vote as more than one.
+when it exists. `LJOS_SEAT` is the name this runner claims and votes under
+when a verb names none; a runner's registration sets it to the runner's
+name (`{name}` in the runners file), so two runners on one host share the
+one pack and tracker and hold separate claims. `VISSUE_AGENT` is the
+tracker's own name for the same thing; `--as` names a persona over both.
