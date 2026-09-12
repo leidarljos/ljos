@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.9.0 (2026-09-12)
 
 - Every recalled memory carries its age: the hook's lines, a brief's
   lines, `search` and the island in `sitting` say `today`, `3 weeks ago`,
