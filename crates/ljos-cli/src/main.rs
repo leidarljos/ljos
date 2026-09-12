@@ -3,7 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, calibrate, cards, claim, consensus_steps, doctor, due_report, finish,
+    ballots_from_json, calibrate, cards, claim, consensus_steps_anchored, doctor, due_report,
+    finish, island_entities, learn_about, personas_from_pack, rows_about, run_as, topic_words,
+    write_persona, Persona,
     format_doctor, format_hits, format_island, format_steps, graded, handover, healthy, join,
     learn, node_for, on_path, onboard, packset_forget, packset_island, packset_search,
     packset_write, policy_line, receive, release, run, run_captured, sitting, trust_from_pack,
@@ -62,6 +64,22 @@ enum Cmd {
         /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
+        /// Cast as this persona instead of the seat's identity.
+        #[arg(long = "as")]
+        as_persona: Option<String>,
+    },
+    /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
+    Persona {
+        name: String,
+        /// How far the persona moves off its ballot in a settle; 1 is a plain voter.
+        #[arg(long, default_value_t = 0.5)]
+        anchor: f64,
+        /// How this persona reads the work, in a sentence or two.
+        #[arg(long)]
+        view: String,
+        /// Domains it speaks to; a trust row scoped to one of them applies when the issue is about it.
+        #[arg(long)]
+        about: Vec<String>,
     },
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
@@ -104,6 +122,9 @@ enum Cmd {
         /// Deed accessions this row stands on.
         #[arg(long)]
         why: Vec<String>,
+        /// Domains this row is scoped to; none means it applies everywhere.
+        #[arg(long)]
+        about: Vec<String>,
     },
     /// Which habitats answer. Exit 1 when a required one does not.
     Doctor,
@@ -228,10 +249,32 @@ fn main() -> Result<()> {
             None => run("vissue", &["deed", &issue])?,
         },
         Cmd::Recall { issue } => run("vissue", &["recall", &issue])?,
-        Cmd::Vote { issue, choice } => match choice {
-            Some(c) => run("vissue", &["vote", &issue, "--for", &c])?,
+        Cmd::Vote {
+            issue,
+            choice,
+            as_persona,
+        } => match choice {
+            Some(c) => run_as(
+                "vissue",
+                &["vote", &issue, "--for", &c],
+                as_persona.as_deref(),
+            )?,
             None => run("vissue", &["vote", &issue])?,
         },
+        Cmd::Persona {
+            name,
+            anchor,
+            view,
+            about,
+        } => {
+            let body = write_persona(&Persona {
+                name,
+                anchor,
+                view,
+                entities: about,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
         Cmd::Claim { node, assignee } => print!("{}", claim(&node, &assignee)?),
         Cmd::Release { node, assignee } => print!("{}", release(&node, &assignee)?),
         Cmd::Complete { node, status } => match status {
@@ -244,9 +287,18 @@ fn main() -> Result<()> {
             println!("{}", policy_line(&argv)?);
         }
         Cmd::Consensus { id } => {
-            let trust = pack_trust_or_none();
-            for step in consensus_steps(&id, on_path("ljos-consensus"), on_path("vissue"), &trust)?
-            {
+            // Rows scoped to a domain apply when the issue is about it; the
+            // personas' anchors go to both settles.
+            let topic = issue_topic(&id);
+            let trust = rows_about(&pack_trust_or_none(), &topic);
+            let personas = personas_from_pack().unwrap_or_default();
+            for step in consensus_steps_anchored(
+                &id,
+                on_path("ljos-consensus"),
+                on_path("vissue"),
+                &trust,
+                &personas,
+            )? {
                 run(step.bin, &step.args)?;
             }
         }
@@ -255,8 +307,14 @@ fn main() -> Result<()> {
             to,
             weight,
             why,
+            about,
         } => {
-            let row = Trust { from, to, weight };
+            let row = Trust {
+                from,
+                to,
+                weight,
+                about,
+            };
             let v = write_trust(&row, &why)?;
             println!("{v}");
         }
@@ -327,7 +385,10 @@ fn main() -> Result<()> {
         Cmd::Learn { id, outcome, beta } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let ballots = ballots_from_json(&said.stdout)?;
-            let rows = learn(&ballots, &outcome, &trust_from_pack()?, beta)?;
+            // The rows written are scoped to what the issue's island is
+            // about, so a voter wrong here keeps its standing elsewhere.
+            let about = island_entities(&id).unwrap_or_default();
+            let rows = learn_about(&ballots, &outcome, &trust_from_pack()?, beta, &about)?;
             // Every row lands before any is printed, so a closed pipe cannot
             // leave the graph half written.
             for row in &rows {
@@ -339,6 +400,16 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The words an issue is about, from its title; none when the tracker does
+/// not answer, which scopes nothing out.
+fn issue_topic(id: &str) -> Vec<String> {
+    run_captured("vissue", &["show", id, "--json"])
+        .ok()
+        .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok())
+        .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(topic_words))
+        .unwrap_or_default()
 }
 
 /// The pack's rows, or none with a note: a seat without a pack still settles.

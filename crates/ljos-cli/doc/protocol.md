@@ -11,7 +11,8 @@ name with the prefix `ljos_`.
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
-| how do the voters weigh each other | pack, trust rows | `trust`, `learn` |
+| how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
+| who votes with a view of its own | pack, persona atoms | `persona`, `vote --as` |
 
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
@@ -56,6 +57,14 @@ Every piece of work has an issue before it has a claim.
   `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
   `ljos consensus ISSUE`. A tally is a count; the consensus is the settle
   under the trust rows.
+- When the work wants readers with views of their own, such as a reviewer
+  for a broad audience beside a domain expert, write each once:
+  `ljos persona NAME --anchor A --view "..." --about DOMAIN...`. Then
+  `ljos vote ISSUE --for OPTION --as NAME` casts as it. The anchor in
+  `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
+  A trust row scoped with `--about DOMAIN` applies when the issue's title
+  carries that word; `learn` writes its rows scoped to what the issue's
+  island is about, so being wrong on one topic costs nothing elsewhere.
 - Progress goes on the issue, dated: `vissue note ISSUE "..."`.
 
 ## After the work

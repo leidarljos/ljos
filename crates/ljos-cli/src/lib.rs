@@ -607,11 +607,194 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
 }
 
 /// One row of the influence graph: `from` listens to `to` with `weight`.
-#[derive(Debug, Clone, PartialEq)]
+/// `about` scopes the row to the domains it speaks to: a row with none
+/// applies everywhere, a row with some applies when one of them meets the
+/// issue at hand (its title, or the entities of the island it activates).
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Trust {
     pub from: String,
     pub to: String,
     pub weight: f64,
+    pub about: Vec<String>,
+}
+
+/// A voter with a view of its own: a persona. `anchor` in `[0, 1]` is how
+/// far it moves off its ballot in a settle; 0 never moves, 1 is a plain
+/// DeGroot voter. `entities` are the domains it speaks to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Persona {
+    pub name: String,
+    pub anchor: f64,
+    pub view: String,
+    pub entities: Vec<String>,
+}
+
+/// The `persona` atom for the pack: kind `persona`, the view as text.
+///
+/// # Errors
+///
+/// An empty name, an anchor outside `[0, 1]`, or an empty view.
+pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
+    let name = p.name.trim();
+    if name.is_empty() {
+        bail!("persona: a name is required");
+    }
+    if !(0.0..=1.0).contains(&p.anchor) {
+        bail!("persona: anchor {} is not in [0, 1]", p.anchor);
+    }
+    let view = p.view.trim();
+    if view.is_empty() {
+        bail!("persona: say in a sentence or two how {name} reads the work");
+    }
+    let mut atom = atom_body("persona", view, workspace);
+    atom["name"] = Value::String(name.into());
+    atom["anchor"] = serde_json::json!(p.anchor);
+    if !p.entities.is_empty() {
+        atom["entities"] = Value::Array(
+            p.entities
+                .iter()
+                .map(|e| Value::String(e.to_lowercase()))
+                .collect(),
+        );
+    }
+    Ok(atom)
+}
+
+/// POST one persona.
+pub fn write_persona(p: &Persona) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    client
+        .post_atom(&persona_atom(p, &workspace)?)
+        .context("persona: POST /v1/atoms failed")
+}
+
+/// The live personas: the latest `persona` atom per name.
+pub fn personas_of(atoms: &[Value]) -> Vec<Persona> {
+    let mut latest: std::collections::BTreeMap<String, (String, Persona)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("persona") {
+            continue;
+        }
+        let (Some(name), Some(anchor)) = (
+            atom.get("name").and_then(Value::as_str),
+            atom.get("anchor").and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let p = Persona {
+            name: name.to_string(),
+            anchor,
+            view: atom
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            entities: words_of(atom.get("entities")),
+        };
+        match latest.get(name) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(name.to_string(), (ts, p));
+            }
+        }
+    }
+    latest.into_values().map(|(_, p)| p).collect()
+}
+
+/// The personas in the seat's pack.
+pub fn personas_from_pack() -> Result<Vec<Persona>> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("persona: GET /v1/atoms failed")?;
+    Ok(personas_of(&atoms))
+}
+
+/// Anchors as the settles take them: `{"name": anchor, ...}`.
+pub fn anchors_json(personas: &[Persona]) -> String {
+    let map: serde_json::Map<String, Value> = personas
+        .iter()
+        .map(|p| (p.name.clone(), serde_json::json!(p.anchor)))
+        .collect();
+    Value::Object(map).to_string()
+}
+
+fn words_of(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// The domains an issue's island speaks to: the entities of the memories
+/// its title activates, most frequent first, eight at most. What `learn`
+/// scopes its rows to.
+///
+/// # Errors
+///
+/// The tracker or the pack not answering.
+pub fn island_entities(issue: &str) -> Result<Vec<String>> {
+    let title = issue_title(issue)?;
+    let island = packset_island(&title, false)?;
+    let ids: Vec<&str> = island["island"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("island: GET /v1/atoms failed")?;
+    let mut count: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for atom in &atoms {
+        if atom
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| ids.contains(&id))
+        {
+            for e in words_of(atom.get("entities")) {
+                *count.entry(e).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = count.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(ranked.into_iter().take(8).map(|(e, _)| e).collect())
+}
+
+/// The words an issue is about, for scoping trust rows: its title, lower
+/// case, three letters or longer.
+pub fn topic_words(title: &str) -> Vec<String> {
+    let mut words: Vec<String> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(str::to_lowercase)
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
+/// The rows that apply to an issue about `topic`: every unscoped row, and
+/// every scoped row one of whose domains is among the topic's words.
+pub fn rows_about(rows: &[Trust], topic: &[String]) -> Vec<Trust> {
+    rows.iter()
+        .filter(|r| r.about.is_empty() || r.about.iter().any(|a| topic.contains(a)))
+        .cloned()
+        .collect()
 }
 
 /// The factor a refuted voter's rows shrink by (Hedge, doi:10.1006/jcss.1997.1504).
@@ -643,12 +826,23 @@ pub fn trust_atom(row: &Trust, why: &[String], workspace: &str) -> Result<Value>
     if !why.is_empty() {
         atom["entities"] = Value::Array(why.iter().map(|w| Value::String(w.clone())).collect());
     }
+    if !row.about.is_empty() {
+        atom["about"] = Value::Array(
+            row.about
+                .iter()
+                .map(|w| Value::String(w.to_lowercase()))
+                .collect(),
+        );
+    }
     Ok(atom)
 }
 
 /// The live rows in a set of atoms: the latest `trust` atom per `(from, to)`.
 pub fn trust_rows(atoms: &[Value]) -> Vec<Trust> {
-    let mut latest: std::collections::BTreeMap<(String, String), (String, f64)> =
+    // The latest row per (from, to, scope): an unscoped row and a scoped one
+    // for the same pair are different rows, and a later row of the same
+    // scope supersedes.
+    let mut latest: std::collections::BTreeMap<(String, String, Vec<String>), (String, f64)> =
         std::collections::BTreeMap::new();
     for atom in atoms {
         if atom.get("kind").and_then(Value::as_str) != Some("trust") {
@@ -666,7 +860,9 @@ pub fn trust_rows(atoms: &[Value]) -> Vec<Trust> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let key = (from.to_string(), to.to_string());
+        let mut about = words_of(atom.get("about"));
+        about.sort_unstable();
+        let key = (from.to_string(), to.to_string(), about);
         match latest.get(&key) {
             Some((seen, _)) if *seen > ts => {}
             _ => {
@@ -676,7 +872,12 @@ pub fn trust_rows(atoms: &[Value]) -> Vec<Trust> {
     }
     latest
         .into_iter()
-        .map(|((from, to), (_, weight))| Trust { from, to, weight })
+        .map(|((from, to, about), (_, weight))| Trust {
+            from,
+            to,
+            weight,
+            about,
+        })
         .collect()
 }
 
@@ -714,6 +915,19 @@ pub fn learn(
     rows: &[Trust],
     beta: f64,
 ) -> Result<Vec<Trust>> {
+    learn_about(ballots, outcome, rows, beta, &[])
+}
+
+/// [`learn`] writing rows scoped to `about`: the domains the issue's island
+/// speaks to, so that being wrong about one topic does not cost a voter its
+/// standing on every other. An empty `about` is the unscoped rule.
+pub fn learn_about(
+    ballots: &[(String, String)],
+    outcome: &str,
+    rows: &[Trust],
+    beta: f64,
+    about: &[String],
+) -> Result<Vec<Trust>> {
     if !(beta > 0.0 && beta < 1.0) {
         bail!("learn: beta {beta} is not in (0, 1)");
     }
@@ -738,9 +952,15 @@ pub fn learn(
             if from == to {
                 continue;
             }
+            // The row being moved is the one of this scope; a scoped learn
+            // starts from the unscoped row when it has none of its own.
             let current = rows
                 .iter()
-                .find(|r| r.from == *from && r.to == *to)
+                .find(|r| r.from == *from && r.to == *to && r.about == about)
+                .or_else(|| {
+                    rows.iter()
+                        .find(|r| r.from == *from && r.to == *to && r.about.is_empty())
+                })
                 .map_or(1.0, |r| r.weight);
             let next = if refuted(to) {
                 (current * beta).max(TRUST_FLOOR)
@@ -751,6 +971,7 @@ pub fn learn(
                 from: (*from).to_string(),
                 to: (*to).to_string(),
                 weight: next,
+                about: about.to_vec(),
             });
         }
     }
@@ -1545,6 +1766,7 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
                 from: (*from).to_string(),
                 to: (*to).to_string(),
                 weight: acc.clamp(TRUST_FLOOR, 1.0),
+                about: Vec::new(),
             });
         }
     }
@@ -1597,6 +1819,18 @@ pub fn consensus_steps(
     have_vissue: bool,
     trust: &[Trust],
 ) -> Result<Vec<ConsensusStep>> {
+    consensus_steps_anchored(id, have_ljos, have_vissue, trust, &[])
+}
+
+/// [`consensus_steps`] passing the personas' anchors to both settles as
+/// `--susceptibility-of`, so a persona holds its ballot as much as it says.
+pub fn consensus_steps_anchored(
+    id: &str,
+    have_ljos: bool,
+    have_vissue: bool,
+    trust: &[Trust],
+    personas: &[Persona],
+) -> Result<Vec<ConsensusStep>> {
     if !have_ljos && !have_vissue {
         bail!("neither ljos-consensus nor vissue is on PATH");
     }
@@ -1606,6 +1840,10 @@ pub fn consensus_steps(
         if !trust.is_empty() {
             args.push("--trust".into());
             args.push(trust_json(trust));
+        }
+        if !personas.is_empty() {
+            args.push("--susceptibility-of".into());
+            args.push(anchors_json(personas));
         }
         steps.push(ConsensusStep {
             bin: "ljos-consensus",
@@ -1617,6 +1855,10 @@ pub fn consensus_steps(
         if !trust.is_empty() {
             args.push("--trust".into());
             args.push(trust_json(trust));
+        }
+        if !personas.is_empty() {
+            args.push("--susceptibility-of".into());
+            args.push(anchors_json(personas));
         }
         steps.push(ConsensusStep {
             bin: "vissue",
@@ -1631,9 +1873,18 @@ pub fn on_path(bin: &str) -> bool {
 }
 
 pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
+    run_as(bin, args, None)
+}
+
+/// [`run`] with `VISSUE_AGENT` set to `identity`, so a ballot or a claim is
+/// recorded under a persona's name rather than the seat's.
+pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
+    if let Some(who) = identity.map(str::trim).filter(|w| !w.is_empty()) {
+        cmd.env("VISSUE_AGENT", who);
+    }
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -1688,6 +1939,75 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A scoped row applies when the issue is about one of its domains; an
+    /// unscoped row applies everywhere; a scoped learn starts from the
+    /// unscoped row and leaves it standing.
+    #[test]
+    fn scoped_rows_apply_to_their_topic_and_learn_writes_in_scope() {
+        let everywhere = row("a", "b", 0.9);
+        let mut on_docs = row("a", "b", 0.2);
+        on_docs.about = vec!["docs".into()];
+        let rows = vec![everywhere.clone(), on_docs.clone()];
+        let topic = topic_words("Rewrite the docs site");
+        assert_eq!(topic, ["docs", "rewrite", "site", "the"]);
+        assert_eq!(rows_about(&rows, &topic), rows);
+        assert_eq!(rows_about(&rows, &topic_words("Fix the fuse")), vec![everywhere.clone()]);
+
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "hold".to_string()),
+        ];
+        let learned = learn_about(&ballots, "ship", &rows, 0.5, &["fuse".to_string()]).unwrap();
+        let ab = learned.iter().find(|r| r.from == "a" && r.to == "b").unwrap();
+        assert_eq!(ab.about, ["fuse"]);
+        assert!((ab.weight - 0.45).abs() < 1e-9, "starts from the unscoped 0.9: {ab:?}");
+        let ba = learned.iter().find(|r| r.from == "b" && r.to == "a").unwrap();
+        assert!((ba.weight - 1.0).abs() < 1e-9, "a was right: {ba:?}");
+
+        // Rows read back keep scoped and unscoped apart, latest per scope.
+        let atoms = vec![
+            trust_atom(&everywhere, &[], "ws").unwrap(),
+            trust_atom(&on_docs, &[], "ws").unwrap(),
+        ];
+        let mut back = trust_rows(&atoms);
+        back.sort_by(|x, y| x.about.cmp(&y.about));
+        assert_eq!(back, vec![everywhere, on_docs]);
+    }
+
+    /// A persona is a voter with an anchor; the latest atom per name wins and
+    /// the anchors go to the settle as one object.
+    #[test]
+    fn personas_are_latest_per_name_and_anchor_the_settle() {
+        let p = Persona {
+            name: "reviewer".into(),
+            anchor: 0.2,
+            view: "Reads for what could break in production.".into(),
+            entities: vec!["Release".into()],
+        };
+        let mut a = persona_atom(&p, "ws").unwrap();
+        a["ts"] = Value::String("2026-01-01T00:00:00Z".into());
+        let mut later = a.clone();
+        later["anchor"] = serde_json::json!(0.4);
+        later["ts"] = Value::String("2026-02-01T00:00:00Z".into());
+        let got = personas_of(&[a, later]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].anchor, 0.4);
+        assert_eq!(got[0].entities, ["release"]);
+        assert_eq!(anchors_json(&got), r#"{"reviewer":0.4}"#);
+        assert!(persona_atom(
+            &Persona {
+                anchor: 1.5,
+                ..p.clone()
+            },
+            "ws"
+        )
+        .is_err());
+        let steps = consensus_steps_anchored("x-1", true, true, &[], &got).unwrap();
+        for step in &steps {
+            assert!(step.args.contains(&"--susceptibility-of".to_string()), "{step:?}");
+        }
+    }
+
     /// A claim that never entered the clock is due now; a scheduled one is
     /// not; trust rows never are; and the summary says whether the clock runs.
     #[test]
@@ -1914,6 +2234,7 @@ mod tests {
 
     fn row(from: &str, to: &str, weight: f64) -> Trust {
         Trust {
+            about: Vec::new(),
             from: from.into(),
             to: to.into(),
             weight,

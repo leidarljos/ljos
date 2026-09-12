@@ -21,7 +21,9 @@ ljos complete <node> --status done
 ljos cards
 ljos policy -- ls
 ljos consensus vissue-xxxx
-ljos trust alice bob 0.8 --why deed-…
+ljos trust alice bob 0.8 --why deed-… [--about docs]
+ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
+ljos vote vissue-xxxx --for hold --as reviewer
 ljos learn vissue-xxxx --outcome ship
 ljos due
 ljos graded <atom-id> [--lapsed]
@@ -74,11 +76,11 @@ host key at `~/.config/deedar/host.key` when it exists.
 
 `ljos consensus` reads the pack's live `trust` rows and passes them to both `ljos-consensus settle --issue --trust` and `vissue consensus --trust`, so the two settles weigh the same graph. No rows: every voter weighs the same.
 
-`ljos trust FROM TO WEIGHT` writes one row as a `trust` atom, citing deeds with `--why`. `ljos learn ID --outcome OPTION` reads the ballots, shrinks every refuted voter in every other voter's row by `--beta` (default 0.5, Hedge, doi:10.1006/jcss.1997.1504), floors at 0.01, and writes the complete set back. Trust is memory: rows carry a validity window, a later row supersedes, and `packset export` carries them in a handover.
+`ljos trust FROM TO WEIGHT` writes one row as a `trust` atom, citing deeds with `--why`; `--about DOMAIN` scopes the row, and a scoped row applies when the issue's title carries that word. `ljos persona NAME --anchor A --view TEXT [--about DOMAIN]` writes a voter with a view of its own; `ljos vote --as NAME` casts as it, and `ljos consensus` passes every persona's anchor to both settles as `--susceptibility-of`, so a persona holds its ballot as much as it says (Friedkin-Johnsen; a stubborn agent's pull is Acemoglu et al., doi:10.1287/moor.1120.0570). `learn` writes its rows scoped to what the issue's island is about. `ljos learn ID --outcome OPTION` reads the ballots, shrinks every refuted voter in every other voter's row by `--beta` (default 0.5, Hedge, doi:10.1006/jcss.1997.1504), floors at 0.01, and writes the complete set back. Trust is memory: rows carry a validity window, a later row supersedes, and `packset export` carries them in a handover.
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_sitting`, `ljos_finish`, `ljos_calibrate`, `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`. `ljos onboard` writes the registration; by hand it is
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_sitting`, `ljos_finish`, `ljos_calibrate`, `ljos_persona`, `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_island`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_release`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Resources: `ljos://protocol`, and the cards `ljos://cards/USER.md` and `ljos://cards/MEMORY.md` from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`. `ljos onboard` writes the registration; by hand it is
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}

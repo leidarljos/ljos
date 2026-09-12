@@ -4,6 +4,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+Personas and scoped trust:
+
+- `ljos persona NAME --anchor A --view TEXT [--about DOMAIN]` writes a voter
+  with a view; `ljos vote --as NAME` casts as it; `consensus` passes every
+  persona's anchor to both settles as `--susceptibility-of`.
+- Trust rows carry `about` domains: an unscoped row applies everywhere, a
+  scoped one when the issue's title carries the word. `learn` writes rows
+  scoped to the entities of the issue's island.
+- Over MCP: `ljos_persona`, `as` on `ljos_vote`, `about` on `ljos_trust`.
+
 The loop runs every time:
 
 - `ljos sitting ISSUE --assignee NAME` opens a sitting in the protocol's

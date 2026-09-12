@@ -15,13 +15,14 @@
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
 | =due= | pack | claims whose review is due, unreviewed ones first, then one line on the clock |
 | =graded ID [--lapsed]= | pack | one review graded |
-| =trust FROM TO WEIGHT [--why DEED]...= | pack | one trust row |
+| =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
+| =persona NAME --anchor A --view TEXT [--about DOMAIN]...= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot |
 | =learn ID --outcome OPTION [--beta B]= | tracker, pack | reweigh voters by what turned out right |
 | =evidence ACCESSION= / =current ACCESSION= | deed store | intact; still the tip |
 | =deed ID [--add ACCESSION]= | tracker | cite a deed on a node, or list citations |
 | =recall ID= | tracker | the working set |
-| =vote ID [--for OPTION]= | tracker | cast, or read the tally |
-| =consensus ID= | consensus, tracker | settle under the pack's trust rows |
+| =vote ID [--for OPTION] [--as PERSONA]= | tracker | cast, as the seat or as a persona, or read the tally |
+| =consensus ID= | consensus, tracker | settle under the pack's rows that apply to the issue, with every persona's anchor |
 | =claim ID --assignee NAME= | claim graph | a session node for a tracker id; a busy refusal names what the name still holds |
 | =release ID --assignee NAME= | claim graph | hand the session node back unfinished: ready, generation moved |
 | =complete ID [--status done\vert failed\vert cancelled]= | claim graph | finish the session node |
@@ -38,7 +39,7 @@ to one actor; a 32-hex id passes through.
 
 * Model Context Protocol (MCP) tools
 
-Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
+Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
 =ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_claim=,
 =ljos_release=, =ljos_complete=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search=,
 =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
@@ -66,6 +67,19 @@ other voter's row by =beta= (default 0.5), floored at 0.01. A vindicated
 voter keeps its weight, and a missing row starts at 1. Rows are written
 complete, so the settle sees the whole graph. The update is the
 multiplicative weights rule of Hedge (doi:10.1006/jcss.1997.1504).
+
+A row carries the domains it is scoped to. An unscoped row applies to
+every issue; a scoped row applies when one of its domains is a word of the
+issue's title. =learn= writes its rows scoped to the entities of the island
+the issue's title activates, eight at most, so a voter refuted on one topic
+keeps its standing on the rest; a scoped learn starts from the unscoped row
+when it has none of its own and leaves the unscoped row standing.
+
+A persona is a =persona= atom: a name, an anchor in [0, 1], a view, and the
+domains it speaks to. =consensus= passes every persona's anchor to both
+settles as =--susceptibility-of=; at 0 the persona never moves off its
+ballot and pulls the rest toward it (Acemoglu, Como, Fagnani and Ozdaglar,
+doi:10.1287/moor.1120.0570), at 1 it is a plain voter.
 
 Without an outcome, =calibrate= estimates each voter's accuracy from the
 project's issues with two or more ballots by expectation maximisation over

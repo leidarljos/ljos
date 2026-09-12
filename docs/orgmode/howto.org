@@ -106,6 +106,21 @@ learned from outcome "ship": 6 trust rows rewritten
 the ticket stays proj-1a2b's state; `vissue update proj-1a2b -s DONE` closes it
 #+end_src
 
+* Vote with personas
+
+#+begin_src console
+$ ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
+$ ljos persona reader --anchor 0.8 --view "Reads as a first-time user of the docs." --about docs
+$ ljos vote $id --for hold --as reviewer
+$ ljos vote $id --for ship --as reader
+$ ljos consensus $id
+#+end_src
+
+Each persona is one atom in the pack; its ballots carry its name. The
+settle takes its anchor: the reviewer at 0.2 barely moves off =hold=, the
+reader at 0.8 is nearly a plain voter. A trust row scoped with =--about
+docs= weighs only on issues whose title says =docs=.
+
 * Move the trust rows without an outcome
 
 #+begin_src console

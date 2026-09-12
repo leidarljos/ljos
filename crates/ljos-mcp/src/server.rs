@@ -10,10 +10,11 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, calibrate, cards, claim, consensus_steps, doctor, due, finish, graded,
-    handover, learn, node_for, on_path, packset_forget, packset_island, packset_search,
-    packset_write, policy_line, receive, release, run_captured, sitting, trust_from_pack,
-    write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    ballots_from_json, calibrate, cards, claim, consensus_steps_anchored, doctor, due, finish,
+    graded, handover, island_entities, learn_about, node_for, on_path, packset_forget,
+    packset_island, packset_search, packset_write, personas_from_pack, policy_line, receive,
+    release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
+    write_trust, Persona, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -93,6 +94,26 @@ pub struct VoteArgs {
     pub issue: String,
     /// `accept` or `reject`. Absent, the tool shows the tally.
     pub choice: Option<String>,
+    /// Cast as this persona (a name written with `ljos_persona`) instead of
+    /// the seat's own identity.
+    #[serde(rename = "as")]
+    pub as_persona: Option<String>,
+}
+
+/// A voter with a view.
+#[derive(Deserialize, JsonSchema)]
+pub struct PersonaArgs {
+    /// The persona's name; ballots cast as it carry this name.
+    pub name: String,
+    /// How far it moves off its ballot in a settle, in [0, 1]: 0 never
+    /// moves, 1 is a plain voter. Half when absent.
+    pub anchor: Option<f64>,
+    /// How this persona reads the work, in a sentence or two.
+    pub view: String,
+    /// Domains it speaks to; a trust row scoped to one applies when the
+    /// issue is about it.
+    #[serde(default)]
+    pub about: Vec<String>,
 }
 
 /// A session node to take or hand back.
@@ -137,6 +158,9 @@ pub struct TrustArgs {
     /// Deed accessions the row stands on.
     #[serde(default)]
     pub why: Vec<String>,
+    /// Domains this row is scoped to; none means it applies everywhere.
+    #[serde(default)]
+    pub about: Vec<String>,
 }
 
 /// An issue and what turned out right on it.
@@ -312,6 +336,30 @@ fn refused(e: anyhow::Error) -> McpError {
 /// Run a habitat's verb and hand back what it said.
 fn habitat(bin: &str, args: &[&str]) -> Result<Json<Said>, McpError> {
     run_captured(bin, args).map(said).map_err(refused)
+}
+
+/// [`habitat`] with `VISSUE_AGENT` set, so a ballot is recorded under a
+/// persona's name.
+fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<Said>, McpError> {
+    let Some(who) = identity.map(str::trim).filter(|w| !w.is_empty()) else {
+        return habitat(bin, args);
+    };
+    use std::process::{Command, Stdio};
+    let path = which::which(bin).map_err(|_| refused(anyhow::anyhow!("{bin} not on PATH")))?;
+    let out = Command::new(path)
+        .env("VISSUE_AGENT", who)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| refused(anyhow::anyhow!("{bin}: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(refused(anyhow::anyhow!("{bin} exited {}: {stderr}", out.status)));
+    }
+    Ok(said(ljos_cli::Said { stdout, stderr }))
 }
 
 #[tool_router]
@@ -501,7 +549,11 @@ impl LjosServer {
         Parameters(args): Parameters<VoteArgs>,
     ) -> Result<Json<Said>, McpError> {
         match &args.choice {
-            Some(c) => habitat("vissue", &["vote", &args.issue, "--for", c]),
+            Some(c) => habitat_as(
+                "vissue",
+                &["vote", &args.issue, "--for", c],
+                args.as_persona.as_deref(),
+            ),
             None => habitat("vissue", &["vote", &args.issue]),
         }
     }
@@ -687,12 +739,21 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Vec<Said>>, McpError> {
-        let trust = trust_from_pack().unwrap_or_default();
-        let steps = consensus_steps(
+        // Rows scoped to a domain apply when the issue is about it; the
+        // personas' anchors go to both settles.
+        let topic = run_captured("vissue", &["show", &args.issue, "--json"])
+            .ok()
+            .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok())
+            .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(topic_words))
+            .unwrap_or_default();
+        let trust = rows_about(&trust_from_pack().unwrap_or_default(), &topic);
+        let personas = personas_from_pack().unwrap_or_default();
+        let steps = consensus_steps_anchored(
             &args.issue,
             on_path("ljos-consensus"),
             on_path("vissue"),
             &trust,
+            &personas,
         )
         .map_err(refused)?;
         let mut out = Vec::new();
@@ -721,8 +782,32 @@ impl LjosServer {
             from: args.from,
             to: args.to,
             weight: args.weight,
+            about: args.about,
         };
         write_trust(&row, &args.why).map(Json).map_err(refused)
+    }
+
+    #[tool(
+        description = "Call this when the work wants a voter with a view of its own, such as a reviewer for a broad audience or a domain expert: write a persona with a name, an anchor in [0, 1] for how far it moves off its ballot in a settle (0 never moves), a sentence or two on how it reads the work, and the domains it speaks to. Then vote with `as` set to its name; ljos_consensus reads its anchor.",
+        annotations(
+            title = "Write a persona",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_persona(
+        &self,
+        Parameters(args): Parameters<PersonaArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let persona = Persona {
+            name: args.name,
+            anchor: args.anchor.unwrap_or(0.5),
+            view: args.view,
+            entities: args.about,
+        };
+        write_persona(&persona).map(Json).map_err(refused)
     }
 
     #[tool(
@@ -742,11 +827,15 @@ impl LjosServer {
         let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
         let ballots = ballots_from_json(&said.stdout).map_err(refused)?;
         let held = trust_from_pack().map_err(refused)?;
-        let rows = learn(
+        // Scoped to what the issue's island is about, so a voter wrong here
+        // keeps its standing elsewhere.
+        let about = island_entities(&args.issue).unwrap_or_default();
+        let rows = learn_about(
             &ballots,
             &args.outcome,
             &held,
             args.beta.unwrap_or(LEARN_BETA),
+            &about,
         )
         .map_err(refused)?;
         for row in &rows {
@@ -1085,7 +1174,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            26,
+            27,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1126,6 +1215,7 @@ mod tests {
                 "ljos_handover",
                 "ljos_island",
                 "ljos_learn",
+                "ljos_persona",
                 "ljos_prefer",
                 "ljos_receive",
                 "ljos_release",
