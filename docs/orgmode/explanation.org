@@ -104,6 +104,63 @@ arithmetic itself and got a third of them. A reader is a poor calendar; a
 store that already knows every date is a good one, so the store does the
 arithmetic and the reader reads the order.
 
+* The field, and where the seat stands in it
+
+Agent memory systems in the literature and on the market do one of a few
+jobs, and the seat's design can be read against each.
+
+Mem0 (doi:10.48550/arXiv.2504.19413) reads a conversation with a model,
+extracts facts, and has the model decide for each whether to add, update,
+delete or leave the store; a graph variant adds entity nodes. Zep
+(doi:10.48550/arXiv.2501.13956) builds a temporal knowledge graph: a model
+extracts entities and relations, each edge carries the time it became true
+and the time it stopped being true beside the time it was written, and
+retrieval is lexical, dense and graph search fused and reranked. MemGPT
+(doi:10.48550/arXiv.2310.08560), now Letta, keeps a small core memory in
+the model's context that the model edits with tools, a recall store of the
+conversation and an archival vector store, and its sleep-time compute
+(doi:10.48550/arXiv.2504.13171) reorganises memory between turns. A-MEM
+(doi:10.48550/arXiv.2502.12110) keeps notes with model-written keywords
+and links and rewrites older notes when a new one arrives. HippoRAG
+(doi:10.48550/arXiv.2405.14831, doi:10.48550/arXiv.2502.14802) extracts a
+knowledge graph and retrieves by personalised PageRank from the entities
+a question names. MemoryBank (doi:10.48550/arXiv.2305.10250) forgets on an
+Ebbinghaus curve refreshed by recall; Generative Agents
+(doi:10.48550/arXiv.2304.03442) rank by recency, importance and relevance
+and reflect. All of them put a model in the write path.
+
+The seat does not. What is remembered is what was said with =Remember= or
+=Prefer=, stored as written, so a transcript never becomes a belief by
+being read; that is the privacy-of-write, and it is the one design choice
+here that the others do not make. Forgetting is by review rather than by
+age: retrievability from the clock of what was recalled and when, the
+same schedule spaced repetition runs, where MemoryBank ages by time and
+Generative Agents by recency. Time is data, as in Zep: a claim carries the
+time it was written and the window it was live in, a later claim with the
+same head closes the earlier one, and the pack can be asked as of any
+time. Retrieval is a panel of scorers fused, as Zep fuses, and every hit
+says how many scorers named it. The link graph is Hebbian: use strengthens
+a link and disuse fades it, and the cluster a task activates is read
+beside the hits for orientation, not in their place, because measured as
+a ranking it lost. Above the pack the seat has what a memory alone does
+not: ballots settled under trust rows that learn from outcomes, deeds
+that stand for what the work produced, a claim graph for who holds what,
+and a signed handover another seat can check.
+
+What the others have that the seat does not: extraction. A model reading
+a transcript finds facts nobody said =Remember= to, and on a benchmark of
+chat logs that coverage is most of the score. The pack has a proposals
+path for that, gated so a proposal becomes a claim only on an explicit
+accept, and it runs on a model the seat does not ship. Measured on the
+public benchmarks with one small reader, the seat's retrieval finds the
+right session first nine times in ten on LongMemEval
+(doi:10.48550/arXiv.2410.10813), answers within a few points of the
+labelled-session ceiling where retrieval decides, and on MemoryAgentBench
+(doi:10.48550/arXiv.2507.05257) the rows to beat are the retrieval
+baselines rather than the memory products, which that benchmark's authors
+found behind them. The packset site carries every table and the
+reproduction package regenerates them.
+
 * Agreement that learns
 
 A tally counts, and a count is right only when every voter is worth the
