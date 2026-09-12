@@ -1799,7 +1799,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
             .trim_end()
             .to_string(),
     );
-    if std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some() {
+    // The key deedar signs with is the one doctor reports: the variable, or
+    // the seat's own at ~/.config/deedar/host.key. `off` signs nothing.
+    if host_key_path().is_some() {
         let manifest = out.join("manifest-sha256.txt");
         let said = run_captured(
             "deedar",
@@ -1807,7 +1809,11 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
         )?;
         lines.push(said.stdout.trim_end().to_string());
     } else {
-        lines.push("unsigned: DEEDAR_HOST_SIGNING_KEY unset".into());
+        lines.push(
+            "unsigned: no host key at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
+             `ljos onboard` writes one"
+                .into(),
+        );
     }
     Ok(lines)
 }

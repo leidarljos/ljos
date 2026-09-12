@@ -2,6 +2,12 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `handover` signs the manifest with the seat's default host key, not only
+  with one named by `DEEDAR_HOST_SIGNING_KEY`; it went out unsigned while
+  `doctor` reported the key present.
+
 ## 0.4.0 (2026-09-12)
 
 - The kind of work sets the dynamics: an issue tagged `broad` settles
