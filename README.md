@@ -47,6 +47,10 @@ ljos onboard --harness RUNNER
 
 `ljos calibrate -p PROJECT` moves the trust rows when nobody names an outcome: Dawid and Skene's estimate of each voter's accuracy from the project's voting history (doi:10.2307/2346806), written back as the weight every other voter gives that voter (a linear pool's weight for a source that reliable, Genest and Zidek, doi:10.1214/ss/1177013825). Under equal rows a consensus is a count; after `calibrate` or `learn` it is not.
 
+## The smoke test
+
+`scripts/smoke.sh` runs every loop on scratch stores under one temporary directory: memory, agreement, learning, a sitting and its finish, a second sitting that reopens, release, personas with forecasts and the surprisingly popular reading, a brief, calibration, a rule through the hook and through `policy`, a signed handover and its receipt. It needs the seat binaries on `PATH` and starts a pack writer if none answers. It found its first bug on its first run.
+
 ## For an agent, or the person running one
 
 `ljos protocol` prints the sitting protocol: which store answers which

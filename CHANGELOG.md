@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `scripts/smoke.sh`: every loop on scratch stores, as a check.
+
 ## 0.7.0 (2026-09-12)
 
 - `learn --share S`: a fixed share of recovery toward one after the Hedge
