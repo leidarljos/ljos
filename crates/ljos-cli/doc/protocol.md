@@ -38,7 +38,9 @@ hand. Each answers something the next one needs.
    are only its seeds. Every row carries its age; read them as a timeline.
    `ljos search TOPIC --as-of TIME` asks what the seat knew then.
 5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
-   cited so far.
+   cited so far. `ljos timeline ISSUE` when order matters: the logbook,
+   the cited deeds and the activated memories as one dated list, oldest
+   first, each line with its age and the gap since the one before.
 6. `ljos claim ISSUE --assignee NAME`. One live claim per name. `busy` means
    you still hold another node: `ljos complete` it, or `ljos release` it.
 

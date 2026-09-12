@@ -10,12 +10,12 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish,
-    graded, handover, island_entities, learn_and_write, node_for, on_path, packset_forget,
-    age_of, now_utc, packset_island, packset_search, packset_search_as_of, packset_write_as, personas_from_pack, policy_line, receive,
-    release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
-    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    age_of, ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due,
+    finish, graded, handover, island_entities, learn_and_write, node_for, now_utc, on_path,
+    packset_forget, packset_island, packset_search, packset_search_as_of, packset_write_as,
+    personas_from_pack, policy_line, receive, release, rows_about, run_captured, sitting, timeline,
+    topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -504,8 +504,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<Json<Vec<HitRow>>, McpError> {
-        let hits = packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false)
-            .map_err(refused)?;
+        let hits =
+            packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         Ok(Json(
             hits.into_iter()
@@ -588,6 +588,22 @@ impl LjosServer {
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Said>, McpError> {
         habitat("vissue", &["recall", &args.issue])
+    }
+
+    #[tool(
+        description = "Call this after ljos_recall when the order of events matters, or when a question is about when: the issue's timeline, one dated list oldest first across the three stores, the tracker's logbook (creation, state changes, claims, notes), the deeds it cites with the time each was produced, and the memories its title activates with the time each was written. Each line carries its age and the gap since the line before; a later line supersedes an earlier one on the same matter. Read-only.",
+        annotations(
+            title = "Timeline of an issue",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_timeline(
+        &self,
+        Parameters(args): Parameters<IssueArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = timeline(&args.issue, 60).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(

@@ -9,6 +9,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `6 months ago` beside the kind, and the hook's lessons run oldest to
   newest behind the preferences. The reader lays what it recalls on a
   timeline instead of a bag.
+- `timeline ISSUE` (and the `ljos_timeline` tool): the tracker's logbook,
+  the cited deeds and the activated memories as one dated list, oldest
+  first, each line with its age and the gap since the line before.
+  `sitting` prints the last twelve as `== timeline`.
 - `search --as-of TIME` (and `as_of` on the `ljos_search` tool): the pack
   as it stood then, so "what did the seat know when it decided that" has
   an answer.

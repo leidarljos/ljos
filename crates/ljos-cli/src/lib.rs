@@ -2705,6 +2705,203 @@ fn issue_title(issue: &str) -> Result<String> {
         .to_string())
 }
 
+/// One dated event on an issue's timeline, from whichever store holds it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Event {
+    /// Days since the epoch of the event's date.
+    pub days: i64,
+    /// `HH:MM` when the stamp carries a time, else empty; sorts after the
+    /// day.
+    pub clock: String,
+    /// `tracker`, `deed` or `memory`: the store the event came from.
+    pub source: &'static str,
+    /// The event in one line.
+    pub text: String,
+}
+
+/// The issue's timeline, the three stores read as one dated list, oldest
+/// first: the tracker's logbook (creation, state changes, claims, notes),
+/// the deeds the issue cites with the time each was produced, and the
+/// memories the issue's title activates with the time each was written.
+/// The reader gets time as data, not as stamps to do arithmetic on: each
+/// line carries its age and the gap since the line before it, and a later
+/// line supersedes an earlier one on the same matter.
+///
+/// # Errors
+///
+/// The tracker not answering. A deed store or pack that does not answer
+/// leaves its rows out; the tracker's rows are the spine.
+pub fn timeline(issue: &str, limit: usize) -> Result<String> {
+    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    let title = v["title"].as_str().unwrap_or(issue).to_string();
+    let mut events = tracker_events(&v);
+    for accession in v["deeds"].as_array().into_iter().flatten() {
+        let Some(accession) = accession.as_str() else {
+            continue;
+        };
+        if let Ok(said) = run_captured("deedar", &["evidence", accession]) {
+            if let Some(ev) = deed_event(accession, &said.stdout) {
+                events.push(ev);
+            }
+        }
+    }
+    if let Ok(island) = packset_island(&title, false) {
+        for atom in island["island"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|a| reviewable(a))
+            .take(8)
+        {
+            if let Some((days, clock)) = stamp_key(atom["ts"].as_str()) {
+                events.push(Event {
+                    days,
+                    clock,
+                    source: "memory",
+                    text: format!(
+                        "[{}] {}",
+                        atom["kind"].as_str().unwrap_or("claim"),
+                        atom["text"].as_str().unwrap_or("").trim()
+                    ),
+                });
+            }
+        }
+    }
+    // Stable, so events sharing a minute keep the order their store gave.
+    events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
+    let skip = events.len().saturating_sub(limit);
+    Ok(format!(
+        "timeline of {issue}: {title}
+{}",
+        format_events(&events[skip..], &now_utc())
+    ))
+}
+
+/// The tracker's own events on an issue: created, each state change, the
+/// claim, each note.
+fn tracker_events(v: &Value) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut push = |stamp: Option<&str>, source: &'static str, text: String| {
+        if let Some((days, clock)) = stamp_key(stamp) {
+            events.push(Event {
+                days,
+                clock,
+                source,
+                text,
+            });
+        }
+    };
+    push(
+        v["properties"]["CREATED"].as_str(),
+        "tracker",
+        "created".to_string(),
+    );
+    if let Some(by) = v["claimed_by"].as_str() {
+        push(
+            v["claimed_at"].as_str(),
+            "tracker",
+            format!("claimed by {by}"),
+        );
+    }
+    // The logbook is newest first; the timeline reads oldest first.
+    for e in v["logbook"].as_array().into_iter().flatten().rev() {
+        let stamp = e["timestamp"].as_str();
+        if let Some(note) = e["note"].as_str() {
+            push(stamp, "tracker", format!("note: {}", note.trim()));
+        } else if let Some(to) = e["to_state"].as_str() {
+            push(
+                stamp,
+                "tracker",
+                format!("{} -> {to}", e["from_state"].as_str().unwrap_or("-")),
+            );
+        }
+    }
+    events
+}
+
+/// A deed's event from `deedar evidence`: the time it was produced, by
+/// whom.
+fn deed_event(accession: &str, evidence: &str) -> Option<Event> {
+    let secs: i64 = evidence
+        .lines()
+        .find_map(|l| l.strip_prefix("time="))?
+        .trim()
+        .parse()
+        .ok()?;
+    let by = evidence
+        .lines()
+        .find_map(|l| l.strip_prefix("producedBy="))
+        .map(str::trim)
+        .unwrap_or("-");
+    Some(Event {
+        days: secs.div_euclid(86_400),
+        clock: format!(
+            "{:02}:{:02}",
+            secs.rem_euclid(86_400) / 3600,
+            secs.rem_euclid(86_400) % 3600 / 60
+        ),
+        source: "deed",
+        text: format!("{accession} produced by {by}"),
+    })
+}
+
+/// The sort key of a stamp in any of the three stores' shapes: RFC 3339
+/// (`2026-09-12T21:54:00Z`), an org stamp (`[2026-09-12 Sat 21:54]`), or a
+/// date alone. Day, then `HH:MM` when the stamp has one.
+fn stamp_key(stamp: Option<&str>) -> Option<(i64, String)> {
+    let s = stamp?.trim().trim_start_matches('[').trim_end_matches(']');
+    let days = days_of_stamp(Some(s))?;
+    let rest = &s[10..];
+    let clock = rest
+        .split(|c: char| c == 'T' || c == ' ')
+        .find(|t| t.len() >= 5 && t.as_bytes()[2] == b':')
+        .map(|t| t[..5].to_string())
+        .unwrap_or_default();
+    Some((days, clock))
+}
+
+/// One line per event: date, age, gap since the line before, store, text.
+fn format_events(events: &[Event], now: &str) -> String {
+    let today = days_of_stamp(Some(now)).unwrap_or(0);
+    let mut out = String::new();
+    let mut last: Option<i64> = None;
+    for e in events {
+        let gap = match last {
+            None => String::new(),
+            Some(d) if e.days == d => "same day".to_string(),
+            Some(d) => format!("+{} d", e.days - d),
+        };
+        last = Some(e.days);
+        out.push_str(&format!(
+            "{} {}	{}	{}	{}	{}
+",
+            civil_of_days(e.days),
+            e.clock,
+            age_of(Some(&civil_of_days(e.days)), &civil_of_days(today)),
+            gap,
+            e.source,
+            e.text
+        ));
+    }
+    out
+}
+
+/// `YYYY-MM-DD` of a day count since the epoch.
+fn civil_of_days(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Open a sitting on an issue, in the protocol's order, and stop at the
 /// first habitat that does not answer: doctor, cards, the review clock,
 /// the island the issue's title activates, the working set, the claim.
@@ -2739,6 +2936,10 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
     out.push_str(&format_island(&top));
     out.push_str("== recall\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
+    // The last twelve dated events across the three stores; `ljos
+    // timeline` prints them all.
+    out.push_str("== timeline\n");
+    out.push_str(&timeline(issue, 12)?);
     out.push_str("== claim\n");
     out.push_str(&claim(issue, assignee)?);
     Ok(out)
@@ -3209,13 +3410,81 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_timeline_merges_the_three_stores_oldest_first() {
+        let v = serde_json::json!({
+            "properties": {"CREATED": "[2026-09-01 Tue]"},
+            "claimed_by": "seat",
+            "claimed_at": "[2026-09-03 Thu 11:48]",
+            "logbook": [
+                {"note": "second", "timestamp": "[2026-09-10 Thu 09:00]"},
+                {"from_state": "TODO", "to_state": "STARTED", "timestamp": "[2026-09-03 Thu 11:48]"}
+            ]
+        });
+        let mut events = tracker_events(&v);
+        events.push(
+            deed_event(
+                "deed-x",
+                "id=deed-x ok\nproducedBy=seat -\ntime=1788566400\n",
+            )
+            .unwrap(),
+        );
+        events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
+        let text = format_events(&events, "2026-09-12T00:00:00Z");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "{text}");
+        assert!(
+            lines[0].starts_with("2026-09-01 \t11 days ago\t\ttracker\tcreated"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("+2 d\ttracker\tclaimed by seat"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("same day\ttracker\tTODO -> STARTED"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[3]
+                .starts_with("2026-09-05 00:00\t7 days ago\t+2 d\tdeed\tdeed-x produced by seat -"),
+            "{}",
+            lines[3]
+        );
+        assert!(
+            lines[4].contains("2 days ago\t+5 d\ttracker\tnote: second"),
+            "{}",
+            lines[4]
+        );
+    }
+
+    #[test]
+    fn stamps_of_every_shape_key_the_same() {
+        assert_eq!(
+            stamp_key(Some("[2026-09-12 Sat 21:54]")),
+            stamp_key(Some("2026-09-12T21:54:00.000Z"))
+        );
+        assert_eq!(stamp_key(Some("[2026-09-12 Sat]")).unwrap().1, "");
+        assert_eq!(stamp_key(Some("soon")), None);
+        assert_eq!(
+            civil_of_days(days_of_stamp(Some("2026-09-12")).unwrap()),
+            "2026-09-12"
+        );
+    }
+
+    #[test]
     fn ages_read_as_a_timeline() {
         let now = "2026-09-12T14:00:00.000Z";
         assert_eq!(age_of(Some("2026-09-12T01:00:00.000Z"), now), "today");
         assert_eq!(age_of(Some("2026-09-11T23:59:00.000Z"), now), "yesterday");
         assert_eq!(age_of(Some("2026-09-01T00:00:00.000Z"), now), "11 days ago");
         assert_eq!(age_of(Some("2026-08-01T00:00:00.000Z"), now), "6 weeks ago");
-        assert_eq!(age_of(Some("2026-03-01T00:00:00.000Z"), now), "6 months ago");
+        assert_eq!(
+            age_of(Some("2026-03-01T00:00:00.000Z"), now),
+            "6 months ago"
+        );
         assert_eq!(age_of(Some("2023-09-12T00:00:00.000Z"), now), "3 years ago");
         assert_eq!(age_of(Some("2026-09-13T00:00:00.000Z"), now), "in 1 day");
         assert_eq!(age_of(None, now), "");
