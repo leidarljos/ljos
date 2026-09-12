@@ -3,15 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
-    finish, format_doctor, format_hits, format_hubs, format_island, format_steps, graded, handover,
-    healthy, hook_call, hook_context, hook_output_ruled, island_entities, join, learn_and_write,
-    node_for, on_path, onboard, pack, packset_forget, packset_hubs, packset_island,
-    packset_search_opts, packset_write_as, panel, panel_steps, personas_from_pack,
-    policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
-    run_captured, session_end, sitting, topic_words, trust_from_pack, verdict_for, write_persona,
-    write_prediction, write_rule, write_trust, Persona, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish, format_doctor, format_hits, format_hubs, format_island, format_steps, graded, handover, healthy, hook_call, hook_context, hook_output_ruled, island_entities, join, learn_anchors, learn_and_write, learn_shared, node_for, on_path, onboard, pack, packset_forget, packset_hubs, packset_island, packset_search_opts, packset_write_as, panel, panel_steps, personas_from_pack, policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as, run_captured, session_end, sitting, topic_words, trust_from_pack, verdict_for, write_persona, write_prediction, write_rule, write_trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL, Persona, Rule, Trust,
 };
 use std::path::PathBuf;
 
@@ -290,6 +282,9 @@ enum Cmd {
         /// The factor a refuted voter shrinks by.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
+        /// A fixed share of recovery toward one after the step, so a voter refuted long ago can come back; 0 is plain Hedge.
+        #[arg(long, default_value_t = 0.0)]
+        share: f64,
     },
 }
 
@@ -542,13 +537,30 @@ fn main() -> Result<()> {
             let v = graded(&id, !lapsed)?;
             println!("{}", v["due_at"].as_str().unwrap_or("graded"));
         }
-        Cmd::Learn { id, outcome, beta } => {
+        Cmd::Learn {
+            id,
+            outcome,
+            beta,
+            share,
+        } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let ballots = ballots_from_json(&said.stdout)?;
             // The rows written are scoped to what the issue's island is
             // about, so a voter wrong here keeps its standing elsewhere.
             let about = island_entities(&id).unwrap_or_default();
-            let (rows, moved) = learn_and_write(&ballots, &outcome, beta, &about)?;
+            let (rows, moved) = if share > 0.0 {
+                let rows = learn_shared(&ballots, &outcome, &trust_from_pack()?, beta, &about, share)?;
+                let moved = learn_anchors(&personas_from_pack()?, &ballots, &outcome, beta);
+                for row in &rows {
+                    write_trust(row, &[])?;
+                }
+                for p in &moved {
+                    write_persona(p)?;
+                }
+                (rows, moved)
+            } else {
+                learn_and_write(&ballots, &outcome, beta, &about)?
+            };
             for row in &rows {
                 println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
             }

@@ -1884,8 +1884,27 @@ pub fn learn_about(
     beta: f64,
     about: &[String],
 ) -> Result<Vec<Trust>> {
+    learn_shared(ballots, outcome, rows, beta, about, 0.0)
+}
+
+/// [`learn_about`] with a fixed share of recovery: after the Hedge step
+/// every row moves toward one by `share` of the gap, so a voter refuted
+/// long ago is not held down forever and the best voter can change
+/// (Herbster and Warmuth, doi:10.1023/A:1007424614876). Zero is plain
+/// Hedge; the seat's default.
+pub fn learn_shared(
+    ballots: &[(String, String)],
+    outcome: &str,
+    rows: &[Trust],
+    beta: f64,
+    about: &[String],
+    share: f64,
+) -> Result<Vec<Trust>> {
     if !(beta > 0.0 && beta < 1.0) {
         bail!("learn: beta {beta} is not in (0, 1)");
+    }
+    if !(0.0..1.0).contains(&share) {
+        bail!("learn: share {share} is not in [0, 1)");
     }
     let outcome = outcome.trim();
     if outcome.is_empty() {
@@ -1918,11 +1937,12 @@ pub fn learn_about(
                         .find(|r| r.from == *from && r.to == *to && r.about.is_empty())
                 })
                 .map_or(1.0, |r| r.weight);
-            let next = if refuted(to) {
+            let stepped = if refuted(to) {
                 (current * beta).max(TRUST_FLOOR)
             } else {
                 current
             };
+            let next = stepped + (1.0 - stepped) * share;
             out.push(Trust {
                 from: (*from).to_string(),
                 to: (*to).to_string(),
@@ -3698,6 +3718,20 @@ mod tests {
         assert!(learn(&ballots, "ship", &[], 1.0).is_err());
         assert!(learn(&ballots, "  ", &[], 0.5).is_err());
         assert!(learn(&ballots[..1], "ship", &[], 0.5).is_err());
+
+        // A fixed share of recovery: the refuted row moves back toward one
+        // by the share of the gap, the vindicated row stays at one.
+        let shared = learn_shared(&ballots, "ship", &rows, 0.5, &[], 0.1).unwrap();
+        let w3 = |from: &str, to: &str| {
+            shared
+                .iter()
+                .find(|r| r.from == from && r.to == to)
+                .unwrap()
+                .weight
+        };
+        assert!((w3("a", "c") - (0.25 + 0.75 * 0.1)).abs() < 1e-12);
+        assert_eq!(w3("a", "b"), 1.0);
+        assert!(learn_shared(&ballots, "ship", &[], 0.5, &[], 1.0).is_err());
     }
 
     #[test]

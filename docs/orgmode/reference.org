@@ -20,7 +20,7 @@
 | =persona NAME --anchor A --view TEXT [--about DOMAIN]...= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot |
 | =brief NAME ISSUE= | pack, tracker | what a subagent playing the persona starts from: view, what the seat knows on its domains, the working set |
 | =panel ISSUE [--out DIR]= | pack, tracker | one brief per persona as =DIR/<name>.md=, then the settle line; a panel for a runner without MCP |
-| =learn ID --outcome OPTION [--beta B]= | tracker, pack | reweigh voters by what turned out right |
+| =learn ID --outcome OPTION [--beta B] [--share S]= | tracker, pack | reweigh voters by what turned out right; =--share= is a fixed share of recovery toward one after the step |
 | =evidence ACCESSION= / =current ACCESSION= | deed store | intact; still the tip |
 | =deed ID [--add ACCESSION]= | tracker | cite a deed on a node, or list citations |
 | =recall ID= | tracker | the working set |
@@ -94,7 +94,11 @@ issue's title. =learn= writes its rows scoped to the entities of the island
 the issue's title activates, eight at most, so a voter refuted on one topic
 keeps its standing on the rest; a scoped learn starts from the unscoped row
 when it has none of its own and leaves the unscoped row standing. When
-both apply, the scoped row is the one the settle sees. An outcome also
+both apply, the scoped row is the one the settle sees. With =--share S=
+every row then moves toward one by =S= of the gap, the fixed-share rule
+of Herbster and Warmuth (doi:10.1023/A:1007424614876), so a voter refuted
+long ago is not held down forever and the best voter can change; the
+default is zero, plain Hedge. An outcome also
 moves the anchor of every persona it refuted toward one by =1 - beta= of
 the gap: a persona that keeps being wrong listens more.
 
