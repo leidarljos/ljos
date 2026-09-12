@@ -49,7 +49,7 @@ ljos onboard --harness RUNNER
 
 ## The smoke test
 
-`scripts/smoke.sh` runs every loop on scratch stores under one temporary directory: memory, agreement, learning, a sitting and its finish, a second sitting that reopens, release, personas with forecasts and the surprisingly popular reading, a brief, calibration, a rule through the hook and through `policy`, a signed handover and its receipt. It needs the seat binaries on `PATH` and starts a pack writer if none answers. It found its first bug on its first run. `scripts/terra/build.sbatch` and `scripts/terra/smoke.sbatch` are the Slurm scripts that build the seat and consensus crates and run the smoke on the build host, as run.
+`scripts/smoke.sh` runs every loop on scratch stores under one temporary directory: memory, agreement, learning, a sitting and its finish, a second sitting that reopens and a third that resumes, a timeline, release under `LJOS_SEAT`, a rewrite that closes its earlier claim and a consolidation that finds nothing left, an as-of read from before the write, personas with forecasts and the surprisingly popular reading, a brief, calibration, a rule through the hook and through `policy`, a signed handover and its receipt. It needs the seat binaries on `PATH` and starts a pack writer if none answers. It found its first bug on its first run. `scripts/terra/build.sbatch` and `scripts/terra/smoke.sbatch` are the Slurm scripts that build the seat and consensus crates and run the smoke on the build host, as run.
 
 ## For an agent, or the person running one
 
