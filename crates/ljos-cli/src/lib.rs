@@ -320,6 +320,26 @@ pub fn doctor() -> Vec<Habitat> {
             ok: false,
         },
     });
+    out.push(match std::env::var_os("DEEDAR_HOST_SIGNING_KEY") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let seed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 32;
+            Habitat {
+                name: "host key",
+                state: if seed {
+                    format!("{} (32-byte seed)", path.display())
+                } else {
+                    format!("{} is not a 32-byte seed", path.display())
+                },
+                ok: seed,
+            }
+        }
+        None => Habitat {
+            name: "host key",
+            state: "DEEDAR_HOST_SIGNING_KEY unset; handovers go out unsigned".into(),
+            ok: false,
+        },
+    });
     for (name, bin, args) in [
         ("deed store", "deedar", &["log", "head"][..]),
         ("tracker", "vissue", &["identity"][..]),
@@ -1047,6 +1067,7 @@ mod tests {
             "deedar",
             "packset",
             "pack",
+            "host key",
             "deed store",
             "tracker",
         ] {

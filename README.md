@@ -48,7 +48,7 @@ ljos doctor
 
 `ljos handover --out DIR` runs the tracker's satchel, `packset export` into `DIR/data/atoms`, `deedar export` of every deed the satchel needs or the pack cites into `DIR/data/deeds`, then seals, and signs the manifest when `DEEDAR_HOST_SIGNING_KEY` is set. `ljos receive DIR` verifies the manifest, checks the deed receipts (`--since` for the bridge from a kept head), checks the signature when there is one, counts the atoms and trust rows, and with `--import` posts the atoms into this seat's pack.
 
-`ljos doctor` says which habitats answer and exits 1 when the tracker, the deed store, or the pack does not.
+`ljos doctor` says which habitats answer and exits 1 when the tracker, the deed store, or the pack does not. It also says whether `DEEDAR_HOST_SIGNING_KEY` names a 32-byte seed; without one a handover goes out unsigned.
 
 Other projects may still speak packset, deedar, vissue, or claimdag alone.
 
