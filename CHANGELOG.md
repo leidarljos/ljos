@@ -2,6 +2,14 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- Every recalled memory carries its age: the hook's lines, a brief's
+  lines, `search` and the island in `sitting` say `today`, `3 weeks ago`,
+  `6 months ago` beside the kind, and the hook's lessons run oldest to
+  newest behind the preferences. The reader lays what it recalls on a
+  timeline instead of a bag.
+
 ## 0.8.0 (2026-09-12)
 
 - `scripts/smoke.sh`: every loop on scratch stores, as a check.

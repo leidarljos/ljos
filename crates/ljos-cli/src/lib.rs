@@ -730,17 +730,15 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
-    let rows: Vec<&Hit> = rows.into_iter().take(limit).collect();
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|h| {
-            format!(
-                "- [{}] {}",
-                if h.kind.is_empty() { "claim" } else { &h.kind },
-                h.text.trim()
-            )
-        })
-        .collect();
+    let mut rows: Vec<&Hit> = rows.into_iter().take(limit).collect();
+    // Preferences stay in front by score; the lessons behind them run
+    // oldest to newest, so what was learnt last is read last and nearest
+    // the action, and a later lesson that revises an earlier one reads as
+    // a revision.
+    let now = now_utc();
+    let split = rows.iter().filter(|h| h.kind == "preference").count();
+    rows[split..].sort_by_key(|h| days_of_stamp(h.ts.as_deref()).unwrap_or(i64::MAX));
+    let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
     let nudge = due_nudge(call);
     if lines.is_empty() {
         return nudge;
@@ -750,7 +748,7 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
         &rows.iter().filter_map(|h| h.id.clone()).collect::<Vec<_>>(),
     );
     let mut out = format!(
-        "What this seat already knows that bears on this (from the pack; `ljos search` for more):\n{}",
+        "What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):\n{}",
         lines.join("\n")
     );
     if !nudge.is_empty() {
@@ -1336,6 +1334,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     );
     let mut seen = std::collections::BTreeSet::new();
     let mut lines = Vec::new();
+    let now = now_utc();
     // What this persona remembered itself comes first: its own lessons,
     // written with `remember --as`, carry its entity.
     let client = pack()?;
@@ -1354,8 +1353,9 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
                     seen.insert(id.to_string());
                 }
                 out.push_str(&format!(
-                    "- [{}] {}\n",
+                    "- [{}{}] {}\n",
                     a["kind"].as_str().unwrap_or("claim"),
+                    age_tag(a["ts"].as_str(), &now),
                     a["text"].as_str().unwrap_or("").trim()
                 ));
             }
@@ -1379,10 +1379,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
                     continue;
                 }
             }
-            lines.push((
-                h.kind == "preference",
-                format!("- [{}] {}", h.kind, h.text.trim()),
-            ));
+            lines.push((h.kind == "preference", hit_line(&h, &now)));
         }
     }
     lines.sort_by(|a, b| b.0.cmp(&a.0));
@@ -2565,6 +2562,7 @@ pub fn format_hubs(body: &Value) -> String {
 /// One line per activated memory: activation, seed mark, id, text.
 pub fn format_island(body: &Value) -> String {
     let mut out = String::new();
+    let now = now_utc();
     for atom in body["island"]
         .as_array()
         .into_iter()
@@ -2572,7 +2570,7 @@ pub fn format_island(body: &Value) -> String {
         .filter(|a| reviewable(a))
     {
         out.push_str(&format!(
-            "{:.3}\t{}\t{}\t{}\n",
+            "{:.3}\t{}\t{}\t{}\t{}\n",
             atom["activation"].as_f64().unwrap_or(0.0),
             if atom["seed"].as_bool().unwrap_or(false) {
                 "seed"
@@ -2580,6 +2578,7 @@ pub fn format_island(body: &Value) -> String {
                 "    "
             },
             atom["id"].as_str().unwrap_or("-"),
+            age_of(atom["ts"].as_str(), &now),
             atom["text"].as_str().unwrap_or("")
         ));
     }
@@ -2847,13 +2846,86 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
     Ok(rows)
 }
 
+/// One line per hit: score, kind, id, age, text. The age is the one
+/// column a reader needs to lay the hits on a timeline.
 pub fn format_hits(hits: &[Hit]) -> String {
+    let now = now_utc();
     let mut out = String::new();
     for h in hits {
         let id = h.id.as_deref().unwrap_or("-");
-        out.push_str(&format!("{:.4}\t{}\t{}\t{}\n", h.score, h.kind, id, h.text));
+        out.push_str(&format!(
+            "{:.4}\t{}\t{}\t{}\t{}\n",
+            h.score,
+            h.kind,
+            id,
+            age_of(h.ts.as_deref(), &now),
+            h.text
+        ));
     }
     out
+}
+
+/// The line a hit takes in injected context and in a brief: kind and age
+/// in the bracket, then the text.
+fn hit_line(h: &Hit, now: &str) -> String {
+    format!(
+        "- [{}{}] {}",
+        if h.kind.is_empty() { "claim" } else { &h.kind },
+        age_tag(h.ts.as_deref(), now),
+        h.text.trim()
+    )
+}
+
+/// `, N days ago` for a bracket, empty when the stamp is missing.
+fn age_tag(ts: Option<&str>, now: &str) -> String {
+    let age = age_of(ts, now);
+    if age.is_empty() {
+        age
+    } else {
+        format!(", {age}")
+    }
+}
+
+/// How long ago a stamp was, in words a reader can place: `today`,
+/// `yesterday`, `N days ago`, then weeks, months and years once the count
+/// stops fitting the smaller unit. Empty when the stamp is missing or
+/// unreadable, `in N days` for a stamp ahead of `now`.
+#[must_use]
+pub fn age_of(ts: Option<&str>, now: &str) -> String {
+    let (Some(then), Some(today)) = (days_of_stamp(ts), days_of_stamp(Some(now))) else {
+        return String::new();
+    };
+    let days = today - then;
+    match days {
+        d if d < 0 => format!("in {} day{}", -d, if d == -1 { "" } else { "s" }),
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        d if d < 14 => format!("{d} days ago"),
+        d if d < 61 => format!("{} weeks ago", d / 7),
+        d if d < 730 => format!("{} months ago", d / 30),
+        d => format!("{} years ago", d / 365),
+    }
+}
+
+/// Days since the epoch of an RFC 3339 stamp's date, or none when the
+/// first ten characters do not read as `YYYY-MM-DD`.
+fn days_of_stamp(ts: Option<&str>) -> Option<i64> {
+    let ts = ts?;
+    let date = ts.get(..10)?;
+    let mut it = date.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Civil date to days since the epoch (Howard Hinnant's algorithm).
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// Read-only cards. Only [`CARD_NAMES`], never created, never written.
@@ -3114,6 +3186,43 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ages_read_as_a_timeline() {
+        let now = "2026-09-12T14:00:00.000Z";
+        assert_eq!(age_of(Some("2026-09-12T01:00:00.000Z"), now), "today");
+        assert_eq!(age_of(Some("2026-09-11T23:59:00.000Z"), now), "yesterday");
+        assert_eq!(age_of(Some("2026-09-01T00:00:00.000Z"), now), "11 days ago");
+        assert_eq!(age_of(Some("2026-08-01T00:00:00.000Z"), now), "6 weeks ago");
+        assert_eq!(age_of(Some("2026-03-01T00:00:00.000Z"), now), "6 months ago");
+        assert_eq!(age_of(Some("2023-09-12T00:00:00.000Z"), now), "3 years ago");
+        assert_eq!(age_of(Some("2026-09-13T00:00:00.000Z"), now), "in 1 day");
+        assert_eq!(age_of(None, now), "");
+        assert_eq!(age_of(Some("card"), now), "");
+    }
+
+    #[test]
+    fn a_hit_line_carries_kind_and_age() {
+        let h = Hit {
+            id: Some("a".into()),
+            text: " keep the smoke green ".into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: Some("2026-09-10T00:00:00.000Z".into()),
+        };
+        assert_eq!(
+            hit_line(&h, "2026-09-12T00:00:00.000Z"),
+            "- [lesson, 2 days ago] keep the smoke green"
+        );
+        let bare = Hit {
+            id: None,
+            text: "x".into(),
+            score: 1.0,
+            kind: String::new(),
+            ts: None,
+        };
+        assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
+    }
+
     /// A hook call is read from the runner's JSON or from plain text, and
     /// the answer is the runner's shape only when there is something to say.
     #[test]
