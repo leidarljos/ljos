@@ -1277,6 +1277,34 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     Ok(out)
 }
 
+/// A panel for a runner with no MCP: one brief per persona written to
+/// `out`, named `<persona>.md`, and the lines that run it. A runner starts
+/// one subagent per file, each ends with the ballot its brief names, and
+/// `ljos consensus ISSUE` settles.
+///
+/// # Errors
+///
+/// No personas in the pack, or a brief that cannot be written.
+pub fn panel(issue: &str, out: &Path) -> Result<String> {
+    let personas = personas_from_pack()?;
+    if personas.is_empty() {
+        bail!("panel: the pack holds no personas; `ljos persona NAME --anchor A --view ...` writes one");
+    }
+    std::fs::create_dir_all(out)?;
+    let mut lines = vec![format!(
+        "{} briefs in {}; start one subagent per file, each ends with its ballot, then:",
+        personas.len(),
+        out.display()
+    )];
+    for p in &personas {
+        let path = out.join(format!("{}.md", p.name));
+        std::fs::write(&path, brief(&p.name, issue)?)?;
+        lines.push(format!("  {}", path.display()));
+    }
+    lines.push(format!("ljos consensus {issue}"));
+    Ok(lines.join("\n") + "\n")
+}
+
 /// Anchors as the settles take them: `{"name": anchor, ...}`.
 pub fn anchors_json(personas: &[Persona]) -> String {
     let map: serde_json::Map<String, Value> = personas

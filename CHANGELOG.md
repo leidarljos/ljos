@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos panel ISSUE --out DIR`: every persona's brief as a file, so a runner
+  without MCP can start one subagent per persona.
 - `remember --as NAME` and `prefer --as NAME` (and `as` on the tools): a
   persona keeps lessons of its own, which open its next `brief`.
 - `handover` signs the manifest with the seat's default host key, not only

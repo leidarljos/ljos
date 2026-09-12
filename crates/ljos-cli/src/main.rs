@@ -86,6 +86,14 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
     },
+    /// A panel without MCP: one brief per persona written to a directory, then the settle line.
+    Panel {
+        /// The tracker id of the issue.
+        issue: String,
+        /// Where the briefs go, one `<persona>.md` each.
+        #[arg(long, default_value = "panel")]
+        out: PathBuf,
+    },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
     Persona {
         name: String,
@@ -287,6 +295,7 @@ fn main() -> Result<()> {
             None => run("vissue", &["vote", &issue])?,
         },
         Cmd::Brief { name, issue } => print!("{}", brief(&name, &issue)?),
+        Cmd::Panel { issue, out } => print!("{}", panel(&issue, &out)?),
         Cmd::Persona {
             name,
             anchor,

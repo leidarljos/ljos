@@ -25,6 +25,7 @@ ljos trust alice bob 0.8 --why deed-… [--about docs]
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
+ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
 ljos vote vissue-xxxx --for hold --as reviewer
 ljos learn vissue-xxxx --outcome ship
 ljos due
