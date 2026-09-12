@@ -231,8 +231,12 @@ fn main() -> Result<()> {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let ballots = ballots_from_json(&said.stdout)?;
             let rows = learn(&ballots, &outcome, &trust_from_pack()?, beta)?;
+            // Every row lands before any is printed, so a closed pipe cannot
+            // leave the graph half written.
             for row in &rows {
                 write_trust(row, &[])?;
+            }
+            for row in &rows {
                 println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
             }
         }
