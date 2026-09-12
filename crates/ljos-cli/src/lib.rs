@@ -66,26 +66,35 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     post_claim(&client, label, text, &workspace)
 }
 
-/// Retire one atom from the workspace the cwd resolves to.
+/// Retire one atom from the workspace the cwd resolves to, optionally naming
+/// the deed that withdrew it.
 ///
 /// The daemon tombstones rather than erases: the atom stops being recalled and
 /// the pack still records that it was held and withdrawn. That is the right
 /// shape for standing knowledge, where "we no longer believe this" is itself
 /// worth keeping.
 ///
+/// `why` is a deed accession and the pack refuses free text in its place. It
+/// runs the same join as a remembered claim's `entities`, in the same
+/// direction: the pack cites the deed store, never the other way round. A
+/// retraction the work justified is therefore checkable with `deedar evidence`
+/// like any other citation, and one nothing justified simply carries no `why`.
+///
 /// # Errors
 ///
-/// An unset `PACKSET_URL`, an id the workspace does not hold, or the request's.
-pub fn packset_forget(id: &str) -> Result<Value> {
+/// An unset `PACKSET_URL`, an id the workspace does not hold, a `why` that is
+/// not an accession, or the request's.
+pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
         bail!("forget: an atom id is required");
     }
+    let why = why.map(str::trim).filter(|w| !w.is_empty());
     let client =
         PacksetClient::from_env().context("PACKSET_URL unset; forget POSTs /v1/atoms/delete")?;
     let workspace = client.workspace();
     client
-        .delete_atom(&workspace, trimmed)
+        .delete_atom(&workspace, trimmed, why)
         .with_context(|| format!("forget: POST /v1/atoms/delete failed for {trimmed}"))
 }
 
@@ -1159,20 +1168,36 @@ mod tests {
     fn forget_posts_the_id_and_workspace() {
         let (url, captured) = serve_capture();
         let client = PacksetClient::new(&url);
-        let body = client.delete_atom("ws", "atom-1").unwrap();
+        let body = client.delete_atom("ws", "atom-1", None).unwrap();
         assert_eq!(body["id"], "atom-1");
         let req = captured.lock().unwrap().clone();
         assert!(req.contains("POST"), "{req}");
         assert!(req.contains("/v1/atoms/delete"), "{req}");
         assert!(req.contains("\"id\":\"atom-1\""), "{req}");
         assert!(req.contains("\"workspace\":\"ws\""), "{req}");
+        // No deed named, no field: the pack should not have to tell an absent
+        // citation from an empty one.
+        assert!(!req.contains("\"why\""), "{req}");
+    }
+
+    /// The deed rides with the retraction, so the pack can write it onto the
+    /// tombstone in the same step the atom leaves the live set.
+    #[test]
+    fn forget_carries_the_deed_that_withdrew_the_claim() {
+        let (url, captured) = serve_capture();
+        let client = PacksetClient::new(&url);
+        client
+            .delete_atom("ws", "atom-1", Some("deed-patch-overlay"))
+            .unwrap();
+        let req = captured.lock().unwrap().clone();
+        assert!(req.contains("\"why\":\"deed-patch-overlay\""), "{req}");
     }
 
     /// An id is the whole of the request, so an empty one is a mistake worth
     /// naming rather than a delete of whatever the server decides that means.
     #[test]
     fn forget_refuses_an_empty_id() {
-        let err = packset_forget("   ").unwrap_err();
+        let err = packset_forget("   ", None).unwrap_err();
         assert!(err.to_string().contains("atom id is required"), "{err}");
     }
 }

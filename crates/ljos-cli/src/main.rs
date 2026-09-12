@@ -32,6 +32,9 @@ enum Cmd {
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
         id: String,
+        /// The deed accession that withdrew the claim. Refused if it is not one.
+        #[arg(long)]
+        why: Option<String>,
     },
     Search {
         query: Vec<String>,
@@ -140,8 +143,8 @@ fn main() -> Result<()> {
             let body = packset_write("Prefer", &join(&text))?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
-        Cmd::Forget { id } => {
-            let body = packset_forget(&id)?;
+        Cmd::Forget { id, why } => {
+            let body = packset_forget(&id, why.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
         Cmd::Search { query } => {

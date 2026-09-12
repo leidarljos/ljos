@@ -1,18 +1,18 @@
 //! The seat as an agent surface.
 //!
-//! The command line's twelve verbs, none owned here: a pack write is an HTTP
+//! The command line's verbs, none owned here: a pack write is an HTTP
 //! call, everything else execs the habitat's own binary and hands back what
 //! it said. Every tool says whether it writes; a habitat that refused is an
 //! error; the cards are read-only resources under `ljos://cards/`; the
-//! sequences that cross habitats are prompts. The pack is written only by
-//! Remember and Prefer, and the text is the claim.
+//! sequences that cross habitats are prompts. The pack is written by
+//! Remember, Prefer and Forget, and the text is the claim.
 
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
     ballots_from_json, cards, consensus_steps, doctor, due, graded, handover, learn, on_path,
-    packset_search, packset_write, policy_line, receive, run_captured, trust_from_pack,
-    write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
+    packset_forget, packset_search, packset_write, policy_line, receive, run_captured,
+    trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -46,6 +46,18 @@ pub struct ClaimArgs {
 pub struct SearchArgs {
     /// What to ask the seat's standing knowledge.
     pub query: String,
+}
+
+/// One atom to retire, and what withdrew it.
+#[derive(Deserialize, JsonSchema)]
+pub struct ForgetArgs {
+    /// The atom's id, as `ljos_search` returned it. Not its text.
+    pub id: String,
+    /// The deed accession the retraction stands on, when the work minted one.
+    /// Free text is refused: the point of writing it is that `ljos_evidence`
+    /// can be asked about it later.
+    #[serde(default)]
+    pub why: Option<String>,
 }
 
 /// One deed accession.
@@ -298,6 +310,25 @@ impl LjosServer {
         Parameters(args): Parameters<ClaimArgs>,
     ) -> Result<Json<serde_json::Value>, McpError> {
         packset_write("Prefer", &args.text)
+            .map(Json)
+            .map_err(refused)
+    }
+
+    #[tool(
+        description = "Retire one atom by id, so the seat stops recalling it. The pack tombstones rather than erases and keeps the record, and `why` names the deed the retraction stands on. Forget a claim that turned out wrong; do not forget one merely because this sitting disagrees with it.",
+        annotations(
+            title = "Forget",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_forget(
+        &self,
+        Parameters(args): Parameters<ForgetArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        packset_forget(&args.id, args.why.as_deref())
             .map(Json)
             .map_err(refused)
     }
@@ -724,10 +755,13 @@ impl LjosServer {
              5. `ljos_claim` a session node for it. One live claim per assignee.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
-             with `ljos_remember` in two short sentences. When the work produces\n\
-             something, mint the deed in the deed store and `ljos_deed` it on the\n\
-             node. Completing the session node does not close the ticket. A tool\n\
-             that fails is a habitat refusing or down: `ljos_doctor` says which."
+             with `ljos_remember` in two short sentences. When the work shows a\n\
+             standing claim was wrong, `ljos_forget` it and name the deed that\n\
+             showed it; disagreeing with a claim is not showing it wrong. When the\n\
+             work produces something, mint the deed in the deed store and\n\
+             `ljos_deed` it on the node. Completing the session node does not\n\
+             close the ticket. A tool that fails is a habitat refusing or down:\n\
+             `ljos_doctor` says which."
         )))
     }
 
@@ -834,13 +868,13 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every tool is annotated, and the writers are the contract's eleven.
+    /// Every tool is annotated, and the writers are the contract's twelve.
     #[test]
-    fn the_writers_are_the_eleven_the_contract_names() {
+    fn the_writers_are_the_twelve_the_contract_names() {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            20,
+            21,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -854,10 +888,12 @@ mod tests {
             match hints.read_only_hint {
                 Some(true) => {}
                 Some(false) => {
+                    // Forget is the one verb that takes something away. Every
+                    // other writer adds, so saying so is the whole annotation.
+                    let expected = Some(tool.name == "ljos_forget");
                     assert_eq!(
-                        hints.destructive_hint,
-                        Some(false),
-                        "{} destroys",
+                        hints.destructive_hint, expected,
+                        "{} misreports whether it destroys",
                         tool.name
                     );
                     writers.push(tool.name.to_string());
@@ -872,6 +908,7 @@ mod tests {
                 "ljos_claim",
                 "ljos_complete",
                 "ljos_deed",
+                "ljos_forget",
                 "ljos_graded",
                 "ljos_handover",
                 "ljos_learn",

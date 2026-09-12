@@ -26,6 +26,8 @@ ljos doctor
 
 `remember` / `prefer` POST `/v1/atoms` against `PACKSET_URL` (`INSIDE_MEMORY_URL` is an alias). They write one explicit claim. They do not extract from a transcript.
 
+`forget ID` POSTs `/v1/atoms/delete` and is the other direction. The pack tombstones rather than erases, so the claim stops being recalled and the record that it was held and withdrawn stays; `packset atoms --as-of TS` reads it back through the window it was live in. `--why` names the deed the retraction stands on, citing deeds the same way `trust` does, and the pack refuses free text in its place.
+
 `cards` prints `USER.md` and `MEMORY.md` only. It never writes them.
 
 `ljos policy` prints the argv. It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
@@ -36,7 +38,7 @@ ljos doctor
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`, `ljos_handover`, `ljos_receive`. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_forget`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`, `ljos_handover`, `ljos_receive`. `ljos_forget` is the only one annotated destructive, because it is the only one that takes something away. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp", "env": {"PACKSET_URL": "http://127.0.0.1:8761"}}}}
