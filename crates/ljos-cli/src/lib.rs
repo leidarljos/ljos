@@ -3896,12 +3896,12 @@ mod tests {
     #[test]
     fn an_island_prints_one_memory_a_line() {
         let body = serde_json::json!({"island": [
-            {"id": "a", "text": "one", "activation": 1.0, "seed": true},
+            {"id": "a", "text": "one", "activation": 1.0, "seed": true, "ts": now_utc()},
             {"id": "b", "text": "two", "activation": 0.25, "seed": false}
         ]});
         assert_eq!(
             format_island(&body),
-            "1.000\tseed\ta\tone\n0.250\t    \tb\ttwo\n"
+            "1.000\tseed\ta\ttoday\tone\n0.250\t    \tb\t\ttwo\n"
         );
         assert!(format_island(&serde_json::json!({})).is_empty());
     }
