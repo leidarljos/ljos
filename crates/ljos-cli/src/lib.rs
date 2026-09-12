@@ -1059,6 +1059,36 @@ mod tests {
         assert!(healthy(&fine));
     }
 
+    #[test]
+    fn enclosed_atoms_are_read_from_every_jsonl_in_the_bag() {
+        let dir = std::env::temp_dir().join(format!("ljos-bag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let atoms = dir.join("data").join("atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        std::fs::write(
+            atoms.join("a.jsonl"),
+            "{\"kind\":\"lesson\",\"text\":\"one\"}\n\n{\"kind\":\"trust\",\"from\":\"a\",\"to\":\"b\",\"weight\":0.5}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            atoms.join("b.jsonl"),
+            "{\"kind\":\"preference\",\"text\":\"two\"}\n",
+        )
+        .unwrap();
+        let read = enclosed_atoms(&dir).unwrap();
+        assert_eq!(read.len(), 3);
+        assert_eq!(trust_rows(&read).len(), 1);
+        assert!(enclosed_atoms(&dir.join("nowhere")).unwrap().is_empty());
+        std::fs::write(atoms.join("c.jsonl"), "not json\n").unwrap();
+        assert!(enclosed_atoms(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let table = format_due(&[serde_json::json!({
+            "id": "x", "kind": "lesson", "text": "t", "due_at": "2026-01-01T00:00:00.000Z"
+        })]);
+        assert_eq!(table, "2026-01-01T00:00:00.000Z\tlesson\tx\tt\n");
+    }
+
     fn read_http(s: &mut impl Read) -> String {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 1024];
