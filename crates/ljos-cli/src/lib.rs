@@ -2217,6 +2217,14 @@ pub fn format_island(body: &Value) -> String {
 }
 
 pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
+    packset_search_opts(query, 10, false)
+}
+
+/// [`packset_search`] with a limit and the cross-encoder rerank: the
+/// writer scores the top hits against the query with its reranker, which
+/// costs a model call and buys precision. For a brief or a person reading,
+/// not for the hook.
+pub fn packset_search_opts(query: &str, limit: u32, rerank: bool) -> Result<Vec<Hit>> {
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
@@ -2224,7 +2232,7 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
     let client = pack()?;
     let workspace = client.workspace();
     client
-        .search(&workspace, q, 10)
+        .search_opts(&workspace, q, limit, None, rerank)
         .context("search: GET /v1/search failed")
 }
 

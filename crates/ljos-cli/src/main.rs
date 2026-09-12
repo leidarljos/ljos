@@ -6,7 +6,7 @@ use ljos_cli::{
     ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
     finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
     hook_call, hook_context, hook_output, island_entities, join, learn_and_write, node_for,
-    on_path, onboard, packset_forget, packset_island, packset_search, packset_write_as, panel,
+    on_path, onboard, packset_forget, packset_island, packset_search_opts, packset_write_as, panel,
     personas_from_pack, policy_with_memory, receive, release, rows_about, run, run_as,
     run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust, Persona,
     Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
@@ -48,7 +48,15 @@ enum Cmd {
         why: Option<String>,
     },
     /// What the seat knows about a topic, ranked. Empty means the pack holds nothing on it.
-    Search { query: Vec<String> },
+    Search {
+        query: Vec<String>,
+        /// Most hits to print.
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: u32,
+        /// Rerank the top hits with the writer's cross-encoder; slower, sharper.
+        #[arg(long)]
+        rerank: bool,
+    },
     /// The memories a task activates: search hits as seeds, spread along the pack's links.
     Island {
         cue: Vec<String>,
@@ -272,8 +280,15 @@ fn main() -> Result<()> {
         Cmd::Island { cue, fire } => {
             print!("{}", format_island(&packset_island(&join(&cue), fire)?));
         }
-        Cmd::Search { query } => {
-            print!("{}", format_hits(&packset_search(&join(&query))?));
+        Cmd::Search {
+            query,
+            limit,
+            rerank,
+        } => {
+            print!(
+                "{}",
+                format_hits(&packset_search_opts(&join(&query), limit, rerank)?)
+            );
         }
         Cmd::Evidence { accession } => run("deedar", &["evidence", &accession])?,
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,

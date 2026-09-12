@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos search -n N --rerank`: the writer's cross-encoder over the top hits.
 - `ljos panel ISSUE --out DIR`: every persona's brief as a file, so a runner
   without MCP can start one subagent per persona.
 - `remember --as NAME` and `prefer --as NAME` (and `as` on the tools): a

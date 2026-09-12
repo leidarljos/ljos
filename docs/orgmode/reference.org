@@ -11,7 +11,7 @@
 | =remember TEXT [--as PERSONA]= | pack | one lesson, stored as written; as a persona, it carries that persona's entity and opens its next brief |
 | =prefer TEXT= | pack | one standing preference |
 | =forget ID [--why DEED]= | pack | tombstone a claim, naming the deed that withdrew it |
-| =search QUERY= | pack | ranked claims |
+| =search QUERY [-n N] [--rerank]= | pack | ranked claims; =--rerank= scores the top hits with the writer's cross-encoder |
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
 | =due= | pack | claims whose review is due, unreviewed ones first, then one line on the clock |
 | =graded ID [--lapsed]= | pack | one review graded |
