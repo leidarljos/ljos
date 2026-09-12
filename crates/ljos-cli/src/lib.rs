@@ -2701,7 +2701,10 @@ mod tests {
         ];
         let moved = learn_anchors(&got, &ballots, "ship", 0.5);
         assert_eq!(moved.len(), 1);
-        assert!((moved[0].anchor - 0.7).abs() < 1e-9, "0.4 + 0.6 * 0.5: {moved:?}");
+        assert!(
+            (moved[0].anchor - 0.7).abs() < 1e-9,
+            "0.4 + 0.6 * 0.5: {moved:?}"
+        );
         assert!(learn_anchors(&got, &ballots, "hold", 0.5).is_empty());
         assert!(persona_atom(
             &Persona {
