@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.8.0 (2026-09-12)
 
 - `scripts/smoke.sh`: every loop on scratch stores, as a check.
 - `sitting` prints the island's strongest eight; `island` prints it all.
