@@ -21,7 +21,9 @@ Personas and scoped trust:
 - Trust rows carry `about` domains: an unscoped row applies everywhere, a
   scoped one when the issue's title carries the word. `learn` writes rows
   scoped to the entities of the issue's island.
-- Over MCP: `ljos_persona`, `as` on `ljos_vote`, `about` on `ljos_trust`.
+- Over MCP: `ljos_persona`, `as` on `ljos_vote`, `about` on `ljos_trust`,
+  and the `run_a_panel` prompt: one subagent per persona, one ballot each,
+  then the settle.
 
 The loop runs every time:
 

@@ -65,6 +65,9 @@ Every piece of work has an issue before it has a claim.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
   carries that word; `learn` writes its rows scoped to what the issue's
   island is about, so being wrong on one topic costs nothing elsewhere.
+  A panel is one subagent per persona, briefed with the persona's view,
+  each casting one ballot as itself, then `ljos consensus`; over MCP the
+  `run_a_panel` prompt orders it.
 - Progress goes on the issue, dated: `vissue note ISSUE "..."`.
 
 ## After the work

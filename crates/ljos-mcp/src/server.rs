@@ -1044,6 +1044,59 @@ impl LjosServer {
         )))
     }
 
+    /// Run a panel: one subagent per persona in the pack, each voting as
+    /// itself, then the settle under the trust rows.
+    #[prompt(name = "run_a_panel")]
+    pub async fn run_a_panel_prompt(
+        &self,
+        Parameters(args): Parameters<IssueArgs>,
+    ) -> Result<Vec<PromptMessage>, McpError> {
+        let issue = args.issue;
+        let personas = personas_from_pack().unwrap_or_default();
+        let roster = if personas.is_empty() {
+            "The pack holds no personas yet. Write two or three with `ljos_persona` first: a \
+             name, an anchor in [0, 1] (0 never moves off its ballot), a sentence on how it \
+             reads the work, and the domains it speaks to."
+                .to_string()
+        } else {
+            personas
+                .iter()
+                .map(|p| {
+                    format!(
+                        "- {} (anchor {:.2}{}): {}",
+                        p.name,
+                        p.anchor,
+                        if p.entities.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", about {}", p.entities.join(", "))
+                        },
+                        p.view
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        Ok(asked(format!(
+            "Run a panel on {issue}.\n\n\
+             The personas in this seat's pack:\n{roster}\n\n\
+             1. `ljos_recall` on {issue}, and `ljos_search` for what the seat knows about it.\n\
+             2. For each persona, start one subagent with the persona's view as its brief and \
+                the recall as its material. Each subagent reads the work in its own way and \
+                ends by casting exactly one ballot: `ljos_vote` on {issue} with `as` set to \
+                the persona's name, for the option it would defend. Subagents run in \
+                parallel and do not see each other's ballots.\n\
+             3. `ljos_consensus` on {issue}. The settle weighs the ballots by the trust rows \
+                the pack holds and holds each persona to its ballot by its anchor; it \
+                reports polarization and disagreement, not only shares. A tally is not this.\n\
+             4. Act on the settle, not on the count. When the world later says which option \
+                was right, `ljos_learn` on {issue} with that outcome, and the personas that \
+                were wrong lose weight on this topic.\n\n\
+             A panel with equal rows is a count. Run `ljos_calibrate` on the project once it \
+             holds a few voted issues, so the rows carry what the personas' history says."
+        )))
+    }
+
     /// Check a handover somebody sent, in the order the questions come.
     #[prompt(name = "check_a_handover")]
     pub async fn check_a_handover_prompt(
@@ -1331,7 +1384,19 @@ mod tests {
         let declared = LjosServer::prompt_router().list_all();
         let mut names: Vec<&str> = declared.iter().map(|p| p.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, ["check_a_handover", "start_a_sitting"]);
+        assert_eq!(names, ["check_a_handover", "run_a_panel", "start_a_sitting"]);
+        let panel = server
+            .run_a_panel_prompt(Parameters(IssueArgs {
+                issue: "proj-1a2b".into(),
+            }))
+            .await
+            .expect("renders");
+        let said = text(&panel[0]);
+        assert!(said.contains("proj-1a2b"), "{said}");
+        ordered(
+            said,
+            &["`ljos_recall`", "`ljos_vote`", "`ljos_consensus`", "`ljos_learn`", "`ljos_calibrate`"],
+        );
         let server = LjosServer::at(std::env::temp_dir());
         let begun = server
             .start_a_sitting_prompt(Parameters(PickUpArgs {

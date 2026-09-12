@@ -46,7 +46,7 @@ Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_
 =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
 =ljos_consensus=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
 =ljos://protocol=, =ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:
-=start_a_sitting=, =check_a_handover=. Every tool description opens with
+=start_a_sitting=, =run_a_panel=, =check_a_handover=. Every tool description opens with
 when to call it.
 
 * Environment
