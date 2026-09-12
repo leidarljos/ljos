@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.10.0 (2026-09-12)
 
 - `doctor` prints a `seat` row: the name this runner claims and votes
   under, and whether it came from `LJOS_SEAT`, `VISSUE_AGENT` or the
