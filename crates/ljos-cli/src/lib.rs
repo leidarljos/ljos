@@ -340,6 +340,7 @@ pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
 
 /// What a habitat printed, kept for a caller that has to hand it on. A
 /// non-zero exit is an error carrying stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Said {
     pub stdout: String,
     pub stderr: String,
