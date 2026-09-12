@@ -3,7 +3,15 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish, format_doctor, format_hits, format_hubs, format_island, format_steps, graded, handover, healthy, hook_call, hook_context, hook_output_ruled, island_entities, join, learn_and_write, node_for, on_path, onboard, pack, packset_forget, packset_hubs, packset_island, packset_search_opts, packset_write_as, panel, panel_steps, personas_from_pack, policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as, run_captured, session_end, sitting, topic_words, trust_from_pack, verdict_for, write_persona, write_prediction, write_rule, write_trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL, Persona, Rule, Trust,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
+    finish, format_doctor, format_hits, format_hubs, format_island, format_steps, graded, handover,
+    healthy, hook_call, hook_context, hook_output_ruled, island_entities, join, learn_and_write,
+    node_for, on_path, onboard, pack, packset_forget, packset_hubs, packset_island,
+    packset_search_opts, packset_write_as, panel, panel_steps, personas_from_pack,
+    policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
+    run_captured, session_end, sitting, topic_words, trust_from_pack, verdict_for, write_persona,
+    write_prediction, write_rule, write_trust, Persona, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 

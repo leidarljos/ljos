@@ -3056,7 +3056,10 @@ mod tests {
     #[test]
     fn a_sessions_injected_memories_are_read_back_and_cleared() {
         let session = format!("end-test-{}", std::process::id());
-        mark_seen(Some(&session), &["a".to_string(), "due-nudge".to_string(), "b".to_string()]);
+        mark_seen(
+            Some(&session),
+            &["a".to_string(), "due-nudge".to_string(), "b".to_string()],
+        );
         let (ids, path) = injected_ids(&session);
         assert_eq!(ids, ["a", "b"]);
         assert!(path.as_ref().is_some_and(|p| p.is_file()));
