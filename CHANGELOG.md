@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `doctor` prints a `seat` row: the name this runner claims and votes
+  under, and whether it came from `LJOS_SEAT`, `VISSUE_AGENT` or the
+  default.
 - `calibrate` writes log-odds weights (Nitzan and Paroush): a voter right
   nine times in ten now outweighs one right six times in ten five to one,
   where the linear rule gave three to two; chance earns the floor.

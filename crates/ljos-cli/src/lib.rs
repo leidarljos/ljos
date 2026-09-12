@@ -2070,6 +2070,22 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ok: found.is_some(),
         });
     }
+    // The name this runner claims and votes under, and where it came from.
+    let (seat, source) = ["LJOS_SEAT", "VISSUE_AGENT"]
+        .iter()
+        .find_map(|k| {
+            std::env::var(k)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(|v| (v, *k))
+        })
+        .unwrap_or_else(|| ("seat".to_string(), "the default"));
+    out.push(Habitat {
+        name: "seat",
+        state: format!("{seat} (from {source})"),
+        ok: true,
+    });
     out.push(match PacksetClient::from_env() {
         Ok(client) => match client.health() {
             Ok(_) => Habitat {
