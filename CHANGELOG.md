@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.7.0 (2026-09-12)
 
 - `learn --share S`: a fixed share of recovery toward one after the Hedge
   step (Herbster and Warmuth), so a voter refuted long ago can come back;
