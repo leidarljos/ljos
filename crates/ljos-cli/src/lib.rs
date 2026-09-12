@@ -689,8 +689,9 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
             )
         })
         .collect();
+    let nudge = due_nudge(call);
     if lines.is_empty() {
-        return String::new();
+        return nudge;
     }
     mark_seen(
         call.session.as_deref(),
@@ -1410,6 +1411,20 @@ pub const REQUIRED: &[&str] = &["vissue", "deedar", "packset"];
 /// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
 /// deed store, the tracker, the claim graph.
 pub fn doctor() -> Vec<Habitat> {
+    // The runner rows ask the runners' own command lines, which start slowly;
+    // they run beside the seat's rows rather than after them.
+    let (mut out, runners) = std::thread::scope(|s| {
+        let runners = s.spawn(harness_rows);
+        let seat = doctor_seat();
+        (seat, runners.join().unwrap_or_default())
+    });
+    out.extend(runners);
+    out
+}
+
+/// The seat's own rows: binaries, pack, host key, deed store, tracker,
+/// claim graph. What a sitting checks; the runner rows are onboarding.
+pub fn doctor_seat() -> Vec<Habitat> {
     let mut out = Vec::new();
     for bin in [
         "vissue",
@@ -1487,7 +1502,6 @@ pub fn doctor() -> Vec<Habitat> {
             },
         });
     }
-    out.extend(harness_rows());
     out
 }
 
@@ -2038,7 +2052,7 @@ fn issue_title(issue: &str) -> Result<String> {
 /// the assignee still holds).
 pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> {
     let mut out = String::new();
-    let rows = doctor();
+    let rows = doctor_seat();
     out.push_str("== doctor\n");
     out.push_str(&format_doctor(&rows));
     if !healthy(&rows) {
