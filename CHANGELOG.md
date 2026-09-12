@@ -6,6 +6,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - `scripts/smoke.sh`: every loop on scratch stores, as a check.
 - `sitting` prints the island's strongest eight; `island` prints it all.
+- A habitat cut off by the seat's own reader closing the pipe is not a
+  refusal: `ljos consensus ID | head` ends quietly.
 
 ## 0.7.0 (2026-09-12)
 

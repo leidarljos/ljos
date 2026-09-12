@@ -3058,6 +3058,16 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()?;
+    // A child that died of a closed pipe was cut off by our own reader
+    // going away (`ljos consensus ID | head`); that is not the habitat
+    // refusing.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if st.signal() == Some(libc::SIGPIPE) {
+            return Ok(());
+        }
+    }
     if !st.success() {
         bail!("{bin} exited {st}");
     }
