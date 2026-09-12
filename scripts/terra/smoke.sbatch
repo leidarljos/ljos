@@ -8,7 +8,7 @@
 #SBATCH --partition=cpu
 #SBATCH --output=%x-%j.out
 set -uo pipefail
-export PATH="$HOME/bin-out:$HOME/stackbin:$PATH"
+export PATH="$HOME/stackbin:$HOME/bin-out:$PATH"
 export PACKSET_PORT=8791 PACKSET_URL=http://127.0.0.1:8791 PACKSET_HOME="$HOME/.cache/ljos-smoke-pack"
 export PACKSET_EMBED_MODEL=bge-small PACKSET_EMBED_CACHE="$HOME/.cache/packset-embed"
 rm -rf "$PACKSET_HOME"
