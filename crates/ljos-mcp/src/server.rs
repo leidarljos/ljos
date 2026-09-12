@@ -136,7 +136,7 @@ pub struct LearnArgs {
 
 /// A slice of the seat to pack.
 #[derive(Deserialize, JsonSchema)]
-pub struct HandoverArgs {
+pub struct PackArgs {
     /// Where to write the satchel.
     pub out: String,
     /// Projects to take whole.
@@ -606,7 +606,7 @@ impl LjosServer {
     )]
     async fn ljos_handover(
         &self,
-        Parameters(args): Parameters<HandoverArgs>,
+        Parameters(args): Parameters<PackArgs>,
     ) -> Result<Json<Vec<String>>, McpError> {
         handover(Path::new(&args.out), &args.projects, &args.issues)
             .map(Json)
