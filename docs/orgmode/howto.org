@@ -232,6 +232,25 @@ $ ljos receive /tmp/bag2 --since /tmp/bag/head.txt
 The bridge shows the sender's log grew from the head you kept and was not
 rewritten.
 
+* Close what a later lesson replaced
+
+#+begin_src console
+$ ljos consolidate
+closes 3f9c…  The default fuse is Borda.
+    for 51ee…  The default fuse is CombMNZ.
+1 of 97 live memories would close; `ljos consolidate --apply` closes them
+$ ljos consolidate --apply
+closes 3f9c…  The default fuse is Borda.
+    for 51ee…  The default fuse is CombMNZ.
+1 of 97 live memories closed
+#+end_src
+
+A write closes the earlier claim it rewrites on arrival (same opening
+words, a new object; a correction; an explicit supersedes). A pack written
+before that rule, or filled by a handover, holds pairs the rule never saw;
+=consolidate= reports them, =--apply= closes them. The closed claim keeps
+its window: =ljos search --as-of= finds it at the time it was live.
+
 * Retire a claim with its reason
 
 #+begin_src console
