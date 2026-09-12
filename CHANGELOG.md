@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `calibrate` writes log-odds weights (Nitzan and Paroush): a voter right
+  nine times in ten now outweighs one right six times in ten five to one,
+  where the linear rule gave three to two; chance earns the floor.
 - `search` prints how many scorers named each hit; the prompt nudge counts
   the pairs `consolidate` would close beside the claims due.
 - `consolidate` (and the `ljos_consolidate` tool): the pack's replacement

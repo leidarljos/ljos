@@ -3148,13 +3148,42 @@ pub fn finish(
     Ok(out)
 }
 
+/// The weight a voter of estimated accuracy `p` earns: the log odds
+/// `ln(p / (1 - p))`, the optimal weight for independent voters on a
+/// two-way choice (Nitzan and Paroush, doi:10.2307/2526438; a weighted
+/// majority under these weights is the maximum-likelihood decision), with
+/// `p` held inside `[0.01, 0.99]` so a perfect record does not become an
+/// infinite vote, and a voter at or under chance at [`TRUST_FLOOR`]. The
+/// weights are scaled so the most reliable voter stands at one, which is
+/// the scale the trust rows live on; the ratios between voters are the
+/// rule's.
+#[must_use]
+pub fn calibration_weights(accuracy: &[(String, f64)]) -> Vec<(String, f64)> {
+    let logit = |p: f64| {
+        let p = p.clamp(0.01, 0.99);
+        (p / (1.0 - p)).ln()
+    };
+    let raw: Vec<(String, f64)> = accuracy
+        .iter()
+        .map(|(who, p)| (who.clone(), logit(*p).max(0.0)))
+        .collect();
+    let top = raw.iter().map(|(_, w)| *w).fold(0.0_f64, f64::max);
+    raw.into_iter()
+        .map(|(who, w)| {
+            let scaled = if top > 0.0 { w / top } else { 0.0 };
+            (who, scaled.clamp(TRUST_FLOOR, 1.0))
+        })
+        .collect()
+}
+
 /// Turn a project's voting history into trust rows without anyone naming
 /// an outcome: Dawid and Skene's accuracy per voter
-/// (doi:10.2307/2346806), from `ljos-consensus reliability`, written as the
-/// weight every other voter gives that voter. That is the weight a linear
-/// opinion pool gives a source believed that reliable (Genest and Zidek,
-/// doi:10.1214/ss/1177013825). Rows are complete and floored at
-/// [`TRUST_FLOOR`], so the settle sees the whole graph.
+/// (doi:10.2307/2346806), from `ljos-consensus reliability`, turned into
+/// the weight every other voter gives that voter by
+/// [`calibration_weights`]: log odds, so a voter right nine times in ten
+/// outweighs one right six times in ten by five to one, not three to two.
+/// Rows are complete and floored at [`TRUST_FLOOR`], so the settle sees
+/// the whole graph.
 ///
 /// # Errors
 ///
@@ -3176,24 +3205,25 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
         .get("accuracy")
         .and_then(Value::as_object)
         .context("reliability: no accuracy object")?;
-    let mut voters: Vec<(&str, f64)> = accuracy
+    let mut voters: Vec<(String, f64)> = accuracy
         .iter()
-        .filter_map(|(k, val)| val.as_f64().map(|a| (k.as_str(), a)))
+        .filter_map(|(k, val)| val.as_f64().map(|a| (k.clone(), a)))
         .collect();
-    voters.sort_by(|a, b| a.0.cmp(b.0));
+    voters.sort_by(|a, b| a.0.cmp(&b.0));
     if voters.len() < 2 {
         bail!("calibrate: fewer than two voters in {project}");
     }
+    let weights = calibration_weights(&voters);
     let mut rows = Vec::new();
     for (from, _) in &voters {
-        for (to, acc) in &voters {
+        for (to, weight) in &weights {
             if from == to {
                 continue;
             }
             rows.push(Trust {
-                from: (*from).to_string(),
-                to: (*to).to_string(),
-                weight: acc.clamp(TRUST_FLOOR, 1.0),
+                from: from.clone(),
+                to: to.clone(),
+                weight: *weight,
                 about: Vec::new(),
             });
         }
@@ -3567,6 +3597,26 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calibration_weights_are_log_odds_with_the_best_at_one() {
+        let w = calibration_weights(&[
+            ("a".to_string(), 0.9),
+            ("b".to_string(), 0.6),
+            ("c".to_string(), 0.5),
+            ("d".to_string(), 1.0),
+        ]);
+        let of = |who: &str| w.iter().find(|(n, _)| n == who).unwrap().1;
+        assert_eq!(of("d"), 1.0, "a perfect record is the top of the scale");
+        // ln(9) / ln(99) = 0.478; ln(1.5) / ln(99) = 0.088
+        assert!((of("a") - 0.478).abs() < 0.01, "{}", of("a"));
+        assert!((of("b") - 0.088).abs() < 0.01, "{}", of("b"));
+        assert!(
+            of("a") / of("b") > 5.0,
+            "nine in ten outweighs six in ten by more than five"
+        );
+        assert_eq!(of("c"), TRUST_FLOOR, "chance earns the floor");
+    }
+
     #[test]
     fn a_consolidation_report_names_the_pairs() {
         let body = serde_json::json!({"live": 5, "closed": 1, "applied": false, "pairs": [

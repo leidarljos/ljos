@@ -45,7 +45,7 @@ ljos onboard --harness RUNNER
 
 `ljos due` ends with one line on the clock: `0 due; 12 scheduled, next at ...` is a clock that runs; `0 due; nothing scheduled` is a seat that has remembered nothing. A claim that never entered the clock is due now.
 
-`ljos calibrate -p PROJECT` moves the trust rows when nobody names an outcome: Dawid and Skene's estimate of each voter's accuracy from the project's voting history (doi:10.2307/2346806), written back as the weight every other voter gives that voter (a linear pool's weight for a source that reliable, Genest and Zidek, doi:10.1214/ss/1177013825). Under equal rows a consensus is a count; after `calibrate` or `learn` it is not.
+`ljos calibrate -p PROJECT` moves the trust rows when nobody names an outcome: Dawid and Skene's estimate of each voter's accuracy from the project's voting history (doi:10.2307/2346806), written back as the weight every other voter gives that voter: the log odds of the accuracy, the optimal weight for independent voters on a two-way choice (Nitzan and Paroush, doi:10.2307/2526438), scaled so the most reliable voter stands at one, so a voter right nine times in ten outweighs one right six times in ten by five to one rather than three to two, and a voter at chance earns the floor. Under equal rows a consensus is a count; after `calibrate` or `learn` it is not.
 
 ## The smoke test
 
