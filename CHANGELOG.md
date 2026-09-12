@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `onboard` starts a pack writer when none answers, before wiring the
+  runner to it.
 - The hook fires the memories it injected during a session together when
   the session ends (the runner's `SessionEnd` event, on by default), so
   what served one sitting is wired for the next.

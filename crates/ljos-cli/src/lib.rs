@@ -343,7 +343,11 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
         );
     };
     let server = server_path()?;
-    let mut steps = vec![host_key_step(dry), register_step(h, &server, dry)];
+    let mut steps = vec![
+        pack_step(dry),
+        host_key_step(dry),
+        register_step(h, &server, dry),
+    ];
     if let Some(file) = &h.hooks {
         steps.push(hook_step(&expand(file), &hook_events_of(h), dry));
     }
@@ -925,6 +929,57 @@ fn harness_rows() -> Vec<Habitat> {
         });
     }
     rows
+}
+
+/// Have a pack writer up before anything else is wired: a runner onboarded
+/// to a seat with no writer would meet every memory verb failing. `packset
+/// ensure` starts one when none answers and is idempotent when one does.
+fn pack_step(dry: bool) -> Step {
+    let what = "pack".to_string();
+    if let Ok(client) = pack() {
+        if client.health().is_ok() {
+            return Step {
+                what,
+                detail: format!("writer up at {}", client.base()),
+                ok: true,
+            };
+        }
+    } else {
+        return Step {
+            what,
+            detail: "PACKSET_URL=off; no pack on purpose".into(),
+            ok: true,
+        };
+    }
+    if !on_path("packset") {
+        return Step {
+            what,
+            detail: "no writer answers and packset is not on PATH".into(),
+            ok: false,
+        };
+    }
+    if dry {
+        return Step {
+            what,
+            detail: "would run packset ensure".into(),
+            ok: true,
+        };
+    }
+    match run_captured("packset", &["ensure"]) {
+        Ok(said) => Step {
+            what,
+            detail: format!(
+                "started a writer: {}",
+                said.stdout.lines().next().unwrap_or("").trim()
+            ),
+            ok: true,
+        },
+        Err(e) => Step {
+            what,
+            detail: e.to_string().lines().next().unwrap_or("").to_string(),
+            ok: false,
+        },
+    }
 }
 
 /// Make the seat's host key at `~/.config/deedar/host.key` when there is

@@ -58,9 +58,10 @@ either as a command that registers servers or as a config file to append an
 entry to, plus the directory the runner loads skills from;
 `ljos onboard --example` prints the file's shape, and `--harness json` prints
 the server entry to paste into any runner by hand. `--dry-run` reports
-without writing. `onboard` also writes the seat's host key at
-`~/.config/deedar/host.key` when there is none, so handovers go out signed
-from the first. `ljos doctor` then shows whether each runner named is
+without writing. `onboard` also starts a pack writer when none answers (`packset ensure`)
+and writes the seat's host key at `~/.config/deedar/host.key` when there
+is none, so memory verbs answer and handovers go out signed from the
+first. `ljos doctor` then shows whether each runner named is
 onboarded. The server serves the same text at `ljos://protocol`.
 
 Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
