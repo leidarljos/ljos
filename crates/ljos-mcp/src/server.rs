@@ -966,6 +966,22 @@ mod tests {
     /// Every prompt renders from what it declares.
     #[tokio::test]
     async fn every_prompt_renders() {
+        fn text(message: &PromptMessage) -> &str {
+            &message.content.as_text().expect("a text prompt").text
+        }
+        fn ordered(said: &str, verbs: &[&str]) {
+            let at: Vec<usize> = verbs
+                .iter()
+                .map(|v| {
+                    said.find(v)
+                        .unwrap_or_else(|| panic!("{v} missing: {said}"))
+                })
+                .collect();
+            assert!(
+                at.windows(2).all(|w| w[0] < w[1]),
+                "{verbs:?} out of order: {said}"
+            );
+        }
         let declared = LjosServer::prompt_router().list_all();
         let mut names: Vec<&str> = declared.iter().map(|p| p.name.as_str()).collect();
         names.sort_unstable();
@@ -977,15 +993,31 @@ mod tests {
             }))
             .await
             .expect("renders");
-        let text = format!("{:?}", begun[0].content);
-        assert!(text.contains("proj-1a2b"), "{text}");
-        assert!(text.contains("does not close the ticket"), "{text}");
+        let said = text(&begun[0]);
+        assert!(said.contains("proj-1a2b"), "{said}");
+        ordered(
+            said,
+            &[
+                "`ljos_cards`",
+                "`ljos_search`",
+                "`ljos_recall`",
+                "`ljos_due`",
+                "`ljos_graded`",
+                "`ljos_claim`",
+                "`ljos_remember`",
+                "`ljos_forget`",
+                "`ljos_deed`",
+                "`ljos_doctor`",
+            ],
+        );
         let checked = server
             .check_a_handover_prompt(Parameters(HandoverArgs {
                 dir: "/tmp/bag".into(),
             }))
             .await
             .expect("renders");
-        assert!(format!("{:?}", checked[0].content).contains("/tmp/bag"));
+        let said = text(&checked[0]);
+        assert!(said.contains("/tmp/bag"), "{said}");
+        ordered(said, &["`ljos_receive`", "`ljos_current`", "`import`"]);
     }
 }
