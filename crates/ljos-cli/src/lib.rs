@@ -259,6 +259,396 @@ pub fn write_trust(row: &Trust, why: &[String]) -> Result<Value> {
         .context("trust: POST /v1/atoms failed")
 }
 
+/// One habitat and whether it answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Habitat {
+    pub name: &'static str,
+    pub state: String,
+    pub ok: bool,
+}
+
+/// The habitats the seat needs.
+pub const REQUIRED: &[&str] = &["vissue", "deedar", "packset"];
+
+/// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
+/// deed store, the tracker, the claim graph.
+pub fn doctor() -> Vec<Habitat> {
+    let mut out = Vec::new();
+    for bin in [
+        "vissue",
+        "deedar",
+        "claimdag",
+        "packset",
+        "packsetd",
+        "ljos-consensus",
+        "ljos-mcp",
+    ] {
+        let found = which::which(bin).ok();
+        out.push(Habitat {
+            name: bin,
+            state: found
+                .as_ref()
+                .map_or_else(|| "not on PATH".to_string(), |p| p.display().to_string()),
+            ok: found.is_some(),
+        });
+    }
+    out.push(match PacksetClient::from_env() {
+        Ok(client) => match client.health() {
+            Ok(_) => Habitat {
+                name: "pack",
+                state: format!("{} workspace {}", client.base(), client.workspace()),
+                ok: true,
+            },
+            Err(e) => Habitat {
+                name: "pack",
+                state: format!("{} does not answer: {e}", client.base()),
+                ok: false,
+            },
+        },
+        Err(_) => Habitat {
+            name: "pack",
+            state: "PACKSET_URL unset".into(),
+            ok: false,
+        },
+    });
+    for (name, bin, args) in [
+        ("deed store", "deedar", &["log", "head"][..]),
+        ("tracker", "vissue", &["identity"][..]),
+        ("claim graph", "claimdag", &["list"][..]),
+    ] {
+        out.push(match run_captured(bin, args) {
+            Ok(said) => Habitat {
+                name,
+                state: said.stdout.lines().next().unwrap_or("").to_string(),
+                ok: true,
+            },
+            Err(e) => Habitat {
+                name,
+                state: e.to_string().lines().next().unwrap_or("").to_string(),
+                ok: false,
+            },
+        });
+    }
+    out
+}
+
+/// Whether every required habitat answers.
+pub fn healthy(rows: &[Habitat]) -> bool {
+    rows.iter()
+        .all(|h| h.ok || !REQUIRED.contains(&h.name) && h.name != "pack")
+}
+
+pub fn format_doctor(rows: &[Habitat]) -> String {
+    rows.iter()
+        .map(|h| {
+            format!(
+                "{}	{}	{}
+",
+                if h.ok { "ok" } else { "no" },
+                h.name,
+                h.state
+            )
+        })
+        .collect()
+}
+
+/// The accessions a satchel's description says it needs.
+pub fn needs_of(satchel_json: &str) -> Result<Vec<String>> {
+    let v: Value = serde_json::from_str(satchel_json).context("satchel.json")?;
+    Ok(v.get("needs")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Deeds to enclose: the satchel's `needs` plus what the pack cites, once each.
+pub fn enclose(needs: Vec<String>, cited: &str) -> Vec<String> {
+    let mut all: Vec<String> = needs
+        .into_iter()
+        .chain(cited.lines().map(str::trim).map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// Pack a slice of the seat into `out`: the tracker's satchel, the pack's
+/// atoms, the deeds both cite, sealed, and signed when a host key is set.
+pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Vec<String>> {
+    if projects.is_empty() && issues.is_empty() {
+        bail!("handover: name a project or an issue");
+    }
+    let mut lines = Vec::new();
+    let mut args = vec![
+        "satchel".to_string(),
+        "--out".into(),
+        out.display().to_string(),
+    ];
+    for p in projects {
+        args.push("--project".into());
+        args.push(p.clone());
+    }
+    for i in issues {
+        args.push("--issue".into());
+        args.push(i.clone());
+    }
+    lines.push(run_captured("vissue", &args)?.stdout.trim_end().to_string());
+
+    let mut cited = String::new();
+    match PacksetClient::from_env() {
+        Ok(client) => {
+            let atoms_dir = out.join("data").join("atoms");
+            let said = run_captured(
+                "packset",
+                &[
+                    "export",
+                    "--into",
+                    &atoms_dir.display().to_string(),
+                    &client.workspace(),
+                ],
+            )?;
+            cited = said.stdout;
+            lines.push(said.stderr.trim_end().to_string());
+        }
+        Err(_) => lines.push("no pack: PACKSET_URL unset, atoms not enclosed".into()),
+    }
+
+    let description = std::fs::read_to_string(out.join("data").join("satchel.json"))
+        .context("handover: the satchel has no description")?;
+    let deeds = enclose(needs_of(&description)?, &cited);
+    if deeds.is_empty() {
+        lines.push("no deeds cited".into());
+    } else {
+        let deeds_dir = out.join("data").join("deeds");
+        let said = run_fed(
+            "deedar",
+            &["export", "--into", &deeds_dir.display().to_string(), "-"],
+            &format!(
+                "{}
+",
+                deeds.join(
+                    "
+"
+                )
+            ),
+        )?;
+        lines.push(said.stdout.trim_end().to_string());
+    }
+
+    lines.push(
+        run_captured("vissue", &["satchel", "--seal", &out.display().to_string()])?
+            .stdout
+            .trim_end()
+            .to_string(),
+    );
+    if std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some() {
+        let manifest = out.join("manifest-sha256.txt");
+        let said = run_captured(
+            "deedar",
+            &["vouch", "sign", &manifest.display().to_string()],
+        )?;
+        lines.push(said.stdout.trim_end().to_string());
+    } else {
+        lines.push("unsigned: DEEDAR_HOST_SIGNING_KEY unset".into());
+    }
+    Ok(lines)
+}
+
+/// Check a satchel that arrived: manifest, deed receipts, signature, and what
+/// the atoms hold; with `import`, POST the atoms into this seat's pack.
+pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    lines.push(
+        run_captured(
+            "vissue",
+            &["satchel", "--verify", &dir.display().to_string()],
+        )?
+        .stdout
+        .trim_end()
+        .to_string(),
+    );
+    if dir.join("data").join("deeds").is_dir() {
+        let mut args = vec!["check".to_string(), dir.display().to_string()];
+        if let Some(bridge) = since {
+            args.push("--since".into());
+            args.push(bridge.display().to_string());
+        }
+        lines.push(run_captured("deedar", &args)?.stdout.trim_end().to_string());
+    } else {
+        lines.push("no deeds enclosed".into());
+    }
+    let manifest = dir.join("manifest-sha256.txt");
+    if manifest.with_extension("txt.sig").is_file() {
+        lines.push(
+            run_captured(
+                "deedar",
+                &["vouch", "check", &manifest.display().to_string()],
+            )?
+            .stdout
+            .trim_end()
+            .to_string(),
+        );
+    } else {
+        lines.push("unsigned".into());
+    }
+
+    let atoms = enclosed_atoms(dir)?;
+    let rows = trust_rows(&atoms);
+    lines.push(format!(
+        "{} atoms enclosed, {} trust rows",
+        atoms.len(),
+        rows.len()
+    ));
+    if import {
+        let client =
+            PacksetClient::from_env().context("PACKSET_URL unset; import POSTs /v1/atoms")?;
+        let (mut kept, mut refused) = (0usize, Vec::new());
+        for atom in &atoms {
+            match client.post_atom(atom) {
+                Ok(_) => kept += 1,
+                Err(e) => refused.push(e.to_string()),
+            }
+        }
+        lines.push(format!("{kept} atoms imported, {} refused", refused.len()));
+        lines.extend(refused.into_iter().take(5));
+    }
+    Ok(lines)
+}
+
+/// Every atom in a satchel's `data/atoms/*.jsonl`.
+pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
+    let atoms_dir = dir.join("data").join("atoms");
+    let Ok(entries) = std::fs::read_dir(&atoms_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let text = std::fs::read_to_string(entry.path())?;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            out.push(
+                serde_json::from_str(line).with_context(|| entry.path().display().to_string())?,
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// The live atoms whose review is due at `now` (RFC 3339 UTC), soonest first.
+pub fn due_of(atoms: &[Value], now: &str) -> Vec<Value> {
+    let mut due: Vec<Value> = atoms
+        .iter()
+        .filter(|a| {
+            a.get("due_at")
+                .and_then(Value::as_str)
+                .is_some_and(|d| !d.is_empty() && d <= now)
+        })
+        .cloned()
+        .collect();
+    due.sort_by(|a, b| a["due_at"].as_str().cmp(&b["due_at"].as_str()));
+    due
+}
+
+/// What the pack holds for review now.
+pub fn due() -> Result<Vec<Value>> {
+    let client = PacksetClient::from_env().context("PACKSET_URL unset; due reads /v1/atoms")?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("due: GET /v1/atoms failed")?;
+    Ok(due_of(&atoms, &now_utc()))
+}
+
+pub fn format_due(atoms: &[Value]) -> String {
+    atoms
+        .iter()
+        .map(|a| {
+            format!(
+                "{}	{}	{}	{}
+",
+                a["due_at"].as_str().unwrap_or(""),
+                a["kind"].as_str().unwrap_or(""),
+                a["id"].as_str().unwrap_or("-"),
+                a["text"].as_str().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+/// Grade one review: recalled moves the atom out, lapsed brings it back sooner.
+pub fn graded(id: &str, recalled: bool) -> Result<Value> {
+    let id = id.trim();
+    if id.is_empty() {
+        bail!("graded: an atom id is required");
+    }
+    let client = PacksetClient::from_env().context("PACKSET_URL unset; graded POSTs /v1/grade")?;
+    client
+        .grade(&client.workspace(), id, recalled)
+        .with_context(|| format!("graded: POST /v1/grade failed for {id}"))
+}
+
+fn now_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    // Civil date from days since the epoch (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// Run a habitat's verb with `input` on stdin.
+pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
+    let mut cmd = Command::new(path);
+    for a in args {
+        cmd.arg(a.as_ref());
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("{bin}: could not start"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        let why = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        bail!("{bin} exited {}: {why}", out.status);
+    }
+    Ok(Said { stdout, stderr })
+}
+
 pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -598,6 +988,71 @@ mod tests {
         assert!(learn(&ballots, "ship", &[], 1.0).is_err());
         assert!(learn(&ballots, "  ", &[], 0.5).is_err());
         assert!(learn(&ballots[..1], "ship", &[], 0.5).is_err());
+    }
+
+    #[test]
+    fn a_fed_verb_reads_its_stdin() {
+        let said = run_fed("cat", &[] as &[&str], "one\ntwo\n").unwrap();
+        assert_eq!(said.stdout, "one\ntwo\n");
+        assert!(run_fed("sh", &["-c", "exit 2"], "").is_err());
+    }
+
+    #[test]
+    fn needs_and_cited_are_enclosed_once_each() {
+        let needs = needs_of(r#"{"needs":["deed-b-2","deed-a-1"],"other":1}"#).unwrap();
+        assert_eq!(needs, vec!["deed-b-2", "deed-a-1"]);
+        assert_eq!(
+            enclose(needs, "deed-a-1\n\ndeed-c-3\n"),
+            vec!["deed-a-1", "deed-b-2", "deed-c-3"]
+        );
+        assert!(needs_of("{}").unwrap().is_empty());
+        assert!(needs_of("not json").is_err());
+    }
+
+    #[test]
+    fn due_is_the_past_soonest_first() {
+        let atoms = vec![
+            serde_json::json!({"id": "late", "due_at": "2026-02-01T00:00:00.000Z"}),
+            serde_json::json!({"id": "later", "due_at": "2026-03-01T00:00:00.000Z"}),
+            serde_json::json!({"id": "future", "due_at": "2099-01-01T00:00:00.000Z"}),
+            serde_json::json!({"id": "never"}),
+            serde_json::json!({"id": "blank", "due_at": ""}),
+        ];
+        let due = due_of(&atoms, "2026-06-01T00:00:00.000Z");
+        let ids: Vec<&str> = due.iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["late", "later"]);
+        assert!(now_utc().ends_with(".000Z"));
+        assert!(now_utc().as_str() > "2026-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn the_doctor_names_every_habitat_and_the_pack_gates_health() {
+        let rows = doctor();
+        let names: Vec<&str> = rows.iter().map(|h| h.name).collect();
+        for want in [
+            "vissue",
+            "deedar",
+            "packset",
+            "pack",
+            "deed store",
+            "tracker",
+        ] {
+            assert!(names.contains(&want), "{names:?}");
+        }
+        let table = format_doctor(&rows);
+        assert_eq!(table.lines().count(), rows.len());
+        let sick = vec![Habitat {
+            name: "pack",
+            state: "PACKSET_URL unset".into(),
+            ok: false,
+        }];
+        assert!(!healthy(&sick));
+        let fine = vec![Habitat {
+            name: "claimdag",
+            state: "not on PATH".into(),
+            ok: false,
+        }];
+        assert!(healthy(&fine));
     }
 
     fn read_http(s: &mut impl Read) -> String {

@@ -3,9 +3,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, cards, consensus_steps, format_hits, join, learn, on_path, packset_search,
-    packset_forget, packset_write, policy_line, run, run_captured, trust_from_pack, write_trust,
-    Trust, LEARN_BETA,
+    ballots_from_json, cards, consensus_steps, doctor, due, format_doctor, format_due, format_hits,
+    graded, handover, healthy, join, learn, on_path, packset_forget, packset_search, packset_write,
+    policy_line, receive, run, run_captured, trust_from_pack, write_trust, Trust, LEARN_BETA,
     POLICY_TCB,
 };
 use std::path::PathBuf;
@@ -90,6 +90,34 @@ enum Cmd {
         #[arg(long)]
         why: Vec<String>,
     },
+    /// Which habitats answer. Exit 1 when a required one does not.
+    Doctor,
+    /// Pack a slice of the seat: satchel, atoms, the deeds both cite; sealed and signed.
+    Handover {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        project: Vec<String>,
+        #[arg(long)]
+        issue: Vec<String>,
+    },
+    /// Check a satchel that arrived; --import puts its atoms in this seat's pack.
+    Receive {
+        dir: PathBuf,
+        /// A bridge file from the last handover by the same sender.
+        #[arg(long)]
+        since: Option<PathBuf>,
+        #[arg(long)]
+        import: bool,
+    },
+    /// Atoms whose review is due.
+    Due,
+    /// Grade one review; recalled unless --lapsed.
+    Graded {
+        id: String,
+        #[arg(long)]
+        lapsed: bool,
+    },
     /// Reweigh the voters on an issue by what turned out right.
     Learn {
         id: String,
@@ -158,6 +186,32 @@ fn main() -> Result<()> {
             let row = Trust { from, to, weight };
             let v = write_trust(&row, &why)?;
             println!("{v}");
+        }
+        Cmd::Doctor => {
+            let rows = doctor();
+            print!("{}", format_doctor(&rows));
+            if !healthy(&rows) {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Handover {
+            out,
+            project,
+            issue,
+        } => {
+            for line in handover(&out, &project, &issue)? {
+                println!("{line}");
+            }
+        }
+        Cmd::Receive { dir, since, import } => {
+            for line in receive(&dir, since.as_deref(), import)? {
+                println!("{line}");
+            }
+        }
+        Cmd::Due => print!("{}", format_due(&due()?)),
+        Cmd::Graded { id, lapsed } => {
+            let v = graded(&id, !lapsed)?;
+            println!("{}", v["due_at"].as_str().unwrap_or("graded"));
         }
         Cmd::Learn { id, outcome, beta } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;

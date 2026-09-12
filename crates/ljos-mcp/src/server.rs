@@ -7,12 +7,12 @@
 //! sequences that cross habitats are prompts. The pack is written only by
 //! Remember and Prefer, and the text is the claim.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, cards, consensus_steps, learn, on_path, packset_search, packset_write,
-    policy_line, run_captured, trust_from_pack, write_trust, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB,
+    ballots_from_json, cards, consensus_steps, doctor, due, graded, handover, learn, on_path,
+    packset_search, packset_write, policy_line, receive, run_captured, trust_from_pack,
+    write_trust, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -132,6 +132,56 @@ pub struct LearnArgs {
     pub outcome: String,
     /// The factor a refuted voter shrinks by; the seat's default when absent.
     pub beta: Option<f64>,
+}
+
+/// A slice of the seat to pack.
+#[derive(Deserialize, JsonSchema)]
+pub struct HandoverArgs {
+    /// Where to write the satchel.
+    pub out: String,
+    /// Projects to take whole.
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// Issues to take, with what they stand on.
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
+/// A satchel that arrived.
+#[derive(Deserialize, JsonSchema)]
+pub struct ReceiveArgs {
+    /// The satchel directory.
+    pub dir: String,
+    /// A bridge file from the last handover by the same sender.
+    pub since: Option<String>,
+    /// Put the enclosed atoms into this seat's pack.
+    pub import: Option<bool>,
+}
+
+/// One review graded.
+#[derive(Deserialize, JsonSchema)]
+pub struct GradeArgs {
+    /// The atom id.
+    pub id: String,
+    /// False when the claim had to be looked up again.
+    pub recalled: Option<bool>,
+}
+
+/// One habitat and whether it answers.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HabitatRow {
+    pub name: String,
+    pub state: String,
+    pub ok: bool,
+}
+
+/// One atom due for review.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DueRow {
+    pub id: Option<String>,
+    pub kind: String,
+    pub text: String,
+    pub due_at: String,
 }
 
 /// One row of the influence graph.
@@ -526,6 +576,103 @@ impl LjosServer {
                 .collect(),
         ))
     }
+
+    #[tool(
+        description = "Which habitats answer: the binaries on PATH, the pack over PACKSET_URL, the deed store, the tracker, the claim graph. Ask this first when another verb fails.",
+        annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_doctor(&self) -> Result<Json<Vec<HabitatRow>>, McpError> {
+        Ok(Json(
+            doctor()
+                .into_iter()
+                .map(|h| HabitatRow {
+                    name: h.name.to_string(),
+                    state: h.state,
+                    ok: h.ok,
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
+        description = "Pack a slice of the seat for somebody else: the tracker's satchel for the projects and issues named, the pack's atoms (trust rows included), the deeds both cite with their receipts, sealed, and signed when the host has a key.",
+        annotations(
+            title = "Handover",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_handover(
+        &self,
+        Parameters(args): Parameters<HandoverArgs>,
+    ) -> Result<Json<Vec<String>>, McpError> {
+        handover(Path::new(&args.out), &args.projects, &args.issues)
+            .map(Json)
+            .map_err(refused)
+    }
+
+    #[tool(
+        description = "Check a satchel that arrived: manifest, deed receipts against the head in the bag (and the bridge from a kept head when given), the signature, and what the atoms hold. With import, the atoms go into this seat's pack.",
+        annotations(
+            title = "Receive",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_receive(
+        &self,
+        Parameters(args): Parameters<ReceiveArgs>,
+    ) -> Result<Json<Vec<String>>, McpError> {
+        receive(
+            Path::new(&args.dir),
+            args.since.as_deref().map(Path::new),
+            args.import.unwrap_or(false),
+        )
+        .map(Json)
+        .map_err(refused)
+    }
+
+    #[tool(
+        description = "The claims whose review is due, soonest first. Read each; then grade it recalled or lapsed so the review clock moves.",
+        annotations(title = "Due", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_due(&self) -> Result<Json<Vec<DueRow>>, McpError> {
+        Ok(Json(
+            due()
+                .map_err(refused)?
+                .into_iter()
+                .map(|a| DueRow {
+                    id: a["id"].as_str().map(str::to_string),
+                    kind: a["kind"].as_str().unwrap_or("").to_string(),
+                    text: a["text"].as_str().unwrap_or("").to_string(),
+                    due_at: a["due_at"].as_str().unwrap_or("").to_string(),
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
+        description = "Grade one review: recalled (default) pushes the next review out, lapsed brings it back sooner. Returns the atom with its new due_at.",
+        annotations(
+            title = "Graded",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_graded(
+        &self,
+        Parameters(args): Parameters<GradeArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        graded(&args.id, args.recalled.unwrap_or(true))
+            .map(Json)
+            .map_err(refused)
+    }
 }
 
 // ---- prompts ---------------------------------------------------------------
@@ -684,13 +831,13 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every tool is annotated, and the writers are the contract's eight.
+    /// Every tool is annotated, and the writers are the contract's eleven.
     #[test]
-    fn the_writers_are_the_eight_the_contract_names() {
+    fn the_writers_are_the_eleven_the_contract_names() {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            15,
+            20,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -722,8 +869,11 @@ mod tests {
                 "ljos_claim",
                 "ljos_complete",
                 "ljos_deed",
+                "ljos_graded",
+                "ljos_handover",
                 "ljos_learn",
                 "ljos_prefer",
+                "ljos_receive",
                 "ljos_remember",
                 "ljos_trust",
                 "ljos_vote"

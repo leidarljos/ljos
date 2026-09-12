@@ -17,6 +17,11 @@ ljos policy -- ls
 ljos consensus vissue-xxxx
 ljos trust alice bob 0.8 --why deed-…
 ljos learn vissue-xxxx --outcome ship
+ljos due
+ljos graded <atom-id> [--lapsed]
+ljos handover --out bag --project x --issue vissue-xxxx
+ljos receive bag [--since bridge.txt] [--import]
+ljos doctor
 ```
 
 `remember` / `prefer` POST `/v1/atoms` against `PACKSET_URL` (`INSIDE_MEMORY_URL` is an alias). They write one explicit claim. They do not extract from a transcript.
@@ -31,11 +36,17 @@ ljos learn vissue-xxxx --outcome ship
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_trust`, `ljos_learn`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
+`ljos-mcp` serves the same verbs over stdio. Writers: `ljos_remember`, `ljos_prefer`, `ljos_trust`, `ljos_learn`, `ljos_graded`, `ljos_deed`, `ljos_vote`, `ljos_claim`, `ljos_complete`, `ljos_handover`, `ljos_receive`. The rest read. Cards are the resources `ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, from `LJOS_CARDS_DIR`. Prompts: `start_a_sitting`, `check_a_handover`.
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp", "env": {"PACKSET_URL": "http://127.0.0.1:8761"}}}}
 ```
+
+`ljos due` lists the atoms whose review clock has run out; `ljos graded ID` marks one recalled (`--lapsed` for the other answer) and the pack reschedules it. This is the spaced-review loop the pack already keeps, reached from the seat.
+
+`ljos handover --out DIR` runs the tracker's satchel, `packset export` into `DIR/data/atoms`, `deedar export` of every deed the satchel needs or the pack cites into `DIR/data/deeds`, then seals, and signs the manifest when `DEEDAR_HOST_SIGNING_KEY` is set. `ljos receive DIR` verifies the manifest, checks the deed receipts (`--since` for the bridge from a kept head), checks the signature when there is one, counts the atoms and trust rows, and with `--import` posts the atoms into this seat's pack.
+
+`ljos doctor` says which habitats answer and exits 1 when the tracker, the deed store, or the pack does not.
 
 Other projects may still speak packset, deedar, vissue, or claimdag alone.
 
