@@ -667,12 +667,9 @@ impl ServerHandler for LjosServer {
             )
         })?;
         let path = self.cards_dir.join(name);
-        // A missing card is an empty card, which is what the command line prints
-        // for it too: nothing is created to fill the gap.
+        // A missing card is an empty card; nothing is created.
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        Ok(ReadResourceResponse::from(ReadResourceResult {
-            contents: vec![ResourceContents::text(text, uri)],
-        }))
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(text, uri)]).into())
     }
 }
 
