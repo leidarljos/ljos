@@ -15,6 +15,7 @@ $ export CLAIMDAG_DIR=/tmp/seat/claims
 $ packset ensure
 $ ljos doctor
 ok	vissue	...
+ok	seat	you (from LJOS_SEAT)
 ok	pack	http://127.0.0.1:8761 workspace default
 ok	deed store	size=0 root=...
 #+end_src

@@ -140,9 +140,10 @@ answerable.
 * Start a sitting, and end one
 
 #+begin_src console
-$ ljos sitting proj-1a2b --assignee you
+$ ljos sitting proj-1a2b
 == doctor
 ok	vissue	...
+ok	seat	you (from LJOS_SEAT)
 == cards
 == due
 unreviewed	conclusion	3f9c...	The lexical default is BM25+.
