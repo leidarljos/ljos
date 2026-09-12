@@ -3084,7 +3084,11 @@ mod tests {
         .unwrap();
         let both: Vec<String> = vec!["UserPromptSubmit".into(), "PreToolUse".into()];
         let prompts: Vec<String> = HOOK_EVENTS.iter().map(|e| (*e).to_string()).collect();
-        assert_eq!(prompts, ["UserPromptSubmit"], "the panel's default");
+        assert_eq!(
+            prompts,
+            ["UserPromptSubmit", "SessionEnd"],
+            "the panel's default, and the session end that wires what it used"
+        );
         assert!(!hook_installed(&file, &both));
         let dry = hook_step(&file, &both, true);
         assert!(
