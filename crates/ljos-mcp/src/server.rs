@@ -943,9 +943,7 @@ impl ServerHandler for LjosServer {
     ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri.clone();
         if uri == PROTOCOL_URI {
-            return Ok(
-                ReadResourceResult::new(vec![ResourceContents::text(PROTOCOL, uri)]).into(),
-            );
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(PROTOCOL, uri)]).into());
         }
         let name = card_named(&uri).ok_or_else(|| {
             McpError::resource_not_found(
@@ -1087,10 +1085,14 @@ mod tests {
         ] {
             assert!(PROTOCOL.contains(verb), "{verb} missing from the protocol");
         }
-        let order: Vec<usize> = ["## Before the work", "## During the work", "## After the work"]
-            .iter()
-            .map(|h| PROTOCOL.find(h).unwrap_or_else(|| panic!("{h} missing")))
-            .collect();
+        let order: Vec<usize> = [
+            "## Before the work",
+            "## During the work",
+            "## After the work",
+        ]
+        .iter()
+        .map(|h| PROTOCOL.find(h).unwrap_or_else(|| panic!("{h} missing")))
+        .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]));
         // Every tool the server declares is named in the protocol, so a reader
         // of the protocol has heard of everything the server can do.

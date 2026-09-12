@@ -6,8 +6,8 @@ use ljos_cli::{
     ballots_from_json, cards, claim, consensus_steps, doctor, due, format_doctor, format_due,
     format_hits, format_island, format_steps, graded, handover, healthy, join, learn, node_for,
     on_path, onboard, packset_forget, packset_island, packset_search, packset_write, policy_line,
-    receive, release, run, run_captured, trust_from_pack, write_trust, Trust, LEARN_BETA,
-    HARNESSES_EXAMPLE, POLICY_TCB, PROTOCOL,
+    receive, release, run, run_captured, trust_from_pack, write_trust, Trust, HARNESSES_EXAMPLE,
+    LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -24,13 +24,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson that will still be true next sitting. Two sentences at most.
-    Remember {
-        text: Vec<String>,
-    },
+    Remember { text: Vec<String> },
     /// Prefer one way over another, as a standing preference. Stored as written.
-    Prefer {
-        text: Vec<String>,
-    },
+    Prefer { text: Vec<String> },
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
         id: String,
@@ -39,9 +35,7 @@ enum Cmd {
         why: Option<String>,
     },
     /// What the seat knows about a topic, ranked. Empty means the pack holds nothing on it.
-    Search {
-        query: Vec<String>,
-    },
+    Search { query: Vec<String> },
     /// The memories a task activates: search hits as seeds, spread along the pack's links.
     Island {
         cue: Vec<String>,
@@ -50,13 +44,9 @@ enum Cmd {
         fire: bool,
     },
     /// Whether a deed's bytes are intact and its sources are too.
-    Evidence {
-        accession: String,
-    },
+    Evidence { accession: String },
     /// Whether a deed is still the tip, or a later take superseded it.
-    Current {
-        accession: String,
-    },
+    Current { accession: String },
     /// Cite a deed on an issue, or list what it cites. Citation is not a merge.
     Deed {
         issue: String,
@@ -65,9 +55,7 @@ enum Cmd {
         add: Option<String>,
     },
     /// The working set for an issue: plan, its inputs' deeds, its own citations.
-    Recall {
-        issue: String,
-    },
+    Recall { issue: String },
     /// Cast this identity's ballot (VISSUE_AGENT), or read the tally with no --for.
     Vote {
         issue: String,
@@ -105,13 +93,9 @@ enum Cmd {
         dir: PathBuf,
     },
     /// Argv law. Not a store. Does not reload a pack.
-    Policy {
-        argv: Vec<String>,
-    },
+    Policy { argv: Vec<String> },
     /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
-    Consensus {
-        id: String,
-    },
+    Consensus { id: String },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
         from: String,

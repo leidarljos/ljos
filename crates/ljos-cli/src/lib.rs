@@ -192,10 +192,12 @@ fn filled(argv: &[String], server: &Path) -> Vec<String> {
 fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if !h.registered.is_empty() {
         let argv = filled(&h.registered, server);
-        return Some(argv.first().is_some_and(|bin| on_path(bin)) && {
-            let (bin, rest) = (&argv[0], &argv[1..]);
-            run_captured(bin, rest).is_ok()
-        });
+        return Some(
+            argv.first().is_some_and(|bin| on_path(bin)) && {
+                let (bin, rest) = (&argv[0], &argv[1..]);
+                run_captured(bin, rest).is_ok()
+            },
+        );
     }
     if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
         return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
@@ -331,8 +333,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
         Some(dir) => steps.push(write_skill(&expand(dir), dry)),
         None => steps.push(Step {
             what: "skill".into(),
-            detail: "no skills directory in harnesses.toml; `ljos protocol` prints the text"
-                .into(),
+            detail: "no skills directory in harnesses.toml; `ljos protocol` prints the text".into(),
             ok: false,
         }),
     }
@@ -385,7 +386,10 @@ fn harness_rows() -> Vec<Habitat> {
             state: if registered {
                 format!("{}: ljos registered", h.name)
             } else {
-                format!("{}: not registered; ljos onboard --harness {}", h.name, h.name)
+                format!(
+                    "{}: not registered; ljos onboard --harness {}",
+                    h.name, h.name
+                )
             },
             ok: registered,
         });
@@ -401,9 +405,16 @@ fn harness_rows() -> Vec<Habitat> {
             state: match (&skill, current) {
                 (Some(p), true) => format!("{}: {}", h.name, p.display()),
                 (Some(p), false) if p.is_file() => {
-                    format!("{}: {} is stale; ljos onboard --harness {}", h.name, p.display(), h.name)
+                    format!(
+                        "{}: {} is stale; ljos onboard --harness {}",
+                        h.name,
+                        p.display(),
+                        h.name
+                    )
                 }
-                (Some(_), false) => format!("{}: absent; ljos onboard --harness {}", h.name, h.name),
+                (Some(_), false) => {
+                    format!("{}: absent; ljos onboard --harness {}", h.name, h.name)
+                }
                 (None, _) => format!("{}: no skills directory named", h.name),
             },
             ok: current,
@@ -479,8 +490,7 @@ pub fn post_claim(
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
-    let client =
-        pack()?;
+    let client = pack()?;
     let workspace = client.workspace();
     post_claim(&client, label, text, &workspace)
 }
@@ -509,8 +519,7 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
         bail!("forget: an atom id is required");
     }
     let why = why.map(str::trim).filter(|w| !w.is_empty());
-    let client =
-        pack()?;
+    let client = pack()?;
     let workspace = client.workspace();
     client
         .delete_atom(&workspace, trimmed, why)
@@ -960,8 +969,7 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
         rows.len()
     ));
     if import {
-        let client =
-            pack()?;
+        let client = pack()?;
         let (mut kept, mut refused) = (0usize, Vec::new());
         for atom in &atoms {
             match client.post_atom(atom) {
@@ -1141,8 +1149,7 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
     }
-    let client =
-        pack()?;
+    let client = pack()?;
     let workspace = client.workspace();
     client
         .activate(&workspace, cue, 24, fire)
@@ -1173,8 +1180,7 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
     if q.is_empty() {
         bail!("search: empty query");
     }
-    let client =
-        pack()?;
+    let client = pack()?;
     let workspace = client.workspace();
     client
         .search(&workspace, q, 10)
@@ -1191,7 +1197,10 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
 /// The refusal, explained, or any other failure of the claim graph.
 pub fn claim(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
-    match run_captured("claimdag", &["claim", &id, "--assignee", &work_id(assignee)]) {
+    match run_captured(
+        "claimdag",
+        &["claim", &id, "--assignee", &work_id(assignee)],
+    ) {
         Ok(said) => Ok(said.stdout),
         Err(e) => {
             let text = e.to_string();
@@ -1398,8 +1407,13 @@ mod tests {
         )
         .expect("write");
 
-        let refused = super::onboard_from(&file, "nobody", true).unwrap_err().to_string();
-        assert!(refused.contains("no runner \"nobody\"") && refused.contains("names r"), "{refused}");
+        let refused = super::onboard_from(&file, "nobody", true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("no runner \"nobody\"") && refused.contains("names r"),
+            "{refused}"
+        );
 
         let steps = match super::onboard_from(&file, "r", true) {
             Ok(steps) => steps,
@@ -1411,7 +1425,11 @@ mod tests {
             }
         };
         assert!(steps.iter().all(|s| s.ok), "{steps:?}");
-        assert!(steps[0].detail.starts_with("would append"), "{}", steps[0].detail);
+        assert!(
+            steps[0].detail.starts_with("would append"),
+            "{}",
+            steps[0].detail
+        );
         assert!(!config.exists() && !skills.exists(), "a dry run wrote");
 
         let steps = super::onboard_from(&file, "r", false).expect("onboards");
@@ -1425,9 +1443,16 @@ mod tests {
 
         let again = super::onboard_from(&file, "r", false).expect("onboards again");
         assert_eq!(again[0].detail, "ljos registered");
-        assert!(again[1].detail.ends_with("is current"), "{}", again[1].detail);
+        assert!(
+            again[1].detail.ends_with("is current"),
+            "{}",
+            again[1].detail
+        );
         assert_eq!(
-            std::fs::read_to_string(&config).expect("config").matches("[mcp_servers.ljos]").count(),
+            std::fs::read_to_string(&config)
+                .expect("config")
+                .matches("[mcp_servers.ljos]")
+                .count(),
             1,
             "the entry was appended twice"
         );
