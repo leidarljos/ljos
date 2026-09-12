@@ -1202,7 +1202,10 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
                     continue;
                 }
             }
-            lines.push((h.kind == "preference", format!("- [{}] {}", h.kind, h.text.trim())));
+            lines.push((
+                h.kind == "preference",
+                format!("- [{}] {}", h.kind, h.text.trim()),
+            ));
         }
     }
     lines.sort_by(|a, b| b.0.cmp(&a.0));
