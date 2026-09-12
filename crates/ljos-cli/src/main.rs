@@ -4,7 +4,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, cards, consensus_steps, format_hits, join, learn, on_path, packset_search,
-    packset_write, policy_line, run, run_captured, trust_from_pack, write_trust, Trust, LEARN_BETA,
+    packset_forget, packset_write, policy_line, run, run_captured, trust_from_pack, write_trust,
+    Trust, LEARN_BETA,
     POLICY_TCB,
 };
 use std::path::PathBuf;
@@ -27,6 +28,10 @@ enum Cmd {
     },
     Prefer {
         text: Vec<String>,
+    },
+    /// Retire one atom by id. Tombstones it; the pack keeps the record.
+    Forget {
+        id: String,
     },
     Search {
         query: Vec<String>,
@@ -105,6 +110,10 @@ fn main() -> Result<()> {
         }
         Cmd::Prefer { text } => {
             let body = packset_write("Prefer", &join(&text))?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        Cmd::Forget { id } => {
+            let body = packset_forget(&id)?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
         Cmd::Search { query } => {

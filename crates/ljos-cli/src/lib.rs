@@ -66,6 +66,29 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     post_claim(&client, label, text, &workspace)
 }
 
+/// Retire one atom from the workspace the cwd resolves to.
+///
+/// The daemon tombstones rather than erases: the atom stops being recalled and
+/// the pack still records that it was held and withdrawn. That is the right
+/// shape for standing knowledge, where "we no longer believe this" is itself
+/// worth keeping.
+///
+/// # Errors
+///
+/// An unset `PACKSET_URL`, an id the workspace does not hold, or the request's.
+pub fn packset_forget(id: &str) -> Result<Value> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        bail!("forget: an atom id is required");
+    }
+    let client =
+        PacksetClient::from_env().context("PACKSET_URL unset; forget POSTs /v1/atoms/delete")?;
+    let workspace = client.workspace();
+    client
+        .delete_atom(&workspace, trimmed)
+        .with_context(|| format!("forget: POST /v1/atoms/delete failed for {trimmed}"))
+}
+
 /// One row of the influence graph: `from` listens to `to` with `weight`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trust {
@@ -641,5 +664,26 @@ mod tests {
         assert!(req.contains("the default fuse is CombMNZ"), "{req}");
         assert!(req.contains("\"level\":\"explicit\""), "{req}");
         assert!(!req.contains("extract"), "{req}");
+    }
+
+    #[test]
+    fn forget_posts_the_id_and_workspace() {
+        let (url, captured) = serve_capture();
+        let client = PacksetClient::new(&url);
+        let body = client.delete_atom("ws", "atom-1").unwrap();
+        assert_eq!(body["id"], "atom-1");
+        let req = captured.lock().unwrap().clone();
+        assert!(req.contains("POST"), "{req}");
+        assert!(req.contains("/v1/atoms/delete"), "{req}");
+        assert!(req.contains("\"id\":\"atom-1\""), "{req}");
+        assert!(req.contains("\"workspace\":\"ws\""), "{req}");
+    }
+
+    /// An id is the whole of the request, so an empty one is a mistake worth
+    /// naming rather than a delete of whatever the server decides that means.
+    #[test]
+    fn forget_refuses_an_empty_id() {
+        let err = packset_forget("   ").unwrap_err();
+        assert!(err.to_string().contains("atom id is required"), "{err}");
     }
 }
