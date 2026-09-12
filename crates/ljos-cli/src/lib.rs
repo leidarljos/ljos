@@ -2854,7 +2854,7 @@ fn stamp_key(stamp: Option<&str>) -> Option<(i64, String)> {
     let days = days_of_stamp(Some(s))?;
     let rest = &s[10..];
     let clock = rest
-        .split(|c: char| c == 'T' || c == ' ')
+        .split(['T', ' '])
         .find(|t| t.len() >= 5 && t.as_bytes()[2] == b':')
         .map(|t| t[..5].to_string())
         .unwrap_or_default();
