@@ -2223,16 +2223,26 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
         lines.push("no deeds enclosed".into());
     }
     let manifest = dir.join("manifest-sha256.txt");
+    // Who sent it, for the atoms' provenance: the signing key when the bag
+    // is signed, else the fact of a handover. An imported claim then says
+    // where it came from, and a search can ask for what one seat taught.
+    let mut sender = "from:handover".to_string();
     if manifest.with_extension("txt.sig").is_file() {
-        lines.push(
-            run_captured(
-                "deedar",
-                &["vouch", "check", &manifest.display().to_string()],
-            )?
-            .stdout
-            .trim_end()
-            .to_string(),
-        );
+        let said = run_captured(
+            "deedar",
+            &["vouch", "check", &manifest.display().to_string()],
+        )?
+        .stdout
+        .trim_end()
+        .to_string();
+        if let Some(hex) = said
+            .strip_prefix("signed by ")
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_hexdigit()).next())
+            .filter(|h| h.len() >= 12)
+        {
+            sender = format!("from:{}", &hex[..12]);
+        }
+        lines.push(said);
     } else {
         lines.push("unsigned".into());
     }
@@ -2254,6 +2264,15 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
             let mut atom = atom.clone();
             if let Some(map) = atom.as_object_mut() {
                 map.insert("workspace".into(), Value::String(workspace.clone()));
+                let mut entities: Vec<Value> = map
+                    .get("entities")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if !entities.iter().any(|e| e.as_str() == Some(sender.as_str())) {
+                    entities.push(Value::String(sender.clone()));
+                }
+                map.insert("entities".into(), Value::Array(entities));
             }
             match client.post_atom(&atom) {
                 Ok(_) => kept += 1,

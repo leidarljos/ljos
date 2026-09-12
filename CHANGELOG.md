@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `receive --import` tags every imported atom with its sender
+  (`from:<signing key>`, or `from:handover` for an unsigned bag).
 - `onboard` starts a pack writer when none answers, before wiring the
   runner to it.
 - The hook fires the memories it injected during a session together when
