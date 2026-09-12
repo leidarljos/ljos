@@ -179,6 +179,25 @@ pub struct GradeArgs {
     pub recalled: Option<bool>,
 }
 
+/// A cue: the task or question at hand.
+#[derive(Deserialize, JsonSchema)]
+pub struct CueArgs {
+    /// What the seat is about to work on, in its own words.
+    pub cue: String,
+}
+
+/// One memory an island holds.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct IslandRow {
+    pub id: Option<String>,
+    pub kind: String,
+    pub text: String,
+    /// Relative to the strongest, so the top is 1.
+    pub activation: f64,
+    /// Whether search found it, or activation reached it.
+    pub seed: bool,
+}
+
 /// One habitat and whether it answers.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HabitatRow {
@@ -684,6 +703,31 @@ impl LjosServer {
     }
 
     #[tool(
+        description = "The memories a task activates: the top search hits as seeds, spread two hops along the pack's links, strongest first. Not a persona or a view; the cluster this task touches. Read it before starting the work.",
+        annotations(title = "Island", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_island(
+        &self,
+        Parameters(args): Parameters<CueArgs>,
+    ) -> Result<Json<Vec<IslandRow>>, McpError> {
+        let body = packset_island(&args.cue).map_err(refused)?;
+        Ok(Json(
+            body["island"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| IslandRow {
+                    id: a["id"].as_str().map(str::to_string),
+                    kind: a["kind"].as_str().unwrap_or("").to_string(),
+                    text: a["text"].as_str().unwrap_or("").to_string(),
+                    activation: a["activation"].as_f64().unwrap_or(0.0),
+                    seed: a["seed"].as_bool().unwrap_or(false),
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
         description = "The claims whose review is due, soonest first. Read each; then grade it recalled or lapsed so the review clock moves.",
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
@@ -761,9 +805,10 @@ impl LjosServer {
              \n\
              1. `ljos_cards`. What the human froze. Read them first and leave them\n\
                 as they are; if they are empty, they are empty.\n\
-             2. `ljos_search` for what the seat already knows about this work. An\n\
-                empty list means the pack holds nothing; a failure means the writer\n\
-                is down, which is a different thing.\n\
+             2. `ljos_search` for what the seat already knows about this work, then\n\
+                `ljos_island` with the task in your own words: the cluster of\n\
+                memories the task touches, not only the hits. An empty list means\n\
+                the pack holds nothing; a failure means the writer is down.\n\
              3. `ljos_recall` on the node. What it stands on, what its inputs\n\
                 produced, and what it has cited so far.\n\
              4. `ljos_due` for the claims whose review is due; read each and\n\
@@ -1016,6 +1061,7 @@ mod tests {
             &[
                 "`ljos_cards`",
                 "`ljos_search`",
+                "`ljos_island`",
                 "`ljos_recall`",
                 "`ljos_due`",
                 "`ljos_graded`",
