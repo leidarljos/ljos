@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `consolidate` (and the `ljos_consolidate` tool): the pack's replacement
+  rule run over what it holds, pairs reported, `--apply` to write.
 - The hook injects only hits at least two of the pack's scorers named
   (`ballots` of `of` on a hit), when more than one ran; a claim one
   scorer alone matched on a command line stays in the pack.

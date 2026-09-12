@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 
 use ljos_cli::{
     age_of, ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due,
-    finish, graded, handover, identity_or_seat, island_entities, learn_and_write, node_for,
-    now_utc, on_path, packset_forget, packset_island, packset_search_as_of, packset_write_as,
-    personas_from_pack, policy_line, receive, release, rows_about, run_captured, seat_name,
-    sitting, timeline, topic_words, trust_from_pack, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    finish, format_consolidation, graded, handover, identity_or_seat, island_entities,
+    learn_and_write, node_for, now_utc, on_path, packset_consolidate, packset_forget,
+    packset_island, packset_search_as_of, packset_write_as, personas_from_pack, policy_line,
+    receive, release, rows_about, run_captured, seat_name, sitting, timeline, topic_words,
+    trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
+    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -60,6 +61,14 @@ pub struct SearchArgs {
     /// learnt since left out. Omit for now.
     #[serde(default)]
     pub as_of: Option<String>,
+}
+
+/// Whether a consolidation writes.
+#[derive(Deserialize, JsonSchema)]
+pub struct ConsolidateArgs {
+    /// Write the closures. Absent or false: report the pairs, change nothing.
+    #[serde(default)]
+    pub apply: Option<bool>,
 }
 
 /// One atom to retire, and what withdrew it.
@@ -475,6 +484,27 @@ impl LjosServer {
         packset_write_as("Prefer", &args.text, args.as_persona.as_deref())
             .map(Json)
             .map_err(refused)
+    }
+
+    #[tool(
+        description = "Call this after a run of lessons on one matter, or after importing a handover: consolidate the seat's memory. Every claim that rewrites an earlier one of the same kind (same opening words, a new object; a correction; an explicit supersedes) closes the earlier one's validity window and names it, the rule a write applies on arrival run over what is already held. With apply false (the default) it reports the pairs and writes nothing; read them, then call again with apply true.",
+        annotations(
+            title = "Consolidate",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_consolidate(
+        &self,
+        Parameters(args): Parameters<ConsolidateArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let body = packset_consolidate(args.apply.unwrap_or(false)).map_err(refused)?;
+        Ok(Json(Said {
+            text: format_consolidation(&body),
+            aside: None,
+        }))
     }
 
     #[tool(
@@ -1383,7 +1413,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            31,
+            32,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1417,6 +1447,7 @@ mod tests {
                 "ljos_calibrate",
                 "ljos_claim",
                 "ljos_complete",
+                "ljos_consolidate",
                 "ljos_deed",
                 "ljos_finish",
                 "ljos_forget",

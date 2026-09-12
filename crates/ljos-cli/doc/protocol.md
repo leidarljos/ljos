@@ -57,7 +57,9 @@ Every piece of work has an issue before it has a claim.
   of two short sentences at most. A standing choice between two ways is one
   `ljos prefer`. Never a transcript, never a summary of the session. A
   lesson that rewrites an earlier one closes the earlier one's window; the
-  verb says `revises N earlier memories` when it did.
+  verb says `revises N earlier memories` when it did. `ljos consolidate`
+  reports the pairs the rule would close across what is held, and
+  `--apply` closes them; run it after a handover is imported.
 - Every decision with more than one defensible answer is a ballot:
   `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
   `ljos consensus ISSUE`. A tally is a count; the consensus is the settle
