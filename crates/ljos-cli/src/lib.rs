@@ -2422,20 +2422,33 @@ mod tests {
         assert_eq!(prompts, ["UserPromptSubmit"], "the panel's default");
         assert!(!hook_installed(&file, &both));
         let dry = hook_step(&file, &both, true);
-        assert!(dry.ok && dry.detail.starts_with("would add it on"), "{dry:?}");
+        assert!(
+            dry.ok && dry.detail.starts_with("would add it on"),
+            "{dry:?}"
+        );
         let step = hook_step(&file, &both, false);
         assert!(step.ok, "{step:?}");
         assert!(hook_installed(&file, &both));
         let again = hook_step(&file, &both, false);
-        assert!(again.detail.contains("carries the memory hook on"), "{again:?}");
+        assert!(
+            again.detail.contains("carries the memory hook on"),
+            "{again:?}"
+        );
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(v["theme"], "dark", "the rest of the file is kept");
-        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2, "the other hook stays");
+        assert_eq!(
+            v["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            2,
+            "the other hook stays"
+        );
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         // Narrowing to the default drops the seat's tool-call group and
         // leaves the other tool's group alone.
         let narrowed = hook_step(&file, &prompts, false);
-        assert!(narrowed.detail.contains("drop it from PreToolUse"), "{narrowed:?}");
+        assert!(
+            narrowed.detail.contains("drop it from PreToolUse"),
+            "{narrowed:?}"
+        );
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
         assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "other");
