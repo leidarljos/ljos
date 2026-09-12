@@ -19,7 +19,12 @@ ljos doctor | grep -q '^ok	pack' || fail "the pack does not answer"
 ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns." | grep -q '"kind": "lesson"' || fail remember
 ljos prefer "CombMNZ over RRF for fusing two ballots." | grep -q '"kind": "preference"' || fail prefer
 ljos search fuse | grep -q CombMNZ || fail search
+ljos search fuse --as-of 2000-01-01 | grep -q CombMNZ && fail "an as-of read before the write found it"
 ljos due | grep -q 'scheduled' || fail due
+# A rewrite of the same claim closes the earlier one on arrival; the seat
+# says so, and a consolidation finds nothing left to close.
+ljos remember "The lexical default is BM25L. It beat BM25 by two points on turns." 2>&1 | grep -q 'revises 1 earlier' || fail "a rewrite did not close the earlier claim"
+ljos consolidate | grep -q '^0 of ' || fail "consolidate found pairs a write should have closed"
 
 id=$(vissue create -p demo "Ship the fuse change?" -q | tail -1)
 VISSUE_AGENT=alice ljos vote "$id" --for ship >/dev/null
@@ -34,7 +39,9 @@ acc=$(deedar create file --name "the fuse patch" --path patch.rs --agent you | g
 ljos deed "$id" --add "$acc" >/dev/null
 ljos finish "$id" --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold | grep -q 'completed the session node' || fail finish
 ljos sitting "$id" --assignee you | grep -q 'reopened' || fail "reopen on a second sitting"
-ljos release "$id" --assignee you | grep -q '^gen=' || fail release
+ljos sitting "$id" --assignee you | grep -q 'the sitting resumes' || fail "a third sitting on a held node did not resume"
+ljos timeline "$id" | grep -q 'tracker	created' || fail timeline
+LJOS_SEAT=you ljos release "$id" | grep -q '^gen=' || fail "release under LJOS_SEAT"
 
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about docs >/dev/null
 ljos persona reader --anchor 0.8 --view "Reads as a first-time user." --about docs >/dev/null
