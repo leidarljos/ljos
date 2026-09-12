@@ -9,6 +9,7 @@
 | =prefer TEXT= | pack | one standing preference |
 | =forget ID [--why DEED]= | pack | tombstone a claim, naming the deed that withdrew it |
 | =search QUERY= | pack | ranked claims |
+| =island CUE= | pack | the memories a task activates: search hits spread along the links |
 | =due= | pack | claims whose review clock has run out |
 | =graded ID [--lapsed]= | pack | one review graded |
 | =trust FROM TO WEIGHT [--why DEED]...= | pack | one trust row |
@@ -33,7 +34,7 @@ to one actor; a 32-hex id passes through.
 
 Writers: =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
 =ljos_learn=, =ljos_graded=, =ljos_deed=, =ljos_vote=, =ljos_claim=,
-=ljos_complete=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search=,
+=ljos_complete=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search=, =ljos_island=,
 =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
 =ljos_consensus=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
 =ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:

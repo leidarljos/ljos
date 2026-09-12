@@ -39,6 +39,20 @@ effect it schedules for is reviewed by Cepeda et al.
 (doi:10.1037/0033-2909.132.3.354). A claim shown wrong is retracted with
 the deed that showed it, and a contrary claim closes the old one's window.
 
+* Islands
+
+A task does not touch everything a seat knows. The pack links each claim to
+the claims it shares names with, pruned so a neighbourhood spreads over the
+directions a claim is about. Those links form natural clusters, and
+=ljos island= finds the one a task activates: the top search hits are the
+seeds, activation spreads two hops along the links with half lost per hop
+and divided by fan-out, and the cluster comes back strongest first. That is
+spreading activation over a semantic network (Collins and Loftus,
+doi:10.1037/0033-295X.82.6.407), not a persona: a persona is a view that
+colours everything, an island is what this piece of work involves. The
+pack can also list its islands outright, by label propagation over the link
+graph (doi:10.1103/PhysRevE.76.036106).
+
 * Agreement that learns
 
 A tally counts, and a count is right only when every voter is worth the

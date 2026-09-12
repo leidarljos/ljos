@@ -8,6 +8,7 @@ Citation is not a merge. Completing a claimdag node does not close a ticket. Car
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
 ljos search fuse
+ljos island "rebuild the packset site"
 ljos evidence deed-…
 ljos deed vissue-xxxx --add deed-…
 ljos recall vissue-xxxx
@@ -45,6 +46,8 @@ ljos doctor
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp", "env": {"PACKSET_URL": "http://127.0.0.1:8761"}}}}
 ```
+
+`ljos island CUE` asks the pack which memories a task activates: the top search hits seed a two-hop spread along the pack's entity links, and the cluster comes back strongest first. Not a persona or a view; the island this task touches.
 
 `ljos due` lists the atoms whose review clock has run out; `ljos graded ID` marks one recalled (`--lapsed` for the other answer) and the pack reschedules it. This is the spaced-review loop the pack already keeps, reached from the seat.
 
