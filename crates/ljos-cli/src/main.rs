@@ -9,8 +9,8 @@ use ljos_cli::{
     learn_and_write, learn_shared, node_for, on_path, onboard, pack, packset_forget, packset_hubs,
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
-    run_captured, session_end, sitting, timeline, topic_words, trust_from_pack, verdict_for,
-    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
+    run_captured, seat_name, session_end, sitting, timeline, topic_words, trust_from_pack,
+    verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
@@ -138,17 +138,17 @@ enum Cmd {
     Claim {
         /// A tracker id, or a 32-hex claim-graph id.
         node: String,
-        /// Your name; mapped to one actor id.
+        /// Your name; mapped to one actor id. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
         #[arg(long)]
-        assignee: String,
+        assignee: Option<String>,
     },
     /// Hand a session node back unfinished: ready again, generation moved.
     Release {
         /// A tracker id, or a 32-hex claim-graph id.
         node: String,
-        /// The name that holds it.
+        /// The name that holds it. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
         #[arg(long)]
-        assignee: String,
+        assignee: Option<String>,
     },
     /// Finish a session node. Does not close the ticket.
     Complete {
@@ -253,9 +253,9 @@ enum Cmd {
     Sitting {
         /// The tracker id of the issue.
         issue: String,
-        /// Your name; one live claim per name.
+        /// Your name; one live claim per name. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
         #[arg(long)]
-        assignee: String,
+        assignee: Option<String>,
         /// Where the cards are read from.
         #[arg(long, default_value = ".")]
         cards: PathBuf,
@@ -393,8 +393,12 @@ fn main() -> Result<()> {
             })?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
-        Cmd::Claim { node, assignee } => print!("{}", claim(&node, &assignee)?),
-        Cmd::Release { node, assignee } => print!("{}", release(&node, &assignee)?),
+        Cmd::Claim { node, assignee } => {
+            print!("{}", claim(&node, &assignee.unwrap_or_else(seat_name))?)
+        }
+        Cmd::Release { node, assignee } => {
+            print!("{}", release(&node, &assignee.unwrap_or_else(seat_name))?)
+        }
         Cmd::Complete { node, status } => match status {
             Some(s) => run("claimdag", &["complete", &node_for(&node)?, "--status", &s])?,
             None => run("claimdag", &["complete", &node_for(&node)?])?,
@@ -552,7 +556,10 @@ fn main() -> Result<()> {
             issue,
             assignee,
             cards: cards_dir,
-        } => print!("{}", sitting(&issue, &assignee, &cards_dir)?),
+        } => print!(
+            "{}",
+            sitting(&issue, &assignee.unwrap_or_else(seat_name), &cards_dir)?
+        ),
         Cmd::Finish {
             issue,
             status,

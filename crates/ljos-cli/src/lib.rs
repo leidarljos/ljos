@@ -88,11 +88,13 @@ pub struct Harnesses {
 /// An example of the file, with placeholder names. `ljos onboard --example`
 /// prints it; the two shapes are a registering command and a config file.
 pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: the agent runners on this machine.
-# {server} is replaced by the path to ljos-mcp. Paths may start with ~.
+# {server} is replaced by the path to ljos-mcp, {name} by the runner's name.
+# Paths may start with ~. Passing LJOS_SEAT={name} to the server makes each
+# runner claim and vote as itself; they share the one pack and tracker.
 
 [[harness]]
 name = "runner-with-a-command"
-register = ["runner", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
+register = ["runner", "mcp", "add", "-s", "user", "-e", "LJOS_SEAT={name}", "ljos", "--", "{server}"]
 registered = ["runner", "mcp", "get", "ljos"]
 skills = "~/.runner/skills"
 hooks = "~/.runner/settings.json"
@@ -102,7 +104,7 @@ hooks = "~/.runner/settings.json"
 name = "runner-with-a-config-file"
 config = "~/.other/config.toml"
 marker = "[mcp_servers.ljos]"
-snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\n"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv = { LJOS_SEAT = \"{name}\" }\n"
 skills = "~/.other/skills"
 "#;
 
@@ -197,16 +199,34 @@ fn write_skill(dir: &Path, dry: bool) -> Step {
     }
 }
 
-fn filled(argv: &[String], server: &Path) -> Vec<String> {
+/// `{server}` is the path to `ljos-mcp`, `{name}` the runner's name from
+/// the runners file, so a registration can pass `LJOS_SEAT={name}` and
+/// each runner claims and votes as itself.
+fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
     argv.iter()
         .map(|a| a.replace("{server}", &server.display().to_string()))
+        .map(|a| a.replace("{name}", name))
         .collect()
+}
+
+/// The name this seat claims and votes under when none is given:
+/// `LJOS_SEAT` (a runner's registration sets it to the runner's name, so
+/// two runners on one host hold separate claims), else `VISSUE_AGENT`,
+/// else `seat`.
+#[must_use]
+pub fn seat_name() -> String {
+    ["LJOS_SEAT", "VISSUE_AGENT"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "seat".to_string())
 }
 
 /// Whether a runner with a `registered` command already has the server.
 fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if !h.registered.is_empty() {
-        let argv = filled(&h.registered, server);
+        let argv = filled(&h.registered, server, &h.name);
         return Some(
             argv.first().is_some_and(|bin| on_path(bin)) && {
                 let (bin, rest) = (&argv[0], &argv[1..]);
@@ -235,7 +255,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         },
         Some(false) if !h.register.is_empty() => {
-            let argv = filled(&h.register, server);
+            let argv = filled(&h.register, server, &h.name);
             if !on_path(&argv[0]) {
                 return Step {
                     what,
@@ -269,7 +289,8 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 .snippet
                 .as_deref()
                 .unwrap_or_default()
-                .replace("{server}", &server.display().to_string());
+                .replace("{server}", &server.display().to_string())
+                .replace("{name}", &h.name);
             if snippet.is_empty() {
                 return Step {
                     what,
@@ -3348,13 +3369,30 @@ pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
     run_as(bin, args, None)
 }
 
+/// The identity a ballot is cast under: the persona named, else the
+/// runner's seat name when `LJOS_SEAT` is set, else none (the tracker's
+/// own default, `VISSUE_AGENT` or `user@host`).
+#[must_use]
+pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
+    identity
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("LJOS_SEAT")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+}
+
 /// [`run`] with `VISSUE_AGENT` set to `identity`, so a ballot or a claim is
 /// recorded under a persona's name rather than the seat's.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
-    if let Some(who) = identity.map(str::trim).filter(|w| !w.is_empty()) {
+    if let Some(who) = identity_or_seat(identity) {
         cmd.env("VISSUE_AGENT", who);
     }
     for a in args {
@@ -3421,6 +3459,20 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_registration_carries_the_runners_name() {
+        let argv: Vec<String> = ["run", "-e", "LJOS_SEAT={name}", "{server}"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let filled = filled(&argv, Path::new("/x/ljos-mcp"), "runner-a");
+        assert_eq!(filled, ["run", "-e", "LJOS_SEAT=runner-a", "/x/ljos-mcp"]);
+        assert_eq!(
+            identity_or_seat(Some(" reviewer ")).as_deref(),
+            Some("reviewer")
+        );
+    }
+
     #[test]
     fn a_timeline_merges_the_three_stores_oldest_first() {
         let v = serde_json::json!({
