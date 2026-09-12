@@ -1113,10 +1113,7 @@ pub fn review_summary(atoms: &[Value], now: &str) -> String {
         .collect();
     later.sort_unstable();
     match later.first() {
-        Some(next) => format!(
-            "{due} due; {} scheduled, next at {next}",
-            later.len()
-        ),
+        Some(next) => format!("{due} due; {} scheduled, next at {next}", later.len()),
         None if due == 0 => "0 due; nothing scheduled: this seat has remembered nothing yet".into(),
         None => format!("{due} due; nothing else scheduled"),
     }
@@ -1445,13 +1442,20 @@ pub fn finish(
     let title = issue_title(issue)?;
     let island = packset_island(&title, true)?;
     let fired = island["island"].as_array().map_or(0, Vec::len);
-    out.push_str(&format!("fired the island for {title:?}: {fired} memories\n"));
+    out.push_str(&format!(
+        "fired the island for {title:?}: {fired} memories\n"
+    ));
     let terminal = ["done", "failed", "cancelled"];
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
     }
-    run_captured("claimdag", &["complete", &node_for(issue)?, "--status", status])?;
-    out.push_str(&format!("completed the session node for {issue} as {status}\n"));
+    run_captured(
+        "claimdag",
+        &["complete", &node_for(issue)?, "--status", status],
+    )?;
+    out.push_str(&format!(
+        "completed the session node for {issue} as {status}\n"
+    ));
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
         let said = run_captured("vissue", &["vote", issue, "--json"])?;
         let ballots = ballots_from_json(&said.stdout)?;
@@ -1681,7 +1685,11 @@ mod tests {
             .iter()
             .map(|a| a["id"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(due, ["a", "b", "d"], "unreviewed first, then the past-due one");
+        assert_eq!(
+            due,
+            ["a", "b", "d"],
+            "unreviewed first, then the past-due one"
+        );
         assert_eq!(
             super::review_summary(&atoms, now),
             "3 due; 1 scheduled, next at 2030-01-01T00:00:00Z"

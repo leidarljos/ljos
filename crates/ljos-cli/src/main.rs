@@ -4,12 +4,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, calibrate, cards, claim, consensus_steps, doctor, due_report, finish,
-    format_doctor,
-    format_hits, format_island, format_steps, graded, handover, healthy, join, learn, node_for,
-    on_path, onboard, packset_forget, packset_island, packset_search, packset_write, policy_line,
-    receive, release, run, run_captured, sitting, trust_from_pack, write_trust, Trust,
-    HARNESSES_EXAMPLE,
-    LEARN_BETA, POLICY_TCB, PROTOCOL,
+    format_doctor, format_hits, format_island, format_steps, graded, handover, healthy, join,
+    learn, node_for, on_path, onboard, packset_forget, packset_island, packset_search,
+    packset_write, policy_line, receive, release, run, run_captured, sitting, trust_from_pack,
+    write_trust, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
