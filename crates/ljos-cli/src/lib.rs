@@ -741,20 +741,40 @@ fn due_nudge(call: &HookCall) -> String {
 /// no opinion.
 #[must_use]
 pub fn hook_output(call: &HookCall, context: &str) -> String {
-    if context.is_empty() {
+    hook_output_ruled(call, context, None)
+}
+
+/// [`hook_output`] carrying a rule's verdict on a tool call: `deny` or
+/// `ask` as the runner's permission decision, with the rule's reason. On a
+/// prompt or an argv line the verdict is a line of text.
+#[must_use]
+pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
+    if context.is_empty() && verdict.is_none() {
         return String::new();
     }
     if call.event == "argv" {
-        return format!("{context}\n");
-    }
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": call.event,
-            "additionalContext": context
+        let mut out = String::new();
+        if let Some(r) = verdict {
+            out.push_str(&format!("{}: {} (rule `{}`)\n", r.verdict, r.reason, r.pattern));
         }
-    })
-    .to_string()
-        + "\n"
+        if !context.is_empty() {
+            out.push_str(context);
+            out.push('\n');
+        }
+        return out;
+    }
+    let mut specific = serde_json::json!({ "hookEventName": call.event });
+    if !context.is_empty() {
+        specific["additionalContext"] = Value::String(context.to_string());
+    }
+    if let Some(r) = verdict {
+        if call.event == "PreToolUse" {
+            specific["permissionDecision"] = Value::String(r.verdict.clone());
+            specific["permissionDecisionReason"] =
+                Value::String(format!("{} (seat rule `{}`)", r.reason, r.pattern));
+        }
+    }
+    serde_json::json!({ "hookSpecificOutput": specific }).to_string() + "\n"
 }
 
 pub fn format_steps(steps: &[Step]) -> String {
@@ -1303,6 +1323,177 @@ pub fn panel(issue: &str, out: &Path) -> Result<String> {
     }
     lines.push(format!("ljos consensus {issue}"));
     Ok(lines.join("\n") + "\n")
+}
+
+/// One voter's forecast on one issue: what share the others give each
+/// option, or the option it expects to win.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prediction {
+    pub issue: String,
+    pub agent: String,
+    pub expect: Value,
+}
+
+/// POST one forecast. `expect` is an option name or `{option: share}`.
+pub fn write_prediction(issue: &str, agent: &str, expect: &str) -> Result<Value> {
+    let (issue, agent, expect) = (issue.trim(), agent.trim(), expect.trim());
+    if issue.is_empty() || agent.is_empty() || expect.is_empty() {
+        bail!("predict: an issue, an identity and an expectation are required");
+    }
+    let expect_value: Value = match serde_json::from_str::<Value>(expect) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => Value::String(expect.to_string()),
+    };
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = atom_body(
+        "prediction",
+        &format!("{agent} expects {expect} on {issue}."),
+        &workspace,
+    );
+    atom["issue"] = Value::String(issue.into());
+    atom["agent"] = Value::String(agent.into());
+    atom["expect"] = expect_value;
+    client
+        .post_atom(&atom)
+        .context("predict: POST /v1/atoms failed")
+}
+
+/// The latest forecast per agent on an issue.
+pub fn predictions_of(atoms: &[Value], issue: &str) -> Vec<Prediction> {
+    let mut latest: std::collections::BTreeMap<String, (String, Prediction)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("prediction")
+            || atom.get("issue").and_then(Value::as_str) != Some(issue)
+        {
+            continue;
+        }
+        let (Some(agent), Some(expect)) = (
+            atom.get("agent").and_then(Value::as_str),
+            atom.get("expect"),
+        ) else {
+            continue;
+        };
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let p = Prediction {
+            issue: issue.to_string(),
+            agent: agent.to_string(),
+            expect: expect.clone(),
+        };
+        match latest.get(agent) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(agent.to_string(), (ts, p));
+            }
+        }
+    }
+    latest.into_values().map(|(_, p)| p).collect()
+}
+
+/// Forecasts as `ljos-consensus surprising --predictions` takes them.
+pub fn predictions_json(predictions: &[Prediction]) -> String {
+    Value::Array(
+        predictions
+            .iter()
+            .map(|p| serde_json::json!({"agent": p.agent, "expect": p.expect}))
+            .collect(),
+    )
+    .to_string()
+}
+
+/// Argv law kept in the pack: a glob over the command line, a verdict, and
+/// the reason a reader sees when it fires. `deny` stops the action at the
+/// runner and under `ljos policy`; `ask` hands it to the person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rule {
+    pub pattern: String,
+    pub verdict: String,
+    pub reason: String,
+}
+
+/// POST one rule.
+pub fn write_rule(rule: &Rule) -> Result<Value> {
+    let pattern = rule.pattern.trim();
+    if pattern.is_empty() {
+        bail!("rule: a pattern over the command line is required");
+    }
+    if !matches!(rule.verdict.as_str(), "deny" | "ask") {
+        bail!("rule: the verdict is deny or ask, not {:?}", rule.verdict);
+    }
+    let reason = rule.reason.trim();
+    if reason.is_empty() {
+        bail!("rule: say in a sentence why, so the reader who is stopped knows");
+    }
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = atom_body("rule", reason, &workspace);
+    atom["pattern"] = Value::String(pattern.into());
+    atom["verdict"] = Value::String(rule.verdict.clone());
+    client
+        .post_atom(&atom)
+        .context("rule: POST /v1/atoms failed")
+}
+
+/// The live rules in a set of atoms.
+pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
+    atoms
+        .iter()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("rule"))
+        .filter_map(|a| {
+            Some(Rule {
+                pattern: a.get("pattern")?.as_str()?.to_string(),
+                verdict: a.get("verdict")?.as_str()?.to_string(),
+                reason: a.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The rules in the seat's pack.
+pub fn rules_from_pack() -> Result<Vec<Rule>> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("rules: GET /v1/atoms failed")?;
+    Ok(rules_of(&atoms))
+}
+
+/// A glob over a command line: `*` matches any run of characters, `?` one.
+/// The match is on the whole line, so `rm -rf *` is `rm -rf ` and anything
+/// after, and `*sudo*` is sudo anywhere.
+#[must_use]
+pub fn glob_matches(pattern: &str, line: &str) -> bool {
+    fn go(p: &[char], l: &[char]) -> bool {
+        match (p.first(), l.first()) {
+            (None, None) => true,
+            (Some('*'), _) => go(&p[1..], l) || (!l.is_empty() && go(p, &l[1..])),
+            (Some('?'), Some(_)) => go(&p[1..], &l[1..]),
+            (Some(a), Some(b)) if a == b => go(&p[1..], &l[1..]),
+            _ => false,
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let l: Vec<char> = line.trim().chars().collect();
+    go(&p, &l)
+}
+
+/// The verdict the rules give a command line: the first `deny` wins, then
+/// the first `ask`, else none. Returns the rule that fired.
+#[must_use]
+pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
+    rules
+        .iter()
+        .find(|r| r.verdict == "deny" && glob_matches(&r.pattern, line))
+        .or_else(|| {
+            rules
+                .iter()
+                .find(|r| r.verdict == "ask" && glob_matches(&r.pattern, line))
+        })
 }
 
 /// Anchors as the settles take them: `{"name": anchor, ...}`.
@@ -2510,11 +2701,11 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         session: None,
     };
     let context = hook_context(&call, 5);
-    Ok(if context.is_empty() {
-        format!("{line}\n")
-    } else {
-        format!("{line}\n{context}\n")
-    })
+    // The rules are the law's memory: a deny or an ask fires before the
+    // context, so a reader sees the verdict first.
+    let rules = rules_from_pack().unwrap_or_default();
+    let ruled = hook_output_ruled(&call, &context, verdict_for(&rules, &line));
+    Ok(format!("{line}\n{ruled}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2573,6 +2764,41 @@ pub fn consensus_steps_for(
         }
     }
     Ok(steps)
+}
+
+/// The two readings beside a settle, when the pack holds what they need:
+/// the surprisingly popular answer when two or more voters forecast the
+/// others (`predict`), and the EigenTrust standing of the voters when
+/// trust rows exist. Both are the model crate's verbs.
+pub fn panel_steps(
+    id: &str,
+    have_ljos: bool,
+    trust: &[Trust],
+    predictions: &[Prediction],
+) -> Vec<ConsensusStep> {
+    let mut steps = Vec::new();
+    if !have_ljos {
+        return steps;
+    }
+    if predictions.len() >= 2 {
+        steps.push(ConsensusStep {
+            bin: "ljos-consensus",
+            args: vec![
+                "surprising".into(),
+                "--issue".into(),
+                id.into(),
+                "--predictions".into(),
+                predictions_json(predictions),
+            ],
+        });
+    }
+    if !trust.is_empty() {
+        steps.push(ConsensusStep {
+            bin: "ljos-consensus",
+            args: vec!["reputation".into(), "--trust".into(), trust_json(trust)],
+        });
+    }
+    steps
 }
 
 /// [`consensus_steps`] passing the personas' anchors to both settles as
@@ -2791,6 +3017,57 @@ mod tests {
         assert!(hook_installed(&file, &prompts));
         assert!(!hook_installed(&file, &both));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rules are globs over the whole line; deny wins over ask; the hook
+    /// carries the verdict as the runner's permission decision.
+    #[test]
+    fn rules_match_the_line_and_the_hook_carries_the_verdict() {
+        assert!(glob_matches("rm -rf *", "rm -rf /tmp/x"));
+        assert!(!glob_matches("rm -rf *", "ls -la"));
+        assert!(glob_matches("*sudo*", "echo hi && sudo reboot"));
+        assert!(glob_matches("git push*", "git push origin main"));
+        assert!(!glob_matches("git push*", "git pull"));
+        let rules = vec![
+            Rule {
+                pattern: "git push*".into(),
+                verdict: "ask".into(),
+                reason: "A push is the trust gate.".into(),
+            },
+            Rule {
+                pattern: "*--force*".into(),
+                verdict: "deny".into(),
+                reason: "Never force push.".into(),
+            },
+        ];
+        assert_eq!(verdict_for(&rules, "git push --force").unwrap().verdict, "deny");
+        assert_eq!(verdict_for(&rules, "git push origin x").unwrap().verdict, "ask");
+        assert!(verdict_for(&rules, "cargo test").is_none());
+        let call = hook_call(r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}"#);
+        let out = hook_output_ruled(&call, "", verdict_for(&rules, &call.cue));
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("Never force push"));
+        assert!(v["hookSpecificOutput"].get("additionalContext").is_none());
+        let argv = HookCall {
+            event: "argv".into(),
+            cue: "git push origin x".into(),
+            session: None,
+        };
+        assert!(hook_output_ruled(&argv, "", verdict_for(&rules, &argv.cue)).starts_with("ask: A push"));
+        let steps = panel_steps("x-1", true, &[], &[]);
+        assert!(steps.is_empty());
+        let preds = vec![
+            Prediction { issue: "x-1".into(), agent: "a".into(), expect: Value::String("ship".into()) },
+            Prediction { issue: "x-1".into(), agent: "b".into(), expect: serde_json::json!({"ship": 0.6, "hold": 0.4}) },
+        ];
+        let steps = panel_steps("x-1", true, &[row("a", "b", 0.5)], &preds);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].args[0], "surprising");
+        assert_eq!(steps[1].args[0], "reputation");
     }
 
     /// A scoped row applies when the issue is about one of its domains; an

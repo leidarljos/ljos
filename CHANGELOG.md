@@ -2,6 +2,16 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `predict ISSUE --expect OPTION` records a forecast of the others; with
+  two or more, `consensus` prints the surprisingly popular answer (Prelec,
+  Seung and McCoy) and, with trust rows, each voter's EigenTrust standing.
+- `rule PATTERN --verdict deny|ask --why TEXT`: argv law in the pack. The
+  hook returns the verdict as the runner's permission decision on tool
+  calls; `policy` prints it beside the line. Over MCP: `ljos_predict`,
+  `ljos_rule`.
+
 ## 0.5.0 (2026-09-12)
 
 - `ljos search -n N --rerank`: the writer's cross-encoder over the top hits.

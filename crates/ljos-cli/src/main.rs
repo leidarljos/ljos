@@ -1,15 +1,9 @@
 //! `ljos`: one seat over the habitats. It does not own them.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
-    finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy,
-    hook_call, hook_context, hook_output, island_entities, join, learn_and_write, node_for,
-    on_path, onboard, packset_forget, packset_island, packset_search_opts, packset_write_as, panel,
-    personas_from_pack, policy_with_memory, receive, release, rows_about, run, run_as,
-    run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust, Persona,
-    Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report, finish, format_doctor, format_hits, format_island, format_steps, graded, handover, healthy, hook_call, hook_context, hook_output_ruled, island_entities, join, learn_and_write, node_for, on_path, onboard, pack, packset_forget, packset_island, packset_search_opts, packset_write_as, panel, panel_steps, personas_from_pack, policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as, run_captured, sitting, topic_words, trust_from_pack, verdict_for, write_persona, write_prediction, write_rule, write_trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL, Persona, Rule, Trust,
 };
 use std::path::PathBuf;
 
@@ -143,6 +137,27 @@ enum Cmd {
     Cards {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
+    },
+    /// Forecast how the others will vote on an issue; two or more forecasts let the settle name the surprisingly popular answer.
+    Predict {
+        issue: String,
+        /// The option you expect to win, or a JSON object of option to share.
+        #[arg(long)]
+        expect: String,
+        /// Forecast as this persona instead of the seat's identity.
+        #[arg(long = "as")]
+        as_persona: Option<String>,
+    },
+    /// Argv law kept in the pack: a glob over the command line with a verdict the hook and `policy` enforce.
+    Rule {
+        /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push*`.
+        pattern: String,
+        /// deny stops the action; ask hands it to the person.
+        #[arg(long, default_value = "ask")]
+        verdict: String,
+        /// The reason a stopped reader sees.
+        #[arg(long)]
+        why: String,
     },
     /// Argv law: the line as it would run, then what the pack knows that bears on it.
     Policy { argv: Vec<String> },
@@ -332,6 +347,29 @@ fn main() -> Result<()> {
             None => run("claimdag", &["complete", &node_for(&node)?])?,
         },
         Cmd::Cards { dir } => print!("{}", cards(&dir)?),
+        Cmd::Predict {
+            issue,
+            expect,
+            as_persona,
+        } => {
+            let who = as_persona
+                .or_else(|| std::env::var("VISSUE_AGENT").ok())
+                .unwrap_or_else(|| whoami_tracker());
+            let body = write_prediction(&issue, &who, &expect)?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
+        Cmd::Rule {
+            pattern,
+            verdict,
+            why,
+        } => {
+            let body = write_rule(&Rule {
+                pattern,
+                verdict,
+                reason: why,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        }
         Cmd::Policy { argv } => {
             eprintln!("ljos: {POLICY_TCB}");
             print!("{}", policy_with_memory(&argv)?);
@@ -341,7 +379,18 @@ fn main() -> Result<()> {
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
             let call = hook_call(&input);
-            print!("{}", hook_output(&call, &hook_context(&call, limit)));
+            // On a tool call the pack's rules give a verdict; on a prompt
+            // there is nothing to stop, only something to know.
+            let rules = if call.event == "PreToolUse" || call.event == "argv" {
+                rules_from_pack().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let verdict = verdict_for(&rules, &call.cue);
+            print!(
+                "{}",
+                hook_output_ruled(&call, &hook_context(&call, limit), verdict)
+            );
         }
         Cmd::Consensus { id } => {
             // Rows scoped to a domain apply when the issue is about it; the
@@ -358,6 +407,19 @@ fn main() -> Result<()> {
                 &personas,
                 &tags,
             )? {
+                run(step.bin, &step.args)?;
+            }
+            // Beside the settle: the surprisingly popular answer when two
+            // or more voters forecast, and the voters' standing when rows
+            // exist.
+            let predictions = pack()
+                .and_then(|c| {
+                    c.atoms_as_of(&c.workspace(), None)
+                        .context("consensus: GET /v1/atoms failed")
+                })
+                .map(|atoms| predictions_of(&atoms, &id))
+                .unwrap_or_default();
+            for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
                 run(step.bin, &step.args)?;
             }
         }
@@ -482,6 +544,16 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
         .map(str::to_lowercase)
         .collect();
     (topic, tags)
+}
+
+/// The identity the tracker records ballots under, so a forecast and a
+/// ballot from the same seat carry the same name.
+fn whoami_tracker() -> String {
+    run_captured("vissue", &["whoami"])
+        .ok()
+        .and_then(|s| s.stdout.lines().next().map(|l| l.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "seat".to_string())
 }
 
 /// The pack's rows, or none with a note: a seat without a pack still settles.

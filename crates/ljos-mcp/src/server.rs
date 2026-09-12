@@ -10,11 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish,
-    graded, handover, island_entities, learn_and_write, node_for, on_path, packset_forget,
-    packset_island, packset_search, packset_write_as, personas_from_pack, policy_line, receive,
-    release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
-    write_trust, Persona, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish, graded, handover, island_entities, learn_and_write, node_for, on_path, packset_forget, packset_island, packset_search, packset_write_as, personas_from_pack, policy_line, receive, release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL, Persona, Rule, Trust,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -89,6 +85,29 @@ pub struct DeedArgs {
 pub struct IssueArgs {
     /// The issue id.
     pub issue: String,
+}
+
+/// A forecast of the others' ballots.
+#[derive(Deserialize, JsonSchema)]
+pub struct PredictArgs {
+    /// The issue id.
+    pub issue: String,
+    /// The option you expect to win, or an object of option to share.
+    pub expect: serde_json::Value,
+    /// Forecast as this persona; absent, the seat's identity.
+    #[serde(rename = "as")]
+    pub as_persona: Option<String>,
+}
+
+/// A rule: argv law kept in the pack.
+#[derive(Deserialize, JsonSchema)]
+pub struct RuleArgs {
+    /// A glob over the whole command line, such as `*--force*`.
+    pub pattern: String,
+    /// `deny` stops the action at the runner; `ask` hands it to the person.
+    pub verdict: String,
+    /// The reason a stopped reader sees.
+    pub why: String,
 }
 
 /// A ballot, or a request for the tally.
@@ -814,6 +833,56 @@ impl LjosServer {
     }
 
     #[tool(
+        description = "Call this beside a ballot when the question is hard and the majority may be wrong: forecast what share the others give each option. With two or more forecasts, ljos_consensus also names the surprisingly popular answer, the option whose actual share most exceeds its forecast share.",
+        annotations(
+            title = "Forecast the others",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_predict(
+        &self,
+        Parameters(args): Parameters<PredictArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let who = args
+            .as_persona
+            .or_else(|| std::env::var("VISSUE_AGENT").ok())
+            .unwrap_or_else(|| "seat".to_string());
+        let expect = match &args.expect {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        write_prediction(&args.issue, &who, &expect)
+            .map(Json)
+            .map_err(refused)
+    }
+
+    #[tool(
+        description = "Call this when the work has shown that a kind of command must never run, or must be asked about first: writes a rule to the pack, a glob over the command line with a verdict. The memory hook and `ljos policy` enforce it at the point of action, and it travels in handovers like any memory.",
+        annotations(
+            title = "Write a rule",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_rule(
+        &self,
+        Parameters(args): Parameters<RuleArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        write_rule(&Rule {
+            pattern: args.pattern,
+            verdict: args.verdict,
+            reason: args.why,
+        })
+        .map(Json)
+        .map_err(refused)
+    }
+
+    #[tool(
         description = "Call this to start a subagent that plays a persona on an issue: the text it should begin from. The persona's view and anchor, what the seat knows on its domains (preferences first), the issue's working set, and the one ballot it must end with. Read-only.",
         annotations(
             title = "Brief a persona",
@@ -1265,7 +1334,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            28,
+            30,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1307,10 +1376,12 @@ mod tests {
                 "ljos_island",
                 "ljos_learn",
                 "ljos_persona",
+                "ljos_predict",
                 "ljos_prefer",
                 "ljos_receive",
                 "ljos_release",
                 "ljos_remember",
+                "ljos_rule",
                 "ljos_sitting",
                 "ljos_trust",
                 "ljos_vote"

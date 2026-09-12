@@ -24,12 +24,14 @@
 | =deed ID [--add ACCESSION]= | tracker | cite a deed on a node, or list citations |
 | =recall ID= | tracker | the working set |
 | =vote ID [--for OPTION] [--as PERSONA]= | tracker | cast, as the seat or as a persona, or read the tally |
+| =predict ID --expect OPTION\vert JSON [--as PERSONA]= | pack | forecast the others' shares; two or more and =consensus= names the surprisingly popular answer |
+| =rule PATTERN [--verdict deny\vert ask] --why TEXT= | pack | argv law: a glob over the command line the hook and =policy= enforce |
 | =consensus ID= | consensus, tracker | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged =broad= runs bounded confidence |
 | =claim ID --assignee NAME= | claim graph | a session node for a tracker id; a busy refusal names what the name still holds |
 | =release ID --assignee NAME= | claim graph | hand the session node back unfinished: ready, generation moved |
 | =complete ID [--status done\vert failed\vert cancelled]= | claim graph | finish the session node |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
-| =policy ARGV...= | policy, pack | the line as it would run, then what the pack knows that bears on it |
+| =policy ARGV...= | policy, pack | the line as it would run, the verdict of a matching rule, then what the pack knows that bears on it |
 | =hook [--limit N]= | pack | the memory hook: hook JSON or argv on stdin; the hits scoring at least 0.6 of the best, preferences first, five at most, each once per runner session |
 | =handover --out DIR [--project P]... [--issue I]...= | all | pack, seal, sign |
 | =receive DIR [--since BRIDGE] [--import]= | all | check, and import the atoms |

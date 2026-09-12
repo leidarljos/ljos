@@ -56,7 +56,14 @@ Every piece of work has an issue before it has a claim.
 - Every decision with more than one defensible answer is a ballot:
   `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
   `ljos consensus ISSUE`. A tally is a count; the consensus is the settle
-  under the trust rows.
+  under the trust rows. On a hard question add a forecast beside the
+  ballot, `ljos predict ISSUE --expect OPTION`; with two or more forecasts
+  the settle also names the surprisingly popular answer, the option whose
+  actual share most exceeds its forecast, and shows each voter's standing.
+- When the work has shown that a kind of command must never run, or must
+  be asked about first, write the law: `ljos rule 'PATTERN' --verdict
+  deny|ask --why "..."`. The hook stops or asks at the point of action and
+  `ljos policy` says the same; the rule is memory and travels in handovers.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`. Then
