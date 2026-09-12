@@ -713,6 +713,39 @@ pub fn node_for(issue: &str) -> Result<String> {
     Ok(id)
 }
 
+/// The memories a task activates: the pack's island around the cue.
+pub fn packset_island(cue: &str) -> Result<Value> {
+    let cue = cue.trim();
+    if cue.is_empty() {
+        bail!("island: pass the task or question at hand");
+    }
+    let client =
+        PacksetClient::from_env().context("PACKSET_URL unset; island is GET /v1/activate")?;
+    let workspace = client.workspace();
+    client
+        .activate(&workspace, cue, 24)
+        .context("island: GET /v1/activate failed")
+}
+
+/// One line per activated memory: activation, seed mark, id, text.
+pub fn format_island(body: &Value) -> String {
+    let mut out = String::new();
+    for atom in body["island"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{:.3}\t{}\t{}\t{}\n",
+            atom["activation"].as_f64().unwrap_or(0.0),
+            if atom["seed"].as_bool().unwrap_or(false) {
+                "seed"
+            } else {
+                "    "
+            },
+            atom["id"].as_str().unwrap_or("-"),
+            atom["text"].as_str().unwrap_or("")
+        ));
+    }
+    out
+}
+
 pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -1072,6 +1105,19 @@ mod tests {
         assert_ne!(a, work_id("demo-rimm"));
         assert_eq!(work_id(&a.to_ascii_uppercase()), a);
         assert_ne!(work_id("seat"), work_id("reader"));
+    }
+
+    #[test]
+    fn an_island_prints_one_memory_a_line() {
+        let body = serde_json::json!({"island": [
+            {"id": "a", "text": "one", "activation": 1.0, "seed": true},
+            {"id": "b", "text": "two", "activation": 0.25, "seed": false}
+        ]});
+        assert_eq!(
+            format_island(&body),
+            "1.000\tseed\ta\tone\n0.250\t    \tb\ttwo\n"
+        );
+        assert!(format_island(&serde_json::json!({})).is_empty());
     }
 
     #[test]

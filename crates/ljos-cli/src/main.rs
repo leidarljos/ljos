@@ -39,6 +39,10 @@ enum Cmd {
     Search {
         query: Vec<String>,
     },
+    /// The memories a task activates: search hits as seeds, spread along the pack's links.
+    Island {
+        cue: Vec<String>,
+    },
     /// Frozen product.
     Evidence {
         accession: String,
@@ -152,6 +156,7 @@ fn main() -> Result<()> {
             let body = packset_forget(&id, why.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
+        Cmd::Island { cue } => print!("{}", format_island(&packset_island(&join(&cue))?)),
         Cmd::Search { query } => {
             print!("{}", format_hits(&packset_search(&join(&query))?));
         }
