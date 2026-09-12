@@ -52,6 +52,10 @@ Ebbesen measured (https://doi.org/10.1111/j.1467-9280.1991.tb00175.x); the spaci
 effect it schedules for is reviewed by Cepeda et al.
 (https://doi.org/10.1037/0033-2909.132.3.354). A claim shown wrong is retracted with
 the deed that showed it, and a contrary claim closes the old one's window.
+On a longitudinal corpus where one claim per topic is kept recalled and
+three paraphrases written later are not, retrievability ranks the kept
+claim first 0.947 of the time; lexical scoring lands at chance and a
+recency half-life at 0.270 (the packset site carries the table).
 
 Islands
 -------
