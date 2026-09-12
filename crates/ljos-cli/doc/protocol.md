@@ -167,5 +167,8 @@ graph live in the user's state directories, the tracker at the root
 when it exists. `LJOS_SEAT` is the name this runner claims and votes under
 when a verb names none; a runner's registration sets it to the runner's
 name (`{name}` in the runners file), so two runners on one host share the
-one pack and tracker and hold separate claims. `VISSUE_AGENT` is the
-tracker's own name for the same thing; `--as` names a persona over both.
+one pack and tracker and hold separate claims. Export the same
+`LJOS_SEAT` in the runner's shell (a runner's settings usually carry an
+`env` table) so its command-line ballots and claims match its tools'.
+`VISSUE_AGENT` is the tracker's own name for the same thing; `--as` names
+a persona over both.
