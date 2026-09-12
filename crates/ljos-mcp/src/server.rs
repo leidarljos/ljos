@@ -10,11 +10,11 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish, graded,
-    handover, island_entities, learn_and_write, node_for, on_path, packset_forget, packset_island,
-    packset_search, packset_write, personas_from_pack, policy_line, receive, release, rows_about,
-    run_captured, sitting, topic_words, trust_from_pack, write_persona, write_trust, Persona,
-    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due, finish,
+    graded, handover, island_entities, learn_and_write, node_for, on_path, packset_forget,
+    packset_island, packset_search, packset_write, personas_from_pack, policy_line, receive,
+    release, rows_about, run_captured, sitting, topic_words, trust_from_pack, write_persona,
+    write_trust, Persona, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -811,7 +811,11 @@ impl LjosServer {
 
     #[tool(
         description = "Call this to start a subagent that plays a persona on an issue: the text it should begin from. The persona's view and anchor, what the seat knows on its domains (preferences first), the issue's working set, and the one ballot it must end with. Read-only.",
-        annotations(title = "Brief a persona", read_only_hint = true, open_world_hint = false)
+        annotations(
+            title = "Brief a persona",
+            read_only_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn ljos_brief(
         &self,
