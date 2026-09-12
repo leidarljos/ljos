@@ -40,6 +40,9 @@ content-addressed store, a Cap'n Proto snapshot. No model is required to
 run any of it, and any model or agent runner that can call a command or an
 MCP tool can sit in the seat.
 
+#+ATTR_HTML: :alt The seat over four stores :width 100%
+[[file:_static/seat.svg]]
+
 * Install
 
 #+begin_src console

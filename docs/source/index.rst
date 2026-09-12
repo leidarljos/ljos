@@ -40,12 +40,14 @@ content-addressed store, a Cap'n Proto snapshot. No model is required to
 run any of it, and any model or agent runner that can call a command or an
 MCP tool can sit in the seat.
 
+.. image:: _static/seat.svg
+
 Install
 -------
 
 .. code:: console
 
-    $ cargo install --git https://github.com/leidarljos/ljos ljos-cli ljos-mcp
+    $ cargo install --git https://github.com/leidarljos/ljos ljos ljos-mcp
     $ cargo install --git https://github.com/leidarljos/consensus
     $ cargo install --git https://github.com/leidarljos/vissue vissue-cli
     $ cargo install --git https://github.com/leidarljos/deedar deedar-cli

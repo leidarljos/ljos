@@ -7,6 +7,8 @@ Explanation
 Four stores, one identifier
 ---------------------------
 
+.. image:: _static/seat.svg
+
 Each store answers one question and is the authority for it. A deed
 accession is the one identifier that crosses them: the tracker cites it on
 a node, the pack cites it in a claim, the deed store answers for it. No
@@ -36,6 +38,8 @@ The contracts
 Memory that grows, is reviewed, decays, and is retracted
 --------------------------------------------------------
 
+.. image:: _static/memory.svg
+
 A claim enters the pack because the seat decided it was worth keeping, and
 enters a review clock at the same moment. The clock is the spaced-repetition
 model the Free Spaced Repetition Scheduler (FSRS) fits to review data (https://doi.org/10.1145/3534678.3539081): a stability in
@@ -48,6 +52,31 @@ Ebbesen measured (https://doi.org/10.1111/j.1467-9280.1991.tb00175.x); the spaci
 effect it schedules for is reviewed by Cepeda et al.
 (https://doi.org/10.1037/0033-2909.132.3.354). A claim shown wrong is retracted with
 the deed that showed it, and a contrary claim closes the old one's window.
+
+Islands
+-------
+
+A task does not touch everything a seat knows. The pack links each claim to
+the claims it shares names with, pruned so a neighbourhood spreads over the
+directions a claim is about. Those links form natural clusters, and
+``ljos island`` finds the one a task activates: the top search hits are the
+seeds, activation spreads two hops along the links with half lost per hop
+and divided by fan-out, and the cluster comes back strongest first. That is
+spreading activation over a semantic network (Collins and Loftus,
+https://doi.org/10.1037/0033-295X.82.6.407), not a persona: a persona is a view that
+colours everything, an island is what this piece of work involves. The
+pack can also list its islands outright, by label propagation over the link
+graph (https://doi.org/10.1103/PhysRevE.76.036106).
+
+Use shapes the graph. Every link carries a weight, 0.5 until something
+fires over it. When the seat goes on to use an island, ``ljos island --fire``
+says so, and the strongest eight fire together: each pair's weight moves a
+tenth of the way to one, a pair with no link gains one, and every other link
+of a fired claim loses two percent. Hebb's rule with Oja's forgetting term
+(https://doi.org/10.1007/BF00275687), so weights stay bounded and paths a seat never
+walks fade without being deleted. Activation spreads in proportion to
+weight, so the next cue like this one walks a heavier path. The weights are
+on the atom beside the links and travel in a handover.
 
 Agreement that learns
 ---------------------
@@ -64,6 +93,8 @@ and cite the deed behind it.
 
 Handover that can be checked
 ----------------------------
+
+.. image:: _static/handover.svg
 
 A handover is a BagIt bag with the tracker slice, the pack's atoms, and
 the deeds both cite, each deed with its inclusion receipt against the log

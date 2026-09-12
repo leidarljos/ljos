@@ -3,6 +3,9 @@
 
 * Four stores, one identifier
 
+#+ATTR_HTML: :alt The seat over four stores, joined by the deed accession :width 100%
+[[file:_static/seat.svg]]
+
 Each store answers one question and is the authority for it. A deed
 accession is the one identifier that crosses them: the tracker cites it on
 a node, the pack cites it in a claim, the deed store answers for it. No
@@ -25,6 +28,9 @@ to claim-graph nodes.
   never an empty answer.
 
 * Memory that grows, is reviewed, decays, and is retracted
+
+#+ATTR_HTML: :alt The memory loop: write, review clock, due, graded, islands, fire, retract :width 100%
+[[file:_static/memory.svg]]
 
 A claim enters the pack because the seat decided it was worth keeping, and
 enters a review clock at the same moment. The clock is the spaced-repetition
@@ -76,6 +82,9 @@ loses influence and one who is right keeps it. A person can also set a row
 and cite the deed behind it.
 
 * Handover that can be checked
+
+#+ATTR_HTML: :alt The handover: satchel, atoms, deeds, seal and sign; then three questions and import :width 100%
+[[file:_static/handover.svg]]
 
 A handover is a BagIt bag with the tracker slice, the pack's atoms, and
 the deeds both cite, each deed with its inclusion receipt against the log
