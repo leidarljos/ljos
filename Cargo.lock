@@ -594,7 +594,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "ljos"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "ljos-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ljos",
@@ -667,8 +667,8 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "packset-client"
-version = "0.3.0"
-source = "git+https://github.com/leidarljos/packset#1bfc05b88ba87e78caa074cabcac38e8305ff01a"
+version = "0.4.0"
+source = "git+https://github.com/leidarljos/packset#5145cdf2b7c2623bb3df85e965ed3298c55c1be4"
 dependencies = [
  "packset-core",
  "serde",
@@ -679,8 +679,8 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.3.0"
-source = "git+https://github.com/leidarljos/packset#1bfc05b88ba87e78caa074cabcac38e8305ff01a"
+version = "0.4.0"
+source = "git+https://github.com/leidarljos/packset#5145cdf2b7c2623bb3df85e965ed3298c55c1be4"
 dependencies = [
  "rust-stemmers",
  "serde",

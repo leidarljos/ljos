@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/ljos-cli", "crates/ljos-mcp"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
@@ -17,7 +17,7 @@ schemars = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-packset-client = { git = "https://github.com/leidarljos/packset", version = "0.3.0" }
+packset-client = { git = "https://github.com/leidarljos/packset", version = "0.4.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
