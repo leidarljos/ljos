@@ -761,8 +761,8 @@ pub struct ConsensusStep {
     pub args: Vec<String>,
 }
 
-/// `ljos-consensus` first, with the pack's trust rows when there are any,
-/// then `vissue consensus`. Missing bins are skipped.
+/// `ljos-consensus` first, then `vissue consensus`, both under the pack's
+/// trust rows when there are any. Missing bins are skipped.
 pub fn consensus_steps(
     id: &str,
     have_ljos: bool,
@@ -785,9 +785,14 @@ pub fn consensus_steps(
         });
     }
     if have_vissue {
+        let mut args = vec!["consensus".to_string(), id.into()];
+        if !trust.is_empty() {
+            args.push("--trust".into());
+            args.push(trust_json(trust));
+        }
         steps.push(ConsensusStep {
             bin: "vissue",
-            args: vec!["consensus".into(), id.into()],
+            args,
         });
     }
     Ok(steps)
@@ -948,9 +953,13 @@ mod tests {
     #[test]
     fn consensus_carries_the_packs_trust() {
         let rows = vec![row("a", "b", 0.5)];
-        let steps = consensus_steps("id", true, false, &rows).unwrap();
+        let steps = consensus_steps("id", true, true, &rows).unwrap();
         assert_eq!(steps[0].args[3], "--trust");
         assert_eq!(steps[0].args[4], r#"[["a","b",0.5]]"#);
+        assert_eq!(
+            steps[1].args,
+            vec!["consensus", "id", "--trust", r#"[["a","b",0.5]]"#]
+        );
     }
 
     #[test]
