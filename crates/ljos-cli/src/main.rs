@@ -361,7 +361,7 @@ fn main() -> Result<()> {
         } => {
             let who = as_persona
                 .or_else(|| std::env::var("VISSUE_AGENT").ok())
-                .unwrap_or_else(|| whoami_tracker());
+                .unwrap_or_else(whoami_tracker);
             let body = write_prediction(&issue, &who, &expect)?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
