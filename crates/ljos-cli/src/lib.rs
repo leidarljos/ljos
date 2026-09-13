@@ -2254,6 +2254,22 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format!("{seat} (from {source})"),
         ok: true,
     });
+    // The dense ballot: without it the pack ranks by words alone, and an
+    // island's seeds are weaker than the agent may assume.
+    if let Ok(client) = PacksetClient::from_env() {
+        if let Ok(status) = client.status(None) {
+            let available = status["embedder"]["available"].as_bool().unwrap_or(false);
+            out.push(Habitat {
+                name: "encoder",
+                state: if available {
+                    "dense ballot on".to_string()
+                } else {
+                    "down; search is lexical only, islands seed weakly".to_string()
+                },
+                ok: available,
+            });
+        }
+    }
     out.push(match PacksetClient::from_env() {
         Ok(client) => match client.health() {
             Ok(_) => Habitat {
@@ -2934,6 +2950,14 @@ pub fn format_hubs(body: &Value) -> String {
 pub fn format_island(body: &Value) -> String {
     let mut out = String::new();
     let now = now_utc();
+    if body["weak"].as_bool().unwrap_or(false) {
+        out.push_str(&format!(
+            "weak island: {} seed{} two scorers agreed on{}; read it as the pack's best-connected cluster, not as what the cue is about; it will not fire\n",
+            body["agreed_seeds"].as_u64().unwrap_or(0),
+            if body["agreed_seeds"].as_u64().unwrap_or(0) == 1 { "" } else { "s" },
+            if body["dense"].as_bool().unwrap_or(true) { "" } else { "; the encoder is down, ranking is lexical only" }
+        ));
+    }
     for atom in body["island"]
         .as_array()
         .into_iter()
@@ -3390,10 +3414,17 @@ pub fn finish(
     }
     let title = issue_title(issue)?;
     let island = packset_island(&title, true)?;
-    let fired = island["island"].as_array().map_or(0, Vec::len);
-    out.push_str(&format!(
-        "fired the island for {title:?}: {fired} memories\n"
-    ));
+    if island["weak"].as_bool().unwrap_or(false) {
+        out.push_str(&format!(
+            "did not fire the island for {title:?}: its seeds are hits no two scorers agreed on{}; wiring them would tighten the wrong links\n",
+            if island["dense"].as_bool().unwrap_or(true) { "" } else { " (the encoder is down, ranking is lexical only)" }
+        ));
+    } else {
+        let fired = island["island"].as_array().map_or(0, Vec::len);
+        out.push_str(&format!(
+            "fired the island for {title:?}: {fired} memories\n"
+        ));
+    }
     let terminal = ["done", "failed", "cancelled"];
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");

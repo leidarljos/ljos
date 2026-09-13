@@ -2,6 +2,13 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `finish` does not fire a weak island (seeds no two scorers agreed on)
+  and says why; `island` marks one as weak and as the pack's
+  best-connected cluster rather than what the cue is about; `doctor`
+  shows the encoder row, since a down encoder is what makes seeds weak.
+
 ## 0.12.0 (2026-09-13)
 
 - `learn` writes rows from each voter's record: hits and misses so far
