@@ -2,6 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `conflicts` leaves out passes between trust rows, personas, forecasts
+  and rules: weighed, not recalled, so not contradictions to judge.
+
 ## 0.11.0 (2026-09-13)
 
 - `conflicts` (and the `ljos_conflicts` tool): candidate contradictions

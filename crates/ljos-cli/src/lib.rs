@@ -2723,8 +2723,24 @@ pub fn conflicts(limit: usize) -> Result<String> {
             .find(|a| a["id"].as_str() == Some(id))
             .and_then(|a| a["ts"].as_str().map(str::to_string))
     };
+    // Trust rows, personas, forecasts and rules are weighed, not recalled;
+    // a pass between two of them is not a contradiction to judge.
+    let recalled = |id: &str| -> bool {
+        atoms
+            .iter()
+            .find(|a| a["id"].as_str() == Some(id))
+            .is_none_or(reviewable)
+    };
     let mut out = String::new();
-    for pair in v["pairs"].as_array().into_iter().flatten().take(limit) {
+    for pair in v["pairs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            recalled(p["a"].as_str().unwrap_or("")) && recalled(p["b"].as_str().unwrap_or(""))
+        })
+        .take(limit)
+    {
         let a = pair["a"].as_str().unwrap_or("-");
         let b = pair["b"].as_str().unwrap_or("-");
         out.push_str(&format!(
