@@ -3674,9 +3674,10 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 mod tests {
     #[test]
     fn a_correction_is_nudged_once_a_session_and_only_on_a_prompt() {
-        let dir = tempfile::tempdir().unwrap();
         // The seen file lives under the runtime directory.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let dir = std::env::temp_dir().join(format!("ljos-corr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
         let prompt = HookCall {
             event: "UserPromptSubmit".into(),
             cue: "Do you not remember to use uv for scripts?".into(),
