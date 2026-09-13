@@ -317,6 +317,9 @@ enum Cmd {
         /// A fixed share of recovery toward one after the step, so a voter refuted long ago can come back; 0 is plain Hedge.
         #[arg(long, default_value_t = 0.0)]
         share: f64,
+        /// `record` (the default): each voter's hits and misses so far as log-odds weights. `hedge`: refuted voters shrink by --beta, with --share recovery.
+        #[arg(long, default_value = "record")]
+        rule: String,
     },
 }
 
@@ -603,13 +606,14 @@ fn main() -> Result<()> {
             outcome,
             beta,
             share,
+            rule,
         } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let ballots = ballots_from_json(&said.stdout)?;
             // The rows written are scoped to what the issue's island is
             // about, so a voter wrong here keeps its standing elsewhere.
             let about = island_entities(&id).unwrap_or_default();
-            let (rows, moved) = if share > 0.0 {
+            let (rows, moved) = if rule == "hedge" {
                 let rows =
                     learn_shared(&ballots, &outcome, &trust_from_pack()?, beta, &about, share)?;
                 let moved = learn_anchors(&personas_from_pack()?, &ballots, &outcome, beta);

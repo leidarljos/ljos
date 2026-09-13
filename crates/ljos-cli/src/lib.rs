@@ -1843,17 +1843,132 @@ pub fn learn_and_write(
     beta: f64,
     about: &[String],
 ) -> Result<(Vec<Trust>, Vec<Persona>)> {
-    let rows = learn_about(ballots, outcome, &trust_from_pack()?, beta, about)?;
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("learn: GET /v1/atoms failed")?;
+    let (rows, records) = learn_record(ballots, outcome, &records_from_atoms(&atoms), about)?;
     let moved = learn_anchors(&personas_from_pack()?, ballots, outcome, beta);
     // Every row lands before anything is printed, so a closed pipe cannot
     // leave the graph half written.
     for row in &rows {
-        write_trust(row, &[])?;
+        write_trust_record(row, &[], records.get(&row.to).copied())?;
     }
     for p in &moved {
         write_persona(p)?;
     }
     Ok((rows, moved))
+}
+
+/// A voter's record: how often the outcome agreed with its ballot, and
+/// how often not, carried on every trust row into that voter.
+pub type Standing = (f64, f64);
+
+/// The latest record per voter among the trust atoms that carry one.
+#[must_use]
+pub fn records_from_atoms(atoms: &[Value]) -> std::collections::BTreeMap<String, Standing> {
+    let mut latest: std::collections::BTreeMap<String, (String, Standing)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("trust") {
+            continue;
+        }
+        let (Some(to), Some(hits), Some(misses)) = (
+            atom.get("to").and_then(Value::as_str),
+            atom.get("hits").and_then(Value::as_f64),
+            atom.get("misses").and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match latest.get(to) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(to.to_string(), (ts, (hits, misses)));
+            }
+        }
+    }
+    latest.into_iter().map(|(k, (_, r))| (k, r)).collect()
+}
+
+/// Learn from an outcome by the record: each voter's hits and misses so
+/// far, this outcome added, give its accuracy with one of each smoothed
+/// in, and the rows are the log odds of that scaled to the best voter at
+/// one ([`calibration_weights`]). Measured against multiplicative
+/// shrinking (Hedge) on voters of known accuracy, the record reaches the
+/// batch calibration and the shrink does not: a voter is weighed by what
+/// it got right, not by how many times it has been punished. Rows are
+/// complete over the voters and scoped to `about`.
+///
+/// # Errors
+///
+/// No outcome, or fewer than two voters.
+pub fn learn_record(
+    ballots: &[(String, String)],
+    outcome: &str,
+    records: &std::collections::BTreeMap<String, Standing>,
+    about: &[String],
+) -> Result<(Vec<Trust>, std::collections::BTreeMap<String, Standing>)> {
+    let outcome = outcome.trim();
+    if outcome.is_empty() {
+        bail!("learn: an outcome is required");
+    }
+    let mut agents: Vec<&str> = ballots.iter().map(|(a, _)| a.as_str()).collect();
+    agents.sort_unstable();
+    agents.dedup();
+    if agents.len() < 2 {
+        bail!("learn: fewer than two voters, nothing to weigh");
+    }
+    let mut next = records.clone();
+    for (agent, choice) in ballots {
+        let r = next.entry(agent.clone()).or_insert((0.0, 0.0));
+        if choice == outcome {
+            r.0 += 1.0;
+        } else {
+            r.1 += 1.0;
+        }
+    }
+    let accuracy: Vec<(String, f64)> = agents
+        .iter()
+        .map(|a| {
+            let (h, m) = next.get(*a).copied().unwrap_or((0.0, 0.0));
+            ((*a).to_string(), (h + 1.0) / (h + m + 2.0))
+        })
+        .collect();
+    let weights = calibration_weights(&accuracy);
+    let mut out = Vec::new();
+    for from in &agents {
+        for (to, weight) in &weights {
+            if *from == to {
+                continue;
+            }
+            out.push(Trust {
+                from: (*from).to_string(),
+                to: to.clone(),
+                weight: *weight,
+                about: about.to_vec(),
+            });
+        }
+    }
+    Ok((out, next))
+}
+
+/// [`write_trust`] carrying the voter's record on the row.
+pub fn write_trust_record(row: &Trust, why: &[String], record: Option<Standing>) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = trust_atom(row, why, &workspace)?;
+    if let Some((hits, misses)) = record {
+        atom["hits"] = serde_json::json!(hits);
+        atom["misses"] = serde_json::json!(misses);
+    }
+    client
+        .post_atom(&atom)
+        .context("trust: POST /v1/atoms failed")
 }
 
 /// The factor a refuted voter's rows shrink by (Hedge, doi:10.1006/jcss.1997.1504).
@@ -3760,6 +3875,35 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_record_weighs_a_voter_by_what_it_got_right() {
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "ship".to_string()),
+            ("c".to_string(), "hold".to_string()),
+        ];
+        let (rows, records) =
+            learn_record(&ballots, "ship", &std::collections::BTreeMap::new(), &[]).unwrap();
+        assert_eq!(records["a"], (1.0, 0.0));
+        assert_eq!(records["c"], (0.0, 1.0));
+        let w = |to: &str| rows.iter().find(|r| r.to == to).unwrap().weight;
+        assert_eq!(w("a"), 1.0, "a right voter stands at one");
+        assert!(w("c") < w("a"), "a wrong voter stands lower");
+        assert_eq!(rows.len(), 6, "complete over the voters");
+        // The record accumulates: a second outcome against c lowers it further.
+        let (rows2, records2) = learn_record(&ballots, "ship", &records, &[]).unwrap();
+        assert_eq!(records2["c"], (0.0, 2.0));
+        let w2 = |to: &str| rows2.iter().find(|r| r.to == to).unwrap().weight;
+        assert!(w2("c") <= w("c"));
+        assert!(learn_record(&ballots, "  ", &records, &[]).is_err());
+        // Records are read back off trust atoms, latest first.
+        let atoms = vec![
+            serde_json::json!({"kind": "trust", "from": "a", "to": "c", "weight": 0.2, "hits": 1.0, "misses": 3.0, "ts": "2026-09-13T01:00:00Z"}),
+            serde_json::json!({"kind": "trust", "from": "b", "to": "c", "weight": 0.5, "hits": 1.0, "misses": 1.0, "ts": "2026-09-12T01:00:00Z"}),
+        ];
+        assert_eq!(records_from_atoms(&atoms)["c"], (1.0, 3.0));
+    }
+
     #[test]
     fn a_correction_is_nudged_once_a_session_and_only_on_a_prompt() {
         // The seen file lives under the runtime directory.

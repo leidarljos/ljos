@@ -231,7 +231,8 @@ pub struct LearnArgs {
     pub issue: String,
     /// The option that turned out right.
     pub outcome: String,
-    /// The factor a refuted voter shrinks by; the seat's default when absent.
+    /// The factor a refuted persona's anchor moves by; the seat's default
+    /// when absent. The rows themselves follow each voter's record.
     pub beta: Option<f64>,
 }
 

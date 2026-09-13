@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `learn` writes rows from each voter's record: hits and misses so far
+  as log-odds weights, the same scale `calibrate` writes, carried on the
+  rows. On voters of known accuracy the record reaches batch calibration
+  (0.929 against 0.934 over 8000 decisions) where Hedge reaches 0.831 and
+  Hedge with recovery 0.877. `--rule hedge` keeps the shrink.
 - `conflicts` leaves out passes between trust rows, personas, forecasts
   and rules: weighed, not recalled, so not contradictions to judge.
 
