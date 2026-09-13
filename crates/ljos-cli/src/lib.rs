@@ -1166,9 +1166,9 @@ fn host_key_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Printed on stderr. `grok-policyd` is the TCB when it exists.
+/// Printed on stderr. `ljos-policyd` is the TCB when it exists.
 pub const POLICY_TCB: &str =
-    "argv law. grok-policyd is the TCB when present. Reloading a pack is not a check.";
+    "argv law. ljos-policyd is the TCB when present. Reloading a pack is not a check.";
 
 /// The workspace the seat's memory lives in when nothing names one. The
 /// pack's command line keys a workspace to the repository it stands in;
@@ -2228,6 +2228,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         "packsetd",
         "ljos-consensus",
         "ljos-mcp",
+        "ljos-policyd",
     ] {
         let found = which::which(bin).ok();
         out.push(Habitat {
@@ -3666,7 +3667,32 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // context, so a reader sees the verdict first.
     let rules = rules_from_pack().unwrap_or_default();
     let ruled = hook_output_ruled(&call, &context, verdict_for(&rules, &line));
-    Ok(format!("{line}\n{ruled}"))
+    match tcb_check(argv) {
+        Some(tcb) if !tcb.is_empty() => Ok(format!("{line}\n{tcb}\n{ruled}")),
+        _ => Ok(format!("{line}\n{ruled}")),
+    }
+}
+
+/// `POLICYD_BIN`, else `ljos-policyd` on PATH.
+pub fn policyd_bin() -> Option<std::path::PathBuf> {
+    std::env::var_os("POLICYD_BIN")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| which::which("ljos-policyd").ok())
+}
+
+/// One line from `ljos-policyd check -- argv`. None if the binary is absent
+/// or failed to start. Absence is not a deny.
+pub fn tcb_check(argv: &[String]) -> Option<String> {
+    let bin = policyd_bin()?;
+    let out = std::process::Command::new(bin)
+        .arg("check")
+        .arg("--")
+        .args(argv)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4657,7 +4683,7 @@ mod tests {
         assert!(policy_line(&[]).is_err());
         assert_eq!(policy_line(&["ls".into(), "-la".into()]).unwrap(), "ls -la");
         let note = POLICY_TCB.to_ascii_lowercase();
-        assert!(note.contains("grok-policyd"));
+        assert!(note.contains("ljos-policyd"));
         assert!(note.contains("not a check"));
         assert!(!note.contains("grokos policy reload"));
         assert!(!note.contains("policy reload"));

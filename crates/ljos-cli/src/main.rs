@@ -10,6 +10,7 @@ use ljos_cli::{
     node_for, on_path, onboard, pack, packset_consolidate, packset_forget, packset_hubs,
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
+    tcb_check,
     run_captured, seat_name, session_end, sitting, timeline, topic_words, trust_from_pack,
     verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
@@ -469,7 +470,15 @@ fn main() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let verdict = verdict_for(&rules, &call.cue);
+            let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
+            let tcb_rule = tcb_check(&argv).and_then(|t| {
+                t.starts_with("deny").then(|| Rule {
+                    pattern: "ljos-policyd".into(),
+                    verdict: "deny".into(),
+                    reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
+                })
+            });
+            let verdict = tcb_rule.as_ref().or_else(|| verdict_for(&rules, &call.cue));
             print!(
                 "{}",
                 hook_output_ruled(&call, &hook_context(&call, limit), verdict)

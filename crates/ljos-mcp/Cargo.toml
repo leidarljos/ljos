@@ -8,13 +8,18 @@ repository.workspace = true
 homepage.workspace = true
 description = "MCP server for ljos"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/ljos-v{ version }-{ target }.tar.gz"
+bin-dir = "ljos-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [[bin]]
 name = "ljos-mcp"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-ljos = { path = "../ljos-cli" }
+ljos = { path = "../ljos-cli", version = "0.12.0" }
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true

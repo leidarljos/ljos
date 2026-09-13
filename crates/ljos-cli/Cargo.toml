@@ -8,6 +8,11 @@ repository.workspace = true
 homepage.workspace = true
 description = "ljos: one seat over the five habitats and policyd"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/ljos-v{ version }-{ target }.tar.gz"
+bin-dir = "ljos-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [lib]
 name = "ljos_cli"
 path = "src/lib.rs"
