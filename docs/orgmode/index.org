@@ -81,4 +81,5 @@ tracker in about ten minutes.
    grok-build
    reference
    explanation
+   seat
 #+end_export

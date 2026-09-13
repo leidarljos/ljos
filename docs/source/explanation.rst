@@ -1,13 +1,7 @@
-===========
-Explanation
-===========
-
-
-
 Five habitats, one identifier
------------------------------
+=============================
 
-.. image:: _static/seat.svg
+|image1|
 
 Each habitat answers one question and is the authority for it. Cards
 are read-only. A deed accession is the one identifier that crosses the
@@ -16,43 +10,40 @@ in a claim, the deed store answers for it. No habitat opens another's
 format. The seat composes them by passing accessions on pipes, and
 stays thin: its only state of its own is the mapping from tracker ids
 to claim-graph nodes. Argv law sits beside them. It is not a sixth
-store. ``ljos policy`` prints the line; ``ljos-policyd`` is the TCB when it is on ``PATH`` or ``POLICYD_BIN``.
+store. ``ljos policy`` prints the line; ``ljos-policyd`` is the TCB when
+it is on ``PATH`` or ``POLICYD_BIN``.
 
 The contracts
--------------
+=============
 
-- Citation is not a merge. Citing a deed names it; the bytes stay in the
-  deed store.
-
-- Completing a session node does not close a ticket. The claim graph is
-  session state; the tracker decides when work is done.
-
-- Cards are read-only. The seat writes to the pack; a person writes the
-  cards.
-
-- The pack is written only by ``remember``, ``prefer``, ``trust``, ``learn``,
-  ``graded``, ``forget`` and an imported handover. Nothing is extracted from a
-  transcript.
-
-- A tool that fails is a habitat refusing or down, and says which. It is
-  never an empty answer.
+-  Citation is not a merge. Citing a deed names it; the bytes stay in the
+   deed store.
+-  Completing a session node does not close a ticket. The claim graph is
+   session state; the tracker decides when work is done.
+-  Cards are read-only. The seat writes to the pack; a person writes the
+   cards.
+-  The pack is written only by ``remember``, ``prefer``, ``trust``, ``learn``,
+   ``graded``, ``forget`` and an imported handover. Nothing is extracted from a
+   transcript.
+-  A tool that fails is a habitat refusing or down, and says which. It is
+   never an empty answer.
 
 Memory that grows, is reviewed, decays, and is retracted
---------------------------------------------------------
+========================================================
 
-.. image:: _static/memory.svg
+|image2|
 
 A claim enters the pack because the seat decided it was worth keeping, and
 enters a review clock at the same moment. The clock is the spaced-repetition
-model the Free Spaced Repetition Scheduler (FSRS) fits to review data (https://doi.org/10.1145/3534678.3539081): a stability in
+model the Free Spaced Repetition Scheduler (FSRS) fits to review data (doi:10.1145/3534678.3539081): a stability in
 days, a difficulty, and a due date; recalled grows stability by how overdue
 the claim was, lapsed halves it. ``due`` is what the seat is about to forget.
 When the pack's decay slot is on, the same retrievability
 ``R = (1 + 19/81 * t/S)^(-1/2)`` scales a search score, so an unreviewed
 claim sinks without vanishing. The power-law form is the one Wixted and
-Ebbesen measured (https://doi.org/10.1111/j.1467-9280.1991.tb00175.x); the spacing
+Ebbesen measured (doi:10.1111/j.1467-9280.1991.tb00175.x); the spacing
 effect it schedules for is reviewed by Cepeda et al.
-(https://doi.org/10.1037/0033-2909.132.3.354). A claim shown wrong is retracted with
+(doi:10.1037/0033-2909.132.3.354). A claim shown wrong is retracted with
 the deed that showed it, and a contrary claim closes the old one's window.
 On a longitudinal corpus where one claim per topic is kept recalled and
 three paraphrases written later are not, retrievability ranks the kept
@@ -60,7 +51,7 @@ claim first 0.947 of the time; lexical scoring lands at chance and a
 recency half-life at 0.270 (the packset site carries the table).
 
 Islands
--------
+=======
 
 A task does not touch everything a seat knows. The pack links each claim to
 the claims it shares names with, pruned so a neighbourhood spreads over the
@@ -69,38 +60,159 @@ directions a claim is about. Those links form natural clusters, and
 seeds, activation spreads two hops along the links with half lost per hop
 and divided by fan-out, and the cluster comes back strongest first. That is
 spreading activation over a semantic network (Collins and Loftus,
-https://doi.org/10.1037/0033-295X.82.6.407), not a persona: a persona is a view that
+doi:10.1037/0033-295X.82.6.407), not a persona: a persona is a view that
 colours everything, an island is what this piece of work involves. The
 pack can also list its islands outright, by label propagation over the link
-graph (https://doi.org/10.1103/PhysRevE.76.036106).
+graph (doi:10.1103/PhysRevE.76.036106).
 
 Use shapes the graph. Every link carries a weight, 0.5 until something
 fires over it. When the seat goes on to use an island, ``ljos island --fire``
 says so, and the strongest eight fire together: each pair's weight moves a
 tenth of the way to one, a pair with no link gains one, and every other link
 of a fired claim loses two percent. Hebb's rule with Oja's forgetting term
-(https://doi.org/10.1007/BF00275687), so weights stay bounded and paths a seat never
+(doi:10.1007/BF00275687), so weights stay bounded and paths a seat never
 walks fade without being deleted. Activation spreads in proportion to
 weight, so the next cue like this one walks a heavier path. The weights are
 on the atom beside the links and travel in a handover.
 
+The island was measured as a ranking on LongMemEval and lost: sessions
+linked to their five nearest by dense cosine, the fused top ten seeding
+the same spreading activation the writer runs, hit@1 0.377 against the
+fused panel's 0.889 over 470 questions, recall@10 unchanged at 0.981.
+Activation flows to the well-connected, which is what a hub is and not
+what a question asks for. The negative fixes the island's place: what the
+seat prints beside the hits at a sitting, for orientation, and what fires
+together after use; never the order the hits come in.
+
+Time as data
+============
+
+Every record in the seat is dated: an atom carries the writer's clock and,
+when it was retired, the window it was live in; a deed carries the time it
+was produced; the tracker's logbook carries the time of each note, state
+change and claim. The seat hands that to the reader as data rather than as
+stamps to subtract. Every recalled memory, in the hook, a brief, ``ljos
+search``, the island in ``ljos sitting``, carries its age in words (``today``,
+``3 weeks ago``), and the hook's lessons run oldest to newest behind the
+preferences, so a later lesson reads as a revision of an earlier one. ``ljos
+timeline ISSUE`` merges the three stores into one dated list with the gap
+between consecutive lines, and ``ljos search --as-of TIME`` asks the pack as
+it stood at an earlier time.
+
+The design came out of measurement. On a public long-conversation
+benchmark the seat's retrieval finds the right session at the top for nine
+questions in ten, and the answers a small reader gives over those sessions
+fall furthest on the questions about time: handed raw dates it did the
+arithmetic itself and got a third of them. A reader is a poor calendar; a
+store that already knows every date is a good one, so the store does the
+arithmetic and the reader reads the order.
+
+The field, and where the seat stands in it
+==========================================
+
+Agent memory systems in the literature and on the market do one of a few
+jobs, and the seat's design can be read against each.
+
+Mem0 (doi:10.48550/arXiv.2504.19413) reads a conversation with a model,
+extracts facts, and has the model decide for each whether to add, update,
+delete or leave the store; a graph variant adds entity nodes. Zep
+(doi:10.48550/arXiv.2501.13956) builds a temporal knowledge graph: a model
+extracts entities and relations, each edge carries the time it became true
+and the time it stopped being true beside the time it was written, and
+retrieval is lexical, dense and graph search fused and reranked. MemGPT
+(doi:10.48550/arXiv.2310.08560), now Letta, keeps a small core memory in
+the model's context that the model edits with tools, a recall store of the
+conversation and an archival vector store, and its sleep-time compute
+(doi:10.48550/arXiv.2504.13171) reorganises memory between turns. A-MEM
+(doi:10.48550/arXiv.2502.12110) keeps notes with model-written keywords
+and links and rewrites older notes when a new one arrives. HippoRAG
+(doi:10.48550/arXiv.2405.14831, doi:10.48550/arXiv.2502.14802) extracts a
+knowledge graph and retrieves by personalised PageRank from the entities
+a question names. MemoryBank (doi:10.48550/arXiv.2305.10250) forgets on an
+Ebbinghaus curve refreshed by recall; Generative Agents
+(doi:10.48550/arXiv.2304.03442) rank by recency, importance and relevance
+and reflect. All of them put a model in the write path.
+
+The seat does not. What is remembered is what was said with ``Remember`` or
+``Prefer``, stored as written, so a transcript never becomes a belief by
+being read; that is the privacy-of-write, and it is the one design choice
+here that the others do not make. Forgetting is by review rather than by
+age: retrievability from the clock of what was recalled and when, the
+same schedule spaced repetition runs, where MemoryBank ages by time and
+Generative Agents by recency. Time is data, as in Zep: a claim carries the
+time it was written and the window it was live in, a later claim with the
+same head closes the earlier one, and the pack can be asked as of any
+time. Retrieval is a panel of scorers fused, as Zep fuses, and every hit
+says how many scorers named it. The link graph is Hebbian: use strengthens
+a link and disuse fades it, and the cluster a task activates is read
+beside the hits for orientation, not in their place, because measured as
+a ranking it lost. Above the pack the seat has what a memory alone does
+not: ballots settled under trust rows that learn from outcomes, deeds
+that stand for what the work produced, a claim graph for who holds what,
+and a signed handover another seat can check.
+
+What the others have that the seat does not: extraction. A model reading
+a transcript finds facts nobody said ``Remember`` to, and on a benchmark of
+chat logs that coverage is most of the score. The pack has a proposals
+path for that, gated so a proposal becomes a claim only on an explicit
+accept, and it runs on a model the seat does not ship. Measured on the
+public benchmarks with one small reader, the seat's retrieval finds the
+right session first nine times in ten on LongMemEval
+(doi:10.48550/arXiv.2410.10813), answers within a few points of the
+labelled-session ceiling where retrieval decides, and on MemoryAgentBench
+(doi:10.48550/arXiv.2507.05257) the fused panel with that small reader
+answers 0.675 of the accurate-retrieval questions against the published
+0.605 for BM25 and 0.651 for HippoRAG-v2 with a hosted reader, and its
+replacement rule takes the conflict-resolution split to 0.480 against
+their 0.155 to 0.295; the memory products sit behind the retrievers on
+both, as that benchmark's authors found. The packset site carries every table and the
+reproduction package regenerates them.
+
 Agreement that learns
----------------------
+=====================
 
 A tally counts, and a count is right only when every voter is worth the
 same. The seat settles a vote with DeGroot's model
-(https://doi.org/10.1080/01621459.1974.10480137), or Friedkin and Johnsen's anchored
-version (https://doi.org/10.1080/0022250X.1990.9990069), over trust rows. The rows are
+(doi:10.1080/01621459.1974.10480137), or Friedkin and Johnsen's anchored
+version (doi:10.1080/0022250X.1990.9990069), over trust rows. The rows are
 pack atoms, so they are memory: dated, supersedable, exportable. ``learn``
-moves them by what turned out right, with the multiplicative update of
-Hedge (https://doi.org/10.1006/jcss.1997.1504), so a voter who is repeatedly wrong
-loses influence and one who is right keeps it. A person can also set a row
-and cite the deed behind it.
+moves them by what turned out right: each voter's record of outcomes that
+agreed with its ballot and outcomes that did not, this one added, gives
+its accuracy, and the rows are the log odds of that, so a voter is weighed
+by what it got right rather than by how many times it was punished. The
+multiplicative update of Hedge (doi:10.1006/jcss.1997.1504) is kept as
+``--rule hedge``. On voters of known accuracy through the seat's own settle
+(the consensus crate's synthetic voters, nine voters, four hundred
+questions, twenty seeds) the record answers 0.929 of the questions, batch
+calibration 0.934, the true weights 0.939, Hedge 0.831 and Hedge with a
+fixed share of recovery 0.877; a count answers 0.820. A person can also
+set a row and cite the deed behind it. When nobody names an outcome, ``calibrate``
+estimates each voter's accuracy from the project's history (Dawid and
+Skene, doi:10.2307/2346806) and writes the rows as the log odds of that
+accuracy, the weight under which a weighted majority of independent
+voters is the maximum-likelihood decision (Nitzan and Paroush,
+doi:10.2307/2526438): nine right in ten outweighs six in ten by five to
+one, and chance earns the floor.
+
+A panel of subagents that each read the work and vote is the seat's form
+of the parallel agents the products run (self-consistency,
+doi:10.48550/arXiv.2203.11171; multi-agent debate,
+doi:10.48550/arXiv.2305.14325; mixture of agents,
+doi:10.48550/arXiv.2406.04692; the commercial heavy modes). Two things
+differ. The personas are atoms in the pack, with an anchor the settle
+honours (Friedkin and Johnsen; a captain that decides a split is a persona
+at anchor zero), and the weights are memory that moves with outcomes and
+history, scoped to the topics they were earned on. The ``run_a_panel``
+prompt orders it: one subagent per persona, one ballot each as itself,
+then the settle, then ``learn`` when the world answers. Chen et al.
+(doi:10.48550/arXiv.2403.02419) show why a count does not improve with
+more voices on hard items; a weighted settle is the alternative this seat
+takes.
 
 Handover that can be checked
-----------------------------
+============================
 
-.. image:: _static/handover.svg
+|image3|
 
 A handover is a BagIt bag with the tracker slice, the pack's atoms, and
 the deeds both cite, each deed with its inclusion receipt against the log
@@ -111,10 +223,25 @@ key the receiver accepts signed it. Only then are the atoms imported, trust
 rows included. Learning travels with its evidence.
 
 Model and runner agnostic, human readable
------------------------------------------
+=========================================
 
 Nothing in the seat calls a model. The stores are files a person can read:
 Org headings, one JSON object a line, a content-addressed directory, a
 Cap'n Proto snapshot. Any agent that can run a command or call a Model Context Protocol tool
 can work the seat, and a person can do the same from a shell or an editor.
 A read-only viewer over the habitats is the open work.
+
+The agent is told how, in one text. The protocol ``ljos protocol`` prints is
+the same text ``ljos onboard`` installs as a skill and the server serves at
+``ljos://protocol``: which store answers which question, the order of verbs
+in a sitting, and the refusals. An agent that misuses the seat has, in
+every case seen so far, not been handed that text: it asked the pack for
+a deed, claimed with a hex id, or read a failure as an empty answer. The
+tool descriptions open with when to call each one for the same reason.
+
+.. |image1| image:: _static/seat.svg
+   :width: 100.0%
+.. |image2| image:: _static/memory.svg
+   :width: 100.0%
+.. |image3| image:: _static/handover.svg
+   :width: 100.0%

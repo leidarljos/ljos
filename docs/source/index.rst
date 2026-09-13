@@ -76,6 +76,7 @@ tracker in about ten minutes.
    grok-build
    reference
    explanation
+   seat
 
 .. |image1| image:: _static/seat.svg
    :width: 100.0%
