@@ -2690,16 +2690,27 @@ pub fn conflicts(limit: usize) -> Result<String> {
         );
     }
     let client = pack()?;
-    let said = run_captured(
+    let said = match run_captured(
         "landscape",
         &[
             "--atoms",
-            &client.base(),
+            client.base(),
             "--workspace",
             &client.workspace(),
             "--conflicts",
         ],
-    )?;
+    ) {
+        Ok(said) => said,
+        // A pack whose memories carry no embeddings has no landscape to
+        // read; that is a fact about the pack, not a refusal.
+        Err(e) if e.to_string().contains("at least two") => {
+            return Ok(
+                "fewer than two memories with embeddings in the pack; conflicts by geometry need the encoder (`packset doctor` shows it)\n"
+                    .to_string(),
+            );
+        }
+        Err(e) => return Err(e),
+    };
     let v: Value =
         serde_json::from_str(&said.stdout).context("conflicts: landscape printed no JSON")?;
     let now = now_utc();
