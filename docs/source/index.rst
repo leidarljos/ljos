@@ -78,5 +78,6 @@ tracker in about ten minutes.
 
    getting-started
    howto
+   grok-build
    reference
    explanation

@@ -74,7 +74,20 @@ From then on, before each prompt, the runner pipes it to =ljos hook= and
 the memories it activates come back as context, preferences first. Add
 =hook_events = ["UserPromptSubmit", "PreToolUse"]= to the table to inject
 before each shell command as well; a panel of this seat's personas settled
-on the prompt alone, since a turn issues many commands and one prompt. A
+on the prompt alone, since a turn issues many commands and one prompt.
+
+**Grok Build** does not put =UserPromptSubmit= =additionalContext= into
+the model. =ljos onboard --harness grok= still writes
+=~/.config/ljos/hooks.json=, and Grok does not load that path. The pack
+reaches a Grok session only if you also install a Grok-native hook under
+=~/.grok/hooks/= that remaps the event through =ljos hook= and emits
+=PreToolUse= =additionalContext= (Grok does deliver that, after the
+tool). The remap used on this seat is =~/.grok/hooks/ljos-inject.sh=
+plus =~/.grok/hooks/ljos.json=. Reload with =/hooks= then =r=. A sitting
+is still a verb you call; the hook is how the pack arrives without being
+asked. The page [[file:grok-build.org][Grok Build]] is the install.
+
+A
 policy daemon does the same with the argv:
 
 #+begin_src console
