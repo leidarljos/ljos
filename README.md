@@ -5,7 +5,7 @@ One seat over five habitats and argv law. It does not own them.
 Citation is not a merge. Completing a claimdag node does not close a ticket. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
-ljos sitting vissue-xxxx --assignee you        # doctor, cards, due, island, recall, claim
+ljos sitting vissue-xxxx --assignee you        # doctor, cards, due, island, recall, timeline, claim
 ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # remember, fire, complete, learn
 ljos calibrate -p project                      # trust rows from the voting history, no truth labels
 ljos remember "the default fuse is CombMNZ"
