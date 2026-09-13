@@ -171,10 +171,17 @@ same. The seat settles a vote with DeGroot's model
 (doi:10.1080/01621459.1974.10480137), or Friedkin and Johnsen's anchored
 version (doi:10.1080/0022250X.1990.9990069), over trust rows. The rows are
 pack atoms, so they are memory: dated, supersedable, exportable. =learn=
-moves them by what turned out right, with the multiplicative update of
-Hedge (doi:10.1006/jcss.1997.1504), so a voter who is repeatedly wrong
-loses influence and one who is right keeps it. A person can also set a row
-and cite the deed behind it. When nobody names an outcome, =calibrate=
+moves them by what turned out right: each voter's record of outcomes that
+agreed with its ballot and outcomes that did not, this one added, gives
+its accuracy, and the rows are the log odds of that, so a voter is weighed
+by what it got right rather than by how many times it was punished. The
+multiplicative update of Hedge (doi:10.1006/jcss.1997.1504) is kept as
+=--rule hedge=. On voters of known accuracy through the seat's own settle
+(the consensus crate's synthetic voters, nine voters, four hundred
+questions, twenty seeds) the record answers 0.929 of the questions, batch
+calibration 0.934, the true weights 0.939, Hedge 0.831 and Hedge with a
+fixed share of recovery 0.877; a count answers 0.820. A person can also
+set a row and cite the deed behind it. When nobody names an outcome, =calibrate=
 estimates each voter's accuracy from the project's history (Dawid and
 Skene, doi:10.2307/2346806) and writes the rows as the log odds of that
 accuracy, the weight under which a weighted majority of independent
