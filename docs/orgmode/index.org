@@ -48,12 +48,7 @@ MCP tool can sit in the seat.
 * Install
 
 #+begin_src console
-$ cargo install --git https://github.com/leidarljos/ljos ljos ljos-mcp
-$ cargo install --git https://github.com/leidarljos/consensus
-$ cargo install --git https://github.com/leidarljos/vissue vissue-cli
-$ cargo install --git https://github.com/leidarljos/deedar deedar-cli
-$ cargo install --git https://github.com/leidarljos/packset packset-cli packset-daemon
-$ cargo install --git https://github.com/leidarljos/claimdag claimdag-cli
+$ cargo binstall ljos ljos-mcp packset packset-daemon deedar-cli claimdag-cli vissue-cli ljos-consensus ljos-policyd
 $ packset ensure
 $ ljos doctor
 $ ljos onboard --harness json
