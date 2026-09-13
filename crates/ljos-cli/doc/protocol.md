@@ -56,6 +56,9 @@ Every piece of work has an issue before it has a claim.
 - Every lesson that will still be true next sitting is one `ljos remember`
   of two short sentences at most. A standing choice between two ways is one
   `ljos prefer`. Never a transcript, never a summary of the session. A
+  correction from the person ("you should have", "do you not remember")
+  is a preference the pack does not hold: write it with `ljos prefer`
+  before the work it corrects, not after. A
   lesson that rewrites an earlier one closes the earlier one's window; the
   verb says `revises N earlier memories` when it did. `ljos consolidate`
   reports the pairs the rule would close across what is held, and

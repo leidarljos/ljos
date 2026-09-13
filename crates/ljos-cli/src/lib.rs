@@ -761,7 +761,13 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
     let split = rows.iter().filter(|h| h.kind == "preference").count();
     rows[split..].sort_by_key(|h| days_of_stamp(h.ts.as_deref()).unwrap_or(i64::MAX));
     let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
-    let nudge = due_nudge(call);
+    let mut nudge = due_nudge(call);
+    if let Some(c) = correction_nudge(call) {
+        if !nudge.is_empty() {
+            nudge.push('\n');
+        }
+        nudge.push_str(&c);
+    }
     if lines.is_empty() {
         return nudge;
     }
@@ -790,6 +796,53 @@ fn agreed(h: &Hit) -> bool {
         (Some(named), Some(of)) if of >= 2 => named >= 2,
         _ => true,
     }
+}
+
+/// Phrases a person uses when the agent has forgotten something it was
+/// told. A prompt that opens this way is a preference or a lesson the
+/// pack does not hold yet, and the moment to write it is now, before the
+/// work that follows.
+pub const CORRECTION_CUES: &[&str] = &[
+    "do you not remember",
+    "don't you remember",
+    "dont you remember",
+    "you should have",
+    "why did you not",
+    "why didn't you",
+    "why havent you",
+    "why haven't you",
+    "you forgot",
+    "i told you",
+    "i've told you",
+    "as i said",
+    "again you",
+    "still not",
+    "not even able",
+    "you never",
+    "you keep",
+];
+
+/// On a prompt that reads as a correction, the one line that turns it
+/// into memory: the agent writes the preference or lesson with `ljos
+/// prefer` or `ljos remember` before it goes on. Once a session for the
+/// same cue, so a run of corrections does not repeat it.
+fn correction_nudge(call: &HookCall) -> Option<String> {
+    if call.event != "UserPromptSubmit" {
+        return None;
+    }
+    let lower = call.cue.to_lowercase();
+    let hit = CORRECTION_CUES.iter().find(|c| lower.contains(*c))?;
+    let key = format!("correction:{hit}");
+    if seen_ids(call.session.as_deref()).contains(&key) {
+        return None;
+    }
+    mark_seen(call.session.as_deref(), &[key]);
+    Some(
+        "This prompt reads as a correction. Before the work: write what it corrects as one \
+         `ljos prefer \"...\"` (a standing choice) or `ljos remember \"...\"` (a lesson), \
+         so the pack holds it and the hook can raise it next time."
+            .to_string(),
+    )
 }
 
 /// On a prompt, once per session: how many claims are due for review. The
@@ -3619,6 +3672,36 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_correction_is_nudged_once_a_session_and_only_on_a_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        // The seen file lives under the runtime directory.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "Do you not remember to use uv for scripts?".into(),
+            session: Some("corr-test".into()),
+        };
+        let first = correction_nudge(&prompt).expect("a correction is nudged");
+        assert!(first.contains("ljos prefer"), "{first}");
+        assert!(correction_nudge(&prompt).is_none(), "once a session");
+        let tool = HookCall {
+            event: "PreToolUse".into(),
+            cue: "you should have used uv".into(),
+            session: Some("corr-test".into()),
+        };
+        assert!(
+            correction_nudge(&tool).is_none(),
+            "tool calls are not prompts"
+        );
+        let plain = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "add the timeline verb".into(),
+            session: Some("corr-test-2".into()),
+        };
+        assert!(correction_nudge(&plain).is_none());
+    }
+
     #[test]
     fn calibration_weights_are_log_odds_with_the_best_at_one() {
         let w = calibration_weights(&[
