@@ -4,17 +4,20 @@ Explanation
 
 
 
-Four stores, one identifier
----------------------------
+Five habitats, one identifier
+-----------------------------
 
 .. image:: _static/seat.svg
 
-Each store answers one question and is the authority for it. A deed
-accession is the one identifier that crosses them: the tracker cites it on
-a node, the pack cites it in a claim, the deed store answers for it. No
-store opens another's format. The seat composes them by passing accessions
-on pipes, and stays thin: its only state of its own is the mapping from tracker ids
-to claim-graph nodes.
+Each habitat answers one question and is the authority for it. Cards
+are read-only. A deed accession is the one identifier that crosses the
+writable habitats: the tracker cites it on a node, the pack cites it
+in a claim, the deed store answers for it. No habitat opens another's
+format. The seat composes them by passing accessions on pipes, and
+stays thin: its only state of its own is the mapping from tracker ids
+to claim-graph nodes. Argv law sits beside them. It is not a sixth
+store. ``ljos policy`` prints the line; ``grok-policyd`` is the TCB when
+present and is not in the public org.
 
 The contracts
 -------------
@@ -115,4 +118,4 @@ Nothing in the seat calls a model. The stores are files a person can read:
 Org headings, one JSON object a line, a content-addressed directory, a
 Cap'n Proto snapshot. Any agent that can run a command or call a Model Context Protocol tool
 can work the seat, and a person can do the same from a shell or an editor.
-A read-only viewer over the four stores is the open work.
+A read-only viewer over the habitats is the open work.
