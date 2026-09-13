@@ -67,4 +67,9 @@ ljos policy -- git push --force | grep -q '^deny:' || fail "rule through policy"
 
 ljos handover --out "$root/bag" --issue "$id" | grep -q 'manifest-sha256.txt.sig' || fail "signed handover"
 ljos receive "$root/bag" | grep -q 'atoms enclosed' || fail receive
+# A bag altered after sealing is refused: one byte of one atom changed,
+# and the receipt must fail on the manifest, not count the atoms.
+tampered=$(ls "$root/bag/data/atoms"/* | head -1)
+printf 'x' | dd of="$tampered" bs=1 seek=3 conv=notrunc status=none
+if ljos receive "$root/bag" >/dev/null 2>&1; then fail "a tampered bag was received"; fi
 echo "smoke: every loop ran"
