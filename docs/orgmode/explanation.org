@@ -156,9 +156,12 @@ public benchmarks with one small reader, the seat's retrieval finds the
 right session first nine times in ten on LongMemEval
 (doi:10.48550/arXiv.2410.10813), answers within a few points of the
 labelled-session ceiling where retrieval decides, and on MemoryAgentBench
-(doi:10.48550/arXiv.2507.05257) the rows to beat are the retrieval
-baselines rather than the memory products, which that benchmark's authors
-found behind them. The packset site carries every table and the
+(doi:10.48550/arXiv.2507.05257) the fused panel with that small reader
+answers 0.675 of the accurate-retrieval questions against the published
+0.605 for BM25 and 0.651 for HippoRAG-v2 with a hosted reader, and its
+replacement rule takes the conflict-resolution split to 0.480 against
+their 0.155 to 0.295; the memory products sit behind the retrievers on
+both, as that benchmark's authors found. The packset site carries every table and the
 reproduction package regenerates them.
 
 * Agreement that learns
