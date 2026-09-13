@@ -2,6 +2,13 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The hook reads a correction: a prompt that opens with "do you not
+  remember", "you should have", "I told you" and the like gets one line,
+  once per cue a session, to write the preference or lesson into the pack
+  before the work. A correction the pack never held cannot fire.
+
 ## 0.10.0 (2026-09-12)
 
 - `doctor` prints a `seat` row: the name this runner claims and votes
