@@ -850,7 +850,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Argv law: print the line as it would run. This is not a check, and reloading a policy pack is not one either; grok-policyd is the trusted base when it exists.",
+        description = "Argv law: print the line as it would run. This is not a check, and reloading a pack is not one either; ljos-policyd is the trusted base when it is on PATH or POLICYD_BIN.",
         annotations(
             title = "Print an argv",
             read_only_hint = true,

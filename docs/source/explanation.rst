@@ -16,8 +16,7 @@ in a claim, the deed store answers for it. No habitat opens another's
 format. The seat composes them by passing accessions on pipes, and
 stays thin: its only state of its own is the mapping from tracker ids
 to claim-graph nodes. Argv law sits beside them. It is not a sixth
-store. ``ljos policy`` prints the line; ``grok-policyd`` is the TCB when
-present and is not in the public org.
+store. ``ljos policy`` prints the line; ``ljos-policyd`` is the TCB when it is on ``PATH`` or ``POLICYD_BIN``.
 
 The contracts
 -------------

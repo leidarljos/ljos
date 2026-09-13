@@ -84,7 +84,7 @@ A lesson that rewrites an earlier one of the same kind (the pack reads a token o
 
 `ljos policy ARGV` prints the argv line, then the verdict of any rule in the pack that matches it (`deny` or `ask`, with the reason), then what the pack knows that bears on it. `ljos rule PATTERN --verdict deny|ask --why TEXT` writes such a rule: a glob over the whole command line, kept in the pack like any memory, enforced by the hook as the runner's permission decision on tool calls. This is the control the seat has over an action: what it knows arrives as context, what it has ruled arrives as a verdict, both from the same store and both at the point of action.
 
-`ljos predict ISSUE --expect OPTION` (or a JSON object of option to share) records a voter's forecast of the others; with two or more forecasts `ljos consensus` also prints the surprisingly popular answer (Prelec, Seung and McCoy, doi:10.1038/nature21054) and, when trust rows exist, each voter's EigenTrust standing (doi:10.1145/775152.775242). It never calls `grokos policy reload`. Reloading a Janet pack is not a check. When `grok-policyd` exists it is the TCB; this binary is not.
+`ljos predict ISSUE --expect OPTION` (or a JSON object of option to share) records a voter's forecast of the others; with two or more forecasts `ljos consensus` also prints the surprisingly popular answer (Prelec, Seung and McCoy, doi:10.1038/nature21054) and, when trust rows exist, each voter's EigenTrust standing (doi:10.1145/775152.775242). Reloading a pack is not a check. When `ljos-policyd` is on `PATH` (or `POLICYD_BIN`) it is the TCB; this binary is not.
 
 `ljos hook` is the memory hook for a policy layer or a runner: it reads the action about to happen on stdin (the runner's hook JSON with `tool_input.command` or `prompt`, or a plain argv line) and prints the memories that action activates, standing preferences first and then lessons oldest to newest, each bracketed with its kind and its age (`[lesson, 3 weeks ago]`), as the runner's `additionalContext` JSON or as plain lines. The age is what lets the reader treat what it recalls as a timeline: a later lesson revises an earlier one, and a preference from yesterday outranks one from a year ago. `ljos search`, `ljos brief` and the island in `ljos sitting` carry the same age column. On a prompt the hook also says, once per session, how many claims are due for review and how many pairs of memories `ljos consolidate` would close; and on a prompt that reads as a correction ("do you not remember", "you should have", "I told you") it says, once per cue, to write the preference or lesson with `ljos prefer` or `ljos remember` before the work, which is the moment a correction becomes memory rather than a repeat. When the session ends, the memories the hook injected during it fire together (`packset fire`), so what served one sitting is wired for the next; the hook is installed on the runner's session-end event as well by default. Only hits scoring at least six tenths of the best hit are injected, and when the pack ran more than one scorer only hits at least two of them named (the pack says `ballots` of `of` on each hit), five at most, and each memory once per runner session (the ids are kept under the runtime directory), so the same lesson does not arrive on every command. Nothing to say is no output, so the hook never blocks an action. `ljos onboard` merges it into a runner whose runners-file entry names a `hooks` settings file, on the prompt event by default and on the events `hook_events` lists (`["UserPromptSubmit", "PreToolUse"]` for tool calls too), and drops it from events no longer listed; `ljos doctor` shows a `runner hook` row. The default came out of a panel of this seat's personas (issue `ljos-t75s` on the seat's board): a turn issues many shell commands and one prompt. This is how what the seat knows is injected at the point of action rather than waiting to be searched for.
 
@@ -109,5 +109,19 @@ A lesson that rewrites an earlier one of the same kind (the pack reads a token o
 `ljos doctor` says which habitats answer and exits 1 when the tracker, the deed store, or the pack does not. It also says whether a host key is found (`~/.config/deedar/host.key`, or `DEEDAR_HOST_SIGNING_KEY`), without which a handover goes out unsigned, and whether each harness it finds on the machine has the server registered and the skill installed.
 
 Other projects may still speak packset, deedar, vissue, or claimdag alone.
+
+## Documentation
+
+The org site teaches sitting: <https://leidarljos.github.io>.
+The crate site is Org plus Sphinx: <https://leidarljos.github.io/ljos/>.
+
+| Page | What it answers |
+|---|---|
+| [First write](https://leidarljos.github.io/docs/start/) | Install, remember one sentence, search it back |
+| [Sit](https://leidarljos.github.io/docs/sit/) | `sitting` opens, `finish` closes |
+| [Policy](https://leidarljos.github.io/docs/policy/) | `ljos-policyd` is the TCB |
+| [Getting started](https://leidarljos.github.io/ljos/getting-started.html) | Memory, agreement, and a sitting on scratch stores |
+| [How-to](https://leidarljos.github.io/ljos/howto.html) | Hook, onboard, handover |
+| [Reference](https://leidarljos.github.io/ljos/reference.html) | Verbs and MCP tools |
 
 Site: <https://leidarljos.github.io>
