@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `conflicts` (and the `ljos_conflicts` tool): candidate contradictions
+  by geometry, the lowest passes between single memories in the pack's
+  embedding landscape, from the optional `landscape` habitat; nothing
+  written.
 - The hook reads a correction: a prompt that opens with "do you not
   remember", "you should have", "I told you" and the like gets one line,
   once per cue a session, to write the preference or lesson into the pack

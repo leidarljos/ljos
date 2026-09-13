@@ -3,12 +3,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due_report,
-    finish, format_consolidation, format_doctor, format_hits, format_hubs, format_island,
-    format_steps, graded, handover, healthy, hook_call, hook_context, hook_output_ruled,
-    island_entities, join, learn_anchors, learn_and_write, learn_shared, node_for, on_path,
-    onboard, pack, packset_consolidate, packset_forget, packset_hubs, packset_island,
-    packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
+    ballots_from_json, brief, calibrate, cards, claim, conflicts, consensus_steps_for, doctor,
+    due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
+    format_island, format_steps, graded, handover, healthy, hook_call, hook_context,
+    hook_output_ruled, island_entities, join, learn_anchors, learn_and_write, learn_shared,
+    node_for, on_path, onboard, pack, packset_consolidate, packset_forget, packset_hubs,
+    packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
     run_captured, seat_name, session_end, sitting, timeline, topic_words, trust_from_pack,
     verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
@@ -62,6 +62,12 @@ enum Cmd {
         /// Ask the pack as it stood then (YYYY-MM-DD or RFC 3339): what the seat knew at that time, withdrawn memories included, later ones left out.
         #[arg(long, value_name = "TIME")]
         as_of: Option<String>,
+    },
+    /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
+    Conflicts {
+        /// Most pairs to print.
+        #[arg(short = 'n', long, default_value_t = 12)]
+        limit: usize,
     },
     /// Consolidate the seat's memory: a later claim that rewrites an earlier one closes it. Reports the pairs; --apply writes.
     Consolidate {
@@ -345,6 +351,7 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
         Cmd::Hubs { limit } => print!("{}", format_hubs(&packset_hubs(limit)?)),
+        Cmd::Conflicts { limit } => print!("{}", conflicts(limit)?),
         Cmd::Consolidate { apply } => {
             print!("{}", format_consolidation(&packset_consolidate(apply)?))
         }

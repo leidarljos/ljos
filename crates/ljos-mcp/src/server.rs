@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    age_of, ballots_from_json, brief, calibrate, cards, claim, consensus_steps_for, doctor, due,
-    finish, format_consolidation, graded, handover, identity_or_seat, island_entities,
+    age_of, ballots_from_json, brief, calibrate, cards, claim, conflicts, consensus_steps_for,
+    doctor, due, finish, format_consolidation, graded, handover, identity_or_seat, island_entities,
     learn_and_write, node_for, now_utc, on_path, packset_consolidate, packset_forget,
     packset_island, packset_search_as_of, packset_write_as, personas_from_pack, policy_line,
     receive, release, rows_about, run_captured, seat_name, sitting, timeline, topic_words,
@@ -61,6 +61,14 @@ pub struct SearchArgs {
     /// learnt since left out. Omit for now.
     #[serde(default)]
     pub as_of: Option<String>,
+}
+
+/// How many rows to print.
+#[derive(Deserialize, JsonSchema)]
+pub struct LimitArgs {
+    /// Most rows; twelve when absent.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Whether a consolidation writes.
@@ -484,6 +492,22 @@ impl LjosServer {
         packset_write_as("Prefer", &args.text, args.as_persona.as_deref())
             .map(Json)
             .map_err(refused)
+    }
+
+    #[tool(
+        description = "Call this when reviewing the seat's memory for contradictions the words do not show: the lowest passes between single memories in the pack's embedding landscape, read by the optional `landscape` habitat. On a record of planted contradictions the lowest passes were the contradictions nine times in ten. Nothing is written; judge each pair, then ljos_forget the one that turned out wrong or ljos_remember the rewrite. Absent the habitat, the tool says so.",
+        annotations(
+            title = "Contradiction candidates",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_conflicts(
+        &self,
+        Parameters(args): Parameters<LimitArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = conflicts(args.limit.unwrap_or(12)).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(
@@ -1413,7 +1437,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            32,
+            33,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

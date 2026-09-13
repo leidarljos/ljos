@@ -26,6 +26,11 @@ ljos due | grep -q 'scheduled' || fail due
 # says so, and a consolidation finds nothing left to close.
 ljos remember "The lexical default is BM25L. It beat BM25 by two points on turns." 2>&1 | grep -q 'revises 1 earlier' || fail "a rewrite did not close the earlier claim"
 ljos consolidate | grep -q '^0 of ' || fail "consolidate found pairs a write should have closed"
+if command -v landscape >/dev/null; then
+  ljos conflicts -n 2 | grep -q 'passes between single memories' || fail conflicts
+else
+  ljos conflicts 2>&1 | grep -q 'not on PATH' || fail "conflicts without the habitat should say so"
+fi
 
 id=$(vissue create -p demo "Ship the fuse change?" -q | tail -1)
 VISSUE_AGENT=alice ljos vote "$id" --for ship >/dev/null

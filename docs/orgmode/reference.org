@@ -14,6 +14,7 @@
 | =search QUERY [-n N] [--rerank] [--as-of TIME]= | pack | ranked claims with how many scorers named each and its age; =--rerank= scores the top hits with the writer's cross-encoder; =--as-of= asks the pack as it stood then |
 | =timeline ISSUE [-n N]= | tracker, deed store, pack | the logbook, the cited deeds and the activated memories as one dated list, oldest first, each line with its age and the gap since the one before |
 | =consolidate [--apply]= | pack | the pairs where a later claim rewrites an earlier one; =--apply= closes the earlier ones' windows |
+| =conflicts [-n N]= | pack, landscape | candidate contradictions by geometry: the lowest passes between single memories in the embedding landscape, from the optional =landscape= habitat |
 | =hubs [-n N]= | pack | the claims this seat's memory turns on, highest first: a weighted PageRank over the links |
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
 | =due= | pack | claims whose review is due, unreviewed ones first, then one line on the clock |
@@ -49,7 +50,7 @@ to one actor; a 32-hex id passes through.
 
 Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
 =ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_predict=, =ljos_rule=, =ljos_claim=,
-=ljos_release=, =ljos_complete=, =ljos_consolidate=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search= (with =as_of=),
+=ljos_release=, =ljos_complete=, =ljos_consolidate=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search= (with =as_of=), =ljos_conflicts=,
 =ljos_timeline=, =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
 =ljos_consensus=, =ljos_brief=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
 =ljos://protocol=, =ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:

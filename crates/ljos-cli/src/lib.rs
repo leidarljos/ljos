@@ -2672,6 +2672,67 @@ pub fn packset_hubs(limit: usize) -> Result<Value> {
 /// Consolidate the seat's memory: every claim that replaces an earlier
 /// one (a rewrite, a new object under the same head, a correction, an
 /// explicit supersedes) closes the earlier one's window and names it.
+/// Candidate contradictions from the geometry of the seat's memory: the
+/// `landscape` binary reads the pack's embeddings at the point scale and
+/// prints the lowest passes between single memories, which on a record of
+/// planted contradictions were the contradictions nine times in ten. The
+/// replacement rule reads words; this reads distance, in any language.
+/// A candidate is for a person or `consolidate` to judge; nothing is
+/// written here. `landscape` is an optional habitat: absent, this says so.
+///
+/// # Errors
+///
+/// The binary absent or refusing, or the pack not answering.
+pub fn conflicts(limit: usize) -> Result<String> {
+    if which::which("landscape").is_err() {
+        bail!(
+            "conflicts: `landscape` is not on PATH; it is the optional habitat that reads the pack's geometry (leidarljos/landscape)"
+        );
+    }
+    let client = pack()?;
+    let said = run_captured(
+        "landscape",
+        &[
+            "--atoms",
+            &client.base(),
+            "--workspace",
+            &client.workspace(),
+            "--conflicts",
+        ],
+    )?;
+    let v: Value =
+        serde_json::from_str(&said.stdout).context("conflicts: landscape printed no JSON")?;
+    let now = now_utc();
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .unwrap_or_default();
+    let stamp_of = |id: &str| -> Option<String> {
+        atoms
+            .iter()
+            .find(|a| a["id"].as_str() == Some(id))
+            .and_then(|a| a["ts"].as_str().map(str::to_string))
+    };
+    let mut out = String::new();
+    for pair in v["pairs"].as_array().into_iter().flatten().take(limit) {
+        let a = pair["a"].as_str().unwrap_or("-");
+        let b = pair["b"].as_str().unwrap_or("-");
+        out.push_str(&format!(
+            "pass {:.3}\n  {a} {}  {}\n  {b} {}  {}\n",
+            pair["barrier"].as_f64().unwrap_or(0.0),
+            age_of(stamp_of(a).as_deref(), &now),
+            pair["a_text"].as_str().unwrap_or("").trim(),
+            age_of(stamp_of(b).as_deref(), &now),
+            pair["b_text"].as_str().unwrap_or("").trim()
+        ));
+    }
+    let n = v["pairs"].as_array().map_or(0, Vec::len);
+    out.push_str(&format!(
+        "{n} passes between single memories at kernel width {:.3}; the lowest are the likeliest contradictions. `ljos forget ID --why DEED` retires one, `ljos remember` a rewrite closes it.\n",
+        v["sigma"].as_f64().unwrap_or(0.0)
+    ));
+    Ok(out)
+}
+
 /// The rule a write applies on arrival, run over what the pack already
 /// holds. Without `apply` nothing is written; the pairs are reported.
 pub fn packset_consolidate(apply: bool) -> Result<Value> {
