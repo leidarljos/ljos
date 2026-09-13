@@ -72,6 +72,10 @@ Every piece of work has an issue before it has a claim.
   ballot, `ljos predict ISSUE --expect OPTION`; with two or more forecasts
   the settle also names the surprisingly popular answer, the option whose
   actual share most exceeds its forecast, and shows each voter's standing.
+  When the world says which option was right, `ljos finish ISSUE
+  --outcome OPTION` (or `ljos learn`) writes every voter's record of
+  outcomes as its weight, so the next settle weighs a voter by what it
+  got right.
 - When the work has shown that a kind of command must never run, or must
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks at the point of action and
