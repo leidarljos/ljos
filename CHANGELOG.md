@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.11.0 (2026-09-13)
 
 - `conflicts` (and the `ljos_conflicts` tool): candidate contradictions
   by geometry, the lowest passes between single memories in the pack's
