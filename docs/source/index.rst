@@ -1,8 +1,3 @@
-====
-ljos
-====
-
-
 .. raw:: html
 
    <div class="vi-hero">
@@ -40,33 +35,36 @@ content-addressed store, a Cap'n Proto snapshot. No model is required to
 run any of it, and any model or agent runner that can call a command or an
 MCP tool can sit in the seat.
 
-.. image:: _static/seat.svg
+|image1|
 
 Install
--------
+=======
 
 .. code:: console
 
-    $ cargo install --git https://github.com/leidarljos/ljos ljos ljos-mcp
-    $ cargo install --git https://github.com/leidarljos/consensus
-    $ cargo install --git https://github.com/leidarljos/vissue vissue-cli
-    $ cargo install --git https://github.com/leidarljos/deedar deedar-cli
-    $ cargo install --git https://github.com/leidarljos/packset packset-cli packset-daemon
-    $ cargo install --git https://github.com/leidarljos/claimdag claimdag-cli
-    $ export PACKSET_URL=$(packset ensure)
-    $ ljos doctor
+   $ cargo install --git https://github.com/leidarljos/ljos ljos ljos-mcp
+   $ cargo install --git https://github.com/leidarljos/consensus
+   $ cargo install --git https://github.com/leidarljos/vissue vissue-cli
+   $ cargo install --git https://github.com/leidarljos/deedar deedar-cli
+   $ cargo install --git https://github.com/leidarljos/packset packset-cli packset-daemon
+   $ cargo install --git https://github.com/leidarljos/claimdag claimdag-cli
+   $ packset ensure
+   $ ljos doctor
+   $ ljos onboard --harness json
 
 ``doctor`` names each habitat and whether it answers. The seat works with the
-habitats it has; a missing one is reported, not guessed around.
+habitats it has; a missing one is reported, not guessed around. ``onboard``
+registers the server with an agent runner and installs the sitting protocol
+as its skill; ``ljos protocol`` prints that protocol for any other.
 
 First minute
-------------
+============
 
 .. code:: console
 
-    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-    $ ljos search lexical default
-    $ ljos due
+   $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+   $ ljos search lexical default
+   $ ljos due
 
 The :doc:`tutorial <getting-started>` runs all three loops on a scratch
 tracker in about ten minutes.
@@ -81,3 +79,6 @@ tracker in about ten minutes.
    grok-build
    reference
    explanation
+
+.. |image1| image:: _static/seat.svg
+   :width: 100.0%
