@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.12.0 (2026-09-13)
 
 - `learn` writes rows from each voter's record: hits and misses so far
   as log-odds weights, the same scale `calibrate` writes, carried on the
