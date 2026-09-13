@@ -3341,7 +3341,8 @@ fn civil_of_days(days: i64) -> String {
 
 /// Open a sitting on an issue, in the protocol's order, and stop at the
 /// first habitat that does not answer: doctor, cards, the review clock,
-/// the island the issue's title activates, the working set, the claim.
+/// the island the issue's title activates, the working set, the timeline,
+/// the claim.
 /// One verb, so the loop that makes the seat a memory runs every time and
 /// not only when somebody remembers to run it.
 ///
