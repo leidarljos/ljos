@@ -2413,12 +2413,29 @@ pub fn parse_semver(text: &str) -> Option<&str> {
 }
 
 fn bin_version(bin: &str) -> Option<String> {
-    // packset-mcp has no --version and would sit on stdio.
-    if bin == "packset-mcp" {
-        return None;
-    }
-    let said = run_captured(bin, &["--version"]).ok()?;
-    parse_semver(&said.stdout).or_else(|| parse_semver(&said.stderr))
+    use std::process::{Command, Stdio};
+    let path = which::which(bin).ok()?;
+    // MCP servers that do not implement --version sit on stdio.
+    // Cap the wait so doctor cannot hang the seat.
+    let mut cmd = if bin.ends_with("-mcp") {
+        let mut c = Command::new("timeout");
+        c.args(["0.4", path.to_str()?, "--version"]);
+        c
+    } else {
+        let mut c = Command::new(&path);
+        c.arg("--version");
+        c
+    };
+    let said = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&said.stdout);
+    let stderr = String::from_utf8_lossy(&said.stderr);
+    parse_semver(&stdout)
+        .or_else(|| parse_semver(&stderr))
         .map(str::to_string)
 }
 
