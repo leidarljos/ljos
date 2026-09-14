@@ -2358,6 +2358,18 @@ pub struct Habitat {
     pub ok: bool,
 }
 
+/// One line after a pack write: id, kind, due, text. Not the embedding.
+#[must_use]
+pub fn format_write_ack(body: &serde_json::Value) -> String {
+    format!(
+        "{}\t{}\tdue {}\t{}",
+        body["id"].as_str().unwrap_or("?"),
+        body["kind"].as_str().unwrap_or("?"),
+        body["due_at"].as_str().unwrap_or("-"),
+        body["text"].as_str().unwrap_or("").replace('\n', " "),
+    )
+}
+
 /// The habitats the seat needs. Encoder and policyd move with the rest.
 pub const REQUIRED: &[&str] = &[
     "ljos",
@@ -5252,6 +5264,15 @@ mod tests {
             ok: false,
         }];
         assert!(healthy(&fine));
+        assert_eq!(
+            super::format_write_ack(&serde_json::json!({
+                "id": "ab",
+                "kind": "lesson",
+                "due_at": "2026-09-15T00:00:00Z",
+                "text": "The encoder sits beside packsetd."
+            })),
+            "ab\tlesson\tdue 2026-09-15T00:00:00Z\tThe encoder sits beside packsetd."
+        );
         assert_eq!(super::parse_semver("ljos 0.12.8"), Some("0.12.8"));
         assert_eq!(
             super::cmp_semver("0.4.1", "0.5.3"),

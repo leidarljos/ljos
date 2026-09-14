@@ -11,7 +11,8 @@ use ljos_cli::{
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
     tcb_check,
-    hold_hook_context, run_captured, resolve_assignee, session_end, sitting, take_hook_context,
+    format_write_ack, hold_hook_context, run_captured, resolve_assignee, session_end, sitting,
+    take_hook_context,
     timeline, topic_words, trust_from_pack,
     verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
@@ -334,7 +335,7 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Remember { text, as_persona } => {
             let body = packset_write_as("Remember", &join(&text), as_persona.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&body)?);
+            println!("{}", format_write_ack(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
                 eprintln!(
                     "revises {} earlier memor{}, now closed: {}",
@@ -349,7 +350,7 @@ fn main() -> Result<()> {
         }
         Cmd::Prefer { text, as_persona } => {
             let body = packset_write_as("Prefer", &join(&text), as_persona.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&body)?);
+            println!("{}", format_write_ack(&body));
         }
         Cmd::Forget { id, why } => {
             let body = packset_forget(&id, why.as_deref())?;
