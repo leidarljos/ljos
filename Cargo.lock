@@ -594,7 +594,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "ljos"
-version = "0.12.9"
+version = "0.12.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "ljos-mcp"
-version = "0.12.9"
+version = "0.12.10"
 dependencies = [
  "anyhow",
  "ljos",
@@ -667,9 +667,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "packset-client"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03cc4f7f89afc485ac20cf2186d347cd067499997bf5cd4fdea9c6b4eea24b0a"
+checksum = "07a00c3a33ae9f57eeffbcf38075b2818d9b6be5fc526f49a6ad15ca4f23ba87"
 dependencies = [
  "packset-core",
  "serde",

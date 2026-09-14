@@ -44,7 +44,7 @@ Install
 
 .. code:: console
 
-   $ cargo binstall ljos ljos-mcp packset packset-daemon deedar-cli claimdag-cli vissue-cli ljos-consensus ljos-policyd
+   $ cargo binstall ljos ljos-mcp packset packset-daemon packset-embed deedar-cli claimdag-cli vissue-cli ljos-consensus ljos-policyd
    $ packset ensure
    $ ljos doctor
    $ ljos onboard --harness json

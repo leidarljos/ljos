@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.10 (2026-09-14)
+
+- `packset-client` 0.9.1. `ljos-mcp --version` prints and exits.
+  Doctor can version the MCP binary. The door install includes
+  `packset-embed`.
+
 ## 0.12.9 (2026-09-14)
 
 - `ljos doctor` lists every seat binary (`ljos`, `packset-embed`,

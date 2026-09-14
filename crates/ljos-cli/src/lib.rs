@@ -2413,7 +2413,8 @@ pub fn parse_semver(text: &str) -> Option<&str> {
 }
 
 fn bin_version(bin: &str) -> Option<String> {
-    if bin.ends_with("-mcp") {
+    // packset-mcp has no --version and would sit on stdio.
+    if bin == "packset-mcp" {
         return None;
     }
     let said = run_captured(bin, &["--version"]).ok()?;
