@@ -74,15 +74,9 @@ the memories it activates come back as context, preferences first. Do not
 add ``PreToolUse`` as a search event. A turn issues many tool calls and
 one prompt. On a tool call the hook only applies pack rules.
 
-**Grok Build** does not put ``UserPromptSubmit`` ``additionalContext`` into
-the model. ``ljos onboard --harness grok`` still writes
-``~/.config/ljos/hooks.json``, and Grok does not load that path. Install
-``scripts/grok/ljos-inject.sh`` and ``scripts/grok/ljos.json`` under
-``~/.grok/hooks/``, then ``/hooks`` then ``r``. The inject script searches
-on a prompt. On ``PreToolUse`` it exits without talking to the pack.
-``ljos hook`` on Bash is rules only. Remapping every tool call into a
-pack search is what timed Grok out at 20s. The page
-:doc:`Grok Build <grok-build>` is the install.
+**Grok Build.** ``ljos onboard --harness grok`` writes
+``~/.grok/hooks/ljos.json``. The hook searches on the prompt, holds the
+text, and emits it on ``PostToolUse``. :doc:`Grok Build <grok-build>`.
 
 A
 policy daemon does the same with the argv:

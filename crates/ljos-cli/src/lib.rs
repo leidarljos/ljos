@@ -387,6 +387,29 @@ pub fn onboard(harness: &str, dry: bool) -> Result<Vec<Step>> {
     onboard_from(&harnesses_path(), harness, dry)
 }
 
+/// Frozen Grok hook file. Copied to `~/.grok/hooks/ljos.json`.
+const GROK_HOOKS_JSON: &str = include_str!("../../../scripts/grok/ljos.json");
+
+fn write_grok_hooks(dry: bool) -> Result<Step> {
+    let dest = home()?.join(".grok/hooks/ljos.json");
+    if dry {
+        return Ok(Step {
+            what: "hook".into(),
+            detail: format!("would write {}", dest.display()),
+            ok: true,
+        });
+    }
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&dest, GROK_HOOKS_JSON)?;
+    Ok(Step {
+        what: "hook".into(),
+        detail: format!("wrote {}", dest.display()),
+        ok: true,
+    })
+}
+
 pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> {
     if harness == "json" {
         return Ok(vec![Step {
@@ -394,6 +417,19 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
             detail: serde_json::to_string_pretty(&server_entry()?)?,
             ok: true,
         }]);
+    }
+    if harness == "grok" {
+        let mut steps = vec![write_grok_hooks(dry)?];
+        if let Ok(all) = harnesses_from(file) {
+            if let Some(h) = all.harness.iter().find(|h| h.name == "grok") {
+                let server = server_path()?;
+                steps.push(register_step(h, &server, dry));
+                if let Some(dir) = &h.skills {
+                    steps.push(write_skill(&expand(dir), dry));
+                }
+            }
+        }
+        return Ok(steps);
     }
     let all = harnesses_from(file)?;
     let Some(h) = all.harness.iter().find(|h| h.name == harness) else {
@@ -4719,6 +4755,27 @@ mod tests {
             1,
             "the entry was appended twice"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grok_onboard_writes_the_frozen_hook_file() {
+        let dir = std::env::temp_dir().join(format!("ljos-grok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", &dir);
+        let file = dir.join("missing.toml");
+        let steps = super::onboard_from(&file, "grok", false).expect("grok onboard");
+        if let Some(v) = old {
+            std::env::set_var("HOME", v);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
+        let written = std::fs::read_to_string(dir.join(".grok/hooks/ljos.json")).expect("hook");
+        assert!(written.contains("PostToolUse"), "{written}");
+        assert!(written.contains("ljos hook"), "{written}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -3,95 +3,42 @@
 
 The pack only helps a Grok session if it reaches the model.
 
-=ljos onboard --harness grok= writes a =UserPromptSubmit= hook to
-=~/.config/ljos/hooks.json=. Grok does not load that path. Grok also
-discards =UserPromptSubmit= =additionalContext= (observe-only stdout).
-Grok *does* deliver =PreToolUse= =additionalContext= after the tool.
-
-Install the two files below under =~/.grok/hooks/=, then =/hooks=
-A sitting (=ljos sitting ID=) is still a verb. The hook is how the
-pack arrives without being asked.
+Grok discards =UserPromptSubmit= stdout. It delivers =PostToolUse=
+=additionalContext= after the first tool. =ljos hook= searches on the
+prompt, holds the text, and emits it once on =PostToolUse=.
+=PreToolUse= is rules only. There is no =sync.sh=.
 
 * Install
 
 #+begin_src console
-$ scripts/grok/sync.sh
+$ ljos onboard --harness grok
 #+end_src
 
-The script and =ljos hook= are exec'd each event: no =/hooks r=.
-Grok does not watch hook JSON. Reload matchers only when =sync.sh=
-prints =ljos.json changed=. Stale =ljos-mcp= (deleted inode) is
-sent TERM so Grok respawns.
+That writes =~/.grok/hooks/ljos.json= once (=ljos hook= on PATH). Then
+=/hooks= then =r= *once*. Later =cargo binstall ljos= is live on the
+next event. Name =ljos-mcp= on PATH in =~/.grok/config.toml=. Bump
+=LJOS_MCP_GENERATION= in that table when you want Grok's config
+watcher to respawn the server.
 
-* Why this remap
+* Why these events
 
 | Event | What =ljos hook= does | What Grok does with stdout |
 |-------+------------------------+----------------------------|
-| =UserPromptSubmit= | emits =additionalContext= | discarded |
-| =PreToolUse= | silent | =additionalContext= is delivered after the tool |
-| =SessionStart= | silent | stdout ignored |
+| =UserPromptSubmit= | searches, holds the text | discarded |
+| =PostToolUse= | emits the held text once | delivered after the tool |
+| =PreToolUse= | rules only | a turn has many tool calls |
+| =SessionEnd= | fires injected memories | ignored |
 
-The inject script searches on a prompt or session start. On
-=PreToolUse= it exits without talking to the pack. Remapping every
-tool call into =UserPromptSubmit= made Grok wait 20s per tool.
-
-* ~/.grok/hooks/ljos.json
-
-#+begin_src json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${HOME}/.grok/hooks/ljos-inject.sh",
-            "timeout": 20
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${HOME}/.grok/hooks/ljos-inject.sh",
-            "timeout": 20
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${HOME}/.local/bin/ljos hook",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
-#+end_src
-
-Source of truth: [[file:../../scripts/grok/ljos.json][scripts/grok/ljos.json]].
-
-The script searches on a prompt. On =PreToolUse= it exits without
-talking to the pack. Source of truth:
-[[file:../../scripts/grok/ljos-inject.sh][scripts/grok/ljos-inject.sh]].
+The frozen file is [[file:../../scripts/grok/ljos.json][scripts/grok/ljos.json]]. It only names =ljos hook=.
 
 * Smoke
 
 #+begin_src console
-$ echo '{"hook_event_name":"PreToolUse","toolName":"run_terminal_command"}' \
-    | ~/.grok/hooks/ljos-inject.sh
+$ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"echo"}}' | ljos hook
+$ echo '{"hook_event_name":"PostToolUse","session_id":"s"}' | ljos hook
 #+end_src
 
-Stdout must be empty. A tool call is not a sitting.
+A tool call prints nothing unless a prompt has already held pack text.
 
 * harnesses.toml
 
@@ -102,8 +49,5 @@ config = "~/.grok/config.toml"
 marker = "[mcp_servers.ljos]"
 skills = "~/.config/ljos/skills"
 hooks = "~/.grok/hooks/ljos.json"
-hook_events = ["SessionStart", "UserPromptSubmit"]
+hook_events = ["UserPromptSubmit", "PostToolUse", "PreToolUse", "SessionEnd"]
 #+end_src
-
-Keep the =UserPromptSubmit= file for runners that honor that event's
-=additionalContext=. Grok is not one of them.

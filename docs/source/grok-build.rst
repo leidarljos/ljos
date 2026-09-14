@@ -8,11 +8,14 @@ searches on the prompt, holds the text, and emits it once on
 Install
 =======
 
-Copy ``scripts/grok/ljos.json`` to ``~/.grok/hooks/ljos.json`` once
-(``ljos hook`` on PATH). Then ``/hooks`` then ``r`` **once**. Later
-``cargo binstall ljos`` is live on the next event. Name ``ljos-mcp`` on
-PATH in ``~/.grok/config.toml``. Bump ``LJOS_MCP_GENERATION`` in that
-table when you want Grok's config watcher to respawn the server.
+.. code:: console
+
+   $ ljos onboard --harness grok
+
+That writes ``~/.grok/hooks/ljos.json`` once. Then ``/hooks`` then ``r``
+**once**. Later ``cargo binstall ljos`` is live on the next event. Name
+``ljos-mcp`` on PATH in ``~/.grok/config.toml``. Bump
+``LJOS_MCP_GENERATION`` when you want the config watcher to respawn.
 
 Why these events
 ================

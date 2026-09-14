@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.7 (2026-09-14)
+
+- `ljos onboard --harness grok` writes the frozen `~/.grok/hooks/ljos.json`.
+  No table in harnesses.toml is required.
+
 ## 0.12.6 (2026-09-14)
 
 - Grok hook is `ljos hook` only. The prompt's pack text is held and
