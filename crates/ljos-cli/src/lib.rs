@@ -2425,7 +2425,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 state: if available {
                     "dense ballot on".to_string()
                 } else {
-                    "down; search is lexical only, islands seed weakly".to_string()
+                    "down; cargo binstall packset-embed and put it beside packsetd".to_string()
                 },
                 ok: available,
             });
