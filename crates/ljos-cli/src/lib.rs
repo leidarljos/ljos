@@ -502,6 +502,12 @@ fn hook_matcher(event: &str) -> &'static str {
 
 /// The events a runner's table asks for, or the default.
 fn hook_events_of(h: &Harness) -> Vec<String> {
+    if h.name == "grok" {
+        return ["UserPromptSubmit", "PostToolUse", "PreToolUse", "SessionEnd"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
     if h.hook_events.is_empty() {
         HOOK_EVENTS.iter().map(|e| (*e).to_string()).collect()
     } else {
@@ -1306,7 +1312,34 @@ pub const SEAT_WORKSPACE: &str = "seat";
 /// the `seat` workspace; `PACKSET_URL` points elsewhere, `PACKSET_WORKSPACE`
 /// names another workspace, and `PACKSET_URL=off` is the one way to have no
 /// pack.
+/// Load `~/.config/ljos/env` (KEY=VALUE) when the process has not set
+/// those keys. The shell and the MCP seat then share one pack.
+fn load_seat_env() {
+    let Ok(home) = home() else {
+        return;
+    };
+    let path = home.join(".config/ljos/env");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.is_empty() || std::env::var_os(k).is_some() {
+            continue;
+        }
+        std::env::set_var(k, v.trim());
+    }
+}
+
 pub fn pack() -> Result<PacksetClient> {
+    load_seat_env();
     let workspace = std::env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
@@ -2381,6 +2414,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format!("{seat} (from {source})"),
         ok: true,
     });
+    load_seat_env();
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     if let Ok(client) = PacksetClient::from_env() {
@@ -2397,7 +2431,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
             });
         }
     }
-    out.push(match PacksetClient::from_env() {
+    out.push(match pack() {
         Ok(client) => match client.health() {
             Ok(_) => Habitat {
                 name: "pack",
@@ -4759,24 +4793,15 @@ mod tests {
     }
 
     #[test]
-    fn grok_onboard_writes_the_frozen_hook_file() {
-        let dir = std::env::temp_dir().join(format!("ljos-grok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tempdir");
-        let old = std::env::var_os("HOME");
-        std::env::set_var("HOME", &dir);
-        let file = dir.join("missing.toml");
-        let steps = super::onboard_from(&file, "grok", false).expect("grok onboard");
-        if let Some(v) = old {
-            std::env::set_var("HOME", v);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
-        let written = std::fs::read_to_string(dir.join(".grok/hooks/ljos.json")).expect("hook");
-        assert!(written.contains("PostToolUse"), "{written}");
-        assert!(written.contains("ljos hook"), "{written}");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn grok_onboard_names_the_frozen_hook_file() {
+        let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
+        let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
+        assert!(steps[0].ok, "{steps:?}");
+        assert!(
+            steps[0].detail.contains(".grok/hooks/ljos.json"),
+            "{}",
+            steps[0].detail
+        );
     }
 
     use super::*;

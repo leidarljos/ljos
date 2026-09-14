@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.8 (2026-09-14)
+
+- `ljos doctor` treats the grok harness hook as the frozen events
+  (prompt, PostToolUse, Bash rules, SessionEnd), not a stale
+  SessionStart list. `~/.config/ljos/env` is loaded when those
+  keys are unset, so a shell `ljos` shares the MCP pack. Argv law
+  runs only on PreToolUse and argv, not on PostToolUse.
+
 ## 0.12.7 (2026-09-14)
 
 - `ljos onboard --harness grok` writes the frozen `~/.grok/hooks/ljos.json`.

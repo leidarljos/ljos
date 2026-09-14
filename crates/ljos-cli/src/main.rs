@@ -472,13 +472,17 @@ fn main() -> Result<()> {
                 Vec::new()
             };
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
-            let tcb_rule = tcb_check(&argv).and_then(|t| {
-                t.starts_with("deny").then(|| Rule {
-                    pattern: "ljos-policyd".into(),
-                    verdict: "deny".into(),
-                    reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
+            let tcb_rule = if call.event == "PreToolUse" || call.event == "argv" {
+                tcb_check(&argv).and_then(|t| {
+                    t.starts_with("deny").then(|| Rule {
+                        pattern: "ljos-policyd".into(),
+                        verdict: "deny".into(),
+                        reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
+                    })
                 })
-            });
+            } else {
+                None
+            };
             let verdict = tcb_rule.as_ref().or_else(|| verdict_for(&rules, &call.cue));
             // Search on the prompt. Grok throws UserPromptSubmit stdout
             // away, so hold the text and emit it once on PostToolUse, the
