@@ -1,7 +1,8 @@
 #!/bin/sh
 # Grok Build does not add UserPromptSubmit additionalContext to the model.
-# ljos hook is silent on PreToolUse. Remap stdin to UserPromptSubmit so the
-# pack injects, then emit PreToolUse additionalContext which Grok does deliver.
+# Remap a *prompt* to UserPromptSubmit, then emit the event Grok will
+# deliver. PreToolUse must not search the pack: a turn issues many tool
+# calls and one prompt. Rules stay on `ljos hook` matcher Bash.
 set -eu
 LJOS_BIN="${LJOS_BIN:-$(command -v ljos)}"
 input=$(cat)
@@ -13,7 +14,12 @@ except Exception:
     raise SystemExit
 print(d.get("hook_event_name") or d.get("hookEventName") or "UserPromptSubmit")')
 
-# Always query the pack as a prompt event so ljos hook speaks.
+# A tool call is not a sitting. Exit before packset, due, or consolidate.
+case "$event" in
+  PreToolUse|pre_tool_use) exit 0 ;;
+esac
+
+# Query the pack as a prompt event so ljos hook speaks.
 query=$(printf '%s' "$input" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 bits=["Call ljos sitting. Never weaken tests. CI red is a defect.",

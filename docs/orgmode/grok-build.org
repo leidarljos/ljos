@@ -40,9 +40,9 @@ Grok needs an absolute =command= path. The JSON in the tree keeps
 | =PreToolUse= | silent | =additionalContext= is delivered after the tool |
 | =SessionStart= | silent | stdout ignored |
 
-The inject script therefore always calls =ljos hook= as
-=UserPromptSubmit=, then re-emits the pack as =PreToolUse=
-=additionalContext=.
+The inject script searches on a prompt or session start. On
+=PreToolUse= it exits without talking to the pack. Remapping every
+tool call into =UserPromptSubmit= made Grok wait 20s per tool.
 
 * ~/.grok/hooks/ljos.json
 

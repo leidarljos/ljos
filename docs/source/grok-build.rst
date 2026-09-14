@@ -34,16 +34,17 @@ Why this remap
 ==============
 
 ==================== =========================== =================================================
-Event                What ``ljos hook`` does     What Grok does with stdout
+Event                What the hook does          What Grok does with stdout
 ==================== =========================== =================================================
-``UserPromptSubmit`` emits ``additionalContext`` discarded
-``PreToolUse``       silent                      ``additionalContext`` is delivered after the tool
-``SessionStart``     silent                      stdout ignored
+``UserPromptSubmit`` inject searches the pack    discarded; remapped to a deliverable event
+``PreToolUse``       **rules only**, no search   a turn has many tool calls; do not search
+``SessionStart``     writes a brief file         stdout ignored
 ==================== =========================== =================================================
 
-The inject script therefore always calls ``ljos hook`` as
-``UserPromptSubmit``, then re-emits the pack as ``PreToolUse``
-``additionalContext``.
+The inject script searches on a **prompt** or session start. On
+``PreToolUse`` it exits 0 without talking to the pack. A previous
+remap of every tool call into ``UserPromptSubmit`` made Grok wait
+up to 20s per tool (``Ljos Ljos Due``, hook timed out).
 
 ~/.grok/hooks/ljos.json
 =======================

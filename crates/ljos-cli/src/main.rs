@@ -11,7 +11,7 @@ use ljos_cli::{
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
     tcb_check,
-    run_captured, resolve_assignee, seat_name, session_end, sitting, timeline, topic_words, trust_from_pack,
+    run_captured, resolve_assignee, session_end, sitting, timeline, topic_words, trust_from_pack,
     verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
@@ -479,10 +479,14 @@ fn main() -> Result<()> {
                 })
             });
             let verdict = tcb_rule.as_ref().or_else(|| verdict_for(&rules, &call.cue));
-            print!(
-                "{}",
-                hook_output_ruled(&call, &hook_context(&call, limit), verdict)
-            );
+            // A turn issues many tool calls and one prompt. Search and the
+            // due nudge belong on the prompt. PreToolUse / argv only decide.
+            let context = if call.event == "PreToolUse" || call.event == "argv" {
+                String::new()
+            } else {
+                hook_context(&call, limit)
+            };
+            print!("{}", hook_output_ruled(&call, &context, verdict));
         }
         Cmd::Consensus { id } => {
             // Rows scoped to a domain apply when the issue is about it; the

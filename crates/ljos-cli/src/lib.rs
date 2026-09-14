@@ -909,33 +909,17 @@ fn due_nudge(call: &HookCall) -> String {
         return String::new();
     };
     let due = due_of(&atoms, &now_utc()).len();
-    // Pairs the replacement rule would close, read without writing: the
-    // consolidation nobody runs is the one nobody was told about.
-    let pending = client
-        .consolidate(&client.workspace(), false)
-        .ok()
-        .and_then(|b| b["closed"].as_u64())
-        .unwrap_or(0);
     // Counted once a session either way; a quiet seat is not re-counted on
-    // every prompt.
+    // every prompt. Do not call consolidate here: that walk is a sitting,
+    // not a hook, and it is what made PreToolUse time out at 20s.
     mark_seen(call.session.as_deref(), &[key]);
-    if due == 0 && pending == 0 {
+    if due == 0 {
         return String::new();
     }
-    let mut out = Vec::new();
-    if due > 0 {
-        out.push(format!(
-            "{due} claim{} due for review in this seat: `ljos due`, read each, then `ljos graded ID` (or `--lapsed`).",
-            if due == 1 { " is" } else { "s are" }
-        ));
-    }
-    if pending > 0 {
-        out.push(format!(
-            "{pending} pair{} of memories where a later one rewrites an earlier: `ljos consolidate` shows them, `--apply` closes the earlier.",
-            if pending == 1 { "" } else { "s" }
-        ));
-    }
-    out.join("\n")
+    format!(
+        "{due} claim{} due for review in this seat: `ljos due`, read each, then `ljos graded ID` (or `--lapsed`).",
+        if due == 1 { " is" } else { "s are" }
+    )
 }
 
 /// The hook's answer in the runner's JSON: `additionalContext` under the

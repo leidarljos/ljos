@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Grok `PreToolUse` no longer remaps to a pack search. The inject
+  script exits on a tool call. `ljos hook` on Bash only decides
+  rules. The due nudge no longer walks `consolidate` (that sitting
+  is what timed the hook out at 20s).
+
 - `finish` does not fire a weak island (seeds no two scorers agreed on)
   and says why; `island` marks one as weak and as the pack's
   best-connected cluster rather than what the cue is about; `doctor`

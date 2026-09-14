@@ -14,7 +14,7 @@ use ljos_cli::{
     doctor, due, finish, format_consolidation, graded, handover, identity_or_seat, island_entities,
     learn_and_write, node_for, now_utc, on_path, packset_consolidate, packset_forget,
     packset_island, packset_search_as_of, packset_write_as, personas_from_pack, policy_line,
-    receive, release, resolve_assignee, rows_about, run_captured, seat_name, sitting, timeline, topic_words,
+    receive, release, resolve_assignee, rows_about, run_captured, sitting, timeline, topic_words,
     trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
     Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
