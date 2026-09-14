@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.9 (2026-09-14)
+
+- `ljos doctor` lists every seat binary (`ljos`, `packset-embed`,
+  `packset-mcp`, …) with the version on PATH against crates.io. A
+  part that is missing or behind is not ok. Encoder and policyd are
+  required with the rest.
+
 ## 0.12.8 (2026-09-14)
 
 - `ljos doctor` treats the grok harness hook as the frozen events

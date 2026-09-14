@@ -2358,8 +2358,108 @@ pub struct Habitat {
     pub ok: bool,
 }
 
-/// The habitats the seat needs.
-pub const REQUIRED: &[&str] = &["vissue", "deedar", "packset"];
+/// The habitats the seat needs. Encoder and policyd move with the rest.
+pub const REQUIRED: &[&str] = &[
+    "ljos",
+    "ljos-mcp",
+    "ljos-policyd",
+    "vissue",
+    "deedar",
+    "claimdag",
+    "packset",
+    "packsetd",
+    "packset-embed",
+    "pack",
+    "encoder",
+];
+
+/// Binary on PATH and the crates.io name it should track.
+const SEAT_BINS: &[(&str, &str)] = &[
+    ("ljos", "ljos"),
+    ("ljos-mcp", "ljos-mcp"),
+    ("ljos-policyd", "ljos-policyd"),
+    ("ljos-consensus", "ljos-consensus"),
+    ("vissue", "vissue-cli"),
+    ("deedar", "deedar-cli"),
+    ("claimdag", "claimdag-cli"),
+    ("packset", "packset"),
+    ("packsetd", "packset-daemon"),
+    ("packset-embed", "packset-embed"),
+    ("packset-mcp", "packset-mcp"),
+];
+
+/// First `N.N.N` in a `--version` line.
+#[must_use]
+pub fn parse_semver(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            let mut dots = 0;
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                if bytes[i] == b'.' {
+                    dots += 1;
+                }
+                i += 1;
+            }
+            if dots >= 2 {
+                return Some(&text[start..i]);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn bin_version(bin: &str) -> Option<String> {
+    if bin.ends_with("-mcp") {
+        return None;
+    }
+    let said = run_captured(bin, &["--version"]).ok()?;
+    parse_semver(&said.stdout).or_else(|| parse_semver(&said.stderr))
+        .map(str::to_string)
+}
+
+fn crate_max_version(name: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(name) {
+            return hit.clone();
+        }
+    }
+    let url = format!("https://crates.io/api/v1/crates/{name}");
+    let said = std::process::Command::new("curl")
+        .args(["-sS", "-A", "ljos-doctor", "--max-time", "3", &url])
+        .output()
+        .ok();
+    let got = said.and_then(|said| {
+        if !said.status.success() {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&said.stdout).ok()?;
+        v["crate"]["max_version"].as_str().map(str::to_string)
+    });
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(name.to_string(), got.clone());
+    }
+    got
+}
+
+fn cmp_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let parse = |s: &str| -> Option<[u64; 3]> {
+        let mut it = s.split('.');
+        Some([
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ])
+    };
+    Some(parse(a)?.cmp(&parse(b)?))
+}
 
 /// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
 /// deed store, the tracker, the claim graph.
@@ -2379,23 +2479,37 @@ pub fn doctor() -> Vec<Habitat> {
 /// claim graph. What a sitting checks; the runner rows are onboarding.
 pub fn doctor_seat() -> Vec<Habitat> {
     let mut out = Vec::new();
-    for bin in [
-        "vissue",
-        "deedar",
-        "claimdag",
-        "packset",
-        "packsetd",
-        "ljos-consensus",
-        "ljos-mcp",
-        "ljos-policyd",
-    ] {
+    for (bin, crate_name) in SEAT_BINS {
         let found = which::which(bin).ok();
+        let latest = crate_max_version(crate_name);
+        let have = found.as_ref().and_then(|_| bin_version(bin));
+        let (state, ok) = match (found, have.as_deref(), latest.as_deref()) {
+            (None, _, Some(cr)) => (
+                format!("not on PATH; cargo binstall {crate_name} (crates.io {cr})"),
+                false,
+            ),
+            (None, _, None) => ("not on PATH".into(), false),
+            (Some(path), have, Some(cr)) => {
+                let behind = have.is_some_and(|v| cmp_semver(v, cr) == Some(std::cmp::Ordering::Less));
+                let ver = have.unwrap_or("?");
+                if behind {
+                    (
+                        format!("{}  {ver}  behind crates.io {cr}", path.display()),
+                        false,
+                    )
+                } else {
+                    (format!("{}  {ver}  crates.io {cr}", path.display()), true)
+                }
+            }
+            (Some(path), have, None) => {
+                let ver = have.unwrap_or("?");
+                (format!("{}  {ver}", path.display()), true)
+            }
+        };
         out.push(Habitat {
             name: bin,
-            state: found
-                .as_ref()
-                .map_or_else(|| "not on PATH".to_string(), |p| p.display().to_string()),
-            ok: found.is_some(),
+            state,
+            ok,
         });
     }
     // The name this runner claims and votes under, and where it came from.
@@ -2417,10 +2531,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
     load_seat_env();
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
-    if let Ok(client) = PacksetClient::from_env() {
-        if let Ok(status) = client.status(None) {
+    out.push(match PacksetClient::from_env().and_then(|c| c.status(None)) {
+        Ok(status) => {
             let available = status["embedder"]["available"].as_bool().unwrap_or(false);
-            out.push(Habitat {
+            Habitat {
                 name: "encoder",
                 state: if available {
                     "dense ballot on".to_string()
@@ -2428,9 +2542,14 @@ pub fn doctor_seat() -> Vec<Habitat> {
                     "down; cargo binstall packset-embed and put it beside packsetd".to_string()
                 },
                 ok: available,
-            });
+            }
         }
-    }
+        Err(e) => Habitat {
+            name: "encoder",
+            state: format!("pack does not answer: {e}"),
+            ok: false,
+        },
+    });
     out.push(match pack() {
         Ok(client) => match client.health() {
             Ok(_) => Habitat {
@@ -5088,10 +5207,13 @@ mod tests {
         let rows = doctor();
         let names: Vec<&str> = rows.iter().map(|h| h.name).collect();
         for want in [
+            "ljos",
+            "packset-embed",
             "vissue",
             "deedar",
             "packset",
             "pack",
+            "encoder",
             "host key",
             "deed store",
             "tracker",
@@ -5107,11 +5229,16 @@ mod tests {
         }];
         assert!(!healthy(&sick));
         let fine = vec![Habitat {
-            name: "claimdag",
+            name: "landfold",
             state: "not on PATH".into(),
             ok: false,
         }];
         assert!(healthy(&fine));
+        assert_eq!(super::parse_semver("ljos 0.12.8"), Some("0.12.8"));
+        assert_eq!(
+            super::cmp_semver("0.4.1", "0.5.3"),
+            Some(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]
