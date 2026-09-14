@@ -9,6 +9,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   best-connected cluster rather than what the cue is about; `doctor`
   shows the encoder row, since a down encoder is what makes seeds weak.
 
+## 0.12.3 (2026-09-14)
+
+- Occupancy uses the runner session when the assignee is a shared
+  name (`grok`, `seat`, `you`). Two conversations hold two tickets.
+
 ## 0.12.0 (2026-09-13)
 
 - `learn` writes rows from each voter's record: hits and misses so far
