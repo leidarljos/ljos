@@ -9,28 +9,19 @@ discards =UserPromptSubmit= =additionalContext= (observe-only stdout).
 Grok *does* deliver =PreToolUse= =additionalContext= after the tool.
 
 Install the two files below under =~/.grok/hooks/=, then =/hooks=
-then =r=. A sitting (=ljos sitting ID=) is still a verb. The hook is
-how the pack arrives without being asked. CI red is still a defect;
-do not skip tests or pin a deleted wrap to go green.
+A sitting (=ljos sitting ID=) is still a verb. The hook is how the
+pack arrives without being asked.
 
 * Install
 
 #+begin_src console
-$ install -m 755 scripts/grok/ljos-inject.sh ~/.grok/hooks/ljos-inject.sh
-$ python3 - <<'PY'
-from pathlib import Path
-import os
-src = Path("scripts/grok/ljos.json").read_text()
-src = src.replace("${HOME}", os.path.expanduser("~"))
-dest = Path.home() / ".grok" / "hooks" / "ljos.json"
-dest.parent.mkdir(parents=True, exist_ok=True)
-dest.write_text(src)
-print(dest)
-PY
+$ scripts/grok/sync.sh
 #+end_src
 
-Grok needs an absolute =command= path. The JSON in the tree keeps
-=${HOME}= so it is not machine-specific; expand it on install.
+The script and =ljos hook= are exec'd each event: no =/hooks r=.
+Grok does not watch hook JSON. Reload matchers only when =sync.sh=
+prints =ljos.json changed=. Stale =ljos-mcp= (deleted inode) is
+sent TERM so Grok respawns.
 
 * Why this remap
 

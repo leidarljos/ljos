@@ -15,20 +15,14 @@ Install
 
 .. code:: console
 
-   $ install -m 755 scripts/grok/ljos-inject.sh ~/.grok/hooks/ljos-inject.sh
-   $ python3 - <<'PY'
-   from pathlib import Path
-   import os
-   src = Path("scripts/grok/ljos.json").read_text()
-   src = src.replace("${HOME}", os.path.expanduser("~"))
-   dest = Path.home() / ".grok" / "hooks" / "ljos.json"
-   dest.parent.mkdir(parents=True, exist_ok=True)
-   dest.write_text(src)
-   print(dest)
-   PY
+   $ scripts/grok/sync.sh
 
-Grok needs an absolute ``command`` path. The JSON in the tree keeps
-``${HOME}`` so it is not machine-specific; expand it on install.
+That copies ``ljos-inject.sh`` and writes ``ljos.json`` only when the
+matchers changed. The script and ``ljos hook`` are exec'd each event, so
+they are live without ``/hooks`` then ``r``. Grok does **not** watch hook
+JSON (skills do; hooks do not). Reload matchers only when ``sync.sh``
+prints ``ljos.json changed``. A replaced ``ljos-mcp`` that is still
+running as a deleted inode is sent TERM so Grok respawns PATH.
 
 Why this remap
 ==============
