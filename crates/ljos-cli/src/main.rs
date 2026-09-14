@@ -11,7 +11,8 @@ use ljos_cli::{
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
     tcb_check,
-    run_captured, resolve_assignee, session_end, sitting, timeline, topic_words, trust_from_pack,
+    hold_hook_context, run_captured, resolve_assignee, session_end, sitting, take_hook_context,
+    timeline, topic_words, trust_from_pack,
     verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
@@ -479,12 +480,18 @@ fn main() -> Result<()> {
                 })
             });
             let verdict = tcb_rule.as_ref().or_else(|| verdict_for(&rules, &call.cue));
-            // A turn issues many tool calls and one prompt. Search and the
-            // due nudge belong on the prompt. PreToolUse / argv only decide.
-            let context = if call.event == "PreToolUse" || call.event == "argv" {
-                String::new()
-            } else {
-                hook_context(&call, limit)
+            // Search on the prompt. Grok throws UserPromptSubmit stdout
+            // away, so hold the text and emit it once on PostToolUse, the
+            // event it actually delivers. PreToolUse / argv only decide.
+            let context = match call.event.as_str() {
+                "PreToolUse" | "argv" => String::new(),
+                "PostToolUse" => take_hook_context(call.session.as_deref()),
+                "SessionStart" => String::new(),
+                _ => {
+                    let ctx = hook_context(&call, limit);
+                    hold_hook_context(call.session.as_deref(), &ctx);
+                    ctx
+                }
             };
             print!("{}", hook_output_ruled(&call, &context, verdict));
         }

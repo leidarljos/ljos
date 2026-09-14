@@ -1,23 +1,23 @@
 {
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${HOME}/.grok/hooks/ljos-inject.sh",
-            "timeout": 20
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "${HOME}/.grok/hooks/ljos-inject.sh",
-            "timeout": 20
+            "command": "ljos hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ljos hook",
+            "timeout": 5
           }
         ]
       }
@@ -28,7 +28,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${HOME}/.local/bin/ljos hook",
+            "command": "ljos hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ljos hook",
             "timeout": 5
           }
         ]

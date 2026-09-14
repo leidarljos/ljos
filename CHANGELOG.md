@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.6 (2026-09-14)
+
+- Grok hook is `ljos hook` only. The prompt's pack text is held and
+  emitted once on `PostToolUse`, the event Grok delivers. No
+  `sync.sh`. `PreToolUse` stays rules-only.
+
 ## 0.12.5 (2026-09-14)
 
 - Grok `PreToolUse` no longer remaps to a pack search. The inject

@@ -439,9 +439,23 @@ pub const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "SessionEnd"];
 /// The events the hook knows a matcher for; any other event takes `*`.
 pub const HOOK_MATCHERS: &[(&str, &str)] = &[
     ("PreToolUse", "Bash"),
+    ("PostToolUse", "*"),
     ("UserPromptSubmit", "*"),
     ("SessionEnd", "*"),
 ];
+
+/// One runner sends snake_case `hookEventName`; another sends
+/// PascalCase `hook_event_name`. One name in the seat.
+fn normalize_hook_event(raw: &str) -> &str {
+    match raw {
+        "pre_tool_use" | "PreToolUse" => "PreToolUse",
+        "post_tool_use" | "PostToolUse" => "PostToolUse",
+        "user_prompt_submit" | "UserPromptSubmit" => "UserPromptSubmit",
+        "session_end" | "SessionEnd" => "SessionEnd",
+        "session_start" | "SessionStart" => "SessionStart",
+        other => other,
+    }
+}
 
 fn hook_matcher(event: &str) -> &'static str {
     HOOK_MATCHERS
@@ -649,12 +663,14 @@ pub fn hook_call(input: &str) -> HookCall {
     };
     let session = v["session_id"]
         .as_str()
+        .or_else(|| v["sessionId"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let event = v["hook_event_name"]
+    let raw = v["hook_event_name"]
         .as_str()
-        .unwrap_or("PreToolUse")
-        .to_string();
+        .or_else(|| v["hookEventName"].as_str())
+        .unwrap_or("PreToolUse");
+    let event = normalize_hook_event(raw).to_string();
     let cue = if let Some(p) = v["prompt"].as_str() {
         p.to_string()
     } else if let Some(c) = v["tool_input"]["command"].as_str() {
@@ -742,6 +758,50 @@ pub fn session_end(session: Option<&str>) -> usize {
         let _ = std::fs::remove_file(p);
     }
     fired
+}
+
+/// Where a Grok prompt's pack context waits for `PostToolUse`.
+/// Grok discards `UserPromptSubmit` stdout; it delivers
+/// `PostToolUse` `additionalContext` after the first tool.
+fn hook_hold_path(session: Option<&str>) -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let name = session
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(32)
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".into());
+    Some(dir.join(format!("ljos-hook-hold-{name}")))
+}
+
+/// Remember the prompt's pack text so the next `PostToolUse` can emit it.
+pub fn hold_hook_context(session: Option<&str>, context: &str) {
+    let Some(path) = hook_hold_path(session) else {
+        return;
+    };
+    if context.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let _ = std::fs::write(path, context);
+}
+
+/// Take the held pack text once. Empty if nothing was held.
+#[must_use]
+pub fn take_hook_context(session: Option<&str>) -> String {
+    let Some(path) = hook_hold_path(session) else {
+        return String::new();
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    text
 }
 
 fn mark_seen(session: Option<&str>, ids: &[String]) {
@@ -4248,6 +4308,12 @@ mod tests {
         assert_eq!(tool.cue, "cargo test");
         let prompt = hook_call(r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the fuse"}"#);
         assert_eq!(prompt.cue, "fix the fuse");
+        let grok = hook_call(r#"{"hookEventName":"post_tool_use","sessionId":"s1"}"#);
+        assert_eq!(grok.event, "PostToolUse");
+        assert_eq!(grok.session.as_deref(), Some("s1"));
+        hold_hook_context(Some("s1"), "held pack");
+        assert_eq!(take_hook_context(Some("s1")), "held pack");
+        assert!(take_hook_context(Some("s1")).is_empty());
         let argv = hook_call("rm -rf build");
         assert_eq!(argv.event, "argv");
         assert_eq!(argv.session, None);
