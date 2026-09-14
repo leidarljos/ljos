@@ -77,12 +77,12 @@ up to 20s per tool (``Ljos Ljos Due``, hook timed out).
        ],
        "PreToolUse": [
          {
-           "matcher": "*",
+           "matcher": "Bash",
            "hooks": [
              {
                "type": "command",
-               "command": "${HOME}/.grok/hooks/ljos-inject.sh",
-               "timeout": 20
+               "command": "${HOME}/.local/bin/ljos hook",
+               "timeout": 5
              }
            ]
          }
@@ -95,78 +95,19 @@ Source of truth: `scripts/grok/ljos.json <../../scripts/grok/ljos.json>`__.
 ~/.grok/hooks/ljos-inject.sh
 ============================
 
-.. code:: bash
-
-   #!/bin/sh
-   # Grok Build does not add UserPromptSubmit additionalContext to the model.
-   # ljos hook is silent on PreToolUse. Remap stdin to UserPromptSubmit so the
-   # pack injects, then emit PreToolUse additionalContext which Grok does deliver.
-   set -eu
-   LJOS_BIN="${LJOS_BIN:-$(command -v ljos)}"
-   input=$(cat)
-   event=$(printf '%s' "$input" | python3 -c 'import json,sys
-   try:
-       d=json.load(sys.stdin)
-   except Exception:
-       print("UserPromptSubmit")
-       raise SystemExit
-   print(d.get("hook_event_name") or d.get("hookEventName") or "UserPromptSubmit")')
-
-   # Always query the pack as a prompt event so ljos hook speaks.
-   query=$(printf '%s' "$input" | python3 -c 'import json,sys
-   d=json.load(sys.stdin)
-   bits=["Call ljos sitting. Never weaken tests. CI red is a defect.",
-         d.get("prompt") or "",
-         str(d.get("toolName") or ""),
-         str((d.get("toolInput") or {}).get("command") or d.get("toolInput") or "")]
-   print(" ".join(bits)[:2000])')
-
-   payload=$(python3 -c 'import json,sys
-   print(json.dumps({"hook_event_name":"UserPromptSubmit","prompt":sys.argv[1]}))' "$query")
-
-   out=$(printf '%s' "$payload" | "$LJOS_BIN" hook --limit 8 || true)
-   ctx=$(printf '%s' "$out" | python3 -c 'import json,sys
-   raw=sys.stdin.read()
-   try:
-       d=json.loads(raw)
-   except Exception:
-       print("")
-       raise SystemExit
-   print((d.get("hookSpecificOutput") or {}).get("additionalContext") or "")')
-
-   if [ -z "$ctx" ]; then
-     exit 0
-   fi
-
-   # SessionStart stdout is ignored by Grok. Write a brief the sitting can open.
-   if [ "$event" = "SessionStart" ] || [ "$event" = "session_start" ]; then
-     printf '%s\n' "$ctx" > "${XDG_RUNTIME_DIR:-/tmp}/ljos-grok-brief.txt"
-     exit 0
-   fi
-
-   python3 -c 'import json,sys
-   ctx=sys.argv[1]
-   event=sys.argv[2]
-   print(json.dumps({
-     "hookSpecificOutput": {
-       "hookEventName": event if event in ("PreToolUse","UserPromptSubmit","Stop") else "PreToolUse",
-       "additionalContext": ctx,
-     }
-   }))' "$ctx" "$event"
-   exit 0
-
-Source of truth: `scripts/grok/ljos-inject.sh <../../scripts/grok/ljos-inject.sh>`__.
+The script searches on a prompt. On ``PreToolUse`` it exits 0 without
+talking to the pack. Source of truth:
+`scripts/grok/ljos-inject.sh <../../scripts/grok/ljos-inject.sh>`__.
 
 Smoke
 =====
 
 .. code:: console
 
-   $ echo '{"hook_event_name":"PreToolUse","toolName":"run_terminal_command","toolInput":{"command":"pytest"}}' \
+   $ echo '{"hook_event_name":"PreToolUse","toolName":"run_terminal_command"}' \
        | ~/.grok/hooks/ljos-inject.sh
 
-Stdout must be JSON with ``hookSpecificOutput.additionalContext`` and
-pack lines. Empty stdout means the pack had nothing for that cue.
+Stdout must be empty. A tool call is not a sitting.
 
 harnesses.toml
 ==============
@@ -179,7 +120,7 @@ harnesses.toml
    marker = "[mcp_servers.ljos]"
    skills = "~/.config/ljos/skills"
    hooks = "~/.grok/hooks/ljos.json"
-   hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse"]
+   hook_events = ["SessionStart", "UserPromptSubmit"]
 
 Keep the ``UserPromptSubmit`` file for runners that honor that event's
 ``additionalContext``. Grok is not one of them.

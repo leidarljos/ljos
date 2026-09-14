@@ -77,9 +77,9 @@ A runner's table in ``harnesses.toml`` may name ``hooks``, a JSON settings
 file of the shape ``{"hooks": {"<Event>": [{"matcher": "...", "hooks":
 [{"type": "command", "command": "..."}]}]}}``. ``onboard`` merges
 ``ljos hook`` into it on the prompt and session-end events (matcher ``*``) by
-default, or on the events the table's ``hook_events`` lists (``PreToolUse``
-takes the matcher ``Bash``), once each, and drops it from events no longer
-listed. On ``SessionEnd`` the hook fires the memories it injected during the
+default, or on the events the table's ``hook_events`` lists. ``PreToolUse``
+takes the matcher ``Bash`` and applies rules only; it does not search
+the pack. Onboard drops the hook from events no longer listed. On ``SessionEnd`` the hook fires the memories it injected during the
 session together and clears the session's record. The hook reads the runner's JSON on stdin
 (``hook_event_name``, ``tool_input.command``, ``prompt``) and answers
 ``{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}``,

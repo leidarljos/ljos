@@ -70,21 +70,19 @@ Add ``hooks`` to the runner's table and onboard again:
    ok  skill   /home/you/.runner/skills/ljos/SKILL.md is current
 
 From then on, before each prompt, the runner pipes it to ``ljos hook`` and
-the memories it activates come back as context, preferences first. Add
-``hook_events = ["UserPromptSubmit", "PreToolUse"]`` to the table to inject
-before each shell command as well; a panel of this seat's personas settled
-on the prompt alone, since a turn issues many commands and one prompt.
+the memories it activates come back as context, preferences first. Do not
+add ``PreToolUse`` as a search event. A turn issues many tool calls and
+one prompt. On a tool call the hook only applies pack rules.
 
 **Grok Build** does not put ``UserPromptSubmit`` ``additionalContext`` into
 the model. ``ljos onboard --harness grok`` still writes
-``~/.config/ljos/hooks.json``, and Grok does not load that path. The pack
-reaches a Grok session only if you also install a Grok-native hook under
-``~/.grok/hooks/`` that remaps the event through ``ljos hook`` and emits
-``PreToolUse`` ``additionalContext`` (Grok does deliver that, after the
-tool). The remap used on this seat is ``~/.grok/hooks/ljos-inject.sh``
-plus ``~/.grok/hooks/ljos.json``. Reload with ``/hooks`` then ``r``. A sitting
-is still a verb you call; the hook is how the pack arrives without being
-asked. The page :doc:`Grok Build <grok-build>` is the install.
+``~/.config/ljos/hooks.json``, and Grok does not load that path. Install
+``scripts/grok/ljos-inject.sh`` and ``scripts/grok/ljos.json`` under
+``~/.grok/hooks/``, then ``/hooks`` then ``r``. The inject script searches
+on a prompt. On ``PreToolUse`` it exits without talking to the pack.
+``ljos hook`` on Bash is rules only. Remapping every tool call into a
+pack search is what timed Grok out at 20s. The page
+:doc:`Grok Build <grok-build>` is the install.
 
 A
 policy daemon does the same with the argv:
