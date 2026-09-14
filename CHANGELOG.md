@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.5 (2026-09-14)
+
 - Grok `PreToolUse` no longer remaps to a pack search. The inject
   script exits on a tool call. `ljos hook` on Bash only decides
   rules. The due nudge no longer walks `consolidate` (that sitting
