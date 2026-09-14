@@ -104,7 +104,7 @@ hooks = "~/.runner/settings.json"
 name = "runner-with-a-config-file"
 config = "~/.other/config.toml"
 marker = "[mcp_servers.ljos]"
-snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv = { LJOS_SEAT = \"{name}\" }\n"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv = { LJOS_SEAT = \"{name}\", GROK_SESSION_ID = \"${GROK_SESSION_ID}\" }\n"
 skills = "~/.other/skills"
 "#;
 
