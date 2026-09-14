@@ -209,18 +209,64 @@ fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Names that many harnesses pass for every conversation on a host.
+/// Occupancy is one live claim per assignee, so these would make two
+/// grok sessions unable to hold two tickets.
+fn shared_actor_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "grok" | "seat" | "you" | "agent" | "grok-build"
+    )
+}
+
+/// The conversation this process belongs to, when the runner stamped one.
+fn session_actor() -> Option<String> {
+    for key in ["GROK_SESSION_ID", "HARNESS_SESSION_ID", "TERM_SESSION_ID"] {
+        if let Ok(raw) = std::env::var(key) {
+            let t = raw.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let prefix: String = t.chars().take(8).collect();
+            return Some(format!("sess-{prefix}"));
+        }
+    }
+    None
+}
+
 /// The name this seat claims and votes under when none is given:
 /// `LJOS_SEAT` (a runner's registration sets it to the runner's name, so
-/// two runners on one host hold separate claims), else `VISSUE_AGENT`,
-/// else `seat`.
+/// two runners on one host hold separate claims), else the session id
+/// the runner stamped, else `VISSUE_AGENT`, else `seat`.
 #[must_use]
 pub fn seat_name() -> String {
-    ["LJOS_SEAT", "VISSUE_AGENT"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "seat".to_string())
+    if let Ok(v) = std::env::var("LJOS_SEAT") {
+        let t = v.trim();
+        if !t.is_empty() && !shared_actor_name(t) {
+            return t.to_string();
+        }
+    }
+    if let Some(s) = session_actor() {
+        return s;
+    }
+    if let Ok(v) = std::env::var("VISSUE_AGENT") {
+        let t = v.trim();
+        if !t.is_empty() && !shared_actor_name(t) {
+            return t.to_string();
+        }
+    }
+    "seat".to_string()
+}
+
+/// Resolve an `--assignee` / MCP field. A shared name (`grok`, `seat`,
+/// `you`) is treated as omitted so two conversations do not share one
+/// occupancy slot.
+#[must_use]
+pub fn resolve_assignee(passed: Option<&str>) -> String {
+    match passed.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(n) if !shared_actor_name(n) => n.to_string(),
+        _ => seat_name(),
+    }
 }
 
 /// Whether a runner with a `registered` command already has the server.
@@ -3933,6 +3979,22 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shared_name_does_not_occupy_the_whole_host() {
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        }
+        assert_eq!(resolve_assignee(Some("grok")), "sess-01a09b25");
+        assert_eq!(resolve_assignee(Some("seat")), "sess-01a09b25");
+        assert_eq!(resolve_assignee(None), "sess-01a09b25");
+        assert_eq!(resolve_assignee(Some("alice")), "alice");
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+        }
+    }
+
     #[test]
     fn the_record_weighs_a_voter_by_what_it_got_right() {
         let ballots = vec![
