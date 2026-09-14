@@ -9,6 +9,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   best-connected cluster rather than what the cue is about; `doctor`
   shows the encoder row, since a down encoder is what makes seeds weak.
 
+## 0.12.4 (2026-09-14)
+
+- Grok onboard writes `GROK_SESSION_ID` into the MCP env so the
+  occupancy split in 0.12.3 is live for that runner.
+
 ## 0.12.3 (2026-09-14)
 
 - Occupancy uses the runner session when the assignee is a shared
