@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.12 (2026-09-14)
+
+- `packset-client` 0.9.2, so the seat tracks the writer that prints
+  `packset-mcp --version`.
+
 ## 0.12.11 (2026-09-14)
 
 - Doctor times out MCP `--version` so a silent stdio server cannot
