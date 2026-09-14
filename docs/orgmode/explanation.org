@@ -54,6 +54,9 @@ recency half-life at 0.270 (the packset site carries the table).
 
 * Islands
 
+#+ATTR_HTML: :alt Landfold of the pack: this task's island versus other work :width 100%
+[[file:_static/island.svg]]
+
 A task does not touch everything a seat knows. The pack links each claim to
 the claims it shares names with, pruned so a neighbourhood spreads over the
 directions a claim is about. Those links form natural clusters, and

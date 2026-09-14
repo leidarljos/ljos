@@ -53,6 +53,8 @@ recency half-life at 0.270 (the packset site carries the table).
 Islands
 =======
 
+|image3|
+
 A task does not touch everything a seat knows. The pack links each claim to
 the claims it shares names with, pruned so a neighbourhood spreads over the
 directions a claim is about. Those links form natural clusters, and
@@ -212,7 +214,7 @@ takes.
 Handover that can be checked
 ============================
 
-|image3|
+|image4|
 
 A handover is a BagIt bag with the tracker slice, the pack's atoms, and
 the deeds both cite, each deed with its inclusion receipt against the log
@@ -243,5 +245,7 @@ tool descriptions open with when to call each one for the same reason.
    :width: 100.0%
 .. |image2| image:: _static/memory.svg
    :width: 100.0%
-.. |image3| image:: _static/handover.svg
+.. |image3| image:: _static/island.svg
+   :width: 100.0%
+.. |image4| image:: _static/handover.svg
    :width: 100.0%
