@@ -160,7 +160,7 @@ Start a sitting, and end one
    $ ljos sitting proj-1a2b
    == doctor
    ok  vissue  ...
-   ok  seat    you (from LJOS_SEAT)
+   ok  seat    alice (from LJOS_SEAT)
    == cards
    == due
    unreviewed  conclusion  3f9c... The lexical default is BM25+.
