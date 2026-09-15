@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/ljos-cli", "crates/ljos-mcp"]
 
 [workspace.package]
-version = "0.12.13"
+version = "0.12.14"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"

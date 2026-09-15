@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.14 (2026-09-15)
+
+- The README no longer says the hook never blocks. A TCB deny on
+  PreToolUse still blocks.
+
 ## 0.12.13 (2026-09-14)
 
 - `ljos remember` and `prefer` print one line (id, kind, due, text).
