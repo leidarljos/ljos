@@ -1,8 +1,8 @@
 # ljos
 
-One seat over five habitats and argv law. It does not own them.
+One seat over five habitats and argv law. Each habitat keeps its own crate.
 
-Citation is not a merge. Completing a claimdag node does not close a ticket. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
+Citing a deed names it; the bytes stay in deedar. The ticket stays open until the tracker closes it. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
 ljos sitting vissue-xxxx --assignee you        # doctor, cards, due, island, recall, timeline, claim

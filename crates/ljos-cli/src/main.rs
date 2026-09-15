@@ -95,7 +95,7 @@ enum Cmd {
     Evidence { accession: String },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
-    /// Cite a deed on an issue, or list what it cites. Citation is not a merge.
+    /// Cite a deed on an issue, or list what it cites. Citing a deed names it; the bytes stay in deedar.
     Deed {
         issue: String,
         /// The accession to cite, from `deedar create`.

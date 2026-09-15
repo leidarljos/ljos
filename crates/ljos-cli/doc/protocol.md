@@ -52,7 +52,7 @@ Every piece of work has an issue before it has a claim.
 - Every artefact the work produces is a deed, then a citation:
   `deedar create file --name NAME --path PATH --agent NAME` prints an
   accession; `ljos deed ISSUE --add ACCESSION` cites it on the issue.
-  Citation is not a merge, and the product is never pasted into the ticket.
+  Citing a deed names it; the bytes stay in deedar.
 - Every lesson that will still be true next sitting is one `ljos remember`
   of two short sentences at most. A standing choice between two ways is one
   `ljos prefer`. Never a transcript, never a summary of the session. A

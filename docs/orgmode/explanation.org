@@ -18,7 +18,7 @@ it is on =PATH= or =POLICYD_BIN=.
 
 * The contracts
 
-- Citation is not a merge. Citing a deed names it; the bytes stay in the
+- Citing a deed names it; the bytes stay in deedar. Citing a deed names it; the bytes stay in the
   deed store.
 - The ticket stays open until vissue closes it. The claim graph is
   session state; the tracker decides when work is done.

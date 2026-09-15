@@ -615,7 +615,7 @@ impl LjosServer {
     // ---- the tracker ---------------------------------------------------------
 
     #[tool(
-        description = "Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. Omit the accession to list what the issue cites. A citation names the accession and never pastes the product; citation is not a merge.",
+        description = "Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. Omit the accession to list what the issue cites. A citation names the accession; the bytes stay in deedar.",
         annotations(
             title = "Cite a deed",
             read_only_hint = false,
