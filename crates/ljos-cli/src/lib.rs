@@ -2505,6 +2505,21 @@ pub fn doctor() -> Vec<Habitat> {
     out
 }
 
+/// A binary on PATH answers even when crates.io is ahead. Sitting refuses
+/// a missing required habitat, not a stale one.
+fn bin_health(path: &str, have: Option<&str>, latest: Option<&str>) -> (String, bool) {
+    let ver = have.unwrap_or("?");
+    match latest {
+        Some(cr)
+            if have.is_some_and(|v| cmp_semver(v, cr) == Some(std::cmp::Ordering::Less)) =>
+        {
+            (format!("{path}  {ver}  behind crates.io {cr}"), true)
+        }
+        Some(cr) => (format!("{path}  {ver}  crates.io {cr}"), true),
+        None => (format!("{path}  {ver}"), true),
+    }
+}
+
 /// The seat's own rows: binaries, pack, host key, deed store, tracker,
 /// claim graph. What a sitting checks; the runner rows are onboarding.
 pub fn doctor_seat() -> Vec<Habitat> {
@@ -2520,16 +2535,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ),
             (None, _, None) => ("not on PATH".into(), false),
             (Some(path), have, Some(cr)) => {
-                let behind = have.is_some_and(|v| cmp_semver(v, cr) == Some(std::cmp::Ordering::Less));
-                let ver = have.unwrap_or("?");
-                if behind {
-                    (
-                        format!("{}  {ver}  behind crates.io {cr}", path.display()),
-                        false,
-                    )
-                } else {
-                    (format!("{}  {ver}  crates.io {cr}", path.display()), true)
-                }
+                bin_health(&path.display().to_string(), have, Some(cr))
             }
             (Some(path), have, None) => {
                 let ver = have.unwrap_or("?");
@@ -5230,6 +5236,23 @@ mod tests {
         assert_eq!(ids, ["never", "blank", "late", "later"]);
         assert!(now_utc().ends_with(".000Z"));
         assert!(now_utc().as_str() > "2026-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn a_behind_required_bin_still_answers() {
+        let (state, ok) = super::bin_health(
+            "/bin/packsetd",
+            Some("0.9.2"),
+            Some("0.9.5"),
+        );
+        assert!(ok, "{state}");
+        assert!(state.contains("behind crates.io 0.9.5"), "{state}");
+        let rows = vec![Habitat {
+            name: "packsetd",
+            state,
+            ok,
+        }];
+        assert!(healthy(&rows), "sitting must not refuse a stale but answering bin");
     }
 
     #[test]

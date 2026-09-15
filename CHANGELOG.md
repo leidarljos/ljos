@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.12.15 (2026-09-15)
+
+- Sitting no longer treats a binary behind crates.io as a habitat
+  that does not answer. Doctor still names the gap.
+
 ## 0.12.14 (2026-09-15)
 
 - The README no longer says the hook never blocks. A TCB deny on
