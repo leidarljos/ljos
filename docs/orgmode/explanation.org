@@ -18,8 +18,7 @@ it is on =PATH= or =POLICYD_BIN=.
 
 * The contracts
 
-- Citing a deed names it; the bytes stay in deedar. Citing a deed names it; the bytes stay in the
-  deed store.
+- Citing a deed names it; the bytes stay in deedar.
 - The ticket stays open until vissue closes it. The claim graph is
   session state; the tracker decides when work is done.
 - Cards are read-only. The seat writes to the pack; a person writes the
