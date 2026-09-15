@@ -1,4 +1,4 @@
-//! One seat over the habitats. It does not own them.
+//! One seat over the habitats. Each habitat keeps its own crate.
 //!
 //! Cards are read-only. Remember/Prefer POST `/v1/atoms` and never extract
 //! on write. Consensus is a different crate, then the tracker verb. Policyd

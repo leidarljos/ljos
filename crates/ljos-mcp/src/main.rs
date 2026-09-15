@@ -1,7 +1,7 @@
 //! `ljos-mcp`: the one seat over the Model Context Protocol.
 //!
-//! Agents load this instead of the four habitat servers. It does not own the
-//! habitats: a write goes to the pack over HTTP the way the command line's
+//! Agents load this instead of the four habitat servers. Each habitat
+//! keeps its own crate: a write goes to the pack over HTTP the way the command line's
 //! does, and everything else execs the habitat's own binary and hands back
 //! what it said. What this adds over execing `ljos` per call is the protocol
 //! doing its job: a tool says whether it writes, an answer is typed, a habitat

@@ -1,4 +1,4 @@
-//! `ljos`: one seat over the habitats. It does not own them.
+//! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
