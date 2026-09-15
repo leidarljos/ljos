@@ -6,7 +6,7 @@ The pack only helps a Grok session if it reaches the model.
 Grok discards =UserPromptSubmit= stdout. It delivers =PostToolUse=
 =additionalContext= after the first tool. =ljos hook= searches on the
 prompt, holds the text, and emits it once on =PostToolUse=.
-=PreToolUse= is rules only. There is no =sync.sh=.
+=PreToolUse= is TCB and pack rules; a deny blocks. There is no =sync.sh=.
 
 * Install
 
@@ -26,7 +26,7 @@ watcher to respawn the server.
 |-------+------------------------+----------------------------|
 | =UserPromptSubmit= | searches, holds the text | discarded |
 | =PostToolUse= | emits the held text once | delivered after the tool |
-| =PreToolUse= | rules only | a turn has many tool calls |
+| =PreToolUse= | TCB and pack rules; a deny blocks | a turn has many tool calls |
 | =SessionEnd= | fires injected memories | ignored |
 
 The frozen file is [[file:../../scripts/grok/ljos.json][scripts/grok/ljos.json]]. It only names =ljos hook=.
@@ -35,10 +35,13 @@ The frozen file is [[file:../../scripts/grok/ljos.json][scripts/grok/ljos.json]]
 
 #+begin_src console
 $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"echo"}}' | ljos hook
+$ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
 $ echo '{"hook_event_name":"PostToolUse","session_id":"s"}' | ljos hook
 #+end_src
 
-A tool call prints nothing unless a prompt has already held pack text.
+An allow prints nothing unless a prompt has already held pack text.
+A TCB deny still blocks.
 
 * harnesses.toml
 
