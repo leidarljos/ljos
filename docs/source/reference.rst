@@ -1,9 +1,9 @@
 Command line
 ============
 
-=============================================================================== ========================= =========================================================================================================================================================================================================================
+=============================================================================== ========================= ================================================================================================================================================================================================================================================================================================
 Verb                                                                            Habitat                   Does
-=============================================================================== ========================= =========================================================================================================================================================================================================================
+=============================================================================== ========================= ================================================================================================================================================================================================================================================================================================
 ``sitting ISSUE [--assignee NAME] [--cards DIR]``                               all                       open a sitting: doctor, cards, due, island, recall, timeline, claim; stops at the first store down; the name defaults to ``LJOS_SEAT``
 ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B]``     all                       close a sitting: remember, fire the island, complete, learn
 ``calibrate -p PROJECT [--rounds N]``                                           consensus, pack           trust rows from the project's voting history (Dawid-Skene accuracy)
@@ -34,14 +34,14 @@ Verb                                                                            
 ``release ID [--assignee NAME]``                                                claim graph               hand the session node back unfinished: ready, generation moved
 ``complete ID [--status done\vert failed\vert cancelled]``                      claim graph               finish the session node
 ``cards [--dir DIR]``                                                           cards                     print ``USER.md`` and ``MEMORY.md``
-``policy ARGV...``                                                              policy, pack              the line as it would run, the verdict of a matching rule, then what the pack knows that bears on it
-``hook [--limit N]``                                                            pack                      the memory hook: hook JSON or argv on stdin; the hits scoring at least 0.6 of the best that two scorers named, preferences first then lessons oldest first, each with its age, five at most, each once per runner session
+``policy ARGV...``                                                              policy, pack              the line as it would run, the TCB verdict if ``ljos-policyd`` answered, then a matching pack rule, then what the pack knows that bears on it
+``hook [--limit N]``                                                            policy, pack              hook JSON or argv on stdin; on ``PreToolUse`` the TCB and pack rules, a deny is ``permissionDecision``; on a prompt the hits scoring at least 0.6 of the best that two scorers named, preferences first then lessons oldest first, each with its age, five at most, each once per runner session
 ``handover --out DIR [--project P]... [--issue I]... [--to user@host:path]``    all                       pack, seal, sign; ``--to`` copies the bag to another seat over ssh
 ``receive DIR [--since BRIDGE] [--import]``                                     all                       check, and import the atoms
 ``doctor``                                                                      all                       which habitats answer, and whether the harnesses found are onboarded
 ``protocol``                                                                    none                      print the sitting protocol
 ``onboard [--harness NAME\vert json] [--dry-run] [--example]``                  runner                    register ``ljos-mcp`` with a runner named in ``~/.config/ljos/harnesses.toml`` and install the protocol as its skill; ``json`` prints the entry
-=============================================================================== ========================= =========================================================================================================================================================================================================================
+=============================================================================== ========================= ================================================================================================================================================================================================================================================================================================
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.
@@ -65,7 +65,7 @@ Environment
 Variable                                    Read by
 =========================================== =============================================================================================================
 ``PACKSET_URL``                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port); ``off`` means no pack
-``PACKSET_WORKSPACE``                       the pack workspace; unset, ``seat``, whatever directory the seat stands in
+``PACKSET_WORKSPACE``                       the pack workspace; unset, ``seat``
 ``VISSUE_ROOT``, ``VISSUE_AGENT``           the tracker
 ``DEEDAR_URL``, ``DEEDAR_HOST_SIGNING_KEY`` the deed store; the key signs handovers, and ``~/.config/deedar/host.key`` is used when the variable is unset
 ``CLAIMDAG_DIR``                            the claim graph
@@ -77,15 +77,15 @@ A runner's table in ``harnesses.toml`` may name ``hooks``, a JSON settings
 file of the shape ``{"hooks": {"<Event>": [{"matcher": "...", "hooks":
 [{"type": "command", "command": "..."}]}]}}``. ``onboard`` merges
 ``ljos hook`` into it on the prompt and session-end events (matcher ``*``) by
-default, or on the events the table's ``hook_events`` lists. ``PreToolUse``
-takes the matcher ``Bash`` and applies rules only; it does not search
-the pack. Onboard drops the hook from events no longer listed. On ``SessionEnd`` the hook fires the memories it injected during the
+default, or on the events the table's ``hook_events`` lists (``PreToolUse``
+takes the matcher ``Bash``), once each, and drops it from events no longer
+listed. On ``SessionEnd`` the hook fires the memories it injected during the
 session together and clears the session's record. The hook reads the runner's JSON on stdin
 (``hook_event_name``, ``tool_input.command``, ``prompt``) and answers
 ``{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}``,
-or nothing when the pack holds nothing on the cue. Plain text on stdin is
-read as an argv line and answered in plain lines, which is the shape a
-policy daemon takes.
+or nothing when the pack holds nothing on the cue. On ``PreToolUse`` a TCB
+or pack deny is ``permissionDecision`` ``deny`` and blocks. Plain text on
+stdin is an argv line and answered in plain lines.
 
 The learning rules
 ==================

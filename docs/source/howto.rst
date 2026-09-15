@@ -70,13 +70,20 @@ Add ``hooks`` to the runner's table and onboard again:
    ok  skill   /home/you/.runner/skills/ljos/SKILL.md is current
 
 From then on, before each prompt, the runner pipes it to ``ljos hook`` and
-the memories it activates come back as context, preferences first. Do not
-add ``PreToolUse`` as a search event. A turn issues many tool calls and
-one prompt. On a tool call the hook only applies pack rules.
+the memories it activates come back as context, preferences first.
+Do not add ``PreToolUse`` as a search event. A turn issues many tool
+calls and one prompt. On a tool call the hook applies the TCB
+(``ljos-policyd``) and then pack rules. A deny blocks.
+
+.. code:: console
+
+   $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
 
 **Grok Build.** ``ljos onboard --harness grok`` writes
 ``~/.grok/hooks/ljos.json``. The hook searches on the prompt, holds the
-text, and emits it on ``PostToolUse``. :doc:`Grok Build <grok-build>`.
+text, and emits it on ``PostToolUse``. The page :doc:`Grok Build <grok-build>`
+is the install.
 
 A
 policy daemon does the same with the argv:
