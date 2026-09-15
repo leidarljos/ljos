@@ -20,7 +20,7 @@ it is on =PATH= or =POLICYD_BIN=.
 
 - Citation is not a merge. Citing a deed names it; the bytes stay in the
   deed store.
-- Completing a session node does not close a ticket. The claim graph is
+- The ticket stays open until vissue closes it. The claim graph is
   session state; the tracker decides when work is done.
 - Cards are read-only. The seat writes to the pack; a person writes the
   cards.
