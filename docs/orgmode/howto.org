@@ -73,7 +73,13 @@ ok	skill	/home/you/.runner/skills/ljos/SKILL.md is current
 From then on, before each prompt, the runner pipes it to =ljos hook= and
 the memories it activates come back as context, preferences first.
 Do not add =PreToolUse= as a search event. A turn issues many tool
-calls and one prompt. On a tool call the hook only applies pack rules.
+calls and one prompt. On a tool call the hook applies the TCB
+(=ljos-policyd=) and then pack rules. A deny blocks.
+
+#+begin_src console
+$ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
+#+end_src
 
 **Grok Build.** =ljos onboard --harness grok= writes
 =~/.grok/hooks/ljos.json=. The hook searches on the prompt, holds the
