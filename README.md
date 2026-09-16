@@ -2,6 +2,12 @@
 
 One seat over five habitats and argv law. Each habitat keeps its own crate.
 
+```
+cargo binstall ljos
+```
+
+That installs `ljos` and `ljos-mcp`.
+
 Citing a deed names it; the bytes stay in deedar. The ticket stays open until the tracker closes it. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```

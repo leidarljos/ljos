@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `cargo install ljos` installs `ljos` and `ljos-mcp`.
+
 ## 0.12.15 (2026-09-15)
 
 - Sitting no longer treats a binary behind crates.io as a habitat
