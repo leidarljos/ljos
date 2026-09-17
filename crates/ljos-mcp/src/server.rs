@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use ljos_cli::{
     age_of, ballots_from_json, brief, calibrate, cards, claim, conflicts, consensus_steps_for,
-    doctor, due, finish, format_consolidation, graded, handover, identity_or_seat, island_entities,
+    complete, doctor, due, finish, format_consolidation, graded, handover, identity_or_seat,
+    island_entities,
     learn_and_write, node_for, now_utc, on_path, packset_consolidate, packset_forget,
     packset_island, packset_search_as_of, packset_write_as, personas_from_pack, policy_line,
     receive, release, resolve_assignee, rows_about, run_captured, sitting, timeline, topic_words,
@@ -194,6 +195,11 @@ pub struct FinishArgs {
     /// `done` (the default), `failed`, or `cancelled`. To stop without
     /// finishing, use `ljos_release` instead.
     pub status: Option<String>,
+    /// Generation from the sitting's claim. Required. A stale gen is refused.
+    pub gen: u64,
+    /// The name that holds it. Absent: the runner's seat name.
+    #[serde(default)]
+    pub assignee: Option<String>,
 }
 
 /// An argv to check.
@@ -293,6 +299,11 @@ pub struct FinishSittingArgs {
     /// The option that turned out right, when the ballots are in and the
     /// world has said. Omit when nobody knows yet.
     pub outcome: Option<String>,
+    /// Generation from the sitting's claim. Required. A stale gen is refused.
+    pub gen: u64,
+    /// The name that holds it. Absent: the runner's seat name.
+    #[serde(default)]
+    pub assignee: Option<String>,
 }
 
 /// A project whose history calibrates the voters.
@@ -752,6 +763,8 @@ impl LjosServer {
             args.lesson.as_deref(),
             args.outcome.as_deref(),
             LEARN_BETA,
+            &resolve_assignee(args.assignee.as_deref()),
+            args.gen,
         )
         .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
@@ -816,21 +829,14 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<FinishArgs>,
     ) -> Result<Json<Said>, McpError> {
-        match &args.status {
-            Some(s) => habitat(
-                "claimdag",
-                &[
-                    "complete",
-                    &node_for(&args.node).map_err(refused)?,
-                    "--status",
-                    s,
-                ],
-            ),
-            None => habitat(
-                "claimdag",
-                &["complete", &node_for(&args.node).map_err(refused)?],
-            ),
-        }
+        let text = complete(
+            &args.node,
+            args.status.as_deref(),
+            &resolve_assignee(args.assignee.as_deref()),
+            args.gen,
+        )
+        .map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
     }
 
     // ---- cards, policy, consensus -------------------------------------------
@@ -1226,19 +1232,16 @@ impl LjosServer {
         Ok(asked(format!(
             "Begin a sitting on {work}.\n\
              \n\
-             Four habitats answer four different questions, and the order matters:\n\
+             Five habitats answer five different questions, and the order matters:\n\
              \n\
              1. `ljos_cards`. What the human froze. Read them first and leave them\n\
                 as they are; if they are empty, they are empty.\n\
-             2. `ljos_search` for what the seat already knows about this work, then\n\
-                `ljos_island` with the task in your own words: the cluster of\n\
-                memories the task touches, not only the hits. An empty list means\n\
-                the pack holds nothing; a failure means the writer is down.\n\
-             3. `ljos_recall` on the node. What it stands on, what its inputs\n\
-                produced, and what it has cited so far.\n\
-             4. `ljos_due` for the claims whose review is due; read each and\n\
-                `ljos_graded` it, recalled or lapsed, so the clock moves.\n\
-             5. `ljos_claim` a session node for it. One live claim per assignee.\n\
+             2. `ljos_due` for the claims whose review is due; a sitting prints a\n\
+                short prefix. Read each shown row and `ljos_graded` it.\n\
+             3. `ljos_search` then `ljos_island` with the task in your own words.\n\
+             4. `ljos_recall` on the node. What it stands on and what it cited.\n\
+             5. `ljos_timeline` the last twelve dated events across the stores.\n\
+             6. `ljos_claim` a session node for it. One live claim per assignee.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
              with `ljos_remember` in two short sentences. When the work shows a\n\
@@ -1347,7 +1350,7 @@ impl ServerHandler for LjosServer {
             "One seat over five habitats: tracker, pack, deed store, claim graph, \
              consensus. Read ljos://protocol first; it says which store answers \
              which question and the order of tools in a sitting. ljos_sitting \
-             runs the whole opening (doctor, cards, due, island, recall, claim) \
+             runs the whole opening (doctor, cards, due, island, recall, timeline, claim) \
              and ljos_finish the whole closing (remember, fire, complete, learn); \
              prefer them. By hand: ljos_doctor, ljos_cards, ljos_due then \
              ljos_graded, ljos_search then ljos_island, ljos_recall, ljos_claim; \

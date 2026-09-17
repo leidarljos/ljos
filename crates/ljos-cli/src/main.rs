@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, brief, calibrate, cards, claim, conflicts, consensus_steps_for, doctor,
-    due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
+    complete, due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
     format_island, format_steps, graded, handover, healthy, hook_call, hook_context,
     hook_output_ruled, island_entities, join, learn_anchors, learn_and_write, learn_shared,
     node_for, on_path, onboard, pack, packset_consolidate, packset_forget, packset_hubs,
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
-    tcb_check,
+    policyd_required, tcb_check,
     format_write_ack, hold_hook_context, run_captured, resolve_assignee, session_end, sitting,
     take_hook_context,
     timeline, topic_words, trust_from_pack,
@@ -173,6 +173,12 @@ enum Cmd {
         /// done (default), failed, or cancelled.
         #[arg(long)]
         status: Option<String>,
+        /// Generation from the sitting's claim. Required. A stale gen is refused.
+        #[arg(long)]
+        gen: u64,
+        /// The name that holds it. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        #[arg(long)]
+        assignee: Option<String>,
     },
     /// Frozen working core. Read-only. Never extract-on-write.
     Cards {
@@ -265,7 +271,7 @@ enum Cmd {
     },
     /// Atoms whose review is due, then one line on the state of the clock.
     Due,
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, recall, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, recall, timeline, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
@@ -292,6 +298,12 @@ enum Cmd {
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
+        /// Generation from the sitting's claim. Required. A stale gen is refused.
+        #[arg(long)]
+        gen: u64,
+        /// The name that holds it. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        #[arg(long)]
+        assignee: Option<String>,
     },
     /// Write trust rows from a project's voting history: Dawid-Skene accuracy per voter, no truth labels.
     Calibrate {
@@ -422,10 +434,20 @@ fn main() -> Result<()> {
         Cmd::Release { node, assignee } => {
             print!("{}", release(&node, &resolve_assignee(assignee.as_deref()))?)
         }
-        Cmd::Complete { node, status } => match status {
-            Some(s) => run("claimdag", &["complete", &node_for(&node)?, "--status", &s])?,
-            None => run("claimdag", &["complete", &node_for(&node)?])?,
-        },
+        Cmd::Complete {
+            node,
+            status,
+            gen,
+            assignee,
+        } => print!(
+            "{}",
+            complete(
+                &node,
+                status.as_deref(),
+                &resolve_assignee(assignee.as_deref()),
+                gen
+            )?
+        ),
         Cmd::Cards { dir } => print!("{}", cards(&dir)?),
         Cmd::Predict {
             issue,
@@ -474,13 +496,19 @@ fn main() -> Result<()> {
             };
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             let tcb_rule = if call.event == "PreToolUse" || call.event == "argv" {
-                tcb_check(&argv).and_then(|t| {
-                    t.starts_with("deny").then(|| Rule {
+                match tcb_check(&argv) {
+                    Some(t) if t.starts_with("deny") => Some(Rule {
                         pattern: "ljos-policyd".into(),
                         verdict: "deny".into(),
                         reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
-                    })
-                })
+                    }),
+                    None if policyd_required() => Some(Rule {
+                        pattern: "ljos-policyd".into(),
+                        verdict: "deny".into(),
+                        reason: "TCB required".to_string(),
+                    }),
+                    _ => None,
+                }
             } else {
                 None
             };
@@ -611,9 +639,19 @@ fn main() -> Result<()> {
             lesson,
             outcome,
             beta,
+            gen,
+            assignee,
         } => print!(
             "{}",
-            finish(&issue, &status, lesson.as_deref(), outcome.as_deref(), beta)?
+            finish(
+                &issue,
+                &status,
+                lesson.as_deref(),
+                outcome.as_deref(),
+                beta,
+                &resolve_assignee(assignee.as_deref()),
+                gen
+            )?
         ),
         Cmd::Calibrate { project, rounds } => {
             let rows = calibrate(&project, rounds)?;

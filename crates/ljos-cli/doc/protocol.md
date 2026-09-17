@@ -7,6 +7,7 @@ name with the prefix `ljos_`.
 
 | question | store | verbs |
 |---|---|---|
+| what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
 | what is the work, what blocks it, who agrees | tracker (vissue) | `recall`, `vote`, `consensus`, `deed`; `vissue create`, `vissue note`, `vissue update` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |

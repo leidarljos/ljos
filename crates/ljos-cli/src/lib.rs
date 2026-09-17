@@ -2821,6 +2821,9 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
         .stdout
         .trim_end()
         .to_string();
+        if !said.starts_with("signed by ") {
+            bail!("receive: satchel is not signed by an accepted key: {said}");
+        }
         if let Some(hex) = said
             .strip_prefix("signed by ")
             .and_then(|rest| rest.split(|c: char| !c.is_ascii_hexdigit()).next())
@@ -2829,6 +2832,8 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
             sender = format!("from:{}", &hex[..12]);
         }
         lines.push(said);
+    } else if import {
+        bail!("receive: unsigned satchel; will not import");
     } else {
         lines.push("unsigned".into());
     }
@@ -2945,6 +2950,28 @@ pub fn review_summary(atoms: &[Value], now: &str) -> String {
         None if due == 0 => "0 due; nothing scheduled: this seat has remembered nothing yet".into(),
         None => format!("{due} due; nothing else scheduled"),
     }
+}
+
+/// How many due rows a sitting prints before the summary line.
+pub const SITTING_DUE: usize = 8;
+
+/// How many dated events a sitting's timeline prints. Protocol: last twelve.
+pub const SITTING_TIMELINE: usize = 12;
+
+/// The review clock as a sitting prints it: a short prefix, then the summary.
+pub fn sitting_due_report() -> Result<String> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("due: GET /v1/atoms failed")?;
+    let now = now_utc();
+    let due = due_of(&atoms, &now);
+    let shown = due.len().min(SITTING_DUE);
+    Ok(format!(
+        "{}{}",
+        format_due(&due[..shown]),
+        review_summary(&atoms, &now)
+    ))
 }
 
 /// The review clock as `ljos due` prints it: the due atoms, then the summary.
@@ -3387,8 +3414,8 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             "already held by {assignee}; the sitting resumes\n{renewed}"
                         ))
                     }
-                    Some(holder) => bail!(
-                        "claim: {node} is held by another seat (actor {holder}); that seat frees it with `ljos release {node}` or `ljos complete {node}`"
+                    Some(_) => bail!(
+                        "claim: {node} is held by another seat; that seat frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting"
                     ),
                     None => Err(e),
                 };
@@ -3556,6 +3583,20 @@ fn tracker_events(v: &Value) -> Vec<Event> {
             format!("claimed by {by}"),
         );
     }
+    if let Some(d) = v["properties"]["DEADLINE"].as_str() {
+        push(
+            v["properties"]["DEADLINE"].as_str(),
+            "tracker",
+            format!("DEADLINE {d}"),
+        );
+    }
+    if let Some(s) = v["properties"]["SCHEDULED"].as_str() {
+        push(
+            v["properties"]["SCHEDULED"].as_str(),
+            "tracker",
+            format!("SCHEDULED {s}"),
+        );
+    }
     // The logbook is newest first; the timeline reads oldest first.
     for e in v["logbook"].as_array().into_iter().flatten().rev() {
         let stamp = e["timestamp"].as_str();
@@ -3602,7 +3643,10 @@ fn deed_event(accession: &str, evidence: &str) -> Option<Event> {
 /// (`2026-09-12T21:54:00Z`), an org stamp (`[2026-09-12 Sat 21:54]`), or a
 /// date alone. Day, then `HH:MM` when the stamp has one.
 fn stamp_key(stamp: Option<&str>) -> Option<(i64, String)> {
-    let s = stamp?.trim().trim_start_matches('[').trim_end_matches(']');
+    let s = stamp?
+        .trim()
+        .trim_start_matches(['[', '<'])
+        .trim_end_matches([']', '>']);
     let days = days_of_stamp(Some(s))?;
     let rest = &s[10..];
     let clock = rest
@@ -3676,7 +3720,7 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
     out.push_str("== cards\n");
     out.push_str(&cards(cards_dir)?);
     out.push_str("== due\n");
-    out.push_str(&due_report()?);
+    out.push_str(&sitting_due_report()?);
     let title = issue_title(issue)?;
     out.push_str(&format!("== island: {title}\n"));
     // The strongest eight: a sitting wants orientation, not the whole
@@ -3692,7 +3736,7 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
     // The last twelve dated events across the three stores; `ljos
     // timeline` prints them all.
     out.push_str("== timeline\n");
-    out.push_str(&timeline(issue, 12)?);
+    out.push_str(&timeline(issue, SITTING_TIMELINE)?);
     out.push_str("== claim\n");
     out.push_str(&claim(issue, assignee)?);
     Ok(out)
@@ -3708,12 +3752,39 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
 ///
 /// Any habitat refusing; the pack refuses a lesson longer than two
 /// sentences, the claim graph a status that is not terminal.
+/// Finish a session node only if `gen` is still the live lease.
+///
+/// # Errors
+///
+/// The claim graph refuses a stale generation, a missing actor, or a
+/// status that is not terminal.
+pub fn complete(node: &str, status: Option<&str>, assignee: &str, gen: u64) -> Result<String> {
+    let id = node_for(node)?;
+    let actor = work_id(assignee);
+    let gen_s = gen.to_string();
+    let mut args = vec![
+        "complete",
+        id.as_str(),
+        "--actor",
+        actor.as_str(),
+        "--gen",
+        gen_s.as_str(),
+    ];
+    if let Some(s) = status {
+        args.push("--status");
+        args.push(s);
+    }
+    Ok(run_captured("claimdag", &args)?.stdout)
+}
+
 pub fn finish(
     issue: &str,
     status: &str,
     lesson: Option<&str>,
     outcome: Option<&str>,
     beta: f64,
+    assignee: &str,
+    gen: u64,
 ) -> Result<String> {
     let mut out = String::new();
     match lesson.map(str::trim).filter(|l| !l.is_empty()) {
@@ -3746,10 +3817,7 @@ pub fn finish(
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
     }
-    run_captured(
-        "claimdag",
-        &["complete", &node_for(issue)?, "--status", status],
-    )?;
+    complete(issue, Some(status), assignee, gen)?;
     out.push_str(&format!(
         "completed the session node for {issue} as {status}\n"
     ));
@@ -3985,8 +4053,17 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let ruled = hook_output_ruled(&call, &context, verdict_for(&rules, &line));
     match tcb_check(argv) {
         Some(tcb) if !tcb.is_empty() => Ok(format!("{line}\n{tcb}\n{ruled}")),
+        None if policyd_required() => Ok(format!("{line}\ndeny\tTCB required\n{ruled}")),
         _ => Ok(format!("{line}\n{ruled}")),
     }
+}
+
+/// Operator switch: missing TCB is a deny. Unset, absence stays open.
+pub fn policyd_required() -> bool {
+    matches!(
+        std::env::var("POLICYD_REQUIRED").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
 }
 
 /// `POLICYD_BIN`, else `ljos-policyd` on PATH.
@@ -4416,7 +4493,10 @@ mod tests {
     #[test]
     fn a_timeline_merges_the_three_stores_oldest_first() {
         let v = serde_json::json!({
-            "properties": {"CREATED": "[2026-09-01 Tue]"},
+            "properties": {
+                "CREATED": "[2026-09-01 Tue]",
+                "SCHEDULED": "<2026-02-10 Tue>"
+            },
             "claimed_by": "seat",
             "claimed_at": "[2026-09-03 Thu 11:48]",
             "logbook": [
@@ -4435,33 +4515,60 @@ mod tests {
         events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
         let text = format_events(&events, "2026-09-12T00:00:00Z");
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 5, "{text}");
+        assert_eq!(lines.len(), 6, "{text}");
         assert!(
-            lines[0].starts_with("2026-09-01 \t11 days ago\t\ttracker\tcreated"),
+            lines[0].contains("tracker\tSCHEDULED <2026-02-10 Tue>"),
             "{}",
             lines[0]
         );
         assert!(
-            lines[1].contains("+2 d\ttracker\tclaimed by seat"),
+            lines[1].starts_with("2026-09-01 \t11 days ago"),
             "{}",
             lines[1]
         );
+        assert!(lines[1].contains("tracker\tcreated"), "{}", lines[1]);
         assert!(
-            lines[2].contains("same day\ttracker\tTODO -> STARTED"),
+            lines[2].contains("+2 d\ttracker\tclaimed by seat"),
             "{}",
             lines[2]
         );
         assert!(
-            lines[3]
-                .starts_with("2026-09-05 00:00\t7 days ago\t+2 d\tdeed\tdeed-x produced by seat -"),
+            lines[3].contains("same day\ttracker\tTODO -> STARTED"),
             "{}",
             lines[3]
         );
         assert!(
-            lines[4].contains("2 days ago\t+5 d\ttracker\tnote: second"),
+            lines[4]
+                .starts_with("2026-09-05 00:00\t7 days ago\t+2 d\tdeed\tdeed-x produced by seat -"),
             "{}",
             lines[4]
         );
+        assert!(
+            lines[5].contains("2 days ago\t+5 d\ttracker\tnote: second"),
+            "{}",
+            lines[5]
+        );
+    }
+
+    #[test]
+    fn sitting_caps_are_the_protocol_numbers() {
+        assert_eq!(SITTING_DUE, 8);
+        assert_eq!(SITTING_TIMELINE, 12);
+    }
+
+    #[test]
+    fn policyd_required_is_the_operator_switch() {
+        let before = std::env::var_os("POLICYD_REQUIRED");
+        std::env::remove_var("POLICYD_REQUIRED");
+        assert!(!policyd_required());
+        std::env::set_var("POLICYD_REQUIRED", "1");
+        assert!(policyd_required());
+        std::env::set_var("POLICYD_REQUIRED", "0");
+        assert!(!policyd_required());
+        match before {
+            Some(v) => std::env::set_var("POLICYD_REQUIRED", v),
+            None => std::env::remove_var("POLICYD_REQUIRED"),
+        }
     }
 
     #[test]
@@ -4471,6 +4578,10 @@ mod tests {
             stamp_key(Some("2026-09-12T21:54:00.000Z"))
         );
         assert_eq!(stamp_key(Some("[2026-09-12 Sat]")).unwrap().1, "");
+        assert_eq!(
+            stamp_key(Some("<2026-02-10 Tue>")).map(|k| k.0),
+            stamp_key(Some("2026-02-10")).map(|k| k.0)
+        );
         assert_eq!(stamp_key(Some("soon")), None);
         assert_eq!(
             civil_of_days(days_of_stamp(Some("2026-09-12")).unwrap()),
