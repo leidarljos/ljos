@@ -51,8 +51,9 @@ def lesson(i: int) -> str:
 
 
 def post(url: str, workspace: str, text: str) -> None:
+    # As ljos writes: the seat's name rides in entities and is not a topic.
     body = json.dumps({"schema": "inside.atom/v1", "kind": "lesson", "level": "explicit",
-                       "text": text, "workspace": workspace}).encode()
+                       "text": text, "workspace": workspace, "entities": ["seat:scale"]}).encode()
     req = urllib.request.Request(f"{url}/v1/atoms", data=body, headers={"content-type": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         r.read()
