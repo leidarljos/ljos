@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A persona's memory tree: `remember --as` and `prefer --as` write into
+  the set `persona-NAME`, its own tree for the duplicate and replacement
+  rules; `ljos island --as NAME` and the `ljos_island` tool's `as` walk
+  the pack through the persona's own link weights and fire those, not
+  the seat's. Facts stay one substrate; readings and paths are the
+  persona's. `packset-client` 0.9.20.
+
 ## 0.13.5 (2026-09-20)
 
 - A finish says when the island fired already this hour (the pack holds

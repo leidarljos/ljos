@@ -1993,6 +1993,23 @@ pub fn persona_entity(name: &str) -> String {
     format!("persona:{}", name.trim().to_lowercase())
 }
 
+/// The set a persona's own conclusions live in: `persona-<name>`, in the
+/// pack's set alphabet. A set is its own tree for the duplicate and
+/// replacement rules, so a persona's lesson never closes the seat's or
+/// another persona's, and the seat still reads them all.
+#[must_use]
+pub fn persona_set(name: &str) -> String {
+    let mut out = String::from("persona-");
+    for c in name.trim().to_lowercase().chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').chars().take(32).collect()
+}
+
 /// [`packset_write`] as a persona: the claim carries the persona's entity,
 /// so what a persona learned comes back to it first in its next brief and
 /// stays in the seat's one pack. A persona accumulates its own lessons the
@@ -2010,6 +2027,9 @@ pub fn packset_write_as(label: &str, text: &str, persona: Option<&str>) -> Resul
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, &workspace);
     add_entities(&mut atom, [persona_entity(name)]);
+    // Its own tree: the persona's conclusions replace and duplicate among
+    // themselves, not against the seat's or another persona's.
+    atom["set"] = Value::String(persona_set(name));
     client
         .post_atom(&atom)
         .with_context(|| format!("{label}: POST /v1/atoms failed"))
@@ -2210,12 +2230,20 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     // written with `remember --as`, carry its entity.
     let client = pack()?;
     let own_tag = persona_entity(&p.name);
-    if let Ok(atoms) = client.atoms_as_of(&client.workspace(), None) {
-        let mut own: Vec<&Value> = atoms
-            .iter()
-            .filter(|a| reviewable(a))
-            .filter(|a| words_of(a.get("entities")).contains(&own_tag))
-            .collect();
+    // Its own set first; lessons written before sets carry the entity alone.
+    let mut pool = client
+        .atoms_in_set(&client.workspace(), &persona_set(&p.name))
+        .unwrap_or_default();
+    if let Ok(all) = client.atoms_of_kind(&client.workspace(), "lesson") {
+        pool.extend(
+            all.into_iter()
+                .filter(|a| words_of(a.get("entities")).contains(&own_tag))
+                .filter(|a| a.get("set").is_none()),
+        );
+    }
+    {
+        let atoms = pool;
+        let mut own: Vec<&Value> = atoms.iter().filter(|a| reviewable(a)).collect();
         own.sort_by(|a, b| b["ts"].as_str().cmp(&a["ts"].as_str()));
         if !own.is_empty() {
             out.push_str("\nWhat you remembered yourself:\n");
@@ -4123,14 +4151,25 @@ pub fn node_for(issue: &str) -> Result<String> {
 /// The memories a task activates: the pack's island around the cue. With
 /// `fire`, the strongest of them fire together and their links gain weight.
 pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
+    packset_island_as(cue, fire, None)
+}
+
+/// [`packset_island`] through a persona's lens: the spread follows the
+/// weights that persona fired, and a fire writes its weights and not the
+/// seat's. The seat's own island is the one with no lens.
+pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
     }
     let client = pack()?;
     let workspace = client.workspace();
+    let lens = lens
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_lowercase);
     client
-        .activate(&workspace, cue, 24, fire)
+        .activate_as(&workspace, cue, 24, fire, lens.as_deref())
         .context("island: GET /v1/activate failed")
 }
 
@@ -6678,6 +6717,13 @@ mod tests {
         );
         assert!(needs_of("{}").unwrap().is_empty());
         assert!(needs_of("not json").is_err());
+    }
+
+    #[test]
+    fn a_persona_set_is_in_the_pack_alphabet() {
+        assert_eq!(persona_set("Reviewer"), "persona-reviewer");
+        assert_eq!(persona_set("first gpu:user"), "persona-first-gpu-user");
+        assert!(persona_set("x".repeat(60).as_str()).len() <= 32);
     }
 
     #[test]

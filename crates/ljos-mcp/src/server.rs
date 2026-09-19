@@ -13,11 +13,11 @@ use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due, finish, format_change, format_consolidation, graded, habit,
     habits, handover, identity_or_seat, island_entities, issue_words, learn_and_write, now_utc,
-    on_path, other_seat, packset_consolidate, packset_forget, packset_island, packset_search_as_of,
-    packset_write_as, parse_every, personas_from_pack, personas_speaking_to, policy_line, receive,
-    release, resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting, timeline,
-    topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    on_path, other_seat, packset_consolidate, packset_forget, packset_island, packset_island_as,
+    packset_search_as_of, packset_write_as, parse_every, personas_from_pack, personas_speaking_to,
+    policy_line, receive, release, resolve_assignee, rows_about, run_captured, runner_pid,
+    seat_name, sitting, timeline, topic_words, trust_from_pack, write_persona, write_prediction,
+    write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -374,6 +374,11 @@ pub struct CueArgs {
     /// Fire the strongest eight together so their links gain weight; say
     /// true when the island is the one you go on to use.
     pub fire: Option<bool>,
+    /// Walk the island as this persona: its own weights lead the spread,
+    /// and a fire moves its weights and not the seat's. A panel member
+    /// passes its own name; the seat passes nothing.
+    #[serde(default, rename = "as")]
+    pub lens: Option<String>,
 }
 
 /// One memory an island holds.
@@ -1243,7 +1248,8 @@ impl LjosServer {
         Parameters(args): Parameters<CueArgs>,
     ) -> Result<Json<Vec<IslandRow>>, McpError> {
         let now = now_utc();
-        let body = packset_island(&args.cue, args.fire.unwrap_or(false)).map_err(refused)?;
+        let body = packset_island_as(&args.cue, args.fire.unwrap_or(false), args.lens.as_deref())
+            .map_err(refused)?;
         Ok(Json(
             body["island"]
                 .as_array()
@@ -1429,9 +1435,12 @@ impl LjosServer {
              2. For each persona, `ljos_brief` with its name and {issue}, and start one \
                 subagent with that text as its whole brief: the persona's view, what the seat \
                 knows on its domains, the working set. Each subagent reads the work in its own \
-                way and ends by casting exactly one ballot: `ljos_vote` on {issue} with `as` \
-                set to the persona's name, for the option it would defend. Subagents run in \
-                parallel and do not see each other's ballots.\n\
+                way: `ljos_island` on {issue} with `as` set to its name walks the pack through \
+                its own weights, and with `fire` true once it has read the work tightens the \
+                paths it walked and nobody else's; `ljos_remember` with `as` writes what it \
+                concluded into its own set. It ends by casting exactly one ballot: `ljos_vote` \
+                on {issue} with `as` set to the persona's name, for the option it would defend. \
+                Subagents run in parallel and do not see each other's ballots.\n\
              3. `ljos_consensus` on {issue}. The settle weighs the ballots by the trust rows \
                 the pack holds and holds each persona to its ballot by its anchor; it \
                 reports polarization and disagreement, not only shares. A tally is not this.\n\
