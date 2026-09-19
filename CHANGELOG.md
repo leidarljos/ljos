@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Writing a persona that the pack already holds supersedes its previous
+  atom, so moving an anchor or a view leaves one live persona of that
+  name; the roster showed one, the pack kept both.
+
 ## 0.13.3 (2026-09-19)
 
 - `ljos personas` and the `ljos_personas` tool print the roster the pack

@@ -2095,12 +2095,32 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     Ok(atom)
 }
 
-/// POST one persona.
+/// POST one persona. A persona of the same name already in the pack is
+/// superseded, so a rewrite moves the roster without leaving the old view
+/// live.
 pub fn write_persona(p: &Persona) -> Result<Value> {
     let client = pack()?;
     let workspace = client.workspace();
+    let mut atom = persona_atom(p, &workspace)?;
+    let previous: Vec<Value> = client
+        .atoms_as_of(&workspace, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| {
+            a.get("kind").and_then(Value::as_str) == Some("persona")
+                && a.get("name").and_then(Value::as_str) == Some(p.name.trim())
+        })
+        .filter_map(|a| {
+            a.get("id")
+                .and_then(Value::as_str)
+                .map(|id| Value::String(id.to_string()))
+        })
+        .collect();
+    if !previous.is_empty() {
+        atom["supersedes"] = Value::Array(previous);
+    }
     client
-        .post_atom(&persona_atom(p, &workspace)?)
+        .post_atom(&atom)
         .context("persona: POST /v1/atoms failed")
 }
 
