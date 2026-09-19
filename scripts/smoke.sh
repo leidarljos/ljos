@@ -55,6 +55,7 @@ echo 'fn main() {}' > patch.rs
 acc=$(deedar create file --name "the fuse patch" --path patch.rs --agent you | grep -o 'deed-[a-z0-9-]*' | head -1)
 ljos deed "$id" --add "$acc" >/dev/null
 ljos finish "$id" --gen "$gen" --assignee you --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold | grep -q 'completed the session node' || fail finish
+vissue show "$id" | grep -q 'State:    DONE' || fail "finish with status done did not close the ticket"
 ljos sitting "$id" --assignee you | grep -q 'reopened' || fail "reopen on a second sitting"
 ljos sitting "$id" --assignee you | grep -q 'the sitting resumes' || fail "a third sitting on a held node did not resume"
 ljos timeline "$id" | grep -q 'tracker	created' || fail timeline

@@ -100,7 +100,7 @@ learned from outcome "hold": 6 trust rows rewritten
 activates the island the issue's title touches, recalls the working set,
 and claims a session node. =deed= cites what the work produced. =finish=
 closes: the lesson is remembered, the island fires, the node completes,
-and the outcome reweighs the voters as in step 2. The ticket stays open until vissue closes it. To stop without finishing,
+and the outcome reweighs the voters as in step 2. A finish with status done closes the ticket. To stop without finishing,
 =ljos release $id --assignee alice= hands the node back; until then a second
 =claim= under the same name is refused, and the refusal names this issue.
 

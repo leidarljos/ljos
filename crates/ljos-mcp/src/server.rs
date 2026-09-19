@@ -1453,7 +1453,9 @@ impl ServerHandler for LjosServer {
              imported handover; the text is the claim. Cards are read at \
              ljos://cards/ and never written. Citing a deed on a node names an \
              accession and does not paste the product. Completing a session node \
-             does not close a ticket; ljos_release hands one back unfinished. A \
+             does not close a ticket; ljos_finish with status done does, so a \
+             board never shows TODO over finished work; ljos_release hands one \
+             back unfinished. A \
              tool that fails means a habitat refused or is not running; it is not \
              an empty answer. The seat is named after the client that connected. \
              The holder is any `*_SESSION_ID` the runner stamped, the whole value, \

@@ -8,6 +8,18 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   of the process tag. Two ids that share an eight-character prefix occupy
   different slots. A server sitting and a shell sitting of one session
   are one occupancy name.
+
+- `ljos finish ISSUE` with status done (the default) closes the ticket
+  in the tracker, so a board never shows TODO over a completed claim and
+  hands the work out again. Failed or cancelled leaves the ticket where
+  it is. Completing a node alone still does not close a ticket.
+- The server's seat record is keyed by the conversation id the runner
+  stamped as well as by the runner's process, and the holder's tag is a
+  hash of the whole id, not its first eight characters. A shell whose
+  line editor adds a session id of its own still finds the record by
+  the shared id, so the MCP sitting and the CLI sitting of one
+  conversation are one holder, and two conversations whose ids share a
+  prefix take two slots.
 - Every write names the seat that wrote it (`seat:<name>` first among
   the entities; a persona's, a habit's or a trust row's entities join it,
   a trust row's stay the deeds it cites). A hit written by another seat

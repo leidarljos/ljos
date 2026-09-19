@@ -364,6 +364,61 @@ pub fn runner_pid() -> u32 {
     u32::try_from(ppid).unwrap_or(0)
 }
 
+/// The conversation ids a runner stamped into this environment, by key:
+/// every `*_SESSION_ID` but the login's, sorted so two processes with the
+/// same variables agree on the first.
+fn stamped_sessions() -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, v)| runner_session_var(k, v))
+        .map(|(k, v)| (k, v.trim().to_string()))
+        .collect();
+    found.sort();
+    found
+}
+
+/// A conversation tag from a stamped id: ten base-36 digits of FNV-1a over
+/// the whole id. A prefix of the id would not do: a UUID v7 opens with its
+/// timestamp, so two conversations started in one window share it.
+#[must_use]
+pub fn session_tag(id: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in id.trim().bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    for _ in 0..10 {
+        out.push(DIGITS[(h % 36) as usize]);
+        h /= 36;
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The record a server leaves under a conversation's stamped id, for the
+/// shells that carry the same id and whatever else their line editor adds.
+fn session_record_path(id: &str) -> PathBuf {
+    runtime_dir().join(format!("session-{}", session_tag(id)))
+}
+
+fn write_record(path: &Path, seat: &Seat) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{}\n{}\n", seat.seat, seat.holder));
+}
+
+fn read_record(path: &Path, source: String) -> Option<Seat> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let (seat, holder) = (lines.next()?, lines.next()?);
+    Some(Seat {
+        seat: seat.to_string(),
+        holder: holder.to_string(),
+        source,
+    })
+}
+
 /// The MCP server, once a client has said who it is: the seat is the
 /// client's name. The holder is any `*_SESSION_ID` the runner stamped,
 /// else that seat tagged with the runner's process. The record under the
@@ -388,14 +443,28 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, format!("{}\n{}\n", seat.seat, seat.holder));
     let _ = ANNOUNCED.set(seat.clone());
     seat
 }
 
-/// Drop the record [`announce_seat`] wrote, when the server ends.
+/// Drop the records [`announce_seat`] wrote, when the server ends.
 pub fn retire_seat(runner_pid: u32) {
     let _ = std::fs::remove_file(seat_record_path(runner_pid));
+    for (_, id) in stamped_sessions() {
+        let _ = std::fs::remove_file(session_record_path(&id));
+    }
+}
+
+/// The seat a server announced for one of the conversation ids this
+/// process carries. A shell's line editor may add a session id of its
+/// own; any one shared id is enough.
+fn seat_from_session_records() -> Option<Seat> {
+    stamped_sessions().into_iter().find_map(|(key, id)| {
+        read_record(
+            &session_record_path(&id),
+            format!("the server the runner opened, session {key}"),
+        )
+    })
 }
 
 /// A process's parent and its own short name, from procfs.
@@ -544,15 +613,11 @@ fn program_name(_pid: u32, comm: &str) -> String {
 fn seat_from_tree() -> Option<Seat> {
     let chain = ancestry();
     for (pid, _) in &chain {
-        if let Ok(text) = std::fs::read_to_string(seat_record_path(*pid)) {
-            let mut lines = text.lines();
-            if let (Some(seat), Some(holder)) = (lines.next(), lines.next()) {
-                return Some(Seat {
-                    seat: seat.to_string(),
-                    holder: holder.to_string(),
-                    source: format!("the server the runner opened, process {pid}"),
-                });
-            }
+        if let Some(seat) = read_record(
+            &seat_record_path(*pid),
+            format!("the server the runner opened, process {pid}"),
+        ) {
+            return Some(seat);
         }
     }
     for (pid, comm) in &chain {
@@ -596,7 +661,11 @@ pub fn whoami() -> Seat {
     let named = named_var("LJOS_SEAT")
         .map(|n| (n, "LJOS_SEAT"))
         .or_else(|| named_var("VISSUE_AGENT").map(|n| (n, "VISSUE_AGENT")));
-    let program = ANNOUNCED.get().cloned().or_else(seat_from_tree);
+    let program = ANNOUNCED
+        .get()
+        .cloned()
+        .or_else(seat_from_session_records)
+        .or_else(seat_from_tree);
     let agent = named_var("VISSUE_AGENT");
     let seat_name = named
         .as_ref()
@@ -4580,9 +4649,18 @@ pub fn finish(
             ));
         }
     }
-    out.push_str(&format!(
-        "the ticket stays {issue}'s state; `vissue update {issue} -s DONE` closes it\n"
-    ));
+    // The ticket follows the sitting's verdict: done closes it, so a board
+    // never shows TODO over a completed claim and hands the work out again.
+    // Failed or cancelled leaves the ticket where it is, for a person.
+    if status.eq_ignore_ascii_case("done") {
+        run_as("vissue", &["update", issue, "-s", "DONE"], None)
+            .with_context(|| format!("finish: could not close the ticket {issue}"))?;
+        out.push_str(&format!("closed the ticket {issue}\n"));
+    } else {
+        out.push_str(&format!(
+            "the ticket stays {issue}'s state; `vissue update {issue} -s DONE` closes it\n"
+        ));
+    }
     Ok(out)
 }
 
@@ -5259,6 +5337,52 @@ mod tests {
     }
 
     #[test]
+    fn two_session_ids_that_share_a_prefix_take_two_slots() {
+        let a = session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        let b = session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd7");
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 10);
+        assert_eq!(a, session_tag(" 01a09b25-ffe9-7972-881a-3cee2ea6efd6 "));
+    }
+
+    #[test]
+    fn a_shell_with_one_more_session_variable_finds_the_servers_record() {
+        let dir = std::env::temp_dir().join(format!("ljos-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+            std::env::set_var("ACME_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        }
+        let server = announce_seat("Acme CLI", 4242);
+        assert_eq!(server.seat, "acme-cli");
+        assert_eq!(
+            server.holder,
+            format!(
+                "acme-cli-{}",
+                session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6")
+            )
+        );
+        // The shell's line editor stamps its own id; the shared one still finds the record.
+        unsafe {
+            std::env::set_var(
+                "AAA_LINE_EDITOR_SESSION_ID",
+                "9f9f9f9f-0000-0000-0000-000000000000",
+            );
+        }
+        let shell = seat_from_session_records().expect("the shared id finds the record");
+        assert_eq!(shell.holder, server.holder);
+        assert_eq!(shell.seat, server.seat);
+        retire_seat(4242);
+        assert!(seat_from_session_records().is_none());
+        unsafe {
+            std::env::remove_var("ACME_SESSION_ID");
+            std::env::remove_var("AAA_LINE_EDITOR_SESSION_ID");
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_client_name_is_one_seat_however_it_is_spelt() {
         assert_eq!(seat_slug("Acme CLI"), "acme-cli");
         assert_eq!(seat_slug("acme_cli/1.2"), "acme-cli-1-2");
@@ -5398,12 +5522,13 @@ mod tests {
 
     #[test]
     fn the_hook_keeps_what_two_scorers_agreed_on() {
-        let hit = |entities: vec![], ballots, of| Hit {
+        let hit = |ballots, of| Hit {
             id: None,
             text: "x".into(),
             score: 1.0,
             kind: "lesson".into(),
             ts: None,
+            entities: vec![],
             ballots,
             of,
         };
