@@ -16,6 +16,6 @@ export PACKSET_EMBED_MODEL=bge-small PACKSET_EMBED_CACHE="$HOME/.cache/packset-e
 rm -rf "$PACKSET_HOME"
 packset ensure
 ljos doctor | grep -E "^(ok|--)	(pack|encoder)" || true
-uv run --script "$HOME/Git/Github/ljos/scripts/terra/hook_scale.py" --sizes 1000 5000 10000; rc=$?
+uv run --script "$HOME/Git/Github/ljos/scripts/terra/hook_scale.py" --sizes 1000 --sizes 5000 --sizes 10000; rc=$?
 packset stop >/dev/null 2>&1 || true
 echo "scale exit $rc"; echo ONE-DONE

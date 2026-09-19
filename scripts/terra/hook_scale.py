@@ -12,7 +12,7 @@ budget is a prompt, so the number that matters is the single hook at the
 largest size. Nothing here calls a model: the writer ranks by words alone
 unless an encoder is beside it.
 
-    PACKSET_URL=http://127.0.0.1:8797 scripts/terra/hook_scale.py --sizes 1000 5000 10000
+    PACKSET_URL=http://127.0.0.1:8797 scripts/terra/hook_scale.py --sizes 1000 --sizes 5000 --sizes 10000
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def main(
     *,
     url: str = os.environ.get("PACKSET_URL", "http://127.0.0.1:8761"),
     workspace: str = "seat",
-    sizes: tuple[int, ...] = (1000, 5000, 10000),
+    sizes: list[int] = [1000, 5000, 10000],
     concurrent: int = 8,
 ):
     """Fill a scratch pack step by step and time the seat at each size.

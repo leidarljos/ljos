@@ -667,6 +667,9 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            (None, Some(_)) => {
+                anyhow::bail!("habit: a reading needs a name; `ljos habit NAME VALUE`")
+            }
             (name, None) => {
                 let now = now_utc();
                 let rows: Vec<Reading> = habits()?
