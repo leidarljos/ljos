@@ -10,14 +10,13 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    age_of, ballots_from_json, brief, calibrate, cards, claim, conflicts, consensus_steps_for,
-    complete, doctor, due, finish, format_consolidation, graded, handover, identity_or_seat,
-    island_entities,
-    learn_and_write, node_for, now_utc, on_path, packset_consolidate, packset_forget,
-    packset_island, packset_search_as_of, packset_write_as, personas_from_pack, policy_line,
-    receive, release, resolve_assignee, rows_about, run_captured, sitting, timeline, topic_words,
-    trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
-    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    age_of, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
+    consensus_steps_for, doctor, due, finish, format_consolidation, graded, handover,
+    identity_or_seat, island_entities, learn_and_write, now_utc, on_path, packset_consolidate,
+    packset_forget, packset_island, packset_search_as_of, packset_write_as, personas_from_pack,
+    policy_line, receive, release, resolve_assignee, rows_about, run_captured, sitting, timeline,
+    topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -181,8 +180,9 @@ pub struct PersonaArgs {
 pub struct TakeArgs {
     /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
     pub node: String,
-    /// Your name. One live claim per name; the name maps to one actor id.
-    /// Absent, the runner's seat name (`LJOS_SEAT` from its registration).
+    /// Your name. A named worker occupies one slot; a harness seat occupies
+    /// per issue. Absent, the runner's seat name (`LJOS_SEAT` from its
+    /// registration, else the runner session).
     #[serde(default)]
     pub assignee: Option<String>,
 }
@@ -280,8 +280,9 @@ pub struct GradeArgs {
 pub struct SittingArgs {
     /// The tracker id of the issue (`proj-1a2b`).
     pub issue: String,
-    /// Your name. One live claim per name. Absent, the runner's seat name
-    /// (`LJOS_SEAT` from its registration).
+    /// Your name. A named worker occupies one slot; a harness seat occupies
+    /// per issue. Absent, the runner's seat name (`LJOS_SEAT` from its
+    /// registration, else the runner session).
     #[serde(default)]
     pub assignee: Option<String>,
 }
@@ -703,7 +704,7 @@ impl LjosServer {
     // ---- the session graph --------------------------------------------------
 
     #[tool(
-        description = "Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. One live claim per name; when you still hold another node the refusal names it and the two tools that free it (ljos_complete, ljos_release). Completing a node later does not close the ticket.",
+        description = "Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
             read_only_hint = false,
@@ -716,12 +717,13 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = claim(&args.node, &resolve_assignee(args.assignee.as_deref())).map_err(refused)?;
+        let text =
+            claim(&args.node, &resolve_assignee(args.assignee.as_deref())).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(
-        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, and the claim. Omit assignee: grok/seat/you share one occupancy slot and make two conversations collide. The session id is the name.",
+        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, and the claim. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -1241,7 +1243,8 @@ impl LjosServer {
              3. `ljos_search` then `ljos_island` with the task in your own words.\n\
              4. `ljos_recall` on the node. What it stands on and what it cited.\n\
              5. `ljos_timeline` the last twelve dated events across the stores.\n\
-             6. `ljos_claim` a session node for it. One live claim per assignee.\n\
+             6. `ljos_claim` a session node for it. A harness seat occupies per\n\
+                issue; a named worker occupies one slot.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
              with `ljos_remember` in two short sentences. When the work shows a\n\

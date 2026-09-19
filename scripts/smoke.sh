@@ -54,6 +54,16 @@ ljos sitting "$id" --assignee you | grep -q 'the sitting resumes' || fail "a thi
 ljos timeline "$id" | grep -q 'tracker	created' || fail timeline
 LJOS_SEAT=you ljos release "$id" | grep -q '^gen=' || fail "release under LJOS_SEAT"
 
+# A harness seat occupies per issue: two sittings must both take, not
+# busy-and-release the first. Named `you` is a shared name.
+id_a=$(vissue create -p demo "First harness ticket" -q | tail -1)
+id_b=$(vissue create -p demo "Second harness ticket" -q | tail -1)
+sit_a=$(ljos sitting "$id_a" --assignee you)
+echo "$sit_a" | grep -q 'gen=' || fail "first harness sitting"
+sit_b=$(ljos sitting "$id_b" --assignee you)
+echo "$sit_b" | grep -q 'assignee busy' && fail "second harness sitting unseated the first"
+echo "$sit_b" | grep -q 'gen=' || fail "second harness sitting"
+
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about docs >/dev/null
 ljos persona reader --anchor 0.8 --view "Reads as a first-time user." --about docs >/dev/null
 id2=$(vissue create -p demo "Publish the docs site now?" -q | tail -1)

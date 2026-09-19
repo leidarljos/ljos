@@ -42,8 +42,10 @@ hand. Each answers something the next one needs.
    cited so far.
 6. `ljos timeline ISSUE`. The last twelve dated events across the three
    stores; `ljos timeline` without a sitting prints them all.
-7. `ljos claim ISSUE --assignee NAME`. One live claim per name. `busy` means
-   you still hold another node: `ljos complete` it, or `ljos release` it.
+7. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
+   two conversations hold two tickets. The same issue is still one
+   holder. `busy` on a named worker means that name still holds another
+   node (`ljos complete` or `ljos release`).
 
 No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
 Every piece of work has an issue before it has a claim.
@@ -138,8 +140,10 @@ under equal weights is a count; under calibrated rows it is not.
 
 ## Refusals worth knowing
 
-- `claim: assignee busy HEX`: you hold that node. `ljos release HEX
-  --assignee NAME` hands it back, `ljos complete HEX` finishes it.
+- `claim: assignee busy HEX`: that name still holds that node.
+  `ljos release HEX --assignee NAME` hands it back, `ljos complete HEX`
+  finishes it. Occupancy is per issue, so a second ticket does not take
+  this path.
 - `already held by NAME; the sitting resumes`: not a refusal. A second
   `sitting` on the issue you hold renews the lease and goes on. Held by
   another seat, the claim names that actor and the two verbs that free it.
@@ -176,9 +180,11 @@ graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`
 when it exists. `LJOS_SEAT` is the name this runner claims and votes under
 when a verb names none; a runner's registration sets it to the runner's
-name (`{name}` in the runners file), so two runners on one host share the
-one pack and tracker and hold separate claims. Export the same
-`LJOS_SEAT` in the runner's shell (a runner's settings usually carry an
-`env` table) so its command-line ballots and claims match its tools'.
-`VISSUE_AGENT` is the tracker's own name for the same thing; `--as` names
-a persona over both.
+name (`{name}` in the runners file). Any `*_SESSION_ID` the runner
+stamped is the occupancy name, ahead of `LJOS_SEAT`, and occupancy is
+`{name}:{issue}` so a second sitting does not release the first.
+`doctor` prints that name and which variable it came from. Export the
+same `LJOS_SEAT` in the runner's shell (a runner's settings usually
+carry an `env` table) so its command-line ballots and claims match its
+tools'. `VISSUE_AGENT` is the tracker's own name for the same thing;
+`--as` names a persona over both.
