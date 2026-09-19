@@ -3983,7 +3983,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                         ))
                     }
                     Some(_) => bail!(
-                        "claim: {node} is held by another seat; that seat frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting"
+                        "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
                     ),
                     None => Err(e),
                 };
