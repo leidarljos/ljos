@@ -255,7 +255,7 @@ fn session_actor() -> Option<(String, String)> {
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join("+");
-    Some((format!("sess-{}", &id[..8]), keys))
+    Some((format!("sess-{id}"), keys))
 }
 
 /// A conversation id the runner stamped, not the login (`XDG_SESSION_ID`
@@ -265,8 +265,7 @@ fn runner_session_var(key: &str, val: &str) -> bool {
 }
 
 fn session_from_value(key: &str, raw: &str) -> (String, String) {
-    let prefix: String = raw.trim().chars().take(8).collect();
-    (format!("sess-{prefix}"), key.to_string())
+    (raw.trim().to_string(), key.to_string())
 }
 
 /// Who is sitting. The seat is the program that connected: the name a
@@ -366,15 +365,25 @@ pub fn runner_pid() -> u32 {
 }
 
 /// The MCP server, once a client has said who it is: the seat is the
-/// client's name, the holder that seat tagged with the runner's process.
-/// The record under the runtime directory is how `ljos` in a shell the
-/// same runner opened names the same seat and holder, with nothing set.
+/// client's name. The holder is any `*_SESSION_ID` the runner stamped,
+/// else that seat tagged with the runner's process. The record under the
+/// runtime directory is how `ljos` in a shell the same runner opened
+/// names the same seat and holder.
 pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
-    let seat = Seat::tagged(
-        seat_slug(client),
-        &conversation_tag(runner_pid),
-        format!("the client that connected, process {runner_pid}"),
-    );
+    let name = seat_slug(client);
+    let seat = if let Some((holder, keys)) = session_actor() {
+        Seat {
+            seat: name,
+            holder,
+            source: format!("the client that connected, process {runner_pid}; session {keys}"),
+        }
+    } else {
+        Seat::tagged(
+            name,
+            &conversation_tag(runner_pid),
+            format!("the client that connected, process {runner_pid}"),
+        )
+    };
     let path = seat_record_path(runner_pid);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -575,12 +584,10 @@ fn named_var(key: &str) -> Option<String> {
 /// tracker's `VISSUE_AGENT` when someone set one; else what the MCP client
 /// said at initialize; else the process tree above this shell, which is
 /// the runner that opened it or the server that runner opened; else the
-/// login user, who is the seat when no program is. The holder is the seat tagged with the
-/// conversation's process, so a runner's server and its shells, which
-/// share that process, agree on it whatever else sits in their
-/// environments; a `*_SESSION_ID` the runner stamped is the holder only
-/// when no process tree can be read, and is reported beside the source
-/// either way.
+/// login user, who is the seat when no program is. The holder is any
+/// `*_SESSION_ID` the runner stamped, ahead of the process tag, so MCP
+/// sitting and CLI sitting of one conversation are one occupancy name;
+/// else the seat tagged with the conversation's process.
 #[must_use]
 pub fn whoami() -> Seat {
     let session = session_actor();
@@ -591,7 +598,20 @@ pub fn whoami() -> Seat {
         .or_else(|| named_var("VISSUE_AGENT").map(|n| (n, "VISSUE_AGENT")));
     let program = ANNOUNCED.get().cloned().or_else(seat_from_tree);
     let agent = named_var("VISSUE_AGENT");
-    let mut seat = match (&named, &program) {
+    let seat_name = named
+        .as_ref()
+        .map(|(n, _)| n.clone())
+        .or_else(|| program.as_ref().map(|p| p.seat.clone()))
+        .or_else(|| agent.clone())
+        .unwrap_or_else(login_user);
+    if let Some((holder, keys)) = session {
+        return Seat {
+            seat: seat_name,
+            holder,
+            source: keys,
+        };
+    }
+    match (&named, &program) {
         (Some((name, key)), Some(p)) => Seat {
             seat: name.clone(),
             holder: p.holder.replacen(&p.seat, name, 1),
@@ -599,22 +619,14 @@ pub fn whoami() -> Seat {
         },
         (Some((name, key)), None) => Seat::whole(name, key),
         (None, Some(p)) => p.clone(),
-        (None, None) => match (&session, &agent) {
-            (Some((holder, keys)), _) => Seat {
-                seat: agent.clone().unwrap_or_else(login_user),
-                holder: holder.clone(),
-                source: keys.clone(),
-            },
-            (None, Some(name)) => Seat::whole(name, "VISSUE_AGENT"),
-            (None, None) => Seat::whole(&login_user(), "the login user"),
-        },
-    };
-    if let Some((id, keys)) = &session {
-        if !seat.source.contains(keys.as_str()) {
-            seat.source = format!("{}; session {keys} {}", seat.source, &id[5..]);
+        (None, None) => {
+            if let Some(name) = agent {
+                Seat::whole(&name, "VISSUE_AGENT")
+            } else {
+                Seat::whole(&login_user(), "the login user")
+            }
         }
     }
-    seat
 }
 
 /// The person at the terminal, when no program is the seat.
@@ -5060,11 +5072,10 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let holder = resolve_assignee(None);
-        assert_ne!(
-            holder, "runner-x",
-            "the name on the box is the seat, not the occupancy"
+        assert_eq!(
+            holder, "01a09b25-ffe9-7972-881a-3cee2ea6efd6",
+            "the session is the occupancy, not a prefix and not the seat"
         );
-        assert!(holder.starts_with("runner-x"), "{holder}");
         assert_eq!(resolve_assignee(Some("seat")), holder);
         assert_eq!(
             resolve_assignee(Some("runner-x")),
@@ -5076,6 +5087,29 @@ mod tests {
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
             std::env::remove_var("LJOS_SEAT");
+        }
+    }
+
+    #[test]
+    fn two_session_ids_that_share_a_prefix_occupy_different_slots() {
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("GROK_SESSION_ID", "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
+        }
+        let a = resolve_assignee(None);
+        unsafe {
+            std::env::set_var("GROK_SESSION_ID", "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
+        }
+        let b = resolve_assignee(None);
+        assert_ne!(
+            a, b,
+            "a shared eight-character prefix is not one conversation"
+        );
+        assert_eq!(a, "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
+        assert_eq!(b, "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
         }
     }
 
@@ -5112,7 +5146,10 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let row = format_seat_row();
-        assert!(row.contains("01a09b25"), "doctor names the session: {row}");
+        assert!(
+            row.contains("01a09b25-ffe9-7972-881a-3cee2ea6efd6"),
+            "doctor names the whole session: {row}"
+        );
         assert!(
             row.contains("GROK_SESSION_ID"),
             "doctor names where the session came from: {row}"

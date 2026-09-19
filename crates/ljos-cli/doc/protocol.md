@@ -196,6 +196,7 @@ which this conversation's claims are held under; any `*_SESSION_ID` the
 runner stamped is the holder ahead of the process tag, and occupancy is
 `{holder}:{issue}`, so two conversations of one runner hold two tickets and
 a second sitting does not release the first. `ljos seat` prints both names
-and where they came from. `LJOS_SEAT` overrides both when someone sets it; `VISSUE_AGENT` is
+and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
+names the holder. `VISSUE_AGENT` is
 the tracker's own name for the same thing; `--as` names a persona over
 both; a person at a terminal is their login user.
