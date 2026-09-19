@@ -2,6 +2,12 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `ljos onboard --harness grok` bumps `LJOS_MCP_GENERATION` in the runner
+  config when the crate version moved, so Grok's watcher respawns
+  `ljos-mcp` and a session restart is not required.
+
 ## 0.13.1 (2026-09-19)
 
 - The holder is any `*_SESSION_ID` the runner set, the full value, ahead

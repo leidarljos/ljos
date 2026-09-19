@@ -14,9 +14,10 @@ Install
 
 That writes ``~/.grok/hooks/ljos.json`` once (``ljos hook`` on PATH). Then
 ``/hooks`` then ``r`` **once**. Later ``cargo binstall ljos`` is live on the
-next event. Name ``ljos-mcp`` on PATH in ``~/.grok/config.toml``. Bump
-``LJOS_MCP_GENERATION`` in that table when you want Grok's config
-watcher to respawn the server.
+next event. Name ``ljos-mcp`` on PATH in ``~/.grok/config.toml``.
+``ljos onboard --harness grok`` bumps ``LJOS_MCP_GENERATION`` in that table
+when the crate version moved, so Grok's config watcher respawns the
+server; a session restart is not required.
 
 Why these events
 ================
