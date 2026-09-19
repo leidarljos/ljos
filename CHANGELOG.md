@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.13.0 (2026-09-19)
 
 - The doctor keeps each crates.io answer on disk for a day, so a herd of
   seats opening sittings asks the registry once a day per binary rather
