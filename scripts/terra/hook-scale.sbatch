@@ -11,7 +11,10 @@
 # a thousand, five thousand and ten thousand distinct lessons.
 set -uo pipefail
 export PATH="$HOME/stackbin:$HOME/bin-out:$HOME/.local/bin:$PATH"
-export PACKSET_PORT=8797 PACKSET_URL=http://127.0.0.1:8797 PACKSET_HOME="$HOME/.cache/ljos-hook-scale-pack"
+# The port and the pack home carry the job id: two scale runs on one host
+# must not share a daemon or wipe each other's pack.
+port=$((8700 + ${SLURM_JOB_ID:-97} % 100))
+export PACKSET_PORT=$port PACKSET_URL=http://127.0.0.1:$port PACKSET_HOME="$HOME/.cache/ljos-hook-scale-pack-${SLURM_JOB_ID:-local}"
 export PACKSET_EMBED_MODEL=bge-small PACKSET_EMBED_CACHE="$HOME/.cache/packset-embed" PYTHONUNBUFFERED=1
 rm -rf "$PACKSET_HOME"
 packset ensure
