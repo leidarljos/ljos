@@ -61,6 +61,14 @@ pub struct Harness {
     pub marker: Option<String>,
     #[serde(default)]
     pub snippet: Option<String>,
+    /// A JSON config file the runner reads its MCP servers from, for a
+    /// runner an appended snippet cannot serve.
+    pub config_json: Option<String>,
+    /// Where in that file the entry goes, as a JSON pointer (`/mcp/ljos`).
+    pub json_pointer: Option<String>,
+    /// The entry to set there, as JSON text; `{server}` and `{name}` are
+    /// replaced.
+    pub json_entry: Option<String>,
     #[serde(default)]
     pub skills: Option<String>,
     /// A JSON settings file the runner reads hooks from, in the shape
@@ -107,6 +115,13 @@ config = "~/.other/config.toml"
 marker = "[mcp_servers.ljos]"
 snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\n"
 skills = "~/.other/skills"
+
+[[harness]]
+name = "runner-with-a-json-config"
+config_json = "~/.config/runner/runner.json"
+json_pointer = "/mcp/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "environment": {"LJOS_SEAT": "{name}"}}'
+skills = "~/.config/runner/skills"
 "#;
 
 fn home() -> Result<PathBuf> {
@@ -794,7 +809,48 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
         return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
     }
+    if let (Some(config), Some(pointer)) = (&h.config_json, &h.json_pointer) {
+        return Some(
+            std::fs::read_to_string(expand(config))
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .is_some_and(|doc| doc.pointer(pointer).is_some()),
+        );
+    }
     None
+}
+
+/// Set `pointer` in the JSON document at `config` to `entry`, making the
+/// objects on the way; a missing file starts as `{}`.
+fn set_json_entry(config: &Path, pointer: &str, entry: &Value) -> Result<()> {
+    let mut doc: Value = match std::fs::read_to_string(config) {
+        Ok(t) if !t.trim().is_empty() => {
+            serde_json::from_str(&t).with_context(|| format!("{}: not JSON", config.display()))?
+        }
+        _ => serde_json::json!({}),
+    };
+    let mut at = &mut doc;
+    let parts: Vec<&str> = pointer.trim_start_matches('/').split('/').collect();
+    let (last, path) = parts
+        .split_last()
+        .context("onboard: an empty JSON pointer")?;
+    for key in path {
+        at = at
+            .as_object_mut()
+            .context("onboard: the pointer crosses a value that is not an object")?
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+    at.as_object_mut()
+        .context("onboard: the pointer's parent is not an object")?
+        .insert((*last).to_string(), entry.clone());
+    if let Some(parent) = config.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut text = serde_json::to_string_pretty(&doc)?;
+    text.push('\n');
+    std::fs::write(config, text)?;
+    Ok(())
 }
 
 /// Grok watches `[mcp_servers.ljos.env]`. Changing `LJOS_MCP_GENERATION`
@@ -890,6 +946,45 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 Err(e) => Step {
                     what,
                     detail: e.to_string().lines().next().unwrap_or("").to_string(),
+                    ok: false,
+                },
+            }
+        }
+        Some(false) if h.config_json.is_some() => {
+            let config = expand(h.config_json.as_deref().unwrap_or_default());
+            let pointer = h.json_pointer.clone().unwrap_or_default();
+            let entry_text = h
+                .json_entry
+                .as_deref()
+                .unwrap_or_default()
+                .replace("{server}", &server.display().to_string())
+                .replace("{name}", &h.name);
+            let entry: Value = match serde_json::from_str(&entry_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Step {
+                        what,
+                        detail: format!("json_entry is not JSON: {e}"),
+                        ok: false,
+                    }
+                }
+            };
+            if dry {
+                return Step {
+                    what,
+                    detail: format!("would set {pointer} in {}", config.display()),
+                    ok: true,
+                };
+            }
+            match set_json_entry(&config, &pointer, &entry) {
+                Ok(()) => Step {
+                    what,
+                    detail: format!("set {pointer} in {}", config.display()),
+                    ok: true,
+                },
+                Err(e) => Step {
+                    what,
+                    detail: format!("{}: {e}", config.display()),
                     ok: false,
                 },
             }
@@ -6717,6 +6812,35 @@ mod tests {
         );
         assert!(needs_of("{}").unwrap().is_empty());
         assert!(needs_of("not json").is_err());
+    }
+
+    #[test]
+    fn a_json_config_takes_the_entry_by_pointer() {
+        let dir = std::env::temp_dir().join(format!("ljos-onboard-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("runner.json");
+        std::fs::write(&config, "{\"model\": \"x\"}\n").unwrap();
+        let entry = serde_json::json!({"type": "local", "command": ["/bin/ljos-mcp"]});
+        set_json_entry(&config, "/mcp/ljos", &entry).unwrap();
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(doc["model"], "x", "the rest of the file stands");
+        assert_eq!(doc["mcp"]["ljos"]["command"][0], "/bin/ljos-mcp");
+        let h = Harness {
+            name: "runner".into(),
+            register: Vec::new(),
+            registered: Vec::new(),
+            config: None,
+            marker: None,
+            snippet: None,
+            config_json: Some(config.display().to_string()),
+            json_pointer: Some("/mcp/ljos".into()),
+            json_entry: None,
+            skills: None,
+            hooks: None,
+            hook_events: None,
+        };
+        assert_eq!(is_registered(&h, Path::new("/bin/ljos-mcp")), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
