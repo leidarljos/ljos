@@ -797,14 +797,68 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     None
 }
 
+/// Grok watches `[mcp_servers.ljos.env]`. Changing `LJOS_MCP_GENERATION`
+/// respawns the server; a session restart is not required.
+fn bump_ljos_mcp_generation(config: &Path, version: &str, dry: bool) -> Result<Option<String>> {
+    let text = match std::fs::read_to_string(config) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let mut changed = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rhs) = trimmed.strip_prefix("LJOS_MCP_GENERATION") {
+            let rhs = rhs.trim_start().strip_prefix('=').unwrap_or("").trim();
+            let val = rhs.trim_matches(|c| c == '"' || c == '\'');
+            if val == version {
+                out.push_str(line);
+            } else {
+                let indent_len = line.len() - trimmed.len();
+                out.push_str(&line[..indent_len]);
+                out.push_str("LJOS_MCP_GENERATION = \"");
+                out.push_str(version);
+                out.push('"');
+                changed = true;
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !changed {
+        return Ok(None);
+    }
+    if dry {
+        return Ok(Some(version.to_string()));
+    }
+    std::fs::write(config, out).with_context(|| config.display().to_string())?;
+    Ok(Some(version.to_string()))
+}
+
 fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
     let what = format!("{} mcp", h.name);
     match is_registered(h, server) {
-        Some(true) => Step {
-            what,
-            detail: "ljos registered".into(),
-            ok: true,
-        },
+        Some(true) => {
+            let config = expand(h.config.as_deref().unwrap_or_default());
+            match bump_ljos_mcp_generation(&config, env!("CARGO_PKG_VERSION"), dry) {
+                Ok(Some(v)) => Step {
+                    what,
+                    detail: format!("ljos registered; MCP generation {v}"),
+                    ok: true,
+                },
+                Ok(None) => Step {
+                    what,
+                    detail: "ljos registered".into(),
+                    ok: true,
+                },
+                Err(e) => Step {
+                    what,
+                    detail: format!("ljos registered; generation {e}"),
+                    ok: false,
+                },
+            }
+        }
         None => Step {
             what,
             detail: "no register or config in harnesses.toml; paste `ljos onboard --harness json`"
@@ -6135,6 +6189,33 @@ mod tests {
             "0 due; nothing scheduled: this seat has remembered nothing yet"
         );
         assert!(super::format_due(&super::due_of(&atoms, now)).starts_with("unreviewed\t"));
+    }
+
+    #[test]
+    fn bumping_mcp_generation_respawns_without_rewriting_the_entry() {
+        let dir = std::env::temp_dir().join(format!("ljos-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            "[mcp_servers.ljos.env]\nLJOS_MCP_GENERATION = \"0.12.8\"\n",
+        )
+        .expect("write");
+        let bumped = super::bump_ljos_mcp_generation(&config, "0.13.1", false)
+            .expect("bumps")
+            .expect("changed");
+        assert_eq!(bumped, "0.13.1");
+        let text = std::fs::read_to_string(&config).expect("read");
+        assert!(text.contains("LJOS_MCP_GENERATION = \"0.13.1\""), "{text}");
+        assert!(!text.contains("0.12.8"), "{text}");
+        assert!(
+            super::bump_ljos_mcp_generation(&config, "0.13.1", false)
+                .expect("second")
+                .is_none(),
+            "a matching generation is left alone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The example file parses, and onboarding a config-file runner from it
