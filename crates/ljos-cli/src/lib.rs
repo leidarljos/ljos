@@ -443,10 +443,95 @@ const SESSION: &[&str] = &[
     "tmux", "screen", "zellij", "systemd", "init", "sshd", "login",
 ];
 
+/// Path components that name a place, not a program.
+const PLACES: &[&str] = &[
+    "bin",
+    "sbin",
+    "versions",
+    "current",
+    "dist",
+    "build",
+    "target",
+    "release",
+    "debug",
+    "node_modules",
+    ".bin",
+    "lib",
+    "libexec",
+    "app",
+    "resources",
+];
+
+/// Interpreters run a program named by their first argument.
+const INTERPRETERS: &[&str] = &[
+    "node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl", "java",
+];
+
+fn version_like(s: &str) -> bool {
+    let t = s.strip_prefix('v').unwrap_or(s);
+    t.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// A program's name from how it was started: the last path component of
+/// what ran that is neither a version (`2.1.266`) nor a place (`bin`,
+/// `versions`); for an interpreter, the script it was handed. Falls back
+/// to the kernel's short name.
+#[cfg(target_os = "linux")]
+fn program_name(pid: u32, comm: &str) -> String {
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let args: Vec<String> = cmdline
+        .split(|b| *b == 0)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(first) = args.first() {
+        let base = Path::new(first)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(first);
+        if INTERPRETERS.contains(&base) {
+            if let Some(script) = args.iter().skip(1).find(|a| !a.starts_with('-')) {
+                candidates.push(script);
+            }
+        }
+        candidates.push(first);
+    }
+    for path in candidates {
+        let mut parts: Vec<&str> = Path::new(path)
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        while let Some(last) = parts.pop() {
+            let name = last.rsplit_once('.').map_or(last, |(stem, ext)| {
+                if ["js", "mjs", "cjs", "py", "rb", "pl", "jar", "exe"].contains(&ext) {
+                    stem
+                } else {
+                    last
+                }
+            });
+            if name.is_empty() || version_like(name) || PLACES.contains(&name) || name == "/" {
+                continue;
+            }
+            if name.starts_with('.') || name.contains(std::path::MAIN_SEPARATOR) {
+                continue;
+            }
+            return name.to_string();
+        }
+    }
+    comm.to_string()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn program_name(_pid: u32, comm: &str) -> String {
+    comm.to_string()
+}
+
 /// The seat from the process tree: the record a server left for the runner
 /// above this shell, else the nearest ancestor that is neither a shell nor
-/// a wrapper, tagged with its pid. None when the tree ends in the session
-/// itself, which is a person at a terminal.
+/// a wrapper, named from how it was started and tagged with its pid. None
+/// when the tree ends in the session itself, which is a person at a
+/// terminal.
 fn seat_from_tree() -> Option<Seat> {
     let chain = ancestry();
     for (pid, _) in &chain {
@@ -469,10 +554,11 @@ fn seat_from_tree() -> Option<Seat> {
         if SESSION.iter().any(|s| name.starts_with(s)) {
             return None;
         }
+        let program = program_name(*pid, name);
         return Some(Seat::tagged(
-            seat_slug(name),
+            seat_slug(&program),
             &conversation_tag(*pid),
-            format!("the process tree, {name} {pid}"),
+            format!("the process tree, {program} {pid}"),
         ));
     }
     None
@@ -5067,6 +5153,17 @@ mod tests {
         let late = readings_of(&[first]);
         assert!(format_readings(&late, now).contains("next reading late (yesterday)"));
         assert_eq!(format_change(&late[0], now), "first reading");
+    }
+
+    #[test]
+    fn a_program_is_named_by_its_path_not_its_version() {
+        assert!(version_like("2.1.266"));
+        assert!(version_like("v18.2.0"));
+        assert!(!version_like("acme"));
+        // The kernel's short name of a binary installed under a versions
+        // directory is the version; the program is the directory above.
+        let me = program_name(std::process::id(), "comm");
+        assert!(!me.is_empty() && !version_like(&me), "{me}");
     }
 
     #[test]
