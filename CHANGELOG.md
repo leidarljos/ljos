@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.13.7 (2026-09-20)
+
+- `ljos onboard` registers into a runner's JSON config by pointer: a
+  harness names `config_json`, `json_pointer` and a `json_entry` template
+  (opencode's `mcp` object, for one), and registered means the pointer
+  resolves.
+
 ## 0.13.6 (2026-09-20)
 
 - Every MCP tool answers an object: the ten that answered a bare array
