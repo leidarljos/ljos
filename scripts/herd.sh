@@ -14,10 +14,16 @@ packset ensure >/dev/null
 fail() { echo "herd: $1" >&2; exit 1; }
 
 seats=(brio acme vela orin)
+# The pack knows the topic first, so the island a title activates has
+# seeds two scorers agree on and a finish can fire it.
+LJOS_SEAT=brio ljos remember "The Fuse relay trips at forty amps under the Herd load." --about fuse,herd >/dev/null
+LJOS_SEAT=acme ljos remember "The Herd load peaks when every seat writes at once through the Fuse." --about fuse,herd >/dev/null
+LJOS_SEAT=vela ljos remember "A Fuse that trips under the Herd load is reset by the relay board." --about fuse,herd >/dev/null
+LJOS_SEAT=orin ljos remember "The relay board logs each Fuse trip with the Herd load at the time." --about fuse,herd >/dev/null
 declare -A issue
 for s in "${seats[@]}"; do
   for k in 1 2; do
-    issue[$s:$k]=$(vissue create -p herd "Ticket $k for $s" -q | tail -1)
+    issue[$s:$k]=$(vissue create -p herd "Fuse trips under the herd load" -q | tail -1)
   done
 done
 
@@ -83,6 +89,11 @@ echo "herd: eight finishes closed eight tickets"
 fired=$(grep -l 'fired the island' fin-*.out 2>/dev/null | wc -l || true)
 held=$(grep -l 'fired within the hour' fin-*.out 2>/dev/null | wc -l || true)
 weak=$(grep -l 'did not fire the island' fin-*.out 2>/dev/null | wc -l || true)
-echo "herd: $weak finishes met a weak island (a scratch pack has few seeds)"
+if [ "$weak" = 8 ]; then
+  echo "herd: the island stayed weak on this scratch pack; the fire window is untested here"
+else
+  [ "$fired" = 1 ] || { grep -h "island" fin-*.out; fail "$fired finishes fired the same island, wanted one"; }
+  [ "$held" = 7 ] || { grep -h "island" fin-*.out; fail "$held finishes found it fired already, wanted seven"; }
+fi
 echo "herd: $fired finishes fired an island, $held found it fired already"
 echo "herd: every loop ran"
