@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.13.1 (2026-09-19)
 
 - The holder is any `*_SESSION_ID` the runner set, the full value, ahead
   of the process tag. Two ids that share an eight-character prefix occupy
