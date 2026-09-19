@@ -20,6 +20,10 @@ port=$((8700 + ${SLURM_JOB_ID:-97} % 100))
 export PACKSET_PORT=$port PACKSET_URL=http://127.0.0.1:$port PACKSET_HOME="$HOME/.cache/ljos-hook-scale-pack-${SLURM_JOB_ID:-local}"
 export PACKSET_EMBED_MODEL=bge-small PACKSET_EMBED_CACHE="$HOME/.cache/packset-embed" PYTHONUNBUFFERED=1
 rm -rf "$PACKSET_HOME"
+# One stage-clock line per write, so a fill that slows with the pack says
+# which stage grew.
+export PACKSET_TRACE_WRITES="$HOME/hook-scale-writes-${SLURM_JOB_ID:-local}.log"
+rm -f "$PACKSET_TRACE_WRITES"
 packset ensure
 ljos doctor | grep -E "^(ok|--)	(pack|encoder)" || true
 uv run --script "$HOME/Git/Github/ljos/scripts/terra/hook_scale.py" --sizes 1000 --sizes 5000 --sizes 10000; rc=$?
