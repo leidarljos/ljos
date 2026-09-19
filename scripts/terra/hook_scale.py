@@ -29,26 +29,25 @@ import cyclopts
 
 app = cyclopts.App(help=__doc__)
 
-SUBJECTS = ["the review clock", "a stale claim", "the fused panel", "a scratch pack", "the encoder",
-            "a handover bag", "the claim graph", "a deed accession", "the tracker root", "a persona",
-            "the island walk", "a trust row", "the lexical ballot", "a due card", "the seat workspace",
-            "a consolidation pass", "the hook budget", "a rewrite", "the argv law", "a lease"]
-VERBS = ["closes", "outranks", "reopens", "refuses", "renews", "fires", "weighs", "caps", "seeds", "cites",
-         "pins", "tombstones", "reschedules", "merges", "splits", "holds", "walks", "grades", "settles", "names"]
-OBJECTS = ["the earlier reading", "a busy refusal", "the session node", "the store lock", "a second sitting",
-           "the dense ballot", "an as-of read", "the map size", "a persona's brief", "the entity links",
-           "a weak island", "the head rule", "a stamped session", "the login user", "a bucket of sixty-four",
-           "the writer's port", "a forecast", "the calibration row", "an imported atom", "the last twelve events"]
-WHEN = ["when the pack is cold", "after a handover", "on the second prompt", "under eight seats", "past ten thousand atoms",
-        "before the encoder is up", "at the walltime", "when two runners collide", "on a date-only stamp", "after a lapse"]
+CONSONANTS = "bdfghjklmnprstvz"
+VOWELS = "aeiou"
+SYLLABLES = [c + v for c in CONSONANTS for v in VOWELS]
+
+
+def word(r: random.Random) -> str:
+    """A pronounceable pseudo-word from two or three syllables: a vocabulary
+    of half a million, so two lessons share a token by accident about once
+    in a thousand and the pack's overlap rule leaves every one live."""
+    return "".join(r.choice(SYLLABLES) for _ in range(r.randint(2, 3)))
 
 
 def lesson(i: int) -> str:
-    """Distinct lessons: the case number opens the sentence, so no two share
-    the head the pack's replacement rule reads, and every write stays live."""
+    """Distinct lessons: the case number opens the sentence and the rest is
+    six pseudo-words, so neither the head rule nor the overlap rule pairs
+    two of them and every write stays live."""
     r = random.Random(i)
-    return (f"Case {i} found that {r.choice(SUBJECTS)} {r.choice(VERBS)} {r.choice(OBJECTS)} "
-            f"{r.choice(WHEN)}.")
+    body = " ".join(word(r) for _ in range(6))
+    return f"Case {i}: {body}."
 
 
 def post(url: str, workspace: str, text: str) -> None:
