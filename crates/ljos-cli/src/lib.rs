@@ -1785,7 +1785,12 @@ pub fn atom_kind(label: &str) -> Result<&'static str> {
     }
 }
 
-/// Explicit claim body. The text is stored as given; never harvested.
+/// The entity every write carries: which seat wrote it. Many seats share
+/// one pack, and a reader can then see whose lesson it is reading.
+pub const SEAT_ENTITY: &str = "seat:";
+
+/// Explicit claim body. The text is stored as given; never harvested. The
+/// entities open with the seat that wrote it.
 pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
     serde_json::json!({
         "schema": "inside.atom/v1",
@@ -1793,7 +1798,24 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
         "level": "explicit",
         "text": text,
         "workspace": workspace,
+        "entities": [format!("{SEAT_ENTITY}{}", seat_name())],
     })
+}
+
+/// Add entities to a body without losing the seat's.
+pub fn add_entities(atom: &mut Value, more: impl IntoIterator<Item = String>) {
+    let list = atom["entities"]
+        .as_array_mut()
+        .map(std::mem::take)
+        .unwrap_or_default();
+    let mut list = list;
+    for e in more {
+        let v = Value::String(e);
+        if !list.contains(&v) {
+            list.push(v);
+        }
+    }
+    atom["entities"] = Value::Array(list);
 }
 
 /// POST one explicit claim. Callers pass Remember/Prefer only.
@@ -1840,7 +1862,7 @@ pub fn packset_write_as(label: &str, text: &str, persona: Option<&str>) -> Resul
     }
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, &workspace);
-    atom["entities"] = Value::Array(vec![Value::String(persona_entity(name))]);
+    add_entities(&mut atom, [persona_entity(name)]);
     client
         .post_atom(&atom)
         .with_context(|| format!("{label}: POST /v1/atoms failed"))
@@ -1921,12 +1943,7 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     atom["name"] = Value::String(name.into());
     atom["anchor"] = serde_json::json!(p.anchor);
     if !p.entities.is_empty() {
-        atom["entities"] = Value::Array(
-            p.entities
-                .iter()
-                .map(|e| Value::String(e.to_lowercase()))
-                .collect(),
-        );
+        add_entities(&mut atom, p.entities.iter().map(|e| e.to_lowercase()));
     }
     Ok(atom)
 }
@@ -2580,7 +2597,7 @@ pub fn trust_atom(row: &Trust, why: &[String], workspace: &str) -> Result<Value>
     atom["to"] = Value::String(to.into());
     atom["weight"] = serde_json::json!(row.weight);
     if !why.is_empty() {
-        atom["entities"] = Value::Array(why.iter().map(|w| Value::String(w.clone())).collect());
+        add_entities(&mut atom, why.iter().cloned());
     }
     if !row.about.is_empty() {
         atom["about"] = Value::Array(
@@ -3627,7 +3644,7 @@ pub fn habit(
     let prev = readings_of(&atoms).into_iter().find(|r| r.name == name);
     let now = now_utc();
     let mut atom = atom_body("habit", &habit_text(name, value, unit, source), &workspace);
-    atom["entities"] = Value::Array(vec![Value::String(format!("{HABIT_ENTITY}{name}"))]);
+    add_entities(&mut atom, [format!("{HABIT_ENTITY}{name}")]);
     if let Some(due) = stamp_after(&now, every_s) {
         atom["due_at"] = Value::String(due);
     }
@@ -5969,6 +5986,15 @@ mod tests {
         assert_eq!(v["level"], "explicit");
         assert_eq!(v["text"], "the default fuse is CombMNZ");
         assert_eq!(v["workspace"], "ws");
+        // Every write names the seat that wrote it, and other entities join it.
+        let seat = v["entities"][0].as_str().unwrap();
+        assert!(seat.starts_with(SEAT_ENTITY), "{seat}");
+        let mut more = v.clone();
+        add_entities(
+            &mut more,
+            ["persona:reviewer".to_string(), seat.to_string()],
+        );
+        assert_eq!(more["entities"].as_array().unwrap().len(), 2, "{more}");
         // Never harvest a transcript: the text is the claim, not a prefix parse.
         let raw = atom_body("lesson", "Remember: pin the review set", "ws");
         assert_eq!(raw["text"], "Remember: pin the review set");
