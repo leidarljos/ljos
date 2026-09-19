@@ -117,6 +117,10 @@ A lesson that rewrites an earlier one of the same kind (the pack reads a token o
 
 Other projects may still speak packset, deedar, vissue, or claimdag alone.
 
+Unanimous green (two implementers, two reviewers, `ljos consensus`
+is GREEN) lives in [`examples/unanimous-green/`](examples/unanimous-green/).
+A Rhai host, a Task host, and a procedure-file host run the same seats.
+
 ## Documentation
 
 The org site teaches sitting: <https://leidarljos.github.io>.
