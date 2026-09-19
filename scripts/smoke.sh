@@ -102,7 +102,8 @@ cp -a "$root/bag" "$root/unsigned"
 rtrash "$root/unsigned/manifest-sha256.txt.sig" 2>/dev/null || rm -f "$root/unsigned/manifest-sha256.txt.sig"
 if ljos receive "$root/unsigned" --import >/dev/null 2>&1; then fail "an unsigned bag was imported"; fi
 # Signed import lands atoms; doctor still answers.
-ljos receive "$root/bag" --import | grep -q 'atoms imported' || fail "signed import"
+got=$(ljos receive "$root/bag" --import 2>&1 || true)
+echo "$got" | grep -q 'atoms imported' || { echo "$got"; fail "signed import"; }
 ljos doctor | grep -q '^ok	pack' || fail "doctor after receive"
 # A bag altered after sealing is refused: one byte of one atom changed,
 # and the receipt must fail on the manifest, not count the atoms.
