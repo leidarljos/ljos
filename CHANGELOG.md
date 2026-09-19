@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.13.4 (2026-09-19)
+
 - The roster, a brief and the panel prompt read only the persona atoms
   (`packset-client` 0.9.17), not every atom in the workspace.
 - `ljos doctor` has a memory row: the live count against the cap and
