@@ -439,9 +439,12 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
             format!("the client that connected, process {runner_pid}"),
         )
     };
-    let path = seat_record_path(runner_pid);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    // One record by the runner's process, one by each conversation id the
+    // runner stamped: a shell whose line editor stamps an id of its own
+    // still shares one with the server, and finds this seat by it.
+    write_record(&seat_record_path(runner_pid), &seat);
+    for (_, id) in stamped_sessions() {
+        write_record(&session_record_path(&id), &seat);
     }
     let _ = ANNOUNCED.set(seat.clone());
     seat
@@ -673,6 +676,15 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
+    // The server's record by a shared conversation id first: it carries the
+    // holder the server took, whatever else this shell's environment adds.
+    if let Some(record) = seat_from_session_records() {
+        return Seat {
+            seat: seat_name,
+            holder: record.holder,
+            source: record.source,
+        };
+    }
     if let Some((holder, keys)) = session {
         return Seat {
             seat: seat_name,
@@ -5355,14 +5367,8 @@ mod tests {
         }
         let server = announce_seat("Acme CLI", 4242);
         assert_eq!(server.seat, "acme-cli");
-        assert_eq!(
-            server.holder,
-            format!(
-                "acme-cli-{}",
-                session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6")
-            )
-        );
-        // The shell's line editor stamps its own id; the shared one still finds the record.
+        // The shell's line editor stamps its own id; the shared one still
+        // finds the record, and the holder is the server's.
         unsafe {
             std::env::set_var(
                 "AAA_LINE_EDITOR_SESSION_ID",
@@ -5380,6 +5386,7 @@ mod tests {
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
+        assert_ne!(session_tag("01a09b25-aaaa"), session_tag("01a09b25-bbbb"));
     }
 
     #[test]
