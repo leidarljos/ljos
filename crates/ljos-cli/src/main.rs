@@ -5,16 +5,17 @@ use clap::{Parser, Subcommand};
 use ljos_cli::{
     age_of, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due_report, finish, format_consolidation, format_doctor,
-    format_hits, format_hubs, format_island, format_readings, format_seat, format_steps,
-    format_write_ack, graded, habit, habits, handover, healthy, hold_hook_context, hook_call,
-    hook_context, hook_output_ruled, island_entities, join, learn_anchors, learn_and_write,
-    learn_shared, now_utc, on_path, onboard, pack, packset_consolidate, packset_forget,
-    packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel, panel_steps,
-    parse_every, personas_from_pack, policy_with_memory, policyd_required, predictions_of, receive,
-    release, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
-    sitting, take_hook_context, tcb_check, timeline, topic_words, trim_num, trust_from_pack,
-    verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust, Persona,
-    Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    format_hits, format_hubs, format_island, format_personas, format_readings, format_seat,
+    format_steps, format_write_ack, graded, habit, habits, handover, healthy, hold_hook_context,
+    hook_call, hook_context, hook_output_ruled, island_entities, join, learn_anchors,
+    learn_and_write, learn_shared, now_utc, on_path, onboard, pack, packset_consolidate,
+    packset_forget, packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel,
+    panel_steps, parse_every, personas_from_pack, policy_with_memory, policyd_required,
+    predictions_of, receive, release, resolve_assignee, rows_about, rules_from_pack, run, run_as,
+    run_captured, session_end, sitting, take_hook_context, tcb_check, timeline, topic_words,
+    trim_num, trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB,
+    PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -149,6 +150,8 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
+    /// The personas the pack holds: name, anchor, domains and view, one per line.
+    Personas,
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
         /// A tracker id, or a 32-hex claim-graph id.
@@ -444,6 +447,9 @@ fn main() -> Result<()> {
                 entities: about,
             })?;
             println!("{}", format_write_ack(&body));
+        }
+        Cmd::Personas => {
+            print!("{}", format_personas(&personas_from_pack()?));
         }
         Cmd::Claim { node, assignee } => {
             print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)

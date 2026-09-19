@@ -2265,6 +2265,32 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
 /// shared by many projects holds reviewers for all of them, and a panel on
 /// a docs ticket does not want the CUDA reviewer. None matching, all sit.
 #[must_use]
+/// The roster, one persona per line: name, anchor, the domains it speaks
+/// to, its view. Empty pack: one line saying how to write the first one.
+pub fn format_personas(personas: &[Persona]) -> String {
+    if personas.is_empty() {
+        return "no personas; `ljos persona NAME --anchor A --view \"...\" --about DOMAIN` writes one\n"
+            .to_string();
+    }
+    let width = personas.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    personas
+        .iter()
+        .map(|p| {
+            format!(
+                "{:width$}  anchor {:.2}  {}  {}\n",
+                p.name,
+                p.anchor,
+                if p.entities.is_empty() {
+                    "about anything".to_string()
+                } else {
+                    format!("about {}", p.entities.join(", "))
+                },
+                p.view
+            )
+        })
+        .collect()
+}
+
 pub fn personas_speaking_to(personas: &[Persona], words: &[String]) -> Vec<Persona> {
     let words: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
     let speaking: Vec<Persona> = personas
@@ -6598,6 +6624,33 @@ mod tests {
         );
         assert!(needs_of("{}").unwrap().is_empty());
         assert!(needs_of("not json").is_err());
+    }
+
+    #[test]
+    fn the_roster_lists_each_persona_on_one_line() {
+        assert!(format_personas(&[]).starts_with("no personas;"));
+        let roster = format_personas(&[
+            Persona {
+                name: "reviewer".into(),
+                anchor: 0.2,
+                view: "Reads for what breaks.".into(),
+                entities: vec!["docs".into(), "release".into()],
+            },
+            Persona {
+                name: "reader".into(),
+                anchor: 0.8,
+                view: "Reads as a first-time user.".into(),
+                entities: Vec::new(),
+            },
+        ]);
+        let lines: Vec<&str> = roster.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with("reviewer  anchor 0.20  about docs, release  Reads"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[1].contains("about anything"), "{}", lines[1]);
     }
 
     #[test]

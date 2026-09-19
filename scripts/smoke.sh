@@ -75,6 +75,7 @@ echo "$sit_b" | grep -q 'gen=' || fail "second harness sitting"
 
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about docs >/dev/null
 ljos persona reader --anchor 0.8 --view "Reads as a first-time user." --about docs >/dev/null
+ljos personas | grep -q '^reviewer .*anchor 0.20 .*about docs' || fail "personas roster"
 id2=$(vissue create -p demo "Publish the docs site now?" -q | tail -1)
 ljos vote "$id2" --for hold --as reviewer >/dev/null
 ljos vote "$id2" --for ship --as reader >/dev/null

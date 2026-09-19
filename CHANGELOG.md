@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos personas` and the `ljos_personas` tool print the roster the pack
+  holds: name, anchor, the domains each speaks to, its view. The only
+  way to see it was the panel prompt.
 - `ljos due` sweeps the pack first and says what the sweep did: reviews
   left due past twice their interval lapse, never-recalled claims missed
   three times are forgotten by neglect, and the list that follows is the

@@ -212,6 +212,19 @@ pub struct PersonaArgs {
     pub about: Vec<String>,
 }
 
+/// One persona of the roster.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PersonaRow {
+    /// The name its ballots carry.
+    pub name: String,
+    /// How far it moves off its ballot in a settle, in [0, 1].
+    pub anchor: f64,
+    /// The domains it speaks to; empty speaks to every issue.
+    pub about: Vec<String>,
+    /// How it reads the work.
+    pub view: String,
+}
+
 /// A session node to take or hand back.
 #[derive(Deserialize, JsonSchema)]
 pub struct TakeArgs {
@@ -1243,6 +1256,25 @@ impl LjosServer {
                     activation: a["activation"].as_f64().unwrap_or(0.0),
                     seed: a["seed"].as_bool().unwrap_or(false),
                     age: age_of(a["ts"].as_str(), &now),
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
+        description = "Call this before a panel or a persona vote: the personas the pack holds, each with its name, anchor, the domains it speaks to and its view. Write a missing one with ljos_persona.",
+        annotations(title = "Personas", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_personas(&self) -> Result<Json<Vec<PersonaRow>>, McpError> {
+        Ok(Json(
+            personas_from_pack()
+                .map_err(refused)?
+                .into_iter()
+                .map(|p| PersonaRow {
+                    name: p.name,
+                    anchor: p.anchor,
+                    about: p.entities,
+                    view: p.view,
                 })
                 .collect(),
         ))
