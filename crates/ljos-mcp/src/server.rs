@@ -221,7 +221,7 @@ pub struct Rows<T: JsonSchema> {
 }
 
 /// Wrap a list as the object a structured result has to be.
-fn rows<T: JsonSchema>(rows: Vec<T>) -> Json<Rows<T>> {
+fn as_rows<T: JsonSchema>(rows: Vec<T>) -> Json<Rows<T>> {
     Json(Rows { rows })
 }
 
@@ -650,7 +650,7 @@ impl LjosServer {
             packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        Ok(rows(
+        Ok(as_rows(
             hits.into_iter()
                 .map(|h| HitRow {
                     id: h.id,
@@ -908,7 +908,7 @@ impl LjosServer {
         Parameters(args): Parameters<CalibrateArgs>,
     ) -> Result<Json<Rows<TrustRow>>, McpError> {
         let rows = calibrate(&args.project, args.rounds.unwrap_or(20)).map_err(refused)?;
-        Ok(rows(
+        Ok(as_rows(
             rows.into_iter()
                 .map(|r| TrustRow {
                     from: r.from,
@@ -1037,7 +1037,7 @@ impl LjosServer {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
             out.push(habitat(step.bin, &args)?.0);
         }
-        Ok(rows(out))
+        Ok(as_rows(out))
     }
 
     #[tool(
@@ -1176,7 +1176,7 @@ impl LjosServer {
             &about,
         )
         .map_err(refused)?;
-        Ok(rows(
+        Ok(as_rows(
             rows.into_iter()
                 .map(|r| TrustRow {
                     from: r.from,
@@ -1192,7 +1192,7 @@ impl LjosServer {
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_doctor(&self) -> Result<Json<Rows<HabitatRow>>, McpError> {
-        Ok(rows(
+        Ok(as_rows(
             doctor()
                 .into_iter()
                 .map(|h| HabitatRow {
@@ -1219,7 +1219,7 @@ impl LjosServer {
         Parameters(args): Parameters<PackArgs>,
     ) -> Result<Json<Rows<String>>, McpError> {
         handover(Path::new(&args.out), &args.projects, &args.issues)
-            .map(rows)
+            .map(as_rows)
             .map_err(refused)
     }
 
@@ -1242,7 +1242,7 @@ impl LjosServer {
             args.since.as_deref().map(Path::new),
             args.import.unwrap_or(false),
         )
-        .map(rows)
+        .map(as_rows)
         .map_err(refused)
     }
 
@@ -1263,7 +1263,7 @@ impl LjosServer {
         let now = now_utc();
         let body = packset_island_as(&args.cue, args.fire.unwrap_or(false), args.lens.as_deref())
             .map_err(refused)?;
-        Ok(rows(
+        Ok(as_rows(
             body["island"]
                 .as_array()
                 .into_iter()
@@ -1285,7 +1285,7 @@ impl LjosServer {
         annotations(title = "Personas", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_personas(&self) -> Result<Json<Rows<PersonaRow>>, McpError> {
-        Ok(rows(
+        Ok(as_rows(
             personas_from_pack()
                 .map_err(refused)?
                 .into_iter()
@@ -1304,7 +1304,7 @@ impl LjosServer {
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_due(&self) -> Result<Json<Rows<DueRow>>, McpError> {
-        Ok(rows(
+        Ok(as_rows(
             due()
                 .map_err(refused)?
                 .into_iter()
