@@ -44,9 +44,11 @@ WHEN = ["when the pack is cold", "after a handover", "on the second prompt", "un
 
 
 def lesson(i: int) -> str:
+    """Distinct lessons: the case number opens the sentence, so no two share
+    the head the pack's replacement rule reads, and every write stays live."""
     r = random.Random(i)
-    return (f"{r.choice(SUBJECTS).capitalize()} {r.choice(VERBS)} {r.choice(OBJECTS)} {r.choice(WHEN)}. "
-            f"Case {i} of the scale run says so.")
+    return (f"Case {i} found that {r.choice(SUBJECTS)} {r.choice(VERBS)} {r.choice(OBJECTS)} "
+            f"{r.choice(WHEN)}.")
 
 
 def post(url: str, workspace: str, text: str) -> None:
@@ -85,7 +87,7 @@ def main(
     url: str = os.environ.get("PACKSET_URL", "http://127.0.0.1:8761"),
     workspace: str = "seat",
     sizes: list[int] = [1000, 5000, 10000],
-    concurrent: int = 8,
+    parallel: int = 8,
 ):
     """Fill a scratch pack step by step and time the seat at each size.
 
@@ -97,7 +99,7 @@ def main(
         The workspace written and read; the seat's is `seat`.
     sizes
         Atom counts to time at, ascending; each step adds the difference.
-    concurrent
+    parallel
         Prompts fired at once for the concurrent hook row.
     """
     have = 0
@@ -107,14 +109,14 @@ def main(
             post(url, workspace, lesson(i))
         have = n
         print(f"=== {n} atoms (filled in {time.perf_counter() - t0:.1f} s), live {live(url, workspace)}")
-        prompts = [lesson(random.Random(1000 + k).randrange(n)).split(". ")[0] for k in range(concurrent)]
+        prompts = [lesson(random.Random(1000 + k).randrange(n)).split(". ")[0] for k in range(parallel)]
         for k in range(3):
             secs, out = hook(prompts[k], f"scale-{n}-{k}")
             print(f"hook single {secs:.3f} s ({len(out)} bytes)")
         t0 = time.perf_counter()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
             list(pool.map(lambda kp: hook(kp[1], f"scale-{n}-c{kp[0]}"), enumerate(prompts)))
-        print(f"hook {concurrent} concurrent {time.perf_counter() - t0:.3f} s")
+        print(f"hook {parallel} concurrent {time.perf_counter() - t0:.3f} s")
         secs, _ = timed(["ljos", "search", prompts[0]])
         print(f"search {secs:.3f} s")
         secs, out = timed(["ljos", "consolidate"], timeout=300)

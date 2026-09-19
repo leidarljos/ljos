@@ -1580,6 +1580,7 @@ mod tests {
                 "ljos_finish",
                 "ljos_forget",
                 "ljos_graded",
+                "ljos_habit",
                 "ljos_handover",
                 "ljos_island",
                 "ljos_learn",

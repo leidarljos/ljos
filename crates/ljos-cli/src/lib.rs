@@ -485,11 +485,11 @@ fn named_var(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty() && !omitted_actor_name(v))
 }
 
-/// Who is sitting, with nothing set. The seat: `LJOS_SEAT` when someone
-/// set it; else what the MCP client said at initialize; else the process
-/// tree above this shell, which is the runner that opened it or the server
-/// that runner opened; else `VISSUE_AGENT`; else the login user, who is
-/// the seat when no program is. The holder is the seat tagged with the
+/// Who is sitting, with nothing set. The seat: `LJOS_SEAT` or the
+/// tracker's `VISSUE_AGENT` when someone set one; else what the MCP client
+/// said at initialize; else the process tree above this shell, which is
+/// the runner that opened it or the server that runner opened; else the
+/// login user, who is the seat when no program is. The holder is the seat tagged with the
 /// conversation's process, so a runner's server and its shells, which
 /// share that process, agree on it whatever else sits in their
 /// environments; a `*_SESSION_ID` the runner stamped is the holder only
@@ -498,16 +498,20 @@ fn named_var(key: &str) -> Option<String> {
 #[must_use]
 pub fn whoami() -> Seat {
     let session = session_actor();
-    let named = named_var("LJOS_SEAT");
+    // Both variables are a person naming the seat: the seat's own, and the
+    // tracker's name for the same thing. Either beats what the tree says.
+    let named = named_var("LJOS_SEAT")
+        .map(|n| (n, "LJOS_SEAT"))
+        .or_else(|| named_var("VISSUE_AGENT").map(|n| (n, "VISSUE_AGENT")));
     let program = ANNOUNCED.get().cloned().or_else(seat_from_tree);
     let agent = named_var("VISSUE_AGENT");
     let mut seat = match (&named, &program) {
-        (Some(name), Some(p)) => Seat {
+        (Some((name, key)), Some(p)) => Seat {
             seat: name.clone(),
             holder: p.holder.replacen(&p.seat, name, 1),
-            source: format!("LJOS_SEAT, held by {}", p.source),
+            source: format!("{key}, held by {}", p.source),
         },
-        (Some(name), None) => Seat::whole(name, "LJOS_SEAT"),
+        (Some((name, key)), None) => Seat::whole(name, key),
         (None, Some(p)) => p.clone(),
         (None, None) => match (&session, &agent) {
             (Some((holder, keys)), _) => Seat {
