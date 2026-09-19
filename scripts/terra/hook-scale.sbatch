@@ -6,9 +6,11 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --partition=cpu
-# A timing run owns the node: shared with other work the fill and the hook
-# read two to three times slower and the numbers compare with nothing.
-#SBATCH --exclusive
+# A timing run would own the node (--exclusive): shared with other work the
+# fill reads two to three times slower. Three exclusive runs on 2026-09-19
+# were cancelled by SIGTERM ten minutes in, from the sibling sessions whose
+# jobs they held back, so the run shares the node and the write trace
+# (per-stage milliseconds by pack size) carries the comparison instead.
 #SBATCH --output=%x-%j.out
 # The seat's hook, search and a dry consolidation timed on a scratch pack of
 # a thousand, five thousand and ten thousand distinct lessons.
