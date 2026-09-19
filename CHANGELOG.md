@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.13.5 (2026-09-20)
+
 - A finish says when the island fired already this hour (the pack holds
   a second fire of the same claims for an hour, so several seats or
   personas closing sittings on one issue tighten its links once).
