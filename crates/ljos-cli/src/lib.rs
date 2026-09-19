@@ -2784,6 +2784,21 @@ fn bin_version(bin: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A day, in seconds: how long a crates.io answer is kept on disk.
+const CRATE_VERSION_TTL_S: u64 = 86_400;
+
+/// Where a crates.io answer is kept between processes, so a herd of seats
+/// opening sittings asks the registry once a day for each binary rather
+/// than once a sitting each.
+fn crate_version_cache(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().ok().map(|h| h.join(".cache")))?
+        .join("ljos");
+    Some(dir.join(format!("crate-{name}")))
+}
+
 fn crate_max_version(name: &str) -> Option<String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -2792,6 +2807,24 @@ fn crate_max_version(name: &str) -> Option<String> {
     if let Ok(guard) = cache.lock() {
         if let Some(hit) = guard.get(name) {
             return hit.clone();
+        }
+    }
+    let on_disk = crate_version_cache(name);
+    if let Some(path) = &on_disk {
+        let fresh = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() < CRATE_VERSION_TTL_S);
+        if fresh {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let v = text.trim();
+                let got = (!v.is_empty()).then(|| v.to_string());
+                if let Ok(mut guard) = cache.lock() {
+                    guard.insert(name.to_string(), got.clone());
+                }
+                return got;
+            }
         }
     }
     let url = format!("https://crates.io/api/v1/crates/{name}");
@@ -2806,6 +2839,12 @@ fn crate_max_version(name: &str) -> Option<String> {
         let v: serde_json::Value = serde_json::from_slice(&said.stdout).ok()?;
         v["crate"]["max_version"].as_str().map(str::to_string)
     });
+    if let (Some(path), Some(v)) = (&on_disk, &got) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, format!("{v}\n"));
+    }
     if let Ok(mut guard) = cache.lock() {
         guard.insert(name.to_string(), got.clone());
     }
