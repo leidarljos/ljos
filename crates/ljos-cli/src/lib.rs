@@ -6460,8 +6460,9 @@ mod tests {
     #[test]
     fn onboarding_a_config_file_runner_writes_once() {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
-        assert_eq!(all.harness.len(), 2);
+        assert_eq!(all.harness.len(), 3);
         assert_eq!(all.harness[1].marker.as_deref(), Some("[mcp_servers.ljos]"));
+        assert_eq!(all.harness[2].json_pointer.as_deref(), Some("/mcp/ljos"));
 
         let dir = std::env::temp_dir().join(format!("ljos-onboard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
