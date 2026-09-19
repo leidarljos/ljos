@@ -3,18 +3,16 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, conflicts, consensus_steps_for, doctor,
-    complete, due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
-    format_island, format_steps, graded, handover, healthy, hook_call, hook_context,
-    hook_output_ruled, island_entities, join, learn_anchors, learn_and_write, learn_shared,
-    node_for, on_path, onboard, pack, packset_consolidate, packset_forget, packset_hubs,
-    packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
-    policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
-    policyd_required, tcb_check,
-    format_write_ack, hold_hook_context, run_captured, resolve_assignee, session_end, sitting,
-    take_hook_context,
-    timeline, topic_words, trust_from_pack,
-    verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
+    ballots_from_json, brief, calibrate, cards, claim, complete, conflicts, consensus_steps_for,
+    doctor, due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
+    format_island, format_steps, format_write_ack, graded, handover, healthy, hold_hook_context,
+    hook_call, hook_context, hook_output_ruled, island_entities, join, learn_anchors,
+    learn_and_write, learn_shared, on_path, onboard, pack, packset_consolidate,
+    packset_forget, packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel,
+    panel_steps, personas_from_pack, policy_with_memory, policyd_required, predictions_of, receive,
+    release, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
+    sitting, take_hook_context, tcb_check, timeline, topic_words, trust_from_pack, verdict_for,
+    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
@@ -275,7 +273,7 @@ enum Cmd {
     Sitting {
         /// The tracker id of the issue.
         issue: String,
-        /// Your name; one live claim per name. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        /// Your name. A named worker occupies one slot; a harness seat occupies per issue. Absent: LJOS_SEAT, else session, else VISSUE_AGENT, else `seat`.
         #[arg(long)]
         assignee: Option<String>,
         /// Where the cards are read from.
@@ -432,7 +430,10 @@ fn main() -> Result<()> {
             print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)
         }
         Cmd::Release { node, assignee } => {
-            print!("{}", release(&node, &resolve_assignee(assignee.as_deref()))?)
+            print!(
+                "{}",
+                release(&node, &resolve_assignee(assignee.as_deref()))?
+            )
         }
         Cmd::Complete {
             node,

@@ -5,6 +5,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - `cargo install ljos` installs `ljos` and `ljos-mcp`.
+- Harness occupancy is per issue: a shared seat (`grok`, `seat`, `you`)
+  or a `sess-` id holds `{name}:{issue}`, so two conversations or a
+  parent and an inherited-MCP child can sit on two tickets without
+  releasing each other. A named worker still occupies one slot.
+  `doctor` prints the session name and `GROK_SESSION_ID` when that is
+  the source, not `seat (from the default)`.
 
 ## 0.12.15 (2026-09-15)
 

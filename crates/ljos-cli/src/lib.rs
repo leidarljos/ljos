@@ -220,7 +220,8 @@ fn shared_actor_name(name: &str) -> bool {
 }
 
 /// The conversation this process belongs to, when the runner stamped one.
-fn session_actor() -> Option<String> {
+/// The source key is which env var held it, for doctor.
+fn session_actor() -> Option<(String, &'static str)> {
     for key in ["GROK_SESSION_ID", "HARNESS_SESSION_ID", "TERM_SESSION_ID"] {
         if let Ok(raw) = std::env::var(key) {
             let t = raw.trim();
@@ -228,10 +229,31 @@ fn session_actor() -> Option<String> {
                 continue;
             }
             let prefix: String = t.chars().take(8).collect();
-            return Some(format!("sess-{prefix}"));
+            return Some((format!("sess-{prefix}"), key));
         }
     }
     None
+}
+
+/// The name this seat claims and votes under, and where it came from.
+/// Doctor prints this pair; occupancy uses the name.
+fn seat_identity() -> (String, &'static str) {
+    if let Ok(v) = std::env::var("LJOS_SEAT") {
+        let t = v.trim();
+        if !t.is_empty() && !shared_actor_name(t) {
+            return (t.to_string(), "LJOS_SEAT");
+        }
+    }
+    if let Some((s, key)) = session_actor() {
+        return (s, key);
+    }
+    if let Ok(v) = std::env::var("VISSUE_AGENT") {
+        let t = v.trim();
+        if !t.is_empty() && !shared_actor_name(t) {
+            return (t.to_string(), "VISSUE_AGENT");
+        }
+    }
+    ("seat".to_string(), "the default")
 }
 
 /// The name this seat claims and votes under when none is given:
@@ -240,22 +262,12 @@ fn session_actor() -> Option<String> {
 /// the runner stamped, else `VISSUE_AGENT`, else `seat`.
 #[must_use]
 pub fn seat_name() -> String {
-    if let Ok(v) = std::env::var("LJOS_SEAT") {
-        let t = v.trim();
-        if !t.is_empty() && !shared_actor_name(t) {
-            return t.to_string();
-        }
-    }
-    if let Some(s) = session_actor() {
-        return s;
-    }
-    if let Ok(v) = std::env::var("VISSUE_AGENT") {
-        let t = v.trim();
-        if !t.is_empty() && !shared_actor_name(t) {
-            return t.to_string();
-        }
-    }
-    "seat".to_string()
+    seat_identity().0
+}
+
+fn format_seat_row() -> String {
+    let (seat, source) = seat_identity();
+    format!("{seat} (from {source})")
 }
 
 /// Resolve an `--assignee` / MCP field. A shared name (`grok`, `seat`,
@@ -266,6 +278,32 @@ pub fn resolve_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
         Some(n) if !shared_actor_name(n) => n.to_string(),
         _ => seat_name(),
+    }
+}
+
+/// A harness multiplex (shared names, the default `seat`, a `sess-` id)
+/// is many conversations under one process env. One live claim per that
+/// name unseats sibling sittings. A named worker still occupies one slot.
+fn harness_occupancy_name(name: &str) -> bool {
+    let n = name.trim();
+    shared_actor_name(n) || n.eq_ignore_ascii_case("seat") || n.starts_with("sess-")
+}
+
+/// Occupancy identity for the claim graph: a harness name is scoped to
+/// the issue so two conversations, or a parent and an inherited-MCP
+/// child, can hold two tickets. Already-scoped names (they contain `:`)
+/// are left alone.
+#[must_use]
+pub fn occupancy_assignee(passed: Option<&str>, issue: &str) -> String {
+    occupancy_scope(&resolve_assignee(passed), issue)
+}
+
+fn occupancy_scope(assignee: &str, issue: &str) -> String {
+    let issue = issue.trim();
+    if issue.is_empty() || assignee.contains(':') || !harness_occupancy_name(assignee) {
+        assignee.to_string()
+    } else {
+        format!("{assignee}:{issue}")
     }
 }
 
@@ -503,10 +541,15 @@ fn hook_matcher(event: &str) -> &'static str {
 /// The events a runner's table asks for, or the default.
 fn hook_events_of(h: &Harness) -> Vec<String> {
     if h.name == "grok" {
-        return ["UserPromptSubmit", "PostToolUse", "PreToolUse", "SessionEnd"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        return [
+            "UserPromptSubmit",
+            "PostToolUse",
+            "PreToolUse",
+            "SessionEnd",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     }
     if h.hook_events.is_empty() {
         HOOK_EVENTS.iter().map(|e| (*e).to_string()).collect()
@@ -2510,9 +2553,7 @@ pub fn doctor() -> Vec<Habitat> {
 fn bin_health(path: &str, have: Option<&str>, latest: Option<&str>) -> (String, bool) {
     let ver = have.unwrap_or("?");
     match latest {
-        Some(cr)
-            if have.is_some_and(|v| cmp_semver(v, cr) == Some(std::cmp::Ordering::Less)) =>
-        {
+        Some(cr) if have.is_some_and(|v| cmp_semver(v, cr) == Some(std::cmp::Ordering::Less)) => {
             (format!("{path}  {ver}  behind crates.io {cr}"), true)
         }
         Some(cr) => (format!("{path}  {ver}  crates.io {cr}"), true),
@@ -2534,9 +2575,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 false,
             ),
             (None, _, None) => ("not on PATH".into(), false),
-            (Some(path), have, Some(cr)) => {
-                bin_health(&path.display().to_string(), have, Some(cr))
-            }
+            (Some(path), have, Some(cr)) => bin_health(&path.display().to_string(), have, Some(cr)),
             (Some(path), have, None) => {
                 let ver = have.unwrap_or("?");
                 (format!("{}  {ver}", path.display()), true)
@@ -2549,43 +2588,36 @@ pub fn doctor_seat() -> Vec<Habitat> {
         });
     }
     // The name this runner claims and votes under, and where it came from.
-    let (seat, source) = ["LJOS_SEAT", "VISSUE_AGENT"]
-        .iter()
-        .find_map(|k| {
-            std::env::var(k)
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .map(|v| (v, *k))
-        })
-        .unwrap_or_else(|| ("seat".to_string(), "the default"));
+    // Same pair occupancy uses; a GROK_SESSION_ID is not "the default".
     out.push(Habitat {
         name: "seat",
-        state: format!("{seat} (from {source})"),
+        state: format_seat_row(),
         ok: true,
     });
     load_seat_env();
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
-    out.push(match PacksetClient::from_env().and_then(|c| c.status(None)) {
-        Ok(status) => {
-            let available = status["embedder"]["available"].as_bool().unwrap_or(false);
-            Habitat {
-                name: "encoder",
-                state: if available {
-                    "dense ballot on".to_string()
-                } else {
-                    "down; cargo binstall packset-embed and put it beside packsetd".to_string()
-                },
-                ok: available,
+    out.push(
+        match PacksetClient::from_env().and_then(|c| c.status(None)) {
+            Ok(status) => {
+                let available = status["embedder"]["available"].as_bool().unwrap_or(false);
+                Habitat {
+                    name: "encoder",
+                    state: if available {
+                        "dense ballot on".to_string()
+                    } else {
+                        "down; cargo binstall packset-embed and put it beside packsetd".to_string()
+                    },
+                    ok: available,
+                }
             }
-        }
-        Err(e) => Habitat {
-            name: "encoder",
-            state: format!("pack does not answer: {e}"),
-            ok: false,
+            Err(e) => Habitat {
+                name: "encoder",
+                state: format!("pack does not answer: {e}"),
+                ok: false,
+            },
         },
-    });
+    );
     out.push(match pack() {
         Ok(client) => match client.health() {
             Ok(_) => Habitat {
@@ -3386,7 +3418,7 @@ fn holder_of(get_output: &str) -> Option<String> {
 /// The refusal, explained, or any other failure of the claim graph.
 pub fn claim(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
-    let actor = work_id(assignee);
+    let actor = work_id(&occupancy_scope(assignee, node));
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
         Ok(said) => Ok(said.stdout),
         Err(e) => {
@@ -3460,7 +3492,16 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
 /// The claim graph's refusal: not held, or held by somebody else.
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
-    Ok(run_captured("claimdag", &["release", &id, "--actor", &work_id(assignee)])?.stdout)
+    Ok(run_captured(
+        "claimdag",
+        &[
+            "release",
+            &id,
+            "--actor",
+            &work_id(&occupancy_scope(assignee, node)),
+        ],
+    )?
+    .stdout)
 }
 
 /// `; revises N earlier` when the pack closed earlier memories' windows
@@ -3760,7 +3801,7 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
 /// status that is not terminal.
 pub fn complete(node: &str, status: Option<&str>, assignee: &str, gen: u64) -> Result<String> {
     let id = node_for(node)?;
-    let actor = work_id(assignee);
+    let actor = work_id(&occupancy_scope(assignee, node));
     let gen_s = gen.to_string();
     let mut args = vec![
         "complete",
@@ -4336,6 +4377,48 @@ mod tests {
         assert_eq!(resolve_assignee(Some("seat")), "sess-01a09b25");
         assert_eq!(resolve_assignee(None), "sess-01a09b25");
         assert_eq!(resolve_assignee(Some("alice")), "alice");
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+        }
+    }
+
+    #[test]
+    fn harness_occupancy_is_per_issue_so_two_sittings_do_not_unseat() {
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        }
+        let a = occupancy_assignee(None, "ljos-aaaa");
+        let b = occupancy_assignee(None, "ljos-bbbb");
+        let grok_a = occupancy_assignee(Some("grok"), "ljos-aaaa");
+        assert_ne!(a, b, "two issues under one session must not share a slot");
+        assert_eq!(a, grok_a);
+        assert!(a.starts_with("sess-01a09b25:"), "{a}");
+        assert!(b.starts_with("sess-01a09b25:"), "{b}");
+        assert_eq!(occupancy_assignee(Some("alice"), "ljos-aaaa"), "alice");
+        assert_eq!(occupancy_assignee(Some("alice"), "ljos-bbbb"), "alice");
+        unsafe {
+            std::env::remove_var("GROK_SESSION_ID");
+        }
+    }
+
+    #[test]
+    fn doctor_names_the_session_not_the_default_seat() {
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        }
+        let row = format_seat_row();
+        assert!(
+            row.contains("sess-01a09b25"),
+            "doctor occupancy name: {row}"
+        );
+        assert!(
+            row.contains("GROK_SESSION_ID"),
+            "doctor occupancy source: {row}"
+        );
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
         }
@@ -5351,11 +5434,7 @@ mod tests {
 
     #[test]
     fn a_behind_required_bin_still_answers() {
-        let (state, ok) = super::bin_health(
-            "/bin/packsetd",
-            Some("0.9.2"),
-            Some("0.9.5"),
-        );
+        let (state, ok) = super::bin_health("/bin/packsetd", Some("0.9.2"), Some("0.9.5"));
         assert!(ok, "{state}");
         assert!(state.contains("behind crates.io 0.9.5"), "{state}");
         let rows = vec![Habitat {
@@ -5363,7 +5442,10 @@ mod tests {
             state,
             ok,
         }];
-        assert!(healthy(&rows), "sitting must not refuse a stale but answering bin");
+        assert!(
+            healthy(&rows),
+            "sitting must not refuse a stale but answering bin"
+        );
     }
 
     #[test]
