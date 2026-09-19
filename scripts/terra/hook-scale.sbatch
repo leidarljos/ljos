@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH="$HOME/stackbin:$HOME/bin-out:$HOME/.local/bin:$PATH"
 export PACKSET_PORT=8797 PACKSET_URL=http://127.0.0.1:8797 PACKSET_HOME="$HOME/.cache/ljos-hook-scale-pack"
-export PACKSET_EMBED_MODEL=bge-small PACKSET_EMBED_CACHE="$HOME/.cache/packset-embed"
+export PACKSET_EMBED_MODEL=bge-small PACKSET_EMBED_CACHE="$HOME/.cache/packset-embed" PYTHONUNBUFFERED=1
 rm -rf "$PACKSET_HOME"
 packset ensure
 ljos doctor | grep -E "^(ok|--)	(pack|encoder)" || true
