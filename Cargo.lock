@@ -671,9 +671,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "packset-client"
-version = "0.9.14"
+version = "0.9.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "504fa3c970676a269bba0067f4bce152e14e61ba9e8ab8b82dcc10d350ad0438"
+checksum = "837d45db48700ae8d02da0c07532a0e1e94e93858669b25c25c5b76057f3497b"
 dependencies = [
  "packset-core",
  "serde",

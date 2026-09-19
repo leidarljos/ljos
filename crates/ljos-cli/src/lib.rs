@@ -2103,13 +2103,10 @@ pub fn write_persona(p: &Persona) -> Result<Value> {
     let workspace = client.workspace();
     let mut atom = persona_atom(p, &workspace)?;
     let previous: Vec<Value> = client
-        .atoms_as_of(&workspace, None)
+        .atoms_of_kind(&workspace, "persona")
         .unwrap_or_default()
         .into_iter()
-        .filter(|a| {
-            a.get("kind").and_then(Value::as_str) == Some("persona")
-                && a.get("name").and_then(Value::as_str) == Some(p.name.trim())
-        })
+        .filter(|a| a.get("name").and_then(Value::as_str) == Some(p.name.trim()))
         .filter_map(|a| {
             a.get("id")
                 .and_then(Value::as_str)
@@ -2166,9 +2163,11 @@ pub fn personas_of(atoms: &[Value]) -> Vec<Persona> {
 /// The personas in the seat's pack.
 pub fn personas_from_pack() -> Result<Vec<Persona>> {
     let client = pack()?;
+    // One kind, not the pack: a roster of a dozen does not carry every
+    // lesson's embedding across the socket.
     let atoms = client
-        .atoms_as_of(&client.workspace(), None)
-        .context("persona: GET /v1/atoms failed")?;
+        .atoms_of_kind(&client.workspace(), "persona")
+        .context("persona: GET /v1/atoms?kind=persona failed")?;
     Ok(personas_of(&atoms))
 }
 
