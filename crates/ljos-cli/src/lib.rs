@@ -4817,6 +4817,12 @@ pub fn finish(
             "did not fire the island for {title:?}: its seeds are hits no two scorers agreed on{}; wiring them would tighten the wrong links\n",
             if island["dense"].as_bool().unwrap_or(true) { "" } else { " (the encoder is down, ranking is lexical only)" }
         ));
+    } else if island["held"].as_bool().unwrap_or(false) {
+        // Another sitting on this issue, or another persona's, fired the
+        // same claims within the hour; the pack tightened them once.
+        out.push_str(&format!(
+            "the island for {title:?} fired within the hour; not fired again\n"
+        ));
     } else {
         let fired = island["island"].as_array().map_or(0, Vec::len);
         out.push_str(&format!(

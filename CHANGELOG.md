@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A finish says when the island fired already this hour (the pack holds
+  a second fire of the same claims for an hour, so several seats or
+  personas closing sittings on one issue tighten its links once).
+  `scripts/herd.sh` runs eight sittings from four seats at once, contends
+  one ticket between two seats, and closes all eight in parallel.
+
 ## 0.13.4 (2026-09-19)
 
 - The roster, a brief and the panel prompt read only the persona atoms
