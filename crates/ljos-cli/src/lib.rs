@@ -4665,6 +4665,7 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
 /// lay the hits on a timeline; the count is what the hook keys on.
 pub fn format_hits(hits: &[Hit]) -> String {
     let now = now_utc();
+    let mine = seat_name();
     let mut out = String::new();
     for h in hits {
         let id = h.id.as_deref().unwrap_or("-");
@@ -4672,26 +4673,46 @@ pub fn format_hits(hits: &[Hit]) -> String {
             (Some(b), Some(of)) => format!("{b}/{of}"),
             _ => "-".to_string(),
         };
+        let from = other_seat(&h.entities, &mine)
+            .map(|s| format!(" (from {s})"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "{:.4}\t{}\t{}\t{}\t{}\t{}\n",
+            "{:.4}\t{}\t{}\t{}\t{}{}\t{}\n",
             h.score,
             named,
             h.kind,
             id,
             age_of(h.ts.as_deref(), &now),
+            from,
             h.text
         ));
     }
     out
 }
 
-/// The line a hit takes in injected context and in a brief: kind and age
-/// in the bracket, then the text.
+/// The seat that wrote a hit, when it was another than this one. Many
+/// seats share a pack; a reader is told whose lesson it is reading only
+/// when that is news.
+#[must_use]
+pub fn other_seat(entities: &[String], mine: &str) -> Option<String> {
+    entities
+        .iter()
+        .filter_map(|e| e.strip_prefix(SEAT_ENTITY))
+        .find(|s| !s.is_empty() && *s != mine)
+        .map(str::to_string)
+}
+
+/// The line a hit takes in injected context and in a brief: kind, age and,
+/// when another seat wrote it, that seat in the bracket, then the text.
 fn hit_line(h: &Hit, now: &str) -> String {
+    let from = other_seat(&h.entities, &seat_name())
+        .map(|s| format!(", from {s}"))
+        .unwrap_or_default();
     format!(
-        "- [{}{}] {}",
+        "- [{}{}{}] {}",
         if h.kind.is_empty() { "claim" } else { &h.kind },
         age_tag(h.ts.as_deref(), now),
+        from,
         h.text.trim()
     )
 }
@@ -5190,6 +5211,14 @@ mod tests {
         // directory is the version; the program is the directory above.
         let me = program_name(std::process::id(), "comm");
         assert!(!me.is_empty() && !version_like(&me), "{me}");
+    }
+
+    #[test]
+    fn a_hit_names_the_seat_that_wrote_it_only_when_that_is_another() {
+        let ents = vec!["seat:brio".to_string(), "habit:x".to_string()];
+        assert_eq!(other_seat(&ents, "acme-cli").as_deref(), Some("brio"));
+        assert_eq!(other_seat(&ents, "brio"), None);
+        assert_eq!(other_seat(&["habit:x".to_string()], "brio"), None);
     }
 
     #[test]

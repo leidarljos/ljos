@@ -13,11 +13,11 @@ use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due, finish, format_change, format_consolidation, graded, habit,
     habits, handover, identity_or_seat, island_entities, learn_and_write, now_utc, on_path,
-    packset_consolidate, packset_forget, packset_island, packset_search_as_of, packset_write_as,
-    parse_every, personas_from_pack, policy_line, receive, release, resolve_assignee, rows_about,
-    run_captured, runner_pid, sitting, timeline, topic_words, trust_from_pack, write_persona,
-    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    other_seat, packset_consolidate, packset_forget, packset_island, packset_search_as_of,
+    packset_write_as, parse_every, personas_from_pack, policy_line, receive, release,
+    resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting, timeline,
+    topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -429,6 +429,9 @@ pub struct HitRow {
     /// How long ago that was, in words: `today`, `3 weeks ago`. Read the
     /// hits as a timeline: a later lesson revises an earlier one.
     pub age: String,
+    /// The seat that wrote it, when it was not this one. Many seats share
+    /// a pack.
+    pub from: Option<String>,
 }
 
 /// The argv law's answer.
@@ -615,6 +618,7 @@ impl LjosServer {
         let hits =
             packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
         let now = args.as_of.clone().unwrap_or_else(now_utc);
+        let mine = seat_name();
         Ok(Json(
             hits.into_iter()
                 .map(|h| HitRow {
@@ -623,6 +627,7 @@ impl LjosServer {
                     text: h.text,
                     score: h.score,
                     age: age_of(h.ts.as_deref(), &now),
+                    from: other_seat(&h.entities, &mine),
                     ts: h.ts,
                 })
                 .collect(),

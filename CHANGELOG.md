@@ -2,6 +2,17 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- Every write names the seat that wrote it (`seat:<name>` first among
+  the entities; a persona's, a habit's or a trust row's entities join it,
+  a trust row's stay the deeds it cites). A hit written by another seat
+  says so: `[lesson, 3 days ago, from brio]` in the hook and a brief,
+  `(from brio)` in `ljos search`, `from` on the `ljos_search` row. Many
+  seats share one pack; a reader now sees whose lesson it is reading.
+- `packset-client` 0.9.12, whose hits carry entities and whose writer
+  holds a workspace at a live cap.
+
 ## 0.13.0 (2026-09-19)
 
 - The doctor keeps each crates.io answer on disk for a day, so a herd of
