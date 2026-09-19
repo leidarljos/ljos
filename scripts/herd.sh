@@ -52,11 +52,14 @@ shared=$(vissue create -p herd "One ticket two seats" -q | tail -1)
 wait
 took=0; told=0
 for s in brio acme; do
-  if grep -q 'gen=' "share-$s.out" && ! grep -q 'held by' "share-$s.out"; then took=$((took+1)); fi
-  if grep -q 'held by\|holds' "share-$s.out"; then told=$((told+1)); fi
+  echo "--- $s exit $(cat share-$s.rc), $(wc -l < share-$s.out) lines"
+  if [ "$(cat share-$s.rc)" = 0 ] && grep -q 'gen=' "share-$s.out" && ! grep -q 'held by' "share-$s.out"; then took=$((took+1)); fi
+  if grep -q 'held by another' "share-$s.out"; then told=$((told+1)); fi
 done
-[ "$took" = 1 ] || { cat share-brio.out share-acme.out; fail "$took seats took the shared ticket, wanted one"; }
-[ "$told" = 1 ] || { cat share-brio.out share-acme.out; fail "the second seat was not told who holds it"; }
+nodes=$(claimdag list --json --all | grep -o "\"summary\":\"$shared\"" | wc -l)
+[ "$nodes" = 1 ] || { fail "$nodes claim-graph nodes for one ticket, wanted one"; }
+[ "$took" = 1 ] || { for s in brio acme; do echo "=== $s"; cat "share-$s.out"; done; fail "$took seats took the shared ticket, wanted one"; }
+[ "$told" = 1 ] || { for s in brio acme; do echo "=== $s"; cat "share-$s.out"; done; fail "the second seat was not told who holds it"; }
 echo "herd: one ticket, two seats, one holder"
 
 # Eight finishes at once, each with a lesson. Every ticket closes.
