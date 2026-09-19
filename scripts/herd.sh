@@ -16,10 +16,10 @@ fail() { echo "herd: $1" >&2; exit 1; }
 seats=(brio acme vela orin)
 # The pack knows the topic first, so the island a title activates has
 # seeds two scorers agree on and a finish can fire it.
-LJOS_SEAT=brio ljos remember "The Fuse relay trips at forty amps under the Herd load." --about fuse,herd >/dev/null
-LJOS_SEAT=acme ljos remember "The Herd load peaks when every seat writes at once through the Fuse." --about fuse,herd >/dev/null
-LJOS_SEAT=vela ljos remember "A Fuse that trips under the Herd load is reset by the relay board." --about fuse,herd >/dev/null
-LJOS_SEAT=orin ljos remember "The relay board logs each Fuse trip with the Herd load at the time." --about fuse,herd >/dev/null
+LJOS_SEAT=brio ljos remember "The Fuse relay trips at forty amps under the Herd load." >/dev/null
+LJOS_SEAT=acme ljos remember "The Herd load peaks when every seat writes at once through the Fuse." >/dev/null
+LJOS_SEAT=vela ljos remember "A Fuse that trips under the Herd load is reset by the relay board." >/dev/null
+LJOS_SEAT=orin ljos remember "The relay board logs each Fuse trip with the Herd load at the time." >/dev/null
 declare -A issue
 for s in "${seats[@]}"; do
   for k in 1 2; do
