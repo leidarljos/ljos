@@ -1984,7 +1984,7 @@ pub fn personas_of(atoms: &[Value]) -> Vec<Persona> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            entities: words_of(atom.get("entities")),
+            entities: domains_of(atom.get("entities")),
         };
         match latest.get(name) {
             Some((seen, _)) if *seen > ts => {}
@@ -2315,6 +2315,15 @@ pub fn anchors_json(personas: &[Persona]) -> String {
         .map(|p| (p.name.clone(), serde_json::json!(p.anchor)))
         .collect();
     Value::Object(map).to_string()
+}
+
+/// The entities that name a domain: every entity but the seat that wrote
+/// the atom, which says who, not what.
+fn domains_of(v: Option<&Value>) -> Vec<String> {
+    words_of(v)
+        .into_iter()
+        .filter(|e| !e.starts_with(SEAT_ENTITY))
+        .collect()
 }
 
 fn words_of(v: Option<&Value>) -> Vec<String> {
@@ -6083,7 +6092,10 @@ mod tests {
         assert_eq!(atom["from"], "a");
         assert_eq!(atom["to"], "b");
         assert_eq!(atom["weight"], 0.25);
-        assert_eq!(atom["entities"], serde_json::json!(["deed-x-y"]));
+        assert_eq!(
+            atom["entities"],
+            serde_json::json!([format!("{SEAT_ENTITY}{}", seat_name()), "deed-x-y"])
+        );
         assert_eq!(atom["text"], "a weighs b at 0.250.");
         assert!(trust_atom(&row("a", "a", 0.5), &[], "ws").is_err());
         assert!(trust_atom(&row("a", "b", 0.0), &[], "ws").is_err());
