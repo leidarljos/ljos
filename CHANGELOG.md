@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos due` sweeps the pack first and says what the sweep did: reviews
+  left due past twice their interval lapse, never-recalled claims missed
+  three times are forgotten by neglect, and the list that follows is the
+  one after that. `packset-client` 0.9.14.
+
 ## 0.13.2 (2026-09-19)
 
 - A panel seats only the personas whose domains the issue speaks to,

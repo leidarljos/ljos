@@ -3636,15 +3636,37 @@ pub fn sitting_due_report() -> Result<String> {
 /// The review clock as `ljos due` prints it: the due atoms, then the summary.
 pub fn due_report() -> Result<String> {
     let client = pack()?;
+    // The sweep runs first, so a review left due past twice its interval is
+    // lapsed or forgotten before the list is read, and the report says so.
+    let swept = client.sweep(&client.workspace()).ok();
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
         .context("due: GET /v1/atoms failed")?;
     let now = now_utc();
     Ok(format!(
-        "{}{}\n",
+        "{}{}{}\n",
         format_due(&due_of(&atoms, &now)),
-        review_summary(&atoms, &now)
+        review_summary(&atoms, &now),
+        format_sweep(swept.as_ref())
     ))
+}
+
+/// One line on what the sweep did, or nothing when it found nothing.
+pub fn format_sweep(report: Option<&Value>) -> String {
+    let Some(report) = report else {
+        return String::new();
+    };
+    let lapsed = report.get("lapsed").and_then(Value::as_u64).unwrap_or(0);
+    let forgotten = report.get("forgotten").and_then(Value::as_u64).unwrap_or(0);
+    if lapsed == 0 && forgotten == 0 {
+        return String::new();
+    }
+    format!(
+        "\nswept: {lapsed} review{} lapsed past twice {} interval, {forgotten} never-recalled claim{} forgotten by neglect",
+        if lapsed == 1 { "" } else { "s" },
+        if lapsed == 1 { "its" } else { "their" },
+        if forgotten == 1 { "" } else { "s" }
+    )
 }
 
 /// What the pack holds for review now.
@@ -6576,6 +6598,23 @@ mod tests {
         );
         assert!(needs_of("{}").unwrap().is_empty());
         assert!(needs_of("not json").is_err());
+    }
+
+    #[test]
+    fn the_sweep_line_counts_what_moved_and_is_silent_otherwise() {
+        assert_eq!(format_sweep(None), "");
+        assert_eq!(
+            format_sweep(Some(&serde_json::json!({"lapsed": 0, "forgotten": 0}))),
+            ""
+        );
+        let line = format_sweep(Some(&serde_json::json!({"lapsed": 2, "forgotten": 1})));
+        assert!(line.contains("2 reviews lapsed"), "{line}");
+        assert!(line.contains("1 never-recalled claim forgotten"), "{line}");
+        let one = format_sweep(Some(&serde_json::json!({"lapsed": 1, "forgotten": 0})));
+        assert!(
+            one.contains("1 review lapsed past twice its interval"),
+            "{one}"
+        );
     }
 
     #[test]
