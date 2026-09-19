@@ -37,9 +37,11 @@ for s in "${seats[@]}"; do
 done
 for s in "${seats[@]}"; do
   LJOS_SEAT=$s ljos seat | grep -q "^seat	$s$" || fail "seat $s does not name itself"
-  n=$(claimdag list --json | grep -o "\"assignee\":\"[^\"]*\"" | grep -c "$s:" || true)
-  [ "$n" -ge 2 ] || { claimdag list --json | head -c 600; fail "seat $s holds $n nodes, wanted 2"; }
 done
+# Actors are hashed in the graph, so the count is what says eight seats
+# hold eight nodes: one claimed node per sitting, none lost to a race.
+claimed=$(claimdag list --json | grep -o '"status":"claimed"' | wc -l)
+[ "$claimed" = 8 ] || { claimdag list --json | head -c 600; fail "$claimed claimed nodes, wanted 8"; }
 echo "herd: eight sittings took eight nodes"
 
 # Two seats on one issue at the same moment: one takes it, the other is told
