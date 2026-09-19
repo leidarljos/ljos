@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due, finish, format_change, format_consolidation, graded, habit,
-    habits, handover, identity_or_seat, island_entities, learn_and_write, now_utc, on_path,
-    other_seat, packset_consolidate, packset_forget, packset_island, packset_search_as_of,
-    packset_write_as, parse_every, personas_from_pack, policy_line, receive, release,
-    resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting, timeline,
+    habits, handover, identity_or_seat, island_entities, issue_words, learn_and_write, now_utc,
+    on_path, other_seat, packset_consolidate, packset_forget, packset_island, packset_search_as_of,
+    packset_write_as, parse_every, personas_from_pack, personas_speaking_to, policy_line, receive,
+    release, resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting, timeline,
     topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust,
     Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
