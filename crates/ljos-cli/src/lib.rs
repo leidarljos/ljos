@@ -5175,8 +5175,16 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// The tests that set or read the process environment take this lock:
+    /// cargo runs tests on threads, and one process has one environment.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn a_session_id_occupies_not_the_product_name_on_the_box() {
+        let _g = env_guard();
         unsafe {
             std::env::remove_var("VISSUE_AGENT");
             std::env::set_var("LJOS_SEAT", "runner-x");
@@ -5203,6 +5211,7 @@ mod tests {
 
     #[test]
     fn two_session_ids_that_share_a_prefix_occupy_different_slots() {
+        let _g = env_guard();
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
@@ -5226,6 +5235,7 @@ mod tests {
 
     #[test]
     fn occupancy_is_per_issue_so_two_sittings_do_not_unseat() {
+        let _g = env_guard();
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
@@ -5251,6 +5261,7 @@ mod tests {
 
     #[test]
     fn doctor_names_the_session_not_the_default_seat() {
+        let _g = env_guard();
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
@@ -5359,6 +5370,7 @@ mod tests {
 
     #[test]
     fn a_shell_with_one_more_session_variable_finds_the_servers_record() {
+        let _g = env_guard();
         let dir = std::env::temp_dir().join(format!("ljos-rt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         unsafe {
@@ -5454,6 +5466,7 @@ mod tests {
 
     #[test]
     fn a_correction_is_nudged_once_a_session_and_only_on_a_prompt() {
+        let _g = env_guard();
         // The seen file lives under the runtime directory.
         let dir = std::env::temp_dir().join(format!("ljos-corr-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5641,6 +5654,7 @@ mod tests {
 
     #[test]
     fn policyd_required_is_the_operator_switch() {
+        let _g = env_guard();
         let before = std::env::var_os("POLICYD_REQUIRED");
         std::env::remove_var("POLICYD_REQUIRED");
         assert!(!policyd_required());
