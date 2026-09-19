@@ -81,7 +81,8 @@ ljos predict "$id2" --expect '{"ship":0.6,"hold":0.4}' --as reader >/dev/null
 ljos trust reader reviewer 0.9 --about docs >/dev/null
 ljos consensus "$id2" | grep -q '"predictors": 2' || fail "surprisingly popular"
 ljos brief reviewer "$id2" | grep -q 'You are reviewer' || fail brief
-ljos calibrate -p demo | grep -q weighs || fail calibrate
+cal=$(ljos calibrate -p demo 2>&1 || true)
+echo "$cal" | grep -q weighs || { echo "$cal"; fail calibrate; }
 
 ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
 echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"
