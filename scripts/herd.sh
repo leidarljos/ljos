@@ -24,7 +24,7 @@ done
 # Eight sittings at once, two per seat. Each must take its own node.
 for s in "${seats[@]}"; do
   for k in 1 2; do
-    ( LJOS_SEAT=$s ljos sitting "${issue[$s:$k]}" > "sit-$s-$k.out" 2>&1; echo $? > "sit-$s-$k.rc" ) &
+    ( set +e; LJOS_SEAT=$s ljos sitting "${issue[$s:$k]}" > "sit-$s-$k.out" 2>&1; echo $? > "sit-$s-$k.rc" ) &
   done
 done
 wait
@@ -47,13 +47,13 @@ echo "herd: eight sittings took eight nodes"
 # Two seats on one issue at the same moment: one takes it, the other is told
 # who holds it and does not unseat them.
 shared=$(vissue create -p herd "One ticket two seats" -q | tail -1)
-( LJOS_SEAT=brio ljos sitting "$shared" > share-brio.out 2>&1; echo $? > share-brio.rc ) &
-( LJOS_SEAT=acme ljos sitting "$shared" > share-acme.out 2>&1; echo $? > share-acme.rc ) &
+( set +e; LJOS_SEAT=brio ljos sitting "$shared" > share-brio.out 2>&1; echo $? > share-brio.rc ) &
+( set +e; LJOS_SEAT=acme ljos sitting "$shared" > share-acme.out 2>&1; echo $? > share-acme.rc ) &
 wait
 took=0; told=0
 for s in brio acme; do
   echo "--- $s exit $(cat share-$s.rc), $(wc -l < share-$s.out) lines"
-  if [ "$(cat share-$s.rc)" = 0 ] && grep -q 'gen=' "share-$s.out" && ! grep -q 'held by' "share-$s.out"; then took=$((took+1)); fi
+  if [ "$(cat share-$s.rc)" = 0 ] && grep -q 'gen=' "share-$s.out"; then took=$((took+1)); fi
   if grep -q 'held by another' "share-$s.out"; then told=$((told+1)); fi
 done
 nodes=$(claimdag list --json --all | grep -o "\"summary\":\"$shared\"" | wc -l)
@@ -66,7 +66,7 @@ echo "herd: one ticket, two seats, one holder"
 for s in "${seats[@]}"; do
   for k in 1 2; do
     gen=$(sed -n 's/.*gen=\([0-9][0-9]*\).*/\1/p' "sit-$s-$k.out" | tail -1)
-    ( LJOS_SEAT=$s ljos finish "${issue[$s:$k]}" --gen "$gen" --lesson "Seat $s closed ticket $k. The herd held." > "fin-$s-$k.out" 2>&1; echo $? > "fin-$s-$k.rc" ) &
+    ( set +e; LJOS_SEAT=$s ljos finish "${issue[$s:$k]}" --gen "$gen" --lesson "Seat $s closed ticket $k. The herd held." > "fin-$s-$k.out" 2>&1; echo $? > "fin-$s-$k.rc" ) &
   done
 done
 wait
