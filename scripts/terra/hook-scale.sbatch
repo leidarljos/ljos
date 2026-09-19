@@ -6,6 +6,9 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --partition=cpu
+# A timing run owns the node: shared with other work the fill and the hook
+# read two to three times slower and the numbers compare with nothing.
+#SBATCH --exclusive
 #SBATCH --output=%x-%j.out
 # The seat's hook, search and a dry consolidation timed on a scratch pack of
 # a thousand, five thousand and ten thousand distinct lessons.
