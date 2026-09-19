@@ -4,6 +4,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.13.2 (2026-09-19)
+
+- A panel seats only the personas whose domains the issue speaks to,
+  read from its title's words and the island it activates; every persona
+  sits when none speaks to it. The `ljos panel` brief and the
+  `run_a_panel` prompt agree on the roster, and the prompt says how many
+  of the pack it seated.
 - `ljos onboard --harness grok` bumps `LJOS_MCP_GENERATION` in the runner
   config when the crate version moved, so Grok's watcher respawns
   `ljos-mcp` and a session restart is not required.
