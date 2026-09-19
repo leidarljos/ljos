@@ -2206,15 +2206,50 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
 /// # Errors
 ///
 /// No personas in the pack, or a brief that cannot be written.
+/// The personas that speak to an issue: those whose domains meet the
+/// words of its title or the entities of the island it activates. A pack
+/// shared by many projects holds reviewers for all of them, and a panel on
+/// a docs ticket does not want the CUDA reviewer. None matching, all sit.
+#[must_use]
+pub fn personas_speaking_to(personas: &[Persona], words: &[String]) -> Vec<Persona> {
+    let words: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    let speaking: Vec<Persona> = personas
+        .iter()
+        .filter(|p| {
+            p.entities
+                .iter()
+                .any(|d| words.iter().any(|w| w == &d.to_lowercase()))
+        })
+        .cloned()
+        .collect();
+    if speaking.is_empty() {
+        personas.to_vec()
+    } else {
+        speaking
+    }
+}
+
+/// The words an issue speaks in: its title's topic words and the entities
+/// of the island its title activates.
+pub fn issue_words(issue: &str) -> Vec<String> {
+    let mut words = issue_title(issue)
+        .map(|t| topic_words(&t))
+        .unwrap_or_default();
+    words.extend(island_entities(issue).unwrap_or_default());
+    words
+}
+
 pub fn panel(issue: &str, out: &Path) -> Result<String> {
-    let personas = personas_from_pack()?;
-    if personas.is_empty() {
+    let all = personas_from_pack()?;
+    if all.is_empty() {
         bail!("panel: the pack holds no personas; `ljos persona NAME --anchor A --view ...` writes one");
     }
+    let personas = personas_speaking_to(&all, &issue_words(issue));
     std::fs::create_dir_all(out)?;
     let mut lines = vec![format!(
-        "{} briefs in {}; start one subagent per file, each ends with its ballot, then:",
+        "{} of {} personas speak to {issue}; briefs in {}; start one subagent per file, each ends with its ballot, then:",
         personas.len(),
+        all.len(),
         out.display()
     )];
     for p in &personas {
@@ -5400,6 +5435,28 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert_ne!(session_tag("01a09b25-aaaa"), session_tag("01a09b25-bbbb"));
+    }
+
+    #[test]
+    fn a_panel_seats_the_personas_that_speak_to_the_issue() {
+        let mk = |name: &str, about: &[&str]| Persona {
+            name: name.into(),
+            anchor: 0.5,
+            view: String::new(),
+            entities: about.iter().map(|s| (*s).to_string()).collect(),
+        };
+        let all = vec![
+            mk("reviewer", &["docs"]),
+            mk("cuda", &["gpu", "kernels"]),
+            mk("reader", &[]),
+        ];
+        let docs = personas_speaking_to(&all, &["Docs".to_string(), "site".to_string()]);
+        assert_eq!(
+            docs.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["reviewer"]
+        );
+        let nobody = personas_speaking_to(&all, &["fortran".to_string()]);
+        assert_eq!(nobody.len(), 3, "none matching, all sit");
     }
 
     #[test]

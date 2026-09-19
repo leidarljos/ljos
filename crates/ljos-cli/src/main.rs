@@ -443,7 +443,7 @@ fn main() -> Result<()> {
                 view,
                 entities: about,
             })?;
-            println!("{}", serde_json::to_string_pretty(&body)?);
+            println!("{}", format_write_ack(&body));
         }
         Cmd::Claim { node, assignee } => {
             print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)
