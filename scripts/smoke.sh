@@ -44,7 +44,8 @@ VISSUE_AGENT=alice ljos vote "$id" --for ship >/dev/null
 VISSUE_AGENT=bob ljos vote "$id" --for ship >/dev/null
 VISSUE_AGENT=carol ljos vote "$id" --for hold >/dev/null
 ljos consensus "$id" | grep -q '"engine": "degroot-fj"' || fail consensus
-ljos learn "$id" --outcome hold | grep -q 'weighs' || fail learn
+learned=$(ljos learn "$id" --outcome hold 2>&1 || true)
+echo "$learned" | grep -q 'weighs' || { echo "$learned"; ljos seat; vissue vote "$id" 2>&1 | head -8; fail learn; }
 
 sit=$(ljos sitting "$id" --assignee you)
 echo "$sit" | grep -q 'gen=' || fail sitting
