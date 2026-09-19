@@ -23,7 +23,7 @@
 | =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
 | =persona NAME --anchor A --view TEXT [--about DOMAIN]...= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot |
 | =brief NAME ISSUE= | pack, tracker | what a subagent playing the persona starts from: view, what the seat knows on its domains, the working set |
-| =panel ISSUE [--out DIR]= | pack, tracker | one brief per persona as =DIR/<name>.md=, then the settle line; a panel for a runner without MCP |
+| =panel ISSUE [--out DIR]= | pack, tracker | one brief per persona whose domains the issue speaks to as =DIR/<name>.md=, then the settle line; a panel for a runner without MCP |
 | =learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]= | tracker, pack | reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights; =hedge= shrinks refuted voters by =B= with =S= recovery |
 | =evidence ACCESSION= / =current ACCESSION= | deed store | intact; still the tip |
 | =deed ID [--add ACCESSION]= | tracker | cite a deed on a node, or list citations |

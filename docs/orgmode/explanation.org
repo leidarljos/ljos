@@ -210,7 +210,11 @@ doi:10.48550/arXiv.2406.04692; the commercial heavy modes). Two things
 differ. The personas are atoms in the pack, with an anchor the settle
 honours (Friedkin and Johnsen; a captain that decides a split is a persona
 at anchor zero), and the weights are memory that moves with outcomes and
-history, scoped to the topics they were earned on. The =run_a_panel=
+history, scoped to the topics they were earned on. A panel seats only
+the personas whose domains the issue speaks to, read from its title's
+words and the entities of the island it activates; every persona sits
+when none speaks to it, since a seat that runs every persona on every
+issue is a count with extra steps. The =run_a_panel=
 prompt orders it: one subagent per persona, one ballot each as itself,
 then the settle, then =learn= when the world answers. Chen et al.
 (doi:10.48550/arXiv.2403.02419) show why a count does not improve with
