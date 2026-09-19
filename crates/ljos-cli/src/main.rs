@@ -153,7 +153,7 @@ enum Cmd {
     Claim {
         /// A tracker id, or a 32-hex claim-graph id.
         node: String,
-        /// Your name; mapped to one actor id. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        /// Your name; mapped to one actor id. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
     },
@@ -161,7 +161,7 @@ enum Cmd {
     Release {
         /// A tracker id, or a 32-hex claim-graph id.
         node: String,
-        /// The name that holds it. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
     },
@@ -175,7 +175,7 @@ enum Cmd {
         /// Generation from the sitting's claim. Required. A stale gen is refused.
         #[arg(long)]
         gen: u64,
-        /// The name that holds it. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
     },
@@ -292,7 +292,7 @@ enum Cmd {
     Sitting {
         /// The tracker id of the issue.
         issue: String,
-        /// Occupancy name. Absent: the runner session, else LJOS_SEAT, else `seat`. Always scoped to the issue.
+        /// Occupancy name. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
         #[arg(long)]
         assignee: Option<String>,
         /// Where the cards are read from.
@@ -318,7 +318,7 @@ enum Cmd {
         /// Generation from the sitting's claim. Required. A stale gen is refused.
         #[arg(long)]
         gen: u64,
-        /// The name that holds it. Absent: LJOS_SEAT, else VISSUE_AGENT, else `seat`.
+        /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
     },
