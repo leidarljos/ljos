@@ -239,6 +239,16 @@ also what seats a persona: =ljos panel ISSUE= and the =run_a_panel=
 prompt brief only the personas whose domains the issue's title or its
 island names, and every persona when none does.
 
+A persona keeps its own tree over the seat's facts. =ljos remember --as
+NAME= writes into the set =persona-NAME=, where the duplicate and
+replacement rules run among its own conclusions and never against the
+seat's or another persona's; the seat still reads every set. =ljos
+island CUE --as NAME= walks the pack through that persona's link
+weights, and with =--fire= tightens the paths it walked under its own
+name (=link_weights_by=), leaving the seat's weights as they were. Two
+personas that read the same island differently end up with different
+islands over the same claims.
+
 * Move the trust rows without an outcome
 
 #+begin_src console

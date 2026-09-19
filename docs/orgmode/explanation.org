@@ -76,7 +76,10 @@ of a fired claim loses two percent. Hebb's rule with Oja's forgetting term
 (doi:10.1007/BF00275687), so weights stay bounded and paths a seat never
 walks fade without being deleted. The same eight fire once an hour: several
 seats, or several personas, closing sittings on one issue tighten its
-links one step, not one step each. Activation spreads in proportion to
+links one step, not one step each. A persona fires through a lens: its
+weights live beside the shared ones under its name and only it reads
+them, so the facts stay one substrate and each persona's paths over them
+are its own. Activation spreads in proportion to
 weight, so the next cue like this one walks a heavier path. The weights are
 on the atom beside the links and travel in a handover.
 
