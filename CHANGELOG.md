@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.13.6 (2026-09-20)
+
+- Every MCP tool answers an object: the ten that answered a bare array
+  now answer `{ rows: [...] }`, since a strict client refused the whole
+  server over an array output schema.
+
 - A persona's memory tree: `remember --as` and `prefer --as` write into
   the set `persona-NAME`, its own tree for the duplicate and replacement
   rules; `ljos island --as NAME` and the `ljos_island` tool's `as` walk
