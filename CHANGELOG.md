@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The doctor keeps each crates.io answer on disk for a day, so a herd of
+  seats opening sittings asks the registry once a day per binary rather
+  than once a sitting each. A busy refusal names this conversation's
+  holder and the release that frees a conversation that is gone.
 - Habits: `ljos habit NAME VALUE [--unit U] [--every 7d] [--source S]`
   takes a reading of a number the seat keeps measuring, as a claim of
   kind `habit` that supersedes the earlier reading and carries it as
