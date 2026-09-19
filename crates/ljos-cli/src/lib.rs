@@ -209,51 +209,79 @@ fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Names that many harnesses pass for every conversation on a host.
-/// Occupancy is one live claim per assignee, so these would make two
-/// grok sessions unable to hold two tickets.
-fn shared_actor_name(name: &str) -> bool {
+/// Pronouns and defaults, not product names. A runner's own `LJOS_SEAT`
+/// is treated the same way in [`resolve_assignee`]: the process naming
+/// itself is omitted, so occupancy falls through to the session.
+fn omitted_actor_name(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_lowercase().as_str(),
-        "grok" | "seat" | "you" | "agent" | "grok-build"
+        "seat" | "you" | "agent"
     )
 }
 
-/// The conversation this process belongs to, when the runner stamped one.
-/// The source key is which env var held it, for doctor.
-fn session_actor() -> Option<(String, &'static str)> {
-    for key in ["GROK_SESSION_ID", "HARNESS_SESSION_ID", "TERM_SESSION_ID"] {
-        if let Ok(raw) = std::env::var(key) {
-            let t = raw.trim();
-            if t.is_empty() {
-                continue;
-            }
-            let prefix: String = t.chars().take(8).collect();
-            return Some((format!("sess-{prefix}"), key));
-        }
-    }
-    None
+fn own_seat(name: &str) -> bool {
+    std::env::var("LJOS_SEAT")
+        .ok()
+        .is_some_and(|s| s.trim() == name.trim())
 }
 
-/// The name this seat claims and votes under, and where it came from.
-/// Doctor prints this pair; occupancy uses the name.
-fn seat_identity() -> (String, &'static str) {
+/// The conversation this process belongs to: every `*_SESSION_ID` the
+/// runner stamped, one occupancy name. No product list.
+fn session_actor() -> Option<(String, String)> {
+    let mut parts: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, v)| runner_session_var(k, v))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
+    if parts.len() == 1 {
+        return Some(session_from_value(&parts[0].0, &parts[0].1));
+    }
+    let joined = parts
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.trim()))
+        .collect::<Vec<_>>()
+        .join(";");
+    let id = work_id(&joined);
+    let keys = parts
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join("+");
+    Some((format!("sess-{}", &id[..8]), keys))
+}
+
+/// A conversation id the runner stamped, not the login (`XDG_SESSION_ID`
+/// is a small integer). Values shorter than eight characters are ignored.
+fn runner_session_var(key: &str, val: &str) -> bool {
+    key.ends_with("_SESSION_ID") && key != "XDG_SESSION_ID" && val.trim().len() >= 8
+}
+
+fn session_from_value(key: &str, raw: &str) -> (String, String) {
+    let prefix: String = raw.trim().chars().take(8).collect();
+    (format!("sess-{prefix}"), key.to_string())
+}
+
+/// Session first, then `LJOS_SEAT`, then `VISSUE_AGENT`, then `seat`.
+/// A product name in `LJOS_SEAT` must not beat a live session id.
+fn seat_identity() -> (String, String) {
+    if let Some(pair) = session_actor() {
+        return pair;
+    }
     if let Ok(v) = std::env::var("LJOS_SEAT") {
         let t = v.trim();
-        if !t.is_empty() && !shared_actor_name(t) {
-            return (t.to_string(), "LJOS_SEAT");
+        if !t.is_empty() && !omitted_actor_name(t) {
+            return (t.to_string(), "LJOS_SEAT".into());
         }
-    }
-    if let Some((s, key)) = session_actor() {
-        return (s, key);
     }
     if let Ok(v) = std::env::var("VISSUE_AGENT") {
         let t = v.trim();
-        if !t.is_empty() && !shared_actor_name(t) {
-            return (t.to_string(), "VISSUE_AGENT");
+        if !t.is_empty() && !omitted_actor_name(t) {
+            return (t.to_string(), "VISSUE_AGENT".into());
         }
     }
-    ("seat".to_string(), "the default")
+    ("seat".to_string(), "the default".into())
 }
 
 /// The name this seat claims and votes under when none is given:
@@ -270,29 +298,20 @@ fn format_seat_row() -> String {
     format!("{seat} (from {source})")
 }
 
-/// Resolve an `--assignee` / MCP field. A shared name (`grok`, `seat`,
-/// `you`) is treated as omitted so two conversations do not share one
-/// occupancy slot.
+/// Resolve an `--assignee` / MCP field. Empty, a pronoun, or this
+/// process's own `LJOS_SEAT` is omitted: occupancy is the session, not
+/// the product name on the box.
 #[must_use]
 pub fn resolve_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) if !shared_actor_name(n) => n.to_string(),
+        Some(n) if !omitted_actor_name(n) && !own_seat(n) => n.to_string(),
         _ => seat_name(),
     }
 }
 
-/// A harness multiplex (shared names, the default `seat`, a `sess-` id)
-/// is many conversations under one process env. One live claim per that
-/// name unseats sibling sittings. A named worker still occupies one slot.
-fn harness_occupancy_name(name: &str) -> bool {
-    let n = name.trim();
-    shared_actor_name(n) || n.eq_ignore_ascii_case("seat") || n.starts_with("sess-")
-}
-
-/// Occupancy identity for the claim graph: a harness name is scoped to
-/// the issue so two conversations, or a parent and an inherited-MCP
-/// child, can hold two tickets. Already-scoped names (they contain `:`)
-/// are left alone.
+/// Occupancy is always `{name}:{issue}`. One live claim per name is what
+/// made two conversations unseat each other; the issue is already
+/// exclusive. Already-scoped names (they contain `:`) are left alone.
 #[must_use]
 pub fn occupancy_assignee(passed: Option<&str>, issue: &str) -> String {
     occupancy_scope(&resolve_assignee(passed), issue)
@@ -300,7 +319,7 @@ pub fn occupancy_assignee(passed: Option<&str>, issue: &str) -> String {
 
 fn occupancy_scope(assignee: &str, issue: &str) -> String {
     let issue = issue.trim();
-    if issue.is_empty() || assignee.contains(':') || !harness_occupancy_name(assignee) {
+    if issue.is_empty() || assignee.contains(':') {
         assignee.to_string()
     } else {
         format!("{assignee}:{issue}")
@@ -4367,23 +4386,33 @@ pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_shared_name_does_not_occupy_the_whole_host() {
+    fn a_session_id_occupies_not_the_product_name_on_the_box() {
         unsafe {
-            std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("LJOS_SEAT", "runner-x");
             std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
-        assert_eq!(resolve_assignee(Some("grok")), "sess-01a09b25");
-        assert_eq!(resolve_assignee(Some("seat")), "sess-01a09b25");
         assert_eq!(resolve_assignee(None), "sess-01a09b25");
+        assert_eq!(resolve_assignee(Some("seat")), "sess-01a09b25");
+        assert_eq!(
+            resolve_assignee(Some("runner-x")),
+            "sess-01a09b25",
+            "the process naming itself is omitted"
+        );
         assert_eq!(resolve_assignee(Some("alice")), "alice");
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
+            std::env::set_var("OTHER_SESSION_ID", "abcd1234-rest-of-id");
+        }
+        assert_eq!(resolve_assignee(None), "sess-abcd1234");
+        unsafe {
+            std::env::remove_var("OTHER_SESSION_ID");
+            std::env::remove_var("LJOS_SEAT");
         }
     }
 
     #[test]
-    fn harness_occupancy_is_per_issue_so_two_sittings_do_not_unseat() {
+    fn occupancy_is_per_issue_so_two_sittings_do_not_unseat() {
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
@@ -4391,13 +4420,17 @@ mod tests {
         }
         let a = occupancy_assignee(None, "ljos-aaaa");
         let b = occupancy_assignee(None, "ljos-bbbb");
-        let grok_a = occupancy_assignee(Some("grok"), "ljos-aaaa");
         assert_ne!(a, b, "two issues under one session must not share a slot");
-        assert_eq!(a, grok_a);
         assert!(a.starts_with("sess-01a09b25:"), "{a}");
         assert!(b.starts_with("sess-01a09b25:"), "{b}");
-        assert_eq!(occupancy_assignee(Some("alice"), "ljos-aaaa"), "alice");
-        assert_eq!(occupancy_assignee(Some("alice"), "ljos-bbbb"), "alice");
+        assert_eq!(
+            occupancy_assignee(Some("alice"), "ljos-aaaa"),
+            "alice:ljos-aaaa"
+        );
+        assert_eq!(
+            occupancy_assignee(Some("alice"), "ljos-bbbb"),
+            "alice:ljos-bbbb"
+        );
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
         }
