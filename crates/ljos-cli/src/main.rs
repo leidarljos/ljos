@@ -5,14 +5,14 @@ use clap::{Parser, Subcommand};
 use ljos_cli::{
     ballots_from_json, brief, calibrate, cards, claim, complete, conflicts, consensus_steps_for,
     doctor, due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
-    format_island, format_steps, format_write_ack, graded, handover, healthy, hold_hook_context,
-    hook_call, hook_context, hook_output_ruled, island_entities, join, learn_anchors,
-    learn_and_write, learn_shared, on_path, onboard, pack, packset_consolidate, packset_forget,
-    packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel, panel_steps,
-    personas_from_pack, policy_with_memory, policyd_required, predictions_of, receive, release,
-    resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end, sitting,
-    take_hook_context, tcb_check, timeline, topic_words, trust_from_pack, verdict_for,
-    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
+    format_island, format_seat, format_steps, format_write_ack, graded, handover, healthy,
+    hold_hook_context, hook_call, hook_context, hook_output_ruled, island_entities, join,
+    learn_anchors, learn_and_write, learn_shared, on_path, onboard, pack, packset_consolidate,
+    packset_forget, packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel,
+    panel_steps, personas_from_pack, policy_with_memory, policyd_required, predictions_of, receive,
+    release, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
+    sitting, take_hook_context, tcb_check, timeline, topic_words, trust_from_pack, verdict_for,
+    whoami, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
@@ -231,9 +231,11 @@ enum Cmd {
     Doctor,
     /// Print the sitting protocol: which store answers what, and the order of verbs.
     Protocol,
-    /// Register ljos-mcp with an agent runner and install the protocol as its skill.
+    /// Who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from.
+    Seat,
+    /// Print the one MCP server entry any runner takes; with --harness, register it with a runner named in ~/.config/ljos/harnesses.toml and install the protocol as its skill.
     Onboard {
-        /// A runner named in ~/.config/ljos/harnesses.toml, or json to print the server entry.
+        /// A runner named in ~/.config/ljos/harnesses.toml; absent, print the entry to paste anywhere.
         #[arg(long, default_value = "json")]
         harness: String,
         /// Report what would be written and write nothing.
@@ -584,6 +586,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Protocol => print!("{PROTOCOL}"),
+        Cmd::Seat => print!("{}", format_seat(&whoami())),
         Cmd::Onboard {
             harness,
             dry_run,

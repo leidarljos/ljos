@@ -178,13 +178,16 @@ and the seat's memory is one workspace, `seat`, whatever directory you
 stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
 graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`
-when it exists. `LJOS_SEAT` is the name this runner claims and votes under
-when a verb names none; a runner's registration sets it to the runner's
-name (`{name}` in the runners file). Any `*_SESSION_ID` the runner
-stamped is the occupancy name, ahead of `LJOS_SEAT`, and occupancy is
-`{name}:{issue}` so a second sitting does not release the first.
-`doctor` prints that name and which variable it came from. Export the
-same `LJOS_SEAT` in the runner's shell (a runner's settings usually
-carry an `env` table) so its command-line ballots and claims match its
-tools'. `VISSUE_AGENT` is the tracker's own name for the same thing;
-`--as` names a persona over both.
+when it exists. The seat is the program that connected: `ljos-mcp` names
+it after the client that initialised it, and a shell the same runner opens
+finds the same name through the process tree, so a runner's tools and its
+command-line verbs claim and vote as one. Two names come from that: the
+seat (`acme-cli`), which memory, ballots and trust rows accrue to across
+every conversation of that runner, and the holder (`acme-cli-39u`),
+which this conversation's claims are held under; any `*_SESSION_ID` the
+runner stamped is the holder ahead of the process tag, and occupancy is
+`{holder}:{issue}`, so two conversations of one runner hold two tickets and
+a second sitting does not release the first. `ljos seat` prints both names
+and where they came from. `LJOS_SEAT` overrides both when someone sets it; `VISSUE_AGENT` is
+the tracker's own name for the same thing; `--as` names a persona over
+both; a person at a terminal is their login user.

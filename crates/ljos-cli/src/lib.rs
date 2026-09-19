@@ -87,14 +87,15 @@ pub struct Harnesses {
 
 /// An example of the file, with placeholder names. `ljos onboard --example`
 /// prints it; the two shapes are a registering command and a config file.
-pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: the agent runners on this machine.
+pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners this machine registers by command.
+# Optional: `ljos onboard` alone prints the one entry any runner takes.
 # {server} is replaced by the path to ljos-mcp, {name} by the runner's name.
-# Paths may start with ~. Passing LJOS_SEAT={name} to the server makes each
-# runner claim and vote as itself; they share the one pack and tracker.
+# Paths may start with ~. The seat names itself after the client that
+# connects; nothing is passed in env.
 
 [[harness]]
 name = "runner-with-a-command"
-register = ["runner", "mcp", "add", "-s", "user", "-e", "LJOS_SEAT={name}", "ljos", "--", "{server}"]
+register = ["runner", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
 registered = ["runner", "mcp", "get", "ljos"]
 skills = "~/.runner/skills"
 hooks = "~/.runner/settings.json"
@@ -104,7 +105,7 @@ hooks = "~/.runner/settings.json"
 name = "runner-with-a-config-file"
 config = "~/.other/config.toml"
 marker = "[mcp_servers.ljos]"
-snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv = { LJOS_SEAT = \"{name}\", GROK_SESSION_ID = \"${GROK_SESSION_ID}\" }\n"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\n"
 skills = "~/.other/skills"
 "#;
 
@@ -200,8 +201,7 @@ fn write_skill(dir: &Path, dry: bool) -> Step {
 }
 
 /// `{server}` is the path to `ljos-mcp`, `{name}` the runner's name from
-/// the runners file, so a registration can pass `LJOS_SEAT={name}` and
-/// each runner claims and votes as itself.
+/// the runners file, for a registering command that wants either.
 fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
     argv.iter()
         .map(|a| a.replace("{server}", &server.display().to_string()))
@@ -219,14 +219,20 @@ fn omitted_actor_name(name: &str) -> bool {
     )
 }
 
+/// The process naming itself: its `LJOS_SEAT`, or the seat it resolved
+/// to, passed back as an assignee. Omitted, so occupancy stays the
+/// conversation's.
 fn own_seat(name: &str) -> bool {
+    let n = name.trim();
     std::env::var("LJOS_SEAT")
         .ok()
-        .is_some_and(|s| s.trim() == name.trim())
+        .is_some_and(|s| s.trim() == n)
+        || whoami().seat == n
 }
 
 /// The conversation this process belongs to: every `*_SESSION_ID` the
-/// runner stamped, one occupancy name. No product list.
+/// runner stamped, one occupancy name and the keys it came from. No
+/// product list.
 fn session_actor() -> Option<(String, String)> {
     let mut parts: Vec<(String, String)> = std::env::vars()
         .filter(|(k, v)| runner_session_var(k, v))
@@ -263,49 +269,289 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
     (format!("sess-{prefix}"), key.to_string())
 }
 
-/// Session first, then `LJOS_SEAT`, then `VISSUE_AGENT`, then `seat`.
-/// A product name in `LJOS_SEAT` must not beat a live session id.
-fn seat_identity() -> (String, String) {
-    if let Some(pair) = session_actor() {
-        return pair;
-    }
-    if let Ok(v) = std::env::var("LJOS_SEAT") {
-        let t = v.trim();
-        if !t.is_empty() && !omitted_actor_name(t) {
-            return (t.to_string(), "LJOS_SEAT".into());
-        }
-    }
-    if let Ok(v) = std::env::var("VISSUE_AGENT") {
-        let t = v.trim();
-        if !t.is_empty() && !omitted_actor_name(t) {
-            return (t.to_string(), "VISSUE_AGENT".into());
-        }
-    }
-    ("seat".to_string(), "the default".into())
+/// Who is sitting. The seat is the program that connected: the name a
+/// runner remembers, votes and earns trust under, the same across its
+/// conversations. The holder is that seat in one conversation: the name
+/// its claims are held under, so two conversations of one runner hold two
+/// tickets while a vote from either counts for the one voter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seat {
+    pub seat: String,
+    pub holder: String,
+    /// Where the name came from, for `ljos seat` and the doctor.
+    pub source: String,
 }
 
-/// The name this seat claims and votes under when none is given:
-/// `LJOS_SEAT` (a runner's registration sets it to the runner's name, so
-/// two runners on one host hold separate claims), else the session id
-/// the runner stamped, else `VISSUE_AGENT`, else `seat`.
+impl Seat {
+    fn whole(name: &str, source: &str) -> Self {
+        Self {
+            seat: name.to_string(),
+            holder: name.to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    fn tagged(seat: String, tag: &str, source: String) -> Self {
+        Self {
+            holder: format!("{seat}-{tag}"),
+            seat,
+            source,
+        }
+    }
+}
+
+/// What the MCP client said at initialize, kept for every tool call after.
+static ANNOUNCED: std::sync::OnceLock<Seat> = std::sync::OnceLock::new();
+
+/// A name as a seat: lower case, runs of letters and digits joined by one
+/// hyphen. `Acme CLI`, `acme-cli` and `acme_cli/1.2` are one seat.
+#[must_use]
+pub fn seat_slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
+        "runner".to_string()
+    } else {
+        out
+    }
+}
+
+/// A short tag for one conversation from the process that runs it: the pid
+/// in base 36, so `acme-cli-39u` reads as a name and not a number.
+#[must_use]
+pub fn conversation_tag(pid: u32) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut n = u64::from(pid);
+    let mut out = Vec::new();
+    loop {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// The login's runtime directory, where what belongs to a session and never
+/// to the pack is kept.
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ljos")
+}
+
+/// The record a server leaves for the shells the same runner opens.
+fn seat_record_path(runner_pid: u32) -> PathBuf {
+    runtime_dir().join(format!("seat-{runner_pid}"))
+}
+
+/// The process that started this one. For `ljos-mcp` that is the runner,
+/// and the runner is also above every shell it opens.
+#[must_use]
+pub fn runner_pid() -> u32 {
+    // SAFETY: getppid reads one field of the calling process and cannot fail.
+    let ppid = unsafe { libc::getppid() };
+    u32::try_from(ppid).unwrap_or(0)
+}
+
+/// The MCP server, once a client has said who it is: the seat is the
+/// client's name, the holder that seat tagged with the runner's process.
+/// The record under the runtime directory is how `ljos` in a shell the
+/// same runner opened names the same seat and holder, with nothing set.
+pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
+    let seat = Seat::tagged(
+        seat_slug(client),
+        &conversation_tag(runner_pid),
+        format!("the client that connected, process {runner_pid}"),
+    );
+    let path = seat_record_path(runner_pid);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, format!("{}\n{}\n", seat.seat, seat.holder));
+    let _ = ANNOUNCED.set(seat.clone());
+    seat
+}
+
+/// Drop the record [`announce_seat`] wrote, when the server ends.
+pub fn retire_seat(runner_pid: u32) {
+    let _ = std::fs::remove_file(seat_record_path(runner_pid));
+}
+
+/// A process's parent and its own short name, from procfs.
+#[cfg(target_os = "linux")]
+fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let comm = stat.get(open + 1..close)?.to_string();
+    let ppid = stat
+        .get(close + 2..)?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
+    Some((ppid, comm))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn parent_and_comm(_pid: u32) -> Option<(u32, String)> {
+    None
+}
+
+/// The processes above this one, nearest first, as (pid, name); stops
+/// below init.
+fn ancestry() -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let mut pid = std::process::id();
+    for _ in 0..32 {
+        let Some((ppid, _)) = parent_and_comm(pid) else {
+            break;
+        };
+        if ppid <= 1 {
+            break;
+        }
+        let Some((_, comm)) = parent_and_comm(ppid) else {
+            break;
+        };
+        out.push((ppid, comm));
+        pid = ppid;
+    }
+    out
+}
+
+/// Programs that run other programs and are nobody's seat.
+const WRAPPERS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "env", "sudo", "doas",
+    "timeout", "nohup", "xargs", "script", "uv", "direnv", "ljos", "ljos-mcp",
+];
+
+/// Where a process tree stops being a program and becomes the session
+/// itself: above these, nobody ran the shell but the person.
+const SESSION: &[&str] = &[
+    "tmux", "screen", "zellij", "systemd", "init", "sshd", "login",
+];
+
+/// The seat from the process tree: the record a server left for the runner
+/// above this shell, else the nearest ancestor that is neither a shell nor
+/// a wrapper, tagged with its pid. None when the tree ends in the session
+/// itself, which is a person at a terminal.
+fn seat_from_tree() -> Option<Seat> {
+    let chain = ancestry();
+    for (pid, _) in &chain {
+        if let Ok(text) = std::fs::read_to_string(seat_record_path(*pid)) {
+            let mut lines = text.lines();
+            if let (Some(seat), Some(holder)) = (lines.next(), lines.next()) {
+                return Some(Seat {
+                    seat: seat.to_string(),
+                    holder: holder.to_string(),
+                    source: format!("the server the runner opened, process {pid}"),
+                });
+            }
+        }
+    }
+    for (pid, comm) in &chain {
+        let name = comm.as_str();
+        if WRAPPERS.contains(&name) {
+            continue;
+        }
+        if SESSION.iter().any(|s| name.starts_with(s)) {
+            return None;
+        }
+        return Some(Seat::tagged(
+            seat_slug(name),
+            &conversation_tag(*pid),
+            format!("the process tree, {name} {pid}"),
+        ));
+    }
+    None
+}
+
+fn named_var(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !omitted_actor_name(v))
+}
+
+/// Who is sitting, with nothing set. The seat: `LJOS_SEAT` when someone
+/// set it; else what the MCP client said at initialize; else the process
+/// tree above this shell, which is the runner that opened it or the server
+/// that runner opened; else `VISSUE_AGENT`; else the login user, who is
+/// the seat when no program is. The holder: any `*_SESSION_ID` the runner
+/// stamped, ahead of everything, because a live session id names the
+/// conversation better than a process does; else the seat tagged with the
+/// conversation's process; else the seat whole.
+#[must_use]
+pub fn whoami() -> Seat {
+    let named = named_var("LJOS_SEAT").map(|n| Seat::whole(&n, "LJOS_SEAT"));
+    let program = named
+        .clone()
+        .or_else(|| ANNOUNCED.get().cloned())
+        .or_else(seat_from_tree);
+    let agent = named_var("VISSUE_AGENT");
+    let seat = program
+        .as_ref()
+        .map(|p| p.seat.clone())
+        .or_else(|| agent.clone())
+        .unwrap_or_else(login_user);
+    if let Some((session, keys)) = session_actor() {
+        return Seat {
+            seat,
+            holder: session,
+            source: keys,
+        };
+    }
+    if let Some(p) = program {
+        return p;
+    }
+    if let Some(name) = agent {
+        return Seat::whole(&name, "VISSUE_AGENT");
+    }
+    Seat::whole(&seat, "the login user")
+}
+
+/// The person at the terminal, when no program is the seat.
+fn login_user() -> String {
+    std::env::var("USER")
+        .ok()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "seat".to_string())
+}
+
+/// The name this seat remembers, votes and earns trust under.
 #[must_use]
 pub fn seat_name() -> String {
-    seat_identity().0
+    whoami().seat
 }
 
-fn format_seat_row() -> String {
-    let (seat, source) = seat_identity();
-    format!("{seat} (from {source})")
+/// The name this conversation's claims are held under.
+#[must_use]
+pub fn holder_name() -> String {
+    whoami().holder
 }
 
-/// Resolve an `--assignee` / MCP field. Empty, a pronoun, or this
-/// process's own `LJOS_SEAT` is omitted: occupancy is the session, not
-/// the product name on the box.
+/// Resolve an `--assignee` / MCP field for a claim. Empty, a pronoun
+/// (`seat`, `you`, `agent`), or this process naming itself is omitted:
+/// occupancy is the conversation's holder, not the product name on the
+/// box. A named worker is taken as given.
 #[must_use]
 pub fn resolve_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
         Some(n) if !omitted_actor_name(n) && !own_seat(n) => n.to_string(),
-        _ => seat_name(),
+        _ => holder_name(),
     }
 }
 
@@ -324,6 +570,26 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
     } else {
         format!("{assignee}:{issue}")
     }
+}
+
+/// The doctor's `seat` row: who votes, who holds, and where the names came
+/// from.
+#[must_use]
+pub fn format_seat_row() -> String {
+    let who = whoami();
+    format!(
+        "{}, holding as {} (from {})",
+        who.seat, who.holder, who.source
+    )
+}
+
+/// `ljos seat`: who is sitting, one field a line.
+#[must_use]
+pub fn format_seat(seat: &Seat) -> String {
+    format!(
+        "seat\t{}\nholder\t{}\nsource\t{}\n",
+        seat.seat, seat.holder, seat.source
+    )
 }
 
 /// Whether a runner with a `registered` command already has the server.
@@ -2606,8 +2872,8 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ok,
         });
     }
-    // The name this runner claims and votes under, and where it came from.
-    // Same pair occupancy uses; a GROK_SESSION_ID is not "the default".
+    // Who is sitting: the name this runner votes under, the name this
+    // conversation claims under, and where they came from.
     out.push(Habitat {
         name: "seat",
         state: format_seat_row(),
@@ -4295,21 +4561,16 @@ pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
     run_as(bin, args, None)
 }
 
-/// The identity a ballot is cast under: the persona named, else the
-/// runner's seat name when `LJOS_SEAT` is set, else none (the tracker's
-/// own default, `VISSUE_AGENT` or `user@host`).
+/// The identity a ballot is cast under: the persona named, else the seat
+/// ([`whoami`]), the same name across a runner's conversations so its
+/// record accrues to one voter.
 #[must_use]
 pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
     identity
         .map(str::trim)
         .filter(|w| !w.is_empty())
         .map(str::to_string)
-        .or_else(|| {
-            std::env::var("LJOS_SEAT")
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        })
+        .or_else(|| Some(seat_name()))
 }
 
 /// [`run`] with `VISSUE_AGENT` set to `identity`, so a ballot or a claim is
@@ -4455,6 +4716,51 @@ mod tests {
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
         }
+    }
+
+    #[test]
+    fn a_shared_name_does_not_occupy_the_whole_host() {
+        // A shared name is treated as omitted: the holder is this
+        // conversation's, whatever the tree above the test says the seat is.
+        let holder = resolve_assignee(None);
+        assert_eq!(resolve_assignee(Some("grok")), holder);
+        assert_eq!(resolve_assignee(Some("seat")), holder);
+        assert_ne!(holder, "grok");
+        assert_eq!(resolve_assignee(Some("alice")), "alice");
+    }
+
+    #[test]
+    fn a_client_name_is_one_seat_however_it_is_spelt() {
+        assert_eq!(seat_slug("Acme CLI"), "acme-cli");
+        assert_eq!(seat_slug("acme_cli/1.2"), "acme-cli-1-2");
+        assert_eq!(seat_slug("  --  "), "runner");
+        assert_eq!(conversation_tag(4242), "39u");
+        assert_eq!(conversation_tag(0), "0");
+    }
+
+    #[test]
+    fn the_server_leaves_a_record_a_shell_below_the_runner_reads() {
+        let dir = std::env::temp_dir().join(format!("ljos-seat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The record path is pure in the directory, so build it the way the
+        // server does and read it back the way a shell does.
+        let path = dir.join("ljos").join("seat-4242");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let seat = Seat::tagged(
+            seat_slug("Acme CLI"),
+            &conversation_tag(4242),
+            "test".to_string(),
+        );
+        std::fs::write(&path, format!("{}\n{}\n", seat.seat, seat.holder)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("acme-cli"));
+        assert_eq!(lines.next(), Some("acme-cli-39u"));
+        assert_eq!(
+            format_seat(&seat),
+            "seat\tacme-cli\nholder\tacme-cli-39u\nsource\ttest\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

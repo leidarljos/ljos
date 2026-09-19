@@ -3,11 +3,40 @@
 
 * Wire the seat into an agent runner
 
-Describe the runners on the machine once, in
-=~/.config/ljos/harnesses.toml=. A runner registers MCP servers either
-through a command of its own or through a config file it reads; the file
-holds one table per runner, in one of those two shapes, plus the directory
-it loads skills from. =ljos onboard --example= prints the shape:
+One entry, for any runner that speaks MCP over stdio:
+
+#+begin_src console
+$ ljos onboard
+{"mcpServers": {"ljos": {"type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {}}}}
+#+end_src
+
+Paste it where the runner keeps its MCP servers. The =env= is empty on
+purpose. The server names the seat after the client that connects, so a
+runner that calls itself =acme-cli= is the seat =acme-cli= and a
+runner that calls itself =brio= is =brio=, with nothing set per runner.
+A shell the runner opens finds the same seat: =ljos= walks its own
+process tree to the record the server left for that runner, or, when the
+runner has no MCP, to the first ancestor that is not a shell. Each
+conversation holds its claims as the seat tagged with its process, so two
+conversations of one runner hold two tickets.
+
+#+begin_src console
+$ ljos seat
+seat	acme-cli
+holder	acme-cli-39u
+source	the server the runner opened, process 4242
+#+end_src
+
+The protocol goes where the agent reads its instructions: =ljos protocol=
+prints it, the server serves the same text at =ljos://protocol= and names
+it in its instructions, so a runner that loads neither skills nor
+resources still reads it first. Each tool description opens with when to
+call it.
+
+A runner that registers servers by a command of its own, or reads them
+from a config file, can be described once in
+=~/.config/ljos/harnesses.toml= and onboarded in one verb.
+=ljos onboard --example= prints the shape:
 
 #+begin_src toml
 [[harness]]
@@ -24,30 +53,13 @@ snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\n"
 skills = "~/.other/skills"
 #+end_src
 
-Then one verb per runner:
-
 #+begin_src console
 $ ljos onboard --harness runner-with-a-command
 ok	runner-with-a-command mcp	ran runner mcp add -s user ljos -- /home/you/.cargo/bin/ljos-mcp
 ok	skill	wrote /home/you/.runner/skills/ljos/SKILL.md
-$ ljos doctor | grep runner
-ok	runner mcp	runner-with-a-command: ljos registered
-ok	runner skill	runner-with-a-command: /home/you/.runner/skills/ljos/SKILL.md
 #+end_src
 
-=--dry-run= reports what would be written. For a runner not in the file,
-=ljos onboard --harness json= prints the server entry to paste:
-
-#+begin_src json
-{"mcpServers": {"ljos": {"type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {}}}}
-#+end_src
-
-The skill is the protocol =ljos protocol= prints, under a front matter the
-runner reads. The server serves the same text at =ljos://protocol= and
-names it in its instructions, so a runner that loads neither skills nor
-resources still reads it first. Twenty-three tools, fourteen of them
-writers, two prompts (=start_a_sitting=, =check_a_handover=), three
-read-only resources. Each tool description opens with when to call it.
+=--dry-run= reports what would be written.
 
 * Inject memory at the point of action
 

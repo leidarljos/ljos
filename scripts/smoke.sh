@@ -53,6 +53,8 @@ ljos sitting "$id" --assignee you | grep -q 'reopened' || fail "reopen on a seco
 ljos sitting "$id" --assignee you | grep -q 'the sitting resumes' || fail "a third sitting on a held node did not resume"
 ljos timeline "$id" | grep -q 'tracker	created' || fail timeline
 LJOS_SEAT=you ljos release "$id" | grep -q '^gen=' || fail "release under LJOS_SEAT"
+ljos seat | grep -q '^seat	' || fail "seat prints who is sitting"
+[ "$(LJOS_SEAT=alice ljos seat | sed -n 's/^holder	//p')" = alice ] || fail "LJOS_SEAT overrides the holder whole"
 
 # A harness seat occupies per issue: two sittings must both take, not
 # busy-and-release the first. Named `you` is a shared name.

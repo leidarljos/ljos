@@ -11,7 +11,7 @@ That installs `ljos` and `ljos-mcp`.
 Citing a deed names it; the bytes stay in deedar. The ticket stays open until the tracker closes it. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
-ljos sitting vissue-xxxx --assignee you        # doctor, cards, due, island, recall, timeline, claim
+ljos sitting vissue-xxxx                       # doctor, cards, due, island, recall, timeline, claim
 ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # remember, fire, complete, learn
 ljos calibrate -p project                      # trust rows from the voting history, no truth labels
 ljos remember "the default fuse is CombMNZ"
@@ -21,8 +21,9 @@ ljos island "rebuild the packset site"
 ljos evidence deed-…
 ljos deed vissue-xxxx --add deed-…
 ljos recall vissue-xxxx
-ljos claim <node> --assignee you
-ljos release <node> --assignee you
+ljos claim <node>
+ljos release <node>
+ljos seat                                      # who is sitting: the seat, this conversation's holder, and where the names came from
 ljos complete <node> --status done
 ljos cards
 ljos policy -- ls
@@ -42,12 +43,12 @@ ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
 ljos doctor
 ljos protocol
-ljos onboard --harness RUNNER
+ljos onboard                                   # the one MCP server entry any runner takes
 ```
 
 ## The loop, in two verbs
 
-`ljos sitting ISSUE --assignee NAME` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, the claim. `ljos finish ISSUE [--status done] --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, and when an outcome is named the voters it refuted shrink. A finish without a lesson says so. The point is that the loop that makes the seat a memory runs every time, not only when somebody remembers it.
+`ljos sitting ISSUE` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, the claim. `ljos finish ISSUE [--status done] --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, and when an outcome is named the voters it refuted shrink. A finish without a lesson says so. The point is that the loop that makes the seat a memory runs every time, not only when somebody remembers it.
 
 `ljos due` ends with one line on the clock: `0 due; 12 scheduled, next at ...` is a clock that runs; `0 due; nothing scheduled` is a seat that has remembered nothing. A claim that never entered the clock is due now.
 
@@ -61,7 +62,7 @@ ljos onboard --harness RUNNER
 
 `ljos protocol` prints the sitting protocol: which store answers which
 question, the order of verbs before, during and after the work, and the
-refusals worth knowing. `ljos onboard --harness RUNNER` registers `ljos-mcp`
+refusals worth knowing. `ljos onboard` prints the one `mcpServers` entry every runner that speaks MCP over stdio takes, with an empty `env`, because the server names the seat itself; `ljos onboard --harness RUNNER` registers `ljos-mcp`
 with an agent runner and installs the protocol as its `ljos` skill. The
 runners are described in `~/.config/ljos/harnesses.toml`, one table each,
 either as a command that registers servers or as a config file to append an
@@ -86,7 +87,7 @@ A lesson that rewrites an earlier one of the same kind (the pack reads a token o
 
 `cards` prints `USER.md` and `MEMORY.md` only. It never writes them.
 
-`--assignee` may be left off `sitting`, `claim` and `release`: the name is then any `*_SESSION_ID` the runner stamped, else `LJOS_SEAT`, else `VISSUE_AGENT`, else `seat`. Occupancy is `{name}:{issue}`, so two conversations hold two tickets and the same ticket is still one holder. A runner's registration in the runners file sets `LJOS_SEAT` to the runner's name (`{name}` in `register` or `snippet`); a persona named with `--as` speaks over both. `ljos claim ID --assignee NAME`, `ljos release ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A claim refused as busy names the tracker id a named worker still holds and the two verbs that free it; `release` hands a node back unfinished; a claim on an issue whose earlier sitting finished reopens the node and takes it; a claim on an issue this name already holds renews the lease and says the sitting resumes, and one held by another seat names that actor. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
+`--assignee` is left off `sitting`, `claim` and `release` in the ordinary case. The seat is the program that connected: `ljos-mcp` names it after the client that initialised it (`acme-cli`, `brio`, whatever the runner calls itself), and `ljos` in a shell that runner opened finds the same name through the process tree, so a runner's tools and its command-line verbs are one seat with nothing set and nothing registered per runner. Two names come from that. The seat is what memory, ballots and trust rows accrue to, the same across every conversation of that runner. The holder is the seat tagged with the conversation's process (`acme-cli-39u`), or any `*_SESSION_ID` the runner stamped when it did, and it is what a claim is held under; occupancy is `{holder}:{issue}`, so two conversations of one runner hold two tickets, a second sitting does not release the first, and the same ticket is still one holder. `ljos seat` prints both and where they came from; `ljos doctor` carries the same row. A person at a terminal is their login user. `LJOS_SEAT` overrides both names when someone sets it; a persona named with `--as` speaks over both. `ljos claim ID --assignee NAME`, `ljos release ID --assignee NAME` and `ljos complete ID` take a tracker id or a 32-hex claimdag id. A claim refused as busy names the tracker id the assignee still holds and the two verbs that free it; `release` hands a node back unfinished; a claim on an issue whose earlier sitting finished reopens the node and takes it; a claim on an issue this name already holds renews the lease and says the sitting resumes, and one held by another seat names that actor. A tracker id maps to one node (FNV-1a 128 of the id, minted with the id as its summary on first use) and a name to one actor the same way, so the session graph stays outside the accession join while the seat speaks tracker ids.
 
 `ljos policy ARGV` prints the argv line, then the verdict of any rule in the pack that matches it (`deny` or `ask`, with the reason), then what the pack knows that bears on it. `ljos rule PATTERN --verdict deny|ask --why TEXT` writes such a rule: a glob over the whole command line, kept in the pack like any memory, enforced by the hook as the runner's permission decision on tool calls. This is the control the seat has over an action: what it knows arrives as context, what it has ruled arrives as a verdict, both from the same store and both at the point of action.
 

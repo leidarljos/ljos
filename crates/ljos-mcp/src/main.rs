@@ -20,6 +20,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let running = server::LjosServer::from_env().serve(stdio()).await?;
-    running.waiting().await?;
+    let ended = running.waiting().await;
+    ljos_cli::retire_seat(ljos_cli::runner_pid());
+    ended?;
     Ok(())
 }

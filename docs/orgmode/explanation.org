@@ -230,6 +230,17 @@ Cap'n Proto snapshot. Any agent that can run a command or call a Model Context P
 can work the seat, and a person can do the same from a shell or an editor.
 A read-only viewer over the habitats is the open work.
 
+The seat does not know the runners. It knows one thing every runner
+does: it connects, and says its name. =ljos-mcp= takes that name at
+initialize as the seat, and leaves a record under the runtime directory
+keyed by the runner's process; =ljos= in a shell walks its own process
+tree to that record, or to the first ancestor that is not a shell, and so
+names the same seat. A runner's tools and its verbs are one seat with
+nothing set, and a new runner needs no table anywhere. Memory, ballots
+and trust accrue to the seat across conversations; claims are held by
+the seat tagged with the conversation's process, so two conversations of
+one runner hold two tickets. =LJOS_SEAT= is the override, not the setup.
+
 The agent is told how, in one text. The protocol =ljos protocol= prints is
 the same text =ljos onboard= installs as a skill and the server serves at
 =ljos://protocol=: which store answers which question, the order of verbs

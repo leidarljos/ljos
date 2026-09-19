@@ -10,13 +10,13 @@
 use std::path::{Path, PathBuf};
 
 use ljos_cli::{
-    age_of, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
+    age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due, finish, format_consolidation, graded, handover,
     identity_or_seat, island_entities, learn_and_write, now_utc, on_path, packset_consolidate,
     packset_forget, packset_island, packset_search_as_of, packset_write_as, personas_from_pack,
-    policy_line, receive, release, resolve_assignee, rows_about, run_captured, sitting, timeline,
-    topic_words, trust_from_pack, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    policy_line, receive, release, resolve_assignee, rows_about, run_captured, runner_pid, sitting,
+    timeline, topic_words, trust_from_pack, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -180,9 +180,9 @@ pub struct PersonaArgs {
 pub struct TakeArgs {
     /// The tracker id of the issue (`proj-1a2b`), or a 32-hex claim-graph id.
     pub node: String,
-    /// Your name. A named worker occupies one slot; a harness seat occupies
-    /// per issue. Absent, the runner's seat name (`LJOS_SEAT` from its
-    /// registration, else the runner session).
+    /// Your name; a named worker occupies one slot per issue. Absent, this
+    /// conversation's holder: the session the runner stamped, else the seat
+    /// named after the client that connected, tagged with the runner's process.
     #[serde(default)]
     pub assignee: Option<String>,
 }
@@ -280,9 +280,9 @@ pub struct GradeArgs {
 pub struct SittingArgs {
     /// The tracker id of the issue (`proj-1a2b`).
     pub issue: String,
-    /// Your name. A named worker occupies one slot; a harness seat occupies
-    /// per issue. Absent, the runner's seat name (`LJOS_SEAT` from its
-    /// registration, else the runner session).
+    /// Your name; a named worker occupies one slot per issue. Absent, this
+    /// conversation's holder: the session the runner stamped, else the seat
+    /// named after the client that connected, tagged with the runner's process.
     #[serde(default)]
     pub assignee: Option<String>,
 }
@@ -956,10 +956,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PredictArgs>,
     ) -> Result<Json<serde_json::Value>, McpError> {
-        let who = args
-            .as_persona
-            .or_else(|| std::env::var("VISSUE_AGENT").ok())
-            .unwrap_or_else(|| "seat".to_string());
+        let who =
+            identity_or_seat(args.as_persona.as_deref()).unwrap_or_else(|| "seat".to_string());
         let expect = match &args.expect {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -1367,8 +1365,22 @@ impl ServerHandler for LjosServer {
              accession and does not paste the product. Completing a session node \
              does not close a ticket; ljos_release hands one back unfinished. A \
              tool that fails means a habitat refused or is not running; it is not \
-             an empty answer.",
+             an empty answer. The seat is named after the client that connected and \
+             this conversation holds claims under that name tagged with the runner's \
+             process; a shell the runner opens finds the same names, so no field \
+             here needs an assignee.",
         )
+    }
+
+    /// The client has said who it is: name the seat after it and leave the
+    /// record a shell below the same runner reads.
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<RoleServer>) {
+        let client = context
+            .peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone())
+            .unwrap_or_else(|| "runner".to_string());
+        announce_seat(&client, runner_pid());
     }
 
     /// The two cards and the protocol, and nothing else.

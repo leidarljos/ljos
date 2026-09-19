@@ -5,7 +5,7 @@
 
 | Verb | Habitat | Does |
 |---+---+---|
-| =sitting ISSUE [--assignee NAME] [--cards DIR]= | all | open a sitting: doctor, cards, due, island, recall, timeline, claim; stops at the first store down; the name defaults to =LJOS_SEAT= |
+| =sitting ISSUE [--assignee NAME] [--cards DIR]= | all | open a sitting: doctor, cards, due, island, recall, timeline, claim; stops at the first store down; the name defaults to this conversation's holder (=ljos seat=) |
 | =finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B]= | all | close a sitting: remember, fire the island, complete, learn |
 | =calibrate -p PROJECT [--rounds N]= | consensus, pack | trust rows from the project's voting history (Dawid-Skene accuracy) |
 | =remember TEXT [--as PERSONA]= | pack | one lesson, stored as written; as a persona, it carries that persona's entity and opens its next brief |
@@ -39,9 +39,10 @@
 | =hook [--limit N]= | policy, pack | hook JSON or argv on stdin; on =PreToolUse= the TCB and pack rules, a deny is =permissionDecision=; on a prompt the hits scoring at least 0.6 of the best that two scorers named, preferences first then lessons oldest first, each with its age, five at most, each once per runner session |
 | =handover --out DIR [--project P]... [--issue I]... [--to user@host:path]= | all | pack, seal, sign; =--to= copies the bag to another seat over ssh |
 | =receive DIR [--since BRIDGE] [--import]= | all | check, and import the atoms |
-| =doctor= | all | which habitats answer, and whether the harnesses found are onboarded |
+| =doctor= | all | which habitats answer, who is sitting, and whether the runners named in the runners file are onboarded |
+| =seat= | none | who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from |
 | =protocol= | none | print the sitting protocol |
-| =onboard [--harness NAME\vert json] [--dry-run] [--example]= | runner | register =ljos-mcp= with a runner named in =~/.config/ljos/harnesses.toml= and install the protocol as its skill; =json= prints the entry |
+| =onboard [--harness NAME] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it and install the protocol as its skill |
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.
@@ -63,6 +64,7 @@ when to call it.
 |---+---|
 | =PACKSET_URL= | the pack client; unset, =http://127.0.0.1:8761= (=PACKSET_PORT= moves the port); =off= means no pack |
 | =PACKSET_WORKSPACE= | the pack workspace; unset, =seat= |
+| =LJOS_SEAT= | override for who is sitting; unset, the seat is the MCP client that connected or the program above the shell, and the holder is that seat tagged with the conversation's process |
 | =VISSUE_ROOT=, =VISSUE_AGENT= | the tracker |
 | =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |

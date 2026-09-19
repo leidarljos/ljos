@@ -4,11 +4,25 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The seat names itself. `ljos-mcp` takes the client's name at initialize
+  (`acme-cli`, `brio`, whatever the runner says) as the seat and
+  leaves a record under the runtime directory keyed by the runner's
+  process; `ljos` in a shell that runner opened walks its own process tree
+  to the same record, or to the first ancestor that is not a shell, so a
+  runner's tools and its verbs are one seat with nothing set and nothing
+  in `env`. Two names: the seat, which memory, ballots and trust accrue to
+  across conversations, and the holder (`acme-cli-39u`), which this
+  conversation's claims are held under. `ljos seat` prints both; the
+  doctor's `seat` row does too. `LJOS_SEAT` still overrides. The runners
+  file no longer passes `LJOS_SEAT={name}`; `ljos onboard` alone prints
+  the one entry any runner takes. A ballot cast without a persona is cast
+  as the seat.
 - `cargo install ljos` installs `ljos` and `ljos-mcp`.
-- Occupancy is `{name}:{issue}` and the name is any `*_SESSION_ID` the
-  runner stamped, else `LJOS_SEAT`. No product list. Two conversations
-  hold two tickets; the same ticket is still one holder. `doctor`
-  prints the session and which variable it came from.
+- Occupancy is `{holder}:{issue}` and the holder is any `*_SESSION_ID` the
+  runner stamped, else the seat tagged with the conversation's process,
+  else `LJOS_SEAT`. No product list. Two conversations hold two tickets;
+  the same ticket is still one holder. `doctor` prints the session and
+  which variable it came from.
 
 ## 0.12.15 (2026-09-15)
 

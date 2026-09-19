@@ -11,12 +11,12 @@ second seat that checked it.
 #+begin_src console
 $ mkdir -p /tmp/seat && cd /tmp/seat && git init -q
 $ export VISSUE_ROOT=/tmp/seat/tracker DEEDAR_URL=file:///tmp/seat/deeds
-$ export CLAIMDAG_DIR=/tmp/seat/claims LJOS_SEAT=alice
+$ export CLAIMDAG_DIR=/tmp/seat/claims
 $ packsetd --port 18761 --home /tmp/seat-pack &
 $ export PACKSET_URL=http://127.0.0.1:18761
 $ ljos doctor
 ok	vissue	...
-ok	seat	alice (from LJOS_SEAT)
+ok	seat	alice, holding as alice (from the login user)
 ok	pack	http://127.0.0.1:18761 workspace default
 ok	deed store	size=0 root=...
 #+end_src
@@ -138,15 +138,18 @@ $ ljos protocol | head -3
 # The seat protocol
 
 One seat, five stores, five questions. Ask the store that owns the question.
-$ ljos onboard --harness json
-{ "mcpServers": { "ljos": { "type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", ... } } }
+$ ljos onboard
+{ "mcpServers": { "ljos": { "type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {} } } }
 #+end_src
 
-That entry goes into any runner that registers MCP servers by hand. A
-runner described in =~/.config/ljos/harnesses.toml= is onboarded in one
-verb, =ljos onboard --harness NAME=, which registers the server and installs
-the protocol as the runner's skill; the [[file:howto.org][how-to]] shows the
-file. The agent's next sitting then runs in the order above.
+That entry goes into any runner, where it keeps its MCP servers. The
+=env= is empty on purpose: the server names the seat after the client
+that connects, and =ljos= in a shell the runner opens finds the same name
+through the process tree, so nothing is set per runner. The agent's next
+sitting then runs in the order above. A runner that registers servers by
+a command of its own can be described once in
+=~/.config/ljos/harnesses.toml= and onboarded with =ljos onboard --harness
+NAME=; the [[file:howto.org][how-to]] shows the file.
 
 * Where next
 
