@@ -21,4 +21,5 @@ packset ensure
 ljos doctor | grep -E "^(ok|--)	(pack|encoder)" || true
 uv run --script "$HOME/Git/Github/ljos/scripts/terra/hook_scale.py" --sizes 1000 --sizes 5000 --sizes 10000; rc=$?
 packset stop >/dev/null 2>&1 || true
+rm -rf "$PACKSET_HOME"
 echo "scale exit $rc"; echo ONE-DONE
