@@ -212,6 +212,19 @@ pub struct PersonaArgs {
     pub about: Vec<String>,
 }
 
+/// A writer's answer as the object a structured result has to be: the
+/// daemon's own object, or a non-object carried under `value`.
+fn object(value: serde_json::Value) -> Json<serde_json::Map<String, serde_json::Value>> {
+    Json(match value {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("value".into(), other);
+            map
+        }
+    })
+}
+
 /// Rows a tool answers with. The protocol wants a structured result to be
 /// an object, so a list comes back under one key.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -553,9 +566,9 @@ impl LjosServer {
     async fn ljos_remember(
         &self,
         Parameters(args): Parameters<ClaimArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         packset_write_as("Remember", &args.text, args.as_persona.as_deref())
-            .map(Json)
+            .map(object)
             .map_err(refused)
     }
 
@@ -572,9 +585,9 @@ impl LjosServer {
     async fn ljos_prefer(
         &self,
         Parameters(args): Parameters<ClaimArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         packset_write_as("Prefer", &args.text, args.as_persona.as_deref())
-            .map(Json)
+            .map(object)
             .map_err(refused)
     }
 
@@ -628,9 +641,9 @@ impl LjosServer {
     async fn ljos_forget(
         &self,
         Parameters(args): Parameters<ForgetArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         packset_forget(&args.id, args.why.as_deref())
-            .map(Json)
+            .map(object)
             .map_err(refused)
     }
 
@@ -678,7 +691,7 @@ impl LjosServer {
     async fn ljos_habit(
         &self,
         Parameters(args): Parameters<HabitArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         let now = now_utc();
         if let (Some(name), Some(value)) = (&args.name, args.value) {
             let every_s = parse_every(args.every.as_deref().unwrap_or("7d")).map_err(refused)?;
@@ -690,7 +703,7 @@ impl LjosServer {
                 args.source.as_deref().unwrap_or(""),
             )
             .map_err(refused)?;
-            return Ok(Json(serde_json::json!({
+            return Ok(object(serde_json::json!({
                 "reading": body,
                 "was": prev.map(|p| serde_json::json!({"value": p.value, "ts": p.ts, "id": p.id})),
             })));
@@ -710,7 +723,7 @@ impl LjosServer {
                 id: r.id,
             })
             .collect();
-        Ok(Json(serde_json::json!(rows)))
+        Ok(object(serde_json::json!(rows)))
     }
 
     // ---- the deed store ----------------------------------------------------
@@ -1053,14 +1066,14 @@ impl LjosServer {
     async fn ljos_trust(
         &self,
         Parameters(args): Parameters<TrustArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         let row = Trust {
             from: args.from,
             to: args.to,
             weight: args.weight,
             about: args.about,
         };
-        write_trust(&row, &args.why).map(Json).map_err(refused)
+        write_trust(&row, &args.why).map(object).map_err(refused)
     }
 
     #[tool(
@@ -1076,7 +1089,7 @@ impl LjosServer {
     async fn ljos_predict(
         &self,
         Parameters(args): Parameters<PredictArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         let who =
             identity_or_seat(args.as_persona.as_deref()).unwrap_or_else(|| "seat".to_string());
         let expect = match &args.expect {
@@ -1084,7 +1097,7 @@ impl LjosServer {
             other => other.to_string(),
         };
         write_prediction(&args.issue, &who, &expect)
-            .map(Json)
+            .map(object)
             .map_err(refused)
     }
 
@@ -1101,13 +1114,13 @@ impl LjosServer {
     async fn ljos_rule(
         &self,
         Parameters(args): Parameters<RuleArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         write_rule(&Rule {
             pattern: args.pattern,
             verdict: args.verdict,
             reason: args.why,
         })
-        .map(Json)
+        .map(object)
         .map_err(refused)
     }
 
@@ -1140,14 +1153,14 @@ impl LjosServer {
     async fn ljos_persona(
         &self,
         Parameters(args): Parameters<PersonaArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         let persona = Persona {
             name: args.name,
             anchor: args.anchor.unwrap_or(0.5),
             view: args.view,
             entities: args.about,
         };
-        write_persona(&persona).map(Json).map_err(refused)
+        write_persona(&persona).map(object).map_err(refused)
     }
 
     #[tool(
@@ -1331,9 +1344,9 @@ impl LjosServer {
     async fn ljos_graded(
         &self,
         Parameters(args): Parameters<GradeArgs>,
-    ) -> Result<Json<serde_json::Value>, McpError> {
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
         graded(&args.id, args.recalled.unwrap_or(true))
-            .map(Json)
+            .map(object)
             .map_err(refused)
     }
 }
