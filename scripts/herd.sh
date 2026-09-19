@@ -80,7 +80,9 @@ echo "herd: eight finishes closed eight tickets"
 
 # The same island fired by several closings tightens once: the first
 # finish fires it, a second within the hour is held.
-fired=$(grep -l 'fired the island' fin-*.out | wc -l)
-held=$(grep -l 'fired within the hour' fin-*.out | wc -l)
+fired=$(grep -l 'fired the island' fin-*.out 2>/dev/null | wc -l || true)
+held=$(grep -l 'fired within the hour' fin-*.out 2>/dev/null | wc -l || true)
+weak=$(grep -l 'did not fire the island' fin-*.out 2>/dev/null | wc -l || true)
+echo "herd: $weak finishes met a weak island (a scratch pack has few seeds)"
 echo "herd: $fired finishes fired an island, $held found it fired already"
 echo "herd: every loop ran"
