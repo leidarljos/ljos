@@ -6837,7 +6837,7 @@ mod tests {
             json_entry: None,
             skills: None,
             hooks: None,
-            hook_events: None,
+            hook_events: Vec::new(),
         };
         assert_eq!(is_registered(&h, Path::new("/bin/ljos-mcp")), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
