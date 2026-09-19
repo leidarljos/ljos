@@ -14,6 +14,8 @@
 set -uo pipefail
 PREFIX="$HOME/phronesis-prefix"
 mkdir -p "$PREFIX" "$HOME/build"
+# capnp and capnpc-c are user installs; a batch shell does not carry them.
+export PATH="$HOME/.local/bin:$PATH"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
 if ! pkg-config --exists cmocka; then
   echo "== cmocka"
@@ -24,7 +26,7 @@ pkg-config --modversion cmocka || echo "cmocka still missing"
 echo "== phronesis"
 cd "$HOME/Git/Github/phronesis" || exit 1
 git pull -q --ff-only 2>&1 | tail -1; git log --oneline -1
-meson setup build --prefix="$PREFIX" --reconfigure 2>&1 | tail -3
+if [ -d build ]; then meson setup build --prefix="$PREFIX" --reconfigure 2>&1 | tail -3; else meson setup build --prefix="$PREFIX" 2>&1 | tail -3; fi
 meson compile -C build 2>&1 | tail -2
 meson test -C build --print-errorlogs 2>&1 | grep -E "^Ok|^Fail|^Timeout|tests passed|FAIL" | head -5
 meson install -C build 2>&1 | tail -1
