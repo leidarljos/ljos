@@ -14,10 +14,13 @@
 set -uo pipefail
 PREFIX="$HOME/phronesis-prefix"
 mkdir -p "$PREFIX" "$HOME/build"
-# capnp and capnpc-c are user installs; a batch shell does not carry them.
-export PATH="$HOME/.local/bin:$PATH"
-# The capnpc-c plugin there links the Cap'n C runtime from the same prefix.
-export LD_LIBRARY_PATH="$HOME/.local/lib:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+# capnp is a user install; a batch shell does not carry it. Only capnp goes
+# on the path: a capnpc-c found there was built against another Cap'n C
+# runtime than the wrap's and emitted code the library could not compile,
+# so the plugin comes from phronesis's own c-capnproto wrap.
+mkdir -p "$HOME/phronesis-tools" && ln -sf "$HOME/.local/bin/capnp" "$HOME/phronesis-tools/capnp"
+export PATH="$HOME/phronesis-tools:$PATH"
+export LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
 if ! pkg-config --exists cmocka; then
   echo "== cmocka"
@@ -28,9 +31,10 @@ pkg-config --modversion cmocka || echo "cmocka still missing"
 echo "== phronesis"
 cd "$HOME/Git/Github/phronesis" || exit 1
 git pull -q --ff-only 2>&1 | tail -1; git log --oneline -1
-if [ -d build ]; then meson setup build --prefix="$PREFIX" --reconfigure 2>&1 | tail -3; else meson setup build --prefix="$PREFIX" 2>&1 | tail -3; fi
-meson compile -C build 2>&1 | tail -2
-meson test -C build --print-errorlogs 2>&1 | grep -E "^Ok|^Fail|^Timeout|tests passed|FAIL" | head -5
-meson install -C build 2>&1 | tail -1
+B=build-wrap
+if [ -d $B ]; then meson setup $B --prefix="$PREFIX" --reconfigure 2>&1 | tail -3; else meson setup $B --prefix="$PREFIX" 2>&1 | tail -3; fi
+meson compile -C $B 2>&1 | grep -E "error|FAILED|Linking|ninja: no work" | head -12
+meson test -C $B --print-errorlogs 2>&1 | grep -E "^Ok|^Fail|^Timeout|tests passed|FAIL" | head -5
+meson install -C $B 2>&1 | tail -1
 ls "$PREFIX/lib" "$PREFIX/include/phronesis" "$PREFIX/share/phronesis" 2>&1 | head -20
 echo PHRONESIS-DONE
