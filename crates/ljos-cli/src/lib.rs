@@ -2605,9 +2605,9 @@ pub fn trust_atom(row: &Trust, why: &[String], workspace: &str) -> Result<Value>
     atom["from"] = Value::String(from.into());
     atom["to"] = Value::String(to.into());
     atom["weight"] = serde_json::json!(row.weight);
-    if !why.is_empty() {
-        add_entities(&mut atom, why.iter().cloned());
-    }
+    // A trust row's entities are the deeds it stands on and nothing else;
+    // the pack checks each one is an accession. Who wrote it is `from`.
+    atom["entities"] = Value::Array(why.iter().map(|w| Value::String(w.clone())).collect());
     if !row.about.is_empty() {
         atom["about"] = Value::Array(
             row.about
@@ -6092,10 +6092,7 @@ mod tests {
         assert_eq!(atom["from"], "a");
         assert_eq!(atom["to"], "b");
         assert_eq!(atom["weight"], 0.25);
-        assert_eq!(
-            atom["entities"],
-            serde_json::json!([format!("{SEAT_ENTITY}{}", seat_name()), "deed-x-y"])
-        );
+        assert_eq!(atom["entities"], serde_json::json!(["deed-x-y"]));
         assert_eq!(atom["text"], "a weighs b at 0.250.");
         assert!(trust_atom(&row("a", "a", 0.5), &[], "ws").is_err());
         assert!(trust_atom(&row("a", "b", 0.0), &[], "ws").is_err());
