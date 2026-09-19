@@ -1353,7 +1353,10 @@ impl LjosServer {
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Vec<PromptMessage>, McpError> {
         let issue = args.issue;
-        let personas = personas_from_pack().unwrap_or_default();
+        // Only the personas whose domains the issue speaks to sit; a seat
+        // that runs every persona on every issue is a count, not a panel.
+        let all = personas_from_pack().unwrap_or_default();
+        let personas = personas_speaking_to(&all, &issue_words(&issue));
         let roster = if personas.is_empty() {
             "The pack holds no personas yet. Write two or three with `ljos_persona` first: a \
              name, an anchor in [0, 1] (0 never moves off its ballot), a sentence on how it \
@@ -1378,9 +1381,18 @@ impl LjosServer {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        let seated = if personas.len() < all.len() {
+            format!(
+                "The personas whose domains this issue speaks to ({} of {} in the pack):",
+                personas.len(),
+                all.len()
+            )
+        } else {
+            "The personas in this seat's pack:".to_string()
+        };
         Ok(asked(format!(
             "Run a panel on {issue}.\n\n\
-             The personas in this seat's pack:\n{roster}\n\n\
+             {seated}\n{roster}\n\n\
              1. `ljos_recall` on {issue}, and `ljos_search` for what the seat knows about it.\n\
              2. For each persona, `ljos_brief` with its name and {issue}, and start one \
                 subagent with that text as its whole brief: the persona's view, what the seat \
