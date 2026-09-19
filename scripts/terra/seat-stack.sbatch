@@ -15,7 +15,7 @@ set -uo pipefail
 mkdir -p "$HOME/stackbin"
 # The policy daemon links phronesis when scripts/terra/phronesis-build.sbatch
 # has installed it; without the prefix it builds its host argv table only.
-if [ -d "$HOME/phronesis-prefix/lib" ]; then
+if ls "$HOME/phronesis-prefix/lib"/libphronesis.* >/dev/null 2>&1; then
   export PHRONESIS_DIR="$HOME/phronesis-prefix"
   export PKG_CONFIG_PATH="$PHRONESIS_DIR/lib/pkgconfig:$PHRONESIS_DIR/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
   export LD_LIBRARY_PATH="$PHRONESIS_DIR/lib:${LD_LIBRARY_PATH:-}"

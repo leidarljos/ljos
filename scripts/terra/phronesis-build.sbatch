@@ -16,6 +16,8 @@ PREFIX="$HOME/phronesis-prefix"
 mkdir -p "$PREFIX" "$HOME/build"
 # capnp and capnpc-c are user installs; a batch shell does not carry them.
 export PATH="$HOME/.local/bin:$PATH"
+# The capnpc-c plugin there links the Cap'n C runtime from the same prefix.
+export LD_LIBRARY_PATH="$HOME/.local/lib:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
 if ! pkg-config --exists cmocka; then
   echo "== cmocka"
