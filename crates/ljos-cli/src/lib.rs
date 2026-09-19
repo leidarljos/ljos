@@ -5284,6 +5284,7 @@ mod tests {
 
     #[test]
     fn a_shared_name_does_not_occupy_the_whole_host() {
+        let _g = env_guard();
         // A pronoun is treated as omitted: the holder is this conversation's,
         // whatever the tree above the test says the seat is. A name that is
         // not a pronoun is a named worker and stands as given.
