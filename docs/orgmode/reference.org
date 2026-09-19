@@ -18,6 +18,7 @@
 | =hubs [-n N]= | pack | the claims this seat's memory turns on, highest first: a weighted PageRank over the links |
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
 | =due= | pack | claims whose review is due, unreviewed ones first, then one line on the clock |
+| =habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]= | pack | with a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list the habits as they stand with the change since the last reading |
 | =graded ID [--lapsed]= | pack | one review graded |
 | =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
 | =persona NAME --anchor A --view TEXT [--about DOMAIN]...= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot |
@@ -52,7 +53,7 @@ to one actor; a 32-hex id passes through.
 Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_remember=, =ljos_prefer=, =ljos_forget=, =ljos_trust=,
 =ljos_learn=, =ljos_graded=, =ljos_island=, =ljos_deed=, =ljos_vote=, =ljos_predict=, =ljos_rule=, =ljos_claim=,
 =ljos_release=, =ljos_complete=, =ljos_consolidate=, =ljos_handover=, =ljos_receive=. Readers: =ljos_search= (with =as_of=), =ljos_conflicts=,
-=ljos_timeline=, =ljos_due=, =ljos_evidence=, =ljos_current=, =ljos_recall=,
+=ljos_timeline=, =ljos_due=, =ljos_habit= (a writer with a value), =ljos_evidence=, =ljos_current=, =ljos_recall=,
 =ljos_consensus=, =ljos_brief=, =ljos_cards=, =ljos_policy=, =ljos_doctor=. Resources:
 =ljos://protocol=, =ljos://cards/USER.md=, =ljos://cards/MEMORY.md=. Prompts:
 =start_a_sitting=, =run_a_panel=, =check_a_handover=. Every tool description opens with

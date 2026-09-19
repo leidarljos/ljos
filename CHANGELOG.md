@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Habits: `ljos habit NAME VALUE [--unit U] [--every 7d] [--source S]`
+  takes a reading of a number the seat keeps measuring, as a claim of
+  kind `habit` that supersedes the earlier reading and carries it as
+  `was`, due for its next reading one cadence on; `ljos habit` lists
+  them with the change since the last reading and when the next is due.
+  `ljos_habit` is the same over MCP.
 - The seat names itself. `ljos-mcp` takes the client's name at initialize
   (`acme-cli`, `brio`, whatever the runner says) as the seat and
   leaves a record under the runtime directory keyed by the runner's

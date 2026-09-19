@@ -3319,6 +3319,252 @@ pub fn due() -> Result<Vec<Value>> {
     Ok(due_of(&atoms, &now_utc()))
 }
 
+// ---- habits ----------------------------------------------------------------
+
+/// The entity a habit's readings carry, so a name finds them.
+pub const HABIT_ENTITY: &str = "habit:";
+/// A habit's cadence when none is given: a week, in seconds.
+pub const HABIT_EVERY_S: i64 = 7 * 86_400;
+
+/// One reading of a habit: a number the seat keeps measuring, with the
+/// cadence it is measured at. A reading is a claim of kind `habit` that
+/// supersedes the reading before it, so the pack holds one live value a
+/// habit and `search --as-of` still answers what it stood at then; its
+/// review clock is the cadence, so `due` and the hook say when the next
+/// reading is late.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Reading {
+    pub name: String,
+    pub value: f64,
+    pub unit: String,
+    pub source: String,
+    /// Seconds between readings.
+    pub every_s: i64,
+    /// The reading before this one, when there was one.
+    pub was: Option<f64>,
+    pub was_ts: Option<String>,
+    pub id: Option<String>,
+    pub ts: Option<String>,
+    pub due_at: Option<String>,
+}
+
+/// `7d`, `24h`, `2w`, `30m`, or bare seconds.
+pub fn parse_every(text: &str) -> Result<i64> {
+    let t = text.trim();
+    let split = t.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
+    let (num, unit) = t.split_at(split);
+    let n: i64 = num
+        .trim()
+        .parse()
+        .with_context(|| format!("habit: --every {t:?} is not a span; write 7d, 24h, 2w or 30m"))?;
+    let each = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 3_600,
+        "d" => 86_400,
+        "w" => 7 * 86_400,
+        other => bail!("habit: unknown unit {other:?} in --every; write d, h, w, m or s"),
+    };
+    if n <= 0 {
+        bail!("habit: --every must be positive");
+    }
+    Ok(n * each)
+}
+
+/// An RFC 3339 stamp `secs` after `now` (`YYYY-MM-DDTHH:MM:SSZ`, to the
+/// second). None when `now` does not read as a stamp.
+fn stamp_after(now: &str, secs: i64) -> Option<String> {
+    let days = days_of_stamp(Some(now))?;
+    let clock = now.get(11..19)?;
+    let mut it = clock.split(':');
+    let h: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let s: i64 = it.next()?.parse().ok()?;
+    let total = days * 86_400 + h * 3_600 + m * 60 + s + secs;
+    let day = total.div_euclid(86_400);
+    let rem = total.rem_euclid(86_400);
+    Some(format!(
+        "{}T{:02}:{:02}:{:02}.000Z",
+        civil_of_days(day),
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    ))
+}
+
+/// A number as a person writes it: up to four decimals, no trailing zeros.
+#[must_use]
+pub fn trim_num(v: f64) -> String {
+    let s = format!("{v:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// The claim a reading is stored as. The words are for a reader; the
+/// numbers travel in the atom's `habit` field.
+#[must_use]
+pub fn habit_text(name: &str, value: f64, unit: &str, source: &str) -> String {
+    let unit = unit.trim();
+    let source = source.trim();
+    let mut text = format!("habit {} stands at {}", name.trim(), trim_num(value));
+    if !unit.is_empty() {
+        text.push(' ');
+        text.push_str(unit);
+    }
+    if !source.is_empty() {
+        text.push_str(&format!(" ({source})"));
+    }
+    text.push('.');
+    text
+}
+
+fn reading_of(atom: &Value) -> Option<Reading> {
+    if atom.get("kind").and_then(Value::as_str) != Some("habit") {
+        return None;
+    }
+    let h = atom.get("habit")?;
+    Some(Reading {
+        name: h.get("name")?.as_str()?.to_string(),
+        value: h.get("value")?.as_f64()?,
+        unit: h
+            .get("unit")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        source: h
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        every_s: h
+            .get("every_s")
+            .and_then(Value::as_i64)
+            .unwrap_or(HABIT_EVERY_S),
+        was: h.get("was").and_then(Value::as_f64),
+        was_ts: h.get("was_ts").and_then(Value::as_str).map(str::to_string),
+        id: atom.get("id").and_then(Value::as_str).map(str::to_string),
+        ts: atom.get("ts").and_then(Value::as_str).map(str::to_string),
+        due_at: atom
+            .get("due_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// The live readings among `atoms`, one a habit, by name.
+#[must_use]
+pub fn readings_of(atoms: &[Value]) -> Vec<Reading> {
+    let mut rows: Vec<Reading> = atoms.iter().filter_map(reading_of).collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name).then(b.ts.cmp(&a.ts)));
+    rows.dedup_by(|a, b| a.name == b.name);
+    rows
+}
+
+/// The live readings in the seat's pack.
+pub fn habits() -> Result<Vec<Reading>> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("habit: GET /v1/atoms failed")?;
+    Ok(readings_of(&atoms))
+}
+
+/// Take a reading: write it as a claim that supersedes the habit's earlier
+/// reading, carrying that reading as `was`, with its review due one
+/// cadence from now. Returns the pack's answer and the reading it closed.
+pub fn habit(
+    name: &str,
+    value: f64,
+    unit: &str,
+    every_s: i64,
+    source: &str,
+) -> Result<(Value, Option<Reading>)> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("habit: a reading needs a name");
+    }
+    if !value.is_finite() {
+        bail!("habit: {value} is not a reading");
+    }
+    let client = pack()?;
+    let workspace = client.workspace();
+    let atoms = client
+        .atoms_as_of(&workspace, None)
+        .context("habit: GET /v1/atoms failed")?;
+    let prev = readings_of(&atoms).into_iter().find(|r| r.name == name);
+    let now = now_utc();
+    let mut atom = atom_body("habit", &habit_text(name, value, unit, source), &workspace);
+    atom["entities"] = Value::Array(vec![Value::String(format!("{HABIT_ENTITY}{name}"))]);
+    if let Some(due) = stamp_after(&now, every_s) {
+        atom["due_at"] = Value::String(due);
+    }
+    atom["habit"] = serde_json::json!({
+        "name": name,
+        "value": value,
+        "unit": unit.trim(),
+        "source": source.trim(),
+        "every_s": every_s,
+        "was": prev.as_ref().map(|p| p.value),
+        "was_ts": prev.as_ref().and_then(|p| p.ts.clone()),
+    });
+    if let Some(id) = prev.as_ref().and_then(|p| p.id.clone()) {
+        atom["supersedes"] = Value::Array(vec![Value::String(id)]);
+    }
+    let body = client
+        .post_atom(&atom)
+        .context("habit: POST /v1/atoms failed")?;
+    Ok((body, prev))
+}
+
+/// The change since the reading before, signed, or nothing for a first
+/// reading.
+#[must_use]
+pub fn format_change(r: &Reading, now: &str) -> String {
+    match r.was {
+        Some(was) => {
+            let d = r.value - was;
+            let sign = if d >= 0.0 { "+" } else { "" };
+            format!(
+                "{sign}{} since {} ({})",
+                trim_num(d),
+                trim_num(was),
+                age_of(r.was_ts.as_deref(), now)
+            )
+        }
+        None => "first reading".to_string(),
+    }
+}
+
+/// `ljos habit`: one line a habit: name, value with unit, the change since
+/// the last reading, the age of this one, when the next is due, source.
+#[must_use]
+pub fn format_readings(rows: &[Reading], now: &str) -> String {
+    rows.iter()
+        .map(|r| {
+            let due = match r.due_at.as_deref() {
+                Some(d) if d <= now => format!("next reading late ({})", age_of(Some(d), now)),
+                Some(d) => format!("next reading {}", age_of(Some(d), now)),
+                None => "no cadence".to_string(),
+            };
+            format!(
+                "{}\t{}{}{}\t{}\t{}\t{}\t{}\n",
+                r.name,
+                trim_num(r.value),
+                if r.unit.is_empty() { "" } else { " " },
+                r.unit,
+                format_change(r, now),
+                age_of(r.ts.as_deref(), now),
+                due,
+                r.source
+            )
+        })
+        .collect()
+}
+
 pub fn format_due(atoms: &[Value]) -> String {
     atoms
         .iter()
@@ -4724,13 +4970,60 @@ mod tests {
 
     #[test]
     fn a_shared_name_does_not_occupy_the_whole_host() {
-        // A shared name is treated as omitted: the holder is this
-        // conversation's, whatever the tree above the test says the seat is.
+        // A pronoun is treated as omitted: the holder is this conversation's,
+        // whatever the tree above the test says the seat is. A name that is
+        // not a pronoun is a named worker and stands as given.
         let holder = resolve_assignee(None);
-        assert_eq!(resolve_assignee(Some("grok")), holder);
+        assert_eq!(resolve_assignee(Some("you")), holder);
         assert_eq!(resolve_assignee(Some("seat")), holder);
-        assert_ne!(holder, "grok");
+        assert_eq!(resolve_assignee(Some("agent")), holder);
+        assert_ne!(holder, "seat");
         assert_eq!(resolve_assignee(Some("alice")), "alice");
+    }
+
+    #[test]
+    fn a_reading_supersedes_the_one_before_and_keeps_it_as_was() {
+        assert_eq!(parse_every("7d").unwrap(), 7 * 86_400);
+        assert_eq!(parse_every("24h").unwrap(), 86_400);
+        assert_eq!(parse_every("2w").unwrap(), 14 * 86_400);
+        assert_eq!(parse_every("90").unwrap(), 90);
+        assert!(parse_every("soon").is_err());
+        assert!(parse_every("0d").is_err());
+        assert_eq!(
+            stamp_after("2026-09-19T23:30:00.000Z", 3_600).as_deref(),
+            Some("2026-09-20T00:30:00.000Z")
+        );
+        assert_eq!(trim_num(0.5790), "0.579");
+        assert_eq!(trim_num(12.0), "12");
+        assert_eq!(
+            habit_text("mab cr all", 0.579, "acc", "job 11793"),
+            "habit mab cr all stands at 0.579 acc (job 11793)."
+        );
+        let first = serde_json::json!({
+            "id": "a1", "kind": "habit", "ts": "2026-09-12T10:00:00.000Z",
+            "due_at": "2026-09-19T10:00:00.000Z",
+            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "11750", "every_s": 604800}
+        });
+        let second = serde_json::json!({
+            "id": "a2", "kind": "habit", "ts": "2026-09-19T10:00:00.000Z",
+            "due_at": "2026-09-26T10:00:00.000Z",
+            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "11793", "every_s": 604800,
+                       "was": 0.535, "was_ts": "2026-09-12T10:00:00.000Z"}
+        });
+        let other = serde_json::json!({
+            "id": "l1", "kind": "lesson", "text": "not a habit", "ts": "2026-09-19T10:00:00.000Z"
+        });
+        // The pack hands back one live reading a habit; a stale copy sorts out.
+        let rows = readings_of(&[first.clone(), other, second]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("a2"));
+        assert_eq!(rows[0].was, Some(0.535));
+        let now = "2026-09-20T09:00:00.000Z";
+        let line = format_readings(&rows, now);
+        assert!(line.starts_with("mab cr all\t0.579 acc\t+0.044 since 0.535 (8 days ago)\tyesterday\tnext reading in 6 days\t11793\n"), "{line}");
+        let late = readings_of(&[first]);
+        assert!(format_readings(&late, now).contains("next reading late (yesterday)"));
+        assert_eq!(format_change(&late[0], now), "first reading");
     }
 
     #[test]

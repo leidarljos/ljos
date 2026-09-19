@@ -68,6 +68,14 @@ Every piece of work has an issue before it has a claim.
   `--apply` closes them; run it after a handover is imported.
   `ljos conflicts` lists the likeliest contradictions by distance rather
   than by words, when the `landscape` habitat is installed.
+- Every number the seat keeps measuring is a habit: `ljos habit NAME VALUE
+  [--unit U] [--every 7d] [--source JOB]` takes a reading, closes the one
+  before it (kept as what it was), and puts the next reading on the review
+  clock one cadence on, so `ljos due` and the hook say when it is late.
+  `ljos habit` lists the habits as they stand with the change since the
+  last reading; `ljos search --as-of` answers what one stood at then. A
+  benchmark score, a latency, a count of open tickets: readings, not
+  lessons.
 - Every decision with more than one defensible answer is a ballot:
   `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
   `ljos consensus ISSUE`. A tally is a count; the consensus is the settle

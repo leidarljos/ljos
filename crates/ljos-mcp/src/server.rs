@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 
 use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
-    consensus_steps_for, doctor, due, finish, format_consolidation, graded, handover,
-    identity_or_seat, island_entities, learn_and_write, now_utc, on_path, packset_consolidate,
-    packset_forget, packset_island, packset_search_as_of, packset_write_as, personas_from_pack,
-    policy_line, receive, release, resolve_assignee, rows_about, run_captured, runner_pid, sitting,
-    timeline, topic_words, trust_from_pack, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    consensus_steps_for, doctor, due, finish, format_change, format_consolidation, graded, habit,
+    habits, handover, identity_or_seat, island_entities, learn_and_write, now_utc, on_path,
+    packset_consolidate, packset_forget, packset_island, packset_search_as_of, packset_write_as,
+    parse_every, personas_from_pack, policy_line, receive, release, resolve_assignee, rows_about,
+    run_captured, runner_pid, sitting, timeline, topic_words, trust_from_pack, write_persona,
+    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -61,6 +62,42 @@ pub struct SearchArgs {
     /// learnt since left out. Omit for now.
     #[serde(default)]
     pub as_of: Option<String>,
+}
+
+/// A reading of a habit, or the question which readings stand.
+#[derive(Deserialize, JsonSchema)]
+pub struct HabitArgs {
+    /// The habit's name (`mab cr all`, `hook p50 10k`). Absent, every habit.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The reading. With it the tool writes; without it the tool lists.
+    #[serde(default)]
+    pub value: Option<f64>,
+    /// The unit the reading is in, for the reader.
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// How often a reading is taken: `7d`, `24h`, `2w`. Absent, a week.
+    #[serde(default)]
+    pub every: Option<String>,
+    /// Where the reading came from: a job id, a run, a file.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// One habit as it stands.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ReadingRow {
+    pub name: String,
+    pub value: f64,
+    pub unit: String,
+    /// The change since the reading before, in words; `first reading` when none.
+    pub change: String,
+    /// When this reading was taken, in words.
+    pub age: String,
+    /// When the next reading is due, RFC 3339.
+    pub due_at: Option<String>,
+    pub source: String,
+    pub id: Option<String>,
 }
 
 /// How many rows to print.
@@ -590,6 +627,54 @@ impl LjosServer {
                 })
                 .collect(),
         ))
+    }
+
+    #[tool(
+        description = "Call this when a number the seat tracks has been measured again: a benchmark score, a latency, a count. With a value it takes the reading, closes the habit's earlier reading (kept as `was`), and sets the next reading due one cadence on, so ljos_due and the hook say when it is late. Without a value it lists the habits as they stand, each with the change since the last reading and when the next is due. ljos_search with as_of answers what a habit stood at then.",
+        annotations(
+            title = "Take or read a habit's reading",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_habit(
+        &self,
+        Parameters(args): Parameters<HabitArgs>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let now = now_utc();
+        if let (Some(name), Some(value)) = (&args.name, args.value) {
+            let every_s = parse_every(args.every.as_deref().unwrap_or("7d")).map_err(refused)?;
+            let (body, prev) = habit(
+                name,
+                value,
+                args.unit.as_deref().unwrap_or(""),
+                every_s,
+                args.source.as_deref().unwrap_or(""),
+            )
+            .map_err(refused)?;
+            return Ok(Json(serde_json::json!({
+                "reading": body,
+                "was": prev.map(|p| serde_json::json!({"value": p.value, "ts": p.ts, "id": p.id})),
+            })));
+        }
+        let rows: Vec<ReadingRow> = habits()
+            .map_err(refused)?
+            .into_iter()
+            .filter(|r| args.name.as_deref().is_none_or(|n| r.name == n.trim()))
+            .map(|r| ReadingRow {
+                change: format_change(&r, &now),
+                age: age_of(r.ts.as_deref(), &now),
+                name: r.name,
+                value: r.value,
+                unit: r.unit,
+                due_at: r.due_at,
+                source: r.source,
+                id: r.id,
+            })
+            .collect();
+        Ok(Json(serde_json::json!(rows)))
     }
 
     // ---- the deed store ----------------------------------------------------
@@ -1456,7 +1541,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            33,
+            34,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1650,11 +1735,11 @@ mod tests {
             said,
             &[
                 "`ljos_cards`",
+                "`ljos_due`",
+                "`ljos_graded`",
                 "`ljos_search`",
                 "`ljos_island`",
                 "`ljos_recall`",
-                "`ljos_due`",
-                "`ljos_graded`",
                 "`ljos_claim`",
                 "`ljos_remember`",
                 "`ljos_forget`",

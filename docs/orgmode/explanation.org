@@ -101,6 +101,14 @@ timeline ISSUE= merges the three stores into one dated list with the gap
 between consecutive lines, and =ljos search --as-of TIME= asks the pack as
 it stood at an earlier time.
 
+A habit is the same rule turned into a series. A number the seat keeps
+measuring is written as a reading that supersedes the reading before it
+and carries that reading as what it was, so the pack holds one live value
+a habit, an as-of search reads the value at any earlier time, and the
+cadence is the reading's review clock: a week without a new reading and
+the habit is due like any claim. The numbers in this document are
+readings.
+
 The design came out of measurement. On a public long-conversation
 benchmark the seat's retrieval finds the right session at the top for nine
 questions in ten, and the answers a small reader gives over those sessions

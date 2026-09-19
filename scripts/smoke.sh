@@ -24,6 +24,10 @@ ljos search fuse | grep -q CombMNZ || fail search
 before=$(ljos search fuse --as-of 2000-01-01) || fail "an as-of search was refused"
 echo "$before" | grep -q CombMNZ && fail "an as-of read before the write found it"
 ljos due | grep -q 'scheduled' || fail due
+ljos habit smoke-score 0.5 --unit acc --every 7d --source first | grep -q '	habit	' || fail "a first reading"
+ljos habit smoke-score 0.6 --unit acc --every 7d --source second 2>&1 | grep -q 'was 0.5 acc' || fail "a second reading did not name the first"
+ljos habit | grep -q '^smoke-score	0.6 acc	+0.1 since 0.5' || fail "the habit list"
+ljos habit smoke-score | grep -c '^smoke-score' | grep -q '^1$' || fail "one live reading a habit"
 # A rewrite of the same claim closes the earlier one on arrival; the seat
 # says so, and a consolidation finds nothing left to close.
 ljos remember "The lexical default is BM25L. It beat BM25 by two points on turns." 2>&1 | grep -q 'revises 1 earlier' || fail "a rewrite did not close the earlier claim"

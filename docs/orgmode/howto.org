@@ -135,6 +135,28 @@ the age column says when each was written. Add =--fire= when you go on to
 use the island: the strongest eight fire together and their links gain
 weight.
 
+* Keep a number
+
+A number the seat measures again and again, a benchmark score, a hook
+latency, a count of open tickets, is a habit. A reading is one verb:
+
+#+begin_src console
+$ ljos habit mab-cr-all 0.535 --unit acc --every 7d --source 11750
+7b1c...	habit	due 2026-09-26T10:00:00.000Z	habit mab-cr-all stands at 0.535 acc (11750).
+$ ljos habit mab-cr-all 0.579 --unit acc --every 7d --source 11793
+9e0a...	habit	due 2026-10-03T09:12:41.000Z	habit mab-cr-all stands at 0.579 acc (11793).
+was 0.535 acc (8 days ago), now closed
+$ ljos habit
+mab-cr-all	0.579 acc	+0.044 since 0.535 (8 days ago)	today	next reading in 7 days	11793
+#+end_src
+
+The second reading supersedes the first, so the pack holds one live value
+a habit and =ljos search mab-cr-all --as-of 2026-09-15= still answers
+what it stood at then. The cadence is the reading's review clock: when a
+week passes with no new reading, =ljos due= lists the habit and the hook
+says so once a session. The sheet a paper's table is written from is the
+pack, and it is dated.
+
 * Ask when
 
 #+begin_src console

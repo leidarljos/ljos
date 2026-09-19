@@ -3,17 +3,18 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    ballots_from_json, brief, calibrate, cards, claim, complete, conflicts, consensus_steps_for,
-    doctor, due_report, finish, format_consolidation, format_doctor, format_hits, format_hubs,
-    format_island, format_seat, format_steps, format_write_ack, graded, handover, healthy,
-    hold_hook_context, hook_call, hook_context, hook_output_ruled, island_entities, join,
-    learn_anchors, learn_and_write, learn_shared, on_path, onboard, pack, packset_consolidate,
-    packset_forget, packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel,
-    panel_steps, personas_from_pack, policy_with_memory, policyd_required, predictions_of, receive,
+    age_of, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
+    consensus_steps_for, doctor, due_report, finish, format_consolidation, format_doctor,
+    format_hits, format_hubs, format_island, format_readings, format_seat, format_steps,
+    format_write_ack, graded, habit, habits, handover, healthy, hold_hook_context, hook_call,
+    hook_context, hook_output_ruled, island_entities, join, learn_anchors, learn_and_write,
+    learn_shared, now_utc, on_path, onboard, pack, packset_consolidate, packset_forget,
+    packset_hubs, packset_island, packset_search_as_of, packset_write_as, panel, panel_steps,
+    parse_every, personas_from_pack, policy_with_memory, policyd_required, predictions_of, receive,
     release, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
-    sitting, take_hook_context, tcb_check, timeline, topic_words, trust_from_pack, verdict_for,
-    whoami, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
-    HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    sitting, take_hook_context, tcb_check, timeline, topic_words, trim_num, trust_from_pack,
+    verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust, Persona,
+    Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -271,6 +272,22 @@ enum Cmd {
     },
     /// Atoms whose review is due, then one line on the state of the clock.
     Due,
+    /// A habit is a number the seat keeps measuring. `ljos habit NAME VALUE` takes a reading and closes the one before; `ljos habit NAME` shows one; `ljos habit` lists them all with the change since the last reading and when the next is due.
+    Habit {
+        /// The habit's name; absent, list every habit.
+        name: Option<String>,
+        /// The reading; absent, show the habit.
+        value: Option<f64>,
+        /// The unit the reading is in, for the reader.
+        #[arg(long, default_value = "")]
+        unit: String,
+        /// How often a reading is taken: 7d, 24h, 2w, 30m. The next is due one cadence on.
+        #[arg(long, default_value = "7d")]
+        every: String,
+        /// Where the reading came from: a job id, a run, a file.
+        #[arg(long, default_value = "")]
+        source: String,
+    },
     /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, recall, timeline, claim.
     Sitting {
         /// The tracker id of the issue.
@@ -629,6 +646,43 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Due => print!("{}", due_report()?),
+        Cmd::Habit {
+            name,
+            value,
+            unit,
+            every,
+            source,
+        } => match (name, value) {
+            (Some(name), Some(value)) => {
+                let every_s = parse_every(&every)?;
+                let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
+                println!("{}", format_write_ack(&body));
+                if let Some(p) = prev {
+                    eprintln!(
+                        "was {}{}{} ({}), now closed",
+                        trim_num(p.value),
+                        if p.unit.is_empty() { "" } else { " " },
+                        p.unit,
+                        age_of(p.ts.as_deref(), &now_utc())
+                    );
+                }
+            }
+            (name, None) => {
+                let now = now_utc();
+                let rows: Vec<Reading> = habits()?
+                    .into_iter()
+                    .filter(|r| name.as_deref().is_none_or(|n| r.name == n.trim()))
+                    .collect();
+                if rows.is_empty() {
+                    println!(
+                        "no readings{}; `ljos habit NAME VALUE` takes the first",
+                        name.map(|n| format!(" of {n}")).unwrap_or_default()
+                    );
+                } else {
+                    print!("{}", format_readings(&rows, &now));
+                }
+            }
+        },
         Cmd::Sitting {
             issue,
             assignee,
