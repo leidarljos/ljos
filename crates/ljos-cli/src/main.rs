@@ -515,23 +515,26 @@ fn main() -> Result<()> {
                 Vec::new()
             };
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
-            let tcb_rule = if call.event == "PreToolUse" || call.event == "argv" {
-                match tcb_check(&argv) {
-                    Some(t) if t.starts_with("deny") => Some(Rule {
-                        pattern: "ljos-policyd".into(),
-                        verdict: "deny".into(),
-                        reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
-                    }),
-                    None if policyd_required() => Some(Rule {
-                        pattern: "ljos-policyd".into(),
-                        verdict: "deny".into(),
-                        reason: "TCB required".to_string(),
-                    }),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+            // A tool call with no command line (a file read, a search) has
+            // no argv for the law to judge; the TCB sees only shell lines.
+            let tcb_rule =
+                if (call.event == "PreToolUse" || call.event == "argv") && !argv.is_empty() {
+                    match tcb_check(&argv) {
+                        Some(t) if t.starts_with("deny") => Some(Rule {
+                            pattern: "ljos-policyd".into(),
+                            verdict: "deny".into(),
+                            reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
+                        }),
+                        None if policyd_required() => Some(Rule {
+                            pattern: "ljos-policyd".into(),
+                            verdict: "deny".into(),
+                            reason: "TCB required".to_string(),
+                        }),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
             let verdict = tcb_rule.as_ref().or_else(|| verdict_for(&rules, &call.cue));
             // Search on the prompt. Grok throws UserPromptSubmit stdout
             // away, so hold the text and emit it once on PostToolUse, the
