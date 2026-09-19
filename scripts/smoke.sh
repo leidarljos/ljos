@@ -16,7 +16,8 @@ cd "$root"
 packset ensure >/dev/null
 fail() { echo "smoke: $1" >&2; exit 1; }
 
-ljos doctor | grep -q '^ok	pack' || fail "the pack does not answer"
+doc=$(ljos doctor 2>&1 || true)
+echo "$doc" | grep -q '^ok	pack' || { echo "$doc"; fail "the pack does not answer"; }
 ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns." | grep -q lesson || fail remember
 ljos prefer "CombMNZ over RRF for fusing two ballots." | grep -q preference || fail prefer
 ljos search fuse | grep -q CombMNZ || fail search
@@ -54,7 +55,7 @@ ljos sitting "$id" --assignee you | grep -q 'the sitting resumes' || fail "a thi
 ljos timeline "$id" | grep -q 'tracker	created' || fail timeline
 LJOS_SEAT=you ljos release "$id" | grep -q '^gen=' || fail "release under LJOS_SEAT"
 ljos seat | grep -q '^seat	' || fail "seat prints who is sitting"
-[ "$(LJOS_SEAT=alice ljos seat | sed -n 's/^holder	//p')" = alice ] || fail "LJOS_SEAT overrides the holder whole"
+LJOS_SEAT=alice ljos seat | grep -q '^seat	alice$' || fail "LJOS_SEAT names the seat"
 
 # A harness seat occupies per issue: two sittings must both take, not
 # busy-and-release the first. Named `you` is a shared name.

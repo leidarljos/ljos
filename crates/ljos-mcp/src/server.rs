@@ -1374,7 +1374,7 @@ impl ServerHandler for LjosServer {
 
     /// The client has said who it is: name the seat after it and leave the
     /// record a shell below the same runner reads.
-    async fn on_initialized(&self, context: rmcp::service::NotificationContext<RoleServer>) {
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         let client = context
             .peer
             .peer_info()

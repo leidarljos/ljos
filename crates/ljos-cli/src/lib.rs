@@ -489,37 +489,42 @@ fn named_var(key: &str) -> Option<String> {
 /// set it; else what the MCP client said at initialize; else the process
 /// tree above this shell, which is the runner that opened it or the server
 /// that runner opened; else `VISSUE_AGENT`; else the login user, who is
-/// the seat when no program is. The holder: any `*_SESSION_ID` the runner
-/// stamped, ahead of everything, because a live session id names the
-/// conversation better than a process does; else the seat tagged with the
-/// conversation's process; else the seat whole.
+/// the seat when no program is. The holder is the seat tagged with the
+/// conversation's process, so a runner's server and its shells, which
+/// share that process, agree on it whatever else sits in their
+/// environments; a `*_SESSION_ID` the runner stamped is the holder only
+/// when no process tree can be read, and is reported beside the source
+/// either way.
 #[must_use]
 pub fn whoami() -> Seat {
-    let named = named_var("LJOS_SEAT").map(|n| Seat::whole(&n, "LJOS_SEAT"));
-    let program = named
-        .clone()
-        .or_else(|| ANNOUNCED.get().cloned())
-        .or_else(seat_from_tree);
+    let session = session_actor();
+    let named = named_var("LJOS_SEAT");
+    let program = ANNOUNCED.get().cloned().or_else(seat_from_tree);
     let agent = named_var("VISSUE_AGENT");
-    let seat = program
-        .as_ref()
-        .map(|p| p.seat.clone())
-        .or_else(|| agent.clone())
-        .unwrap_or_else(login_user);
-    if let Some((session, keys)) = session_actor() {
-        return Seat {
-            seat,
-            holder: session,
-            source: keys,
-        };
+    let mut seat = match (&named, &program) {
+        (Some(name), Some(p)) => Seat {
+            seat: name.clone(),
+            holder: p.holder.replacen(&p.seat, name, 1),
+            source: format!("LJOS_SEAT, held by {}", p.source),
+        },
+        (Some(name), None) => Seat::whole(name, "LJOS_SEAT"),
+        (None, Some(p)) => p.clone(),
+        (None, None) => match (&session, &agent) {
+            (Some((holder, keys)), _) => Seat {
+                seat: agent.clone().unwrap_or_else(login_user),
+                holder: holder.clone(),
+                source: keys.clone(),
+            },
+            (None, Some(name)) => Seat::whole(name, "VISSUE_AGENT"),
+            (None, None) => Seat::whole(&login_user(), "the login user"),
+        },
+    };
+    if let Some((id, keys)) = &session {
+        if !seat.source.contains(keys.as_str()) {
+            seat.source = format!("{}; session {keys} {}", seat.source, &id[5..]);
+        }
     }
-    if let Some(p) = program {
-        return p;
-    }
-    if let Some(name) = agent {
-        return Seat::whole(&name, "VISSUE_AGENT");
-    }
-    Seat::whole(&seat, "the login user")
+    seat
 }
 
 /// The person at the terminal, when no program is the seat.
@@ -4653,21 +4658,22 @@ mod tests {
             std::env::set_var("LJOS_SEAT", "runner-x");
             std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
-        assert_eq!(resolve_assignee(None), "sess-01a09b25");
-        assert_eq!(resolve_assignee(Some("seat")), "sess-01a09b25");
+        let holder = resolve_assignee(None);
+        assert_ne!(
+            holder, "runner-x",
+            "the name on the box is the seat, not the occupancy"
+        );
+        assert!(holder.starts_with("runner-x"), "{holder}");
+        assert_eq!(resolve_assignee(Some("seat")), holder);
         assert_eq!(
             resolve_assignee(Some("runner-x")),
-            "sess-01a09b25",
+            holder,
             "the process naming itself is omitted"
         );
         assert_eq!(resolve_assignee(Some("alice")), "alice");
+        assert_eq!(seat_name(), "runner-x");
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
-            std::env::set_var("OTHER_SESSION_ID", "abcd1234-rest-of-id");
-        }
-        assert_eq!(resolve_assignee(None), "sess-abcd1234");
-        unsafe {
-            std::env::remove_var("OTHER_SESSION_ID");
             std::env::remove_var("LJOS_SEAT");
         }
     }
@@ -4677,13 +4683,16 @@ mod tests {
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
+        let holder = resolve_assignee(None);
         let a = occupancy_assignee(None, "ljos-aaaa");
         let b = occupancy_assignee(None, "ljos-bbbb");
-        assert_ne!(a, b, "two issues under one session must not share a slot");
-        assert!(a.starts_with("sess-01a09b25:"), "{a}");
-        assert!(b.starts_with("sess-01a09b25:"), "{b}");
+        assert_ne!(
+            a, b,
+            "two issues under one conversation must not share a slot"
+        );
+        assert_eq!(a, format!("{holder}:ljos-aaaa"), "{a}");
+        assert_eq!(b, format!("{holder}:ljos-bbbb"), "{b}");
         assert_eq!(
             occupancy_assignee(Some("alice"), "ljos-aaaa"),
             "alice:ljos-aaaa"
@@ -4692,9 +4701,6 @@ mod tests {
             occupancy_assignee(Some("alice"), "ljos-bbbb"),
             "alice:ljos-bbbb"
         );
-        unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
-        }
     }
 
     #[test]
@@ -4705,14 +4711,12 @@ mod tests {
             std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let row = format_seat_row();
-        assert!(
-            row.contains("sess-01a09b25"),
-            "doctor occupancy name: {row}"
-        );
+        assert!(row.contains("01a09b25"), "doctor names the session: {row}");
         assert!(
             row.contains("GROK_SESSION_ID"),
-            "doctor occupancy source: {row}"
+            "doctor names where the session came from: {row}"
         );
+        assert!(!row.contains("the default"), "{row}");
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
         }

@@ -15,7 +15,7 @@ for r in ljos consensus; do
   cargo fmt --all --check && echo FMT-CLEAN
   cargo clippy --workspace --all-targets -- -D warnings 2>&1 | grep -E "^(error|warning)" -A 8 | head -30
   cargo build --release 2>&1 | tail -1
-  cargo test --workspace --no-fail-fast 2>&1 | grep -E "^(test result:|failures:|---- )" | head -12
+  cargo test --workspace --no-fail-fast 2>&1 | grep -E "^(test result:|failures:|---- )|panicked|assertion|left:|right:" -A2 | head -40
 done
 cp -f "$HOME/Git/Github/ljos/target/release/ljos" "$HOME/Git/Github/ljos/target/release/ljos-mcp" "$HOME/Git/Github/consensus/target/release/ljos-consensus" "$HOME/bin-out/" 2>&1
 ls -la "$HOME/bin-out" | tail -4
