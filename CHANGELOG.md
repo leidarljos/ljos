@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos doctor` has a memory row: the live count against the cap and
+  the claims forgotten, by reason (packset 0.9.17 counts them).
 - Writing a persona that the pack already holds supersedes its previous
   atom, so moving an anchor or a view leaves one live persona of that
   name; the roster showed one, the pack kept both.

@@ -3310,6 +3310,35 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ok: false,
         },
     });
+    // What the pack holds and what it let go: the seat that lets a pack
+    // grow or forget under it reads it here rather than in `packset status`.
+    if let Ok(client) = pack() {
+        if let Ok(status) = client.status(Some(&client.workspace())) {
+            let live = status["live"].as_u64().unwrap_or(0);
+            let cap = status["live_cap"].as_u64().unwrap_or(0);
+            let forgotten: Vec<String> = status["forgotten_by_reason"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .map(|(why, n)| format!("{} by {why}", n.as_u64().unwrap_or(0)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut state = if cap > 0 {
+                format!("{live} live of {cap}")
+            } else {
+                format!("{live} live, no cap")
+            };
+            if !forgotten.is_empty() {
+                state.push_str(&format!("; forgotten {}", forgotten.join(", ")));
+            }
+            out.push(Habitat {
+                name: "memory",
+                state,
+                ok: cap == 0 || live <= cap,
+            });
+        }
+    }
     out.push(match host_key_path() {
         Some(path) => {
             let seed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 32;
