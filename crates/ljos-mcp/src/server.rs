@@ -1592,7 +1592,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            34,
+            35,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
