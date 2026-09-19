@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+## 0.13.3 (2026-09-19)
+
 - `ljos personas` and the `ljos_personas` tool print the roster the pack
   holds: name, anchor, the domains each speaks to, its view. The only
   way to see it was the panel prompt.
