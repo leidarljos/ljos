@@ -93,7 +93,8 @@ Every piece of work has an issue before it has a claim.
   `ljos policy` says the same; the rule is memory and travels in handovers.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
-  `ljos persona NAME --anchor A --view "..." --about DOMAIN...`. Then
+  `ljos persona NAME --anchor A --view "..." --about DOMAIN...`; `ljos
+  personas` prints the roster the pack holds. Then
   `ljos vote ISSUE --for OPTION --as NAME` casts as it. The anchor in
   `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
@@ -103,8 +104,11 @@ Every piece of work has an issue before it has a claim.
   `ljos brief NAME ISSUE` (the view, what the seat knows on its domains,
   the working set), each casting one ballot as itself, then
   `ljos consensus`; over MCP the `run_a_panel` prompt orders it, and
-  without MCP `ljos panel ISSUE --out DIR` writes one brief per persona
-  as a file to start each subagent from. A panel
+  without MCP `ljos panel ISSUE --out DIR` writes one brief per persona.
+  Both seat only the personas whose `--about` domains the issue's title
+  or island names, and every persona when none does; a panel that seats
+  everyone on everything is a count. Each brief is a file to start a
+  subagent from. A panel
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. The kind of work sets the dynamics: tag
   the issue `broad` when the panel is a broad audience, and the settle runs
