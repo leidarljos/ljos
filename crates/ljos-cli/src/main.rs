@@ -11,7 +11,7 @@ use ljos_cli::{
     packset_island, packset_search_as_of, packset_write_as, panel, panel_steps, personas_from_pack,
     policy_with_memory, predictions_of, receive, release, rows_about, rules_from_pack, run, run_as,
     tcb_check,
-    run_captured, seat_name, session_end, sitting, timeline, topic_words, trust_from_pack,
+    run_captured, resolve_assignee, seat_name, session_end, sitting, timeline, topic_words, trust_from_pack,
     verdict_for, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
     HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
@@ -415,10 +415,10 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
         Cmd::Claim { node, assignee } => {
-            print!("{}", claim(&node, &assignee.unwrap_or_else(seat_name))?)
+            print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)
         }
         Cmd::Release { node, assignee } => {
-            print!("{}", release(&node, &assignee.unwrap_or_else(seat_name))?)
+            print!("{}", release(&node, &resolve_assignee(assignee.as_deref()))?)
         }
         Cmd::Complete { node, status } => match status {
             Some(s) => run("claimdag", &["complete", &node_for(&node)?, "--status", &s])?,
@@ -587,7 +587,7 @@ fn main() -> Result<()> {
             cards: cards_dir,
         } => print!(
             "{}",
-            sitting(&issue, &assignee.unwrap_or_else(seat_name), &cards_dir)?
+            sitting(&issue, &resolve_assignee(assignee.as_deref()), &cards_dir)?
         ),
         Cmd::Finish {
             issue,

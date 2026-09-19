@@ -105,9 +105,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
-version = "1.4.5"
+version = "1.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "005ec2760ca554fae18df7a11195552ec576cd665632a881bc011d5bb2fd4d80"
+checksum = "a3eb0f42d6c360dc3f8a821f6bf2fdea7f72bfd36b3076eb0e6d1e9e0752fff4"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -594,7 +594,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "ljos"
-version = "0.12.0"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "ljos-mcp"
-version = "0.12.0"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "ljos",
@@ -667,8 +667,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "packset-client"
-version = "0.8.0"
-source = "git+https://github.com/leidarljos/packset#4005a28cf6d48a6f1a0cb8e033c7565a8c4b83a7"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03cc4f7f89afc485ac20cf2186d347cd067499997bf5cd4fdea9c6b4eea24b0a"
 dependencies = [
  "packset-core",
  "serde",
@@ -679,8 +680,9 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.8.0"
-source = "git+https://github.com/leidarljos/packset#4005a28cf6d48a6f1a0cb8e033c7565a8c4b83a7"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4020b2f349dddd01cd33cc9f55732aebbea971d71b6459b0e98f0f88bbaaa66a"
 dependencies = [
  "rust-stemmers",
  "serde",
@@ -987,9 +989,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.16.0"
+version = "1.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
+checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 
 [[package]]
 name = "stable_deref_trait"

@@ -24,24 +24,24 @@ does not answer:
 
     ljos sitting ISSUE --assignee NAME
 
-It prints six sections, and each one is a step you would otherwise run by
+It prints seven sections, and each one is a step you would otherwise run by
 hand. Each answers something the next one needs.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
-   `packset ensure` starts a pack writer. Do not proceed on a `no`.
+   `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
 2. `ljos cards`. What the human froze. Read, never write.
-3. `ljos due`. Read every claim listed, then `ljos graded ID` for each one,
-   `--lapsed` when you had to look it up. The review clock moves only when
-   you grade.
-4. `ljos search TOPIC`, then `ljos island TASK` with the task in your own
-   words. The island is the cluster of memories this task touches, the hits
-   are only its seeds. Every row carries its age; read them as a timeline.
-   `ljos search TOPIC --as-of TIME` asks what the seat knew then.
+3. `ljos due`. What is due for review. The verb prints the list; it does
+   not grade. After the sitting, read each claim and `ljos graded ID`
+   (`--lapsed` when you had to look it up). The review clock moves only
+   when you grade.
+4. `ljos island` on the issue's title. The sitting takes the strongest
+   eight. `ljos search TOPIC` and a full `ljos island TASK` are during
+   the work, not this opening.
 5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
-   cited so far. `ljos timeline ISSUE` when order matters: the logbook,
-   the cited deeds and the activated memories as one dated list, oldest
-   first, each line with its age and the gap since the one before.
-6. `ljos claim ISSUE --assignee NAME`. One live claim per name. `busy` means
+   cited so far.
+6. `ljos timeline ISSUE`. The last twelve dated events across the three
+   stores; `ljos timeline` without a sitting prints them all.
+7. `ljos claim ISSUE --assignee NAME`. One live claim per name. `busy` means
    you still hold another node: `ljos complete` it, or `ljos release` it.
 
 No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
