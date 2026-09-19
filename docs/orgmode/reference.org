@@ -17,7 +17,7 @@
 | =conflicts [-n N]= | pack, landscape | candidate contradictions by geometry: the lowest passes between single memories in the embedding landscape, from the optional =landscape= habitat |
 | =hubs [-n N]= | pack | the claims this seat's memory turns on, highest first: a weighted PageRank over the links |
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
-| =due= | pack | claims whose review is due, unreviewed ones first, then one line on the clock |
+| =due= | pack | sweeps the pack first (reviews left due past twice their interval lapse; never-recalled claims missed three times are forgotten), then the claims whose review is due, unreviewed ones first, one line on the clock, and one on what the sweep moved |
 | =habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]= | pack | with a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list the habits as they stand with the change since the last reading |
 | =graded ID [--lapsed]= | pack | one review graded |
 | =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
