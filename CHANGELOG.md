@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The holder is any `*_SESSION_ID` the runner set, the full value, ahead
+  of the process tag. Two ids that share an eight-character prefix occupy
+  different slots. A server sitting and a shell sitting of one session
+  are one occupancy name.
 - Every write names the seat that wrote it (`seat:<name>` first among
   the entities; a persona's, a habit's or a trust row's entities join it,
   a trust row's stay the deeds it cites). A hit written by another seat

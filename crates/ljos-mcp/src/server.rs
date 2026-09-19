@@ -1455,10 +1455,10 @@ impl ServerHandler for LjosServer {
              accession and does not paste the product. Completing a session node \
              does not close a ticket; ljos_release hands one back unfinished. A \
              tool that fails means a habitat refused or is not running; it is not \
-             an empty answer. The seat is named after the client that connected and \
-             this conversation holds claims under that name tagged with the runner's \
-             process; a shell the runner opens finds the same names, so no field \
-             here needs an assignee.",
+             an empty answer. The seat is named after the client that connected. \
+             The holder is any `*_SESSION_ID` the runner stamped, the whole value, \
+             else that name tagged with the runner's process; a shell the runner \
+             opens finds the same names, so no field here needs an assignee.",
         )
     }
 
