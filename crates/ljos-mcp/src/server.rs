@@ -212,6 +212,19 @@ pub struct PersonaArgs {
     pub about: Vec<String>,
 }
 
+/// Rows a tool answers with. The protocol wants a structured result to be
+/// an object, so a list comes back under one key.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Rows<T: JsonSchema> {
+    /// The rows, in the order the tool ranks them.
+    pub rows: Vec<T>,
+}
+
+/// Wrap a list as the object a structured result has to be.
+fn rows<T: JsonSchema>(rows: Vec<T>) -> Json<Rows<T>> {
+    Json(Rows { rows })
+}
+
 /// One persona of the roster.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PersonaRow {
@@ -632,12 +645,12 @@ impl LjosServer {
     async fn ljos_search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
-    ) -> Result<Json<Vec<HitRow>>, McpError> {
+    ) -> Result<Json<Rows<HitRow>>, McpError> {
         let hits =
             packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        Ok(Json(
+        Ok(rows(
             hits.into_iter()
                 .map(|h| HitRow {
                     id: h.id,
@@ -893,9 +906,9 @@ impl LjosServer {
     async fn ljos_calibrate(
         &self,
         Parameters(args): Parameters<CalibrateArgs>,
-    ) -> Result<Json<Vec<TrustRow>>, McpError> {
+    ) -> Result<Json<Rows<TrustRow>>, McpError> {
         let rows = calibrate(&args.project, args.rounds.unwrap_or(20)).map_err(refused)?;
-        Ok(Json(
+        Ok(rows(
             rows.into_iter()
                 .map(|r| TrustRow {
                     from: r.from,
@@ -991,7 +1004,7 @@ impl LjosServer {
     async fn ljos_consensus(
         &self,
         Parameters(args): Parameters<IssueArgs>,
-    ) -> Result<Json<Vec<Said>>, McpError> {
+    ) -> Result<Json<Rows<Said>>, McpError> {
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.
         let shown = run_captured("vissue", &["show", &args.issue, "--json"])
@@ -1024,7 +1037,7 @@ impl LjosServer {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
             out.push(habitat(step.bin, &args)?.0);
         }
-        Ok(Json(out))
+        Ok(rows(out))
     }
 
     #[tool(
@@ -1150,7 +1163,7 @@ impl LjosServer {
     async fn ljos_learn(
         &self,
         Parameters(args): Parameters<LearnArgs>,
-    ) -> Result<Json<Vec<TrustRow>>, McpError> {
+    ) -> Result<Json<Rows<TrustRow>>, McpError> {
         let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
         let ballots = ballots_from_json(&said.stdout).map_err(refused)?;
         // Scoped to what the issue's island is about, so a voter wrong here
@@ -1163,7 +1176,7 @@ impl LjosServer {
             &about,
         )
         .map_err(refused)?;
-        Ok(Json(
+        Ok(rows(
             rows.into_iter()
                 .map(|r| TrustRow {
                     from: r.from,
@@ -1178,8 +1191,8 @@ impl LjosServer {
         description = "Call this first in a sitting, and again whenever another tool fails: which habitats answer (binaries, pack, host key, deed store, tracker, claim graph) and whether this harness is onboarded. A tool failing is a habitat down or refusing, never an empty answer.",
         annotations(title = "Doctor", read_only_hint = true, open_world_hint = false)
     )]
-    async fn ljos_doctor(&self) -> Result<Json<Vec<HabitatRow>>, McpError> {
-        Ok(Json(
+    async fn ljos_doctor(&self) -> Result<Json<Rows<HabitatRow>>, McpError> {
+        Ok(rows(
             doctor()
                 .into_iter()
                 .map(|h| HabitatRow {
@@ -1204,9 +1217,9 @@ impl LjosServer {
     async fn ljos_handover(
         &self,
         Parameters(args): Parameters<PackArgs>,
-    ) -> Result<Json<Vec<String>>, McpError> {
+    ) -> Result<Json<Rows<String>>, McpError> {
         handover(Path::new(&args.out), &args.projects, &args.issues)
-            .map(Json)
+            .map(rows)
             .map_err(refused)
     }
 
@@ -1223,13 +1236,13 @@ impl LjosServer {
     async fn ljos_receive(
         &self,
         Parameters(args): Parameters<ReceiveArgs>,
-    ) -> Result<Json<Vec<String>>, McpError> {
+    ) -> Result<Json<Rows<String>>, McpError> {
         receive(
             Path::new(&args.dir),
             args.since.as_deref().map(Path::new),
             args.import.unwrap_or(false),
         )
-        .map(Json)
+        .map(rows)
         .map_err(refused)
     }
 
@@ -1246,11 +1259,11 @@ impl LjosServer {
     async fn ljos_island(
         &self,
         Parameters(args): Parameters<CueArgs>,
-    ) -> Result<Json<Vec<IslandRow>>, McpError> {
+    ) -> Result<Json<Rows<IslandRow>>, McpError> {
         let now = now_utc();
         let body = packset_island_as(&args.cue, args.fire.unwrap_or(false), args.lens.as_deref())
             .map_err(refused)?;
-        Ok(Json(
+        Ok(rows(
             body["island"]
                 .as_array()
                 .into_iter()
@@ -1271,8 +1284,8 @@ impl LjosServer {
         description = "Call this before a panel or a persona vote: the personas the pack holds, each with its name, anchor, the domains it speaks to and its view. Write a missing one with ljos_persona.",
         annotations(title = "Personas", read_only_hint = true, open_world_hint = false)
     )]
-    async fn ljos_personas(&self) -> Result<Json<Vec<PersonaRow>>, McpError> {
-        Ok(Json(
+    async fn ljos_personas(&self) -> Result<Json<Rows<PersonaRow>>, McpError> {
+        Ok(rows(
             personas_from_pack()
                 .map_err(refused)?
                 .into_iter()
@@ -1290,8 +1303,8 @@ impl LjosServer {
         description = "Call this at the start of a sitting, after the cards: the claims whose review is due, soonest first. Read each, then ljos_graded it recalled or lapsed; the review clock moves only when you grade.",
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
-    async fn ljos_due(&self) -> Result<Json<Vec<DueRow>>, McpError> {
-        Ok(Json(
+    async fn ljos_due(&self) -> Result<Json<Rows<DueRow>>, McpError> {
+        Ok(rows(
             due()
                 .map_err(refused)?
                 .into_iter()
