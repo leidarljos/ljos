@@ -5361,7 +5361,7 @@ mod tests {
 
     #[test]
     fn the_hook_keeps_what_two_scorers_agreed_on() {
-        let hit = |ballots, of| Hit {
+        let hit = |entities: vec![], ballots, of| Hit {
             id: None,
             text: "x".into(),
             score: 1.0,
@@ -5528,6 +5528,7 @@ mod tests {
             score: 1.0,
             kind: "lesson".into(),
             ts: Some("2026-09-10T00:00:00.000Z".into()),
+            entities: vec![],
             ballots: None,
             of: None,
         };
@@ -5541,6 +5542,7 @@ mod tests {
             score: 1.0,
             kind: String::new(),
             ts: None,
+            entities: vec![],
             ballots: None,
             of: None,
         };
