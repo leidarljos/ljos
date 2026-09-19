@@ -93,8 +93,8 @@ Every piece of work has an issue before it has a claim.
   `ljos policy` says the same; the rule is memory and travels in handovers.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
-  `ljos persona NAME --anchor A --view "..." --about DOMAIN...`; `ljos
-  personas` prints the roster the pack holds. Then
+  `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
+  `ljos personas` prints the roster the pack holds. Then
   `ljos vote ISSUE --for OPTION --as NAME` casts as it. The anchor in
   `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
