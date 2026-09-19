@@ -21,6 +21,7 @@ else
   git clone -q --branch main git@github.com:HaoZeke/eb-stack.git "$SRC" && cd "$SRC"
 fi
 echo "== eb-stack $(git log --oneline -1 | cut -c1-70)"
-cargo build --release --locked 2>&1 | tail -2
+cargo build --release --locked > "$HOME/ebstack-build-${SLURM_JOB_ID}.log" 2>&1 || true
+grep -E "^(error|warning)" -A14 "$HOME/ebstack-build-${SLURM_JOB_ID}.log" | head -80
 mkdir -p "$HOME/stackbin" && cp -f target/release/eb-stack "$HOME/stackbin/" && echo "copied eb-stack $("$HOME/stackbin/eb-stack" --version)"
 echo BUILD-DONE
