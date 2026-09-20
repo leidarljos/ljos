@@ -59,7 +59,7 @@ mod linux {
 
     impl ksni::Tray for LjosTray {
         fn id(&self) -> String {
-            "ljos-hud".into()
+            crate::place::OVERLAY_APP_ID.into()
         }
 
         fn title(&self) -> String {
@@ -122,5 +122,17 @@ mod tests {
     fn the_menu_toggles_then_quits() {
         assert_eq!(menu_labels(), [MENU_TOGGLE, MENU_QUIT]);
         assert!(MENU_QUIT.contains("HUD"), "Quit names what it leaves");
+    }
+
+    #[test]
+    fn status_notifier_id_is_overlay_app_id() {
+        let src = include_str!("tray.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("OVERLAY_APP_ID"));
+        assert!(
+            !prod.contains("\"ljos-hud\".into()"),
+            "tray id is the overlay app_id, not the binary name"
+        );
+        assert_eq!(crate::place::OVERLAY_APP_ID, "me.rgoswami.ljos-hud");
     }
 }
