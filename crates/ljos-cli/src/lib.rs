@@ -10,6 +10,8 @@ use anyhow::{bail, Context, Result};
 use packset_client::{Hit, PacksetClient};
 use serde_json::Value;
 
+pub mod hud;
+
 /// Working-core files this seat will print. Nothing else, and never write.
 pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
 
@@ -3654,6 +3656,7 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("packsetd", "packset"),
     ("packset-embed", "packset-embed"),
     ("packset-mcp", "packset"),
+    ("ljos-hud", "ljos-hud"),
 ];
 
 /// First `N.N.N` in a `--version` line.
@@ -7113,6 +7116,14 @@ mod tests {
             occupancy_assignee(Some("alice"), "ljos-bbbb"),
             "alice:ljos-bbbb"
         );
+    }
+
+    #[test]
+    fn doctor_lists_ljos_hud_but_does_not_require_it() {
+        assert!(SEAT_BINS
+            .iter()
+            .any(|(n, c)| *n == "ljos-hud" && *c == "ljos-hud"));
+        assert!(!REQUIRED.contains(&"ljos-hud"));
     }
 
     #[test]

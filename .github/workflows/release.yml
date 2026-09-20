@@ -22,12 +22,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p ljos -p ljos-mcp
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p ljos -p ljos-mcp -p ljos-hud
       - run: |
           set -eu
           name="ljos-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/ljos target/${{ matrix.target }}/release/ljos-mcp "dist/$name/"
+          cp target/${{ matrix.target }}/release/ljos target/${{ matrix.target }}/release/ljos-mcp target/${{ matrix.target }}/release/ljos-hud "dist/$name/"
           cp README.md CHANGELOG.md LICENSE* "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")

@@ -243,6 +243,24 @@ enum Cmd {
     },
     /// Which habitats answer. Exit 1 when a required one does not.
     Doctor,
+    /// Read-only icedtea pane over due, claims, and trust. Execs sibling `ljos-hud`.
+    Hud {
+        /// Stay on the terminal. Default detaches.
+        #[arg(long)]
+        foreground: bool,
+        /// Show or hide a running HUD.
+        #[arg(long, group = "summon")]
+        toggle: bool,
+        /// Show a running HUD.
+        #[arg(long, group = "summon")]
+        show: bool,
+        /// Hide a running HUD.
+        #[arg(long, group = "summon")]
+        hide: bool,
+        /// Write a user-local .desktop launcher and Sway overlay include.
+        #[arg(long)]
+        install_desktop: bool,
+    },
     /// Print the sitting protocol: which store answers what, and the order of verbs.
     Protocol,
     /// Who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from.
@@ -680,6 +698,21 @@ fn main() -> Result<()> {
             if !healthy(&rows) {
                 std::process::exit(1);
             }
+        }
+        Cmd::Hud {
+            foreground,
+            toggle,
+            show,
+            hide,
+            install_desktop,
+        } => {
+            std::process::exit(ljos_cli::hud::run(ljos_cli::hud::HudLaunch {
+                foreground,
+                toggle,
+                show,
+                hide,
+                install_desktop,
+            }));
         }
         Cmd::Protocol => print!("{PROTOCOL}"),
         Cmd::Seat => print!("{}", format_seat(&whoami())),
