@@ -5855,7 +5855,7 @@ fn superseded_by_retry(f: &Finding) -> bool {
 fn clip_words(text: &str, n: usize) -> String {
     // A stop inside a word (`scc.h`, `2.17.10`) is not a sentence mark; an
     // ellipsis (`'make ...'`) is EasyBuild eliding a command and goes.
-    let text = text.replace("...", "");
+    let text = text.replace(" ...", "").replace("...", "");
     let chars: Vec<char> = text.chars().collect();
     let mut flat = String::with_capacity(text.len());
     for (i, &c) in chars.iter().enumerate() {
