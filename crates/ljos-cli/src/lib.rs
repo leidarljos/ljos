@@ -6256,10 +6256,9 @@ pub fn bump_rows(
         )),
     ) + lock["versionsuffix"].as_str().unwrap_or("");
     modules.push((root_name.clone(), root_stem, String::new()));
+    // `build` on a lock entry says whether it is a build dependency, not
+    // whether it is built: every entry is a module the generation needs.
     for dep in lock["dependencies"].as_array().into_iter().flatten() {
-        if dep["build"].as_bool() == Some(false) {
-            continue;
-        }
         let name = dep["name"].as_str().unwrap_or("").to_string();
         let dtc = &dep["toolchain"];
         let stem = module_stem(
@@ -7850,18 +7849,20 @@ mod tests {
             [
                 "eOn-2.17.10-foss-2026.1",
                 "CMake-4.2.1-GCCcore-15.2.0",
-                "Eigen-5.0.0-GCCcore-15.2.0"
+                "Eigen-5.0.0-GCCcore-15.2.0",
+                "Python-3.14.2-GCCcore-15.2.0"
             ],
-            "the root first; a module the lock does not build is not a row"
+            "the root first, then every module the lock names, build dependencies included"
         );
         let cmake = &rows[1];
         let eigen = &rows[2];
+        let python = &rows[3];
         assert!(cmake.blockers.is_empty());
         assert_eq!(eigen.blockers, std::slice::from_ref(&cmake.id));
         assert_eq!(
             rows[0].blockers,
-            [cmake.id.clone(), eigen.id.clone()],
-            "an edge to an unbuilt module is dropped"
+            [cmake.id.clone(), eigen.id.clone(), python.id.clone()],
+            "the root is blocked by every module it depends on"
         );
         assert_eq!(
             rows[0].id,
