@@ -62,7 +62,7 @@ Nothing needs a variable set: the pack answers on `127.0.0.1:8761`, the seat's m
 
 ## The smoke test
 
-`scripts/smoke.sh` runs every loop on scratch stores: memory, agreement, learning, a sitting and its finish, a rewrite that closes its earlier claim, habits, an as-of read, a signed handover received and then refused after one byte is altered, a rule through the hook and through `policy`. `scripts/terra/` holds the Slurm scripts that build and smoke the seat on the build host, as run.
+`scripts/smoke.sh` runs every loop on scratch stores: memory, agreement, learning, a sitting and its finish, a rewrite that closes its earlier claim, habits, an as-of read, a signed handover received and then refused after one byte is altered, a rule through the hook and through `policy`, then `scripts/herd.sh` (eight sittings, one contended ticket, eight finishes, one island fire). `scripts/terra/` holds the Slurm scripts that build, smoke and herd the seat on the build host, as run.
 
 ## MCP
 

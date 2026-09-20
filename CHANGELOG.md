@@ -2,6 +2,13 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)
+  and skips cargo-quickinstall, which only had `ljos`.
+- `scripts/smoke.sh` runs `scripts/herd.sh` after the four loops, so the
+  herd sits beside the smoke in the release check.
+
 ## 0.16.0 (2026-09-20)
 
 - `ljos bump-plan BUNDLE --project P --parent I` puts an eb-stack bundle
