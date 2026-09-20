@@ -1,6 +1,9 @@
 [package]
 name = "ljos-mcp"
 version.workspace = true
+# The `ljos` crate ships this binary; this package is the workspace's
+# development shape of it and is not published.
+publish = false
 readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true

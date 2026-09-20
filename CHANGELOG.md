@@ -12,6 +12,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A pack refusal on prose reaches the MCP client with what passes, so the
   second attempt is not a guess; four runners hit the ceiling on their
   first lesson.
+- The `ljos` crate is the one published: it carries the `ljos-mcp` binary,
+  so `cargo install ljos` and `cargo binstall ljos` install both. The
+  `ljos-mcp` package stays in the workspace unpublished; the crate already
+  on crates.io stays where it is.
 
 ## 0.14.0 (2026-09-20)
 
