@@ -81,7 +81,16 @@ mod tests {
     #[test]
     fn hud_sources_never_call_write_verbs() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let verbs = ["graded(", "post_atom", "sweep(", "fire=true"];
+        let verbs = [
+            "graded(",
+            "post_atom",
+            "sweep(",
+            "fire=true",
+            "fire: true",
+            "due_report",
+            "WorkGraph::load_dir",
+            "packset_island",
+        ];
         let mut hits = Vec::new();
         fn walk(dir: &std::path::Path, verbs: &[&str], hits: &mut Vec<String>) {
             for ent in std::fs::read_dir(dir).unwrap() {
