@@ -18,7 +18,7 @@ use ljos_cli::{
     on_path, other_seat, pack, packset_consolidate, packset_forget, packset_island_as,
     packset_search_as_of, packset_write_as, panel_steps, parse_every, personas_from_pack,
     personas_speaking_to, policy_with_memory, predictions_of, read_campaign, receive, release,
-    remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting,
+    remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, seat_name,
     sitting_gated, timeline, topic_words, trust_from_pack, write_persona, write_prediction,
     write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
