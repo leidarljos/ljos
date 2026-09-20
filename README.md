@@ -46,6 +46,8 @@ ljos receive bag [--since bridge.txt] [--import]
 ljos doctor
 ljos protocol
 ljos onboard                                   # the one MCP server entry any runner takes
+ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok ship as shapes
+ljos findings out/campaign.json --remember     # an eb-stack campaign's typed findings, one lesson each under the module that failed
 ```
 
 ## The loop, in two verbs
@@ -64,7 +66,7 @@ Nothing needs a variable set: the pack answers on `127.0.0.1:8761`, the seat's m
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio: thirty-four tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
+`ljos-mcp` serves the same verbs over stdio: thirty-six tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}

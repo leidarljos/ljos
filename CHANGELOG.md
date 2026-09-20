@@ -9,6 +9,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the recipe the campaign drives; the lesson and its entities carry both.
   A finding a later attempt got past says so in its second sentence
   instead of quoting the campaign's automatic resolution.
+- A pack refusal on prose reaches the MCP client with what passes, so the
+  second attempt is not a guess; four runners hit the ceiling on their
+  first lesson.
 
 ## 0.14.0 (2026-09-20)
 

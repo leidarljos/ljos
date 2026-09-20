@@ -507,7 +507,15 @@ fn said(out: ljos_cli::Said) -> Json<Said> {
 
 /// A refusal, as the protocol carries one.
 fn refused(e: anyhow::Error) -> McpError {
-    McpError::internal_error(format!("{e:#}"), None)
+    let text = format!("{e:#}");
+    // The pack's prose rule refuses a hard sentence; the seat that hit it
+    // is told what passes, so the second try is not a guess.
+    let text = if text.contains("readability grade") || text.contains("sentences; one claim") {
+        format!("{text}. What passes: two sentences of plain words, each under twenty, naming the thing (a recipe, a version, an error line) rather than the procedure")
+    } else {
+        text
+    };
+    McpError::internal_error(text, None)
 }
 
 /// Run a habitat's verb and hand back what it said.
