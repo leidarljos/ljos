@@ -177,21 +177,22 @@ impl GraphLayout {
     }
 
     /// Keyboard readout for the selected node. Empty when the graph is empty.
+    /// A missing persona (`anchor` is `None`) is `name  hollow` plus incident
+    /// edges; it does not invent a DeGroot `anchor=1.00`.
     pub fn readout(&self, selected: usize) -> String {
         let Some(node) = self.nodes.get(selected) else {
             return String::new();
         };
-        let (anchor, ring) = match node.anchor {
-            Some(a) => (a, (1.0 - a).clamp(0.0, 1.0)),
-            None => (1.0, 0.0),
+        let head = match node.anchor {
+            Some(a) => format!(
+                "{}  anchor={:.2}  ring={:.2}",
+                node.name,
+                a,
+                (1.0 - a).clamp(0.0, 1.0)
+            ),
+            None => format!("{}  hollow", node.name),
         };
-        let mut lines = vec![format!(
-            "{}  anchor={:.2}  ring={:.2}{}",
-            node.name,
-            anchor,
-            ring,
-            if node.hollow() { "  hollow" } else { "" }
-        )];
+        let mut lines = vec![head];
         for edge in &self.edges {
             if edge.from == selected {
                 let dest = &self.nodes[edge.to].name;
@@ -504,7 +505,13 @@ mod tests {
             .count();
         assert_eq!(hollow, 1);
         assert_eq!(filled, 1);
-        assert!(g.readout(1).contains("hollow"));
+        let text = g.readout(1);
+        assert_eq!(text.lines().next(), Some("beta  hollow"));
+        assert!(
+            !text.contains("anchor="),
+            "hollow readout must not invent DeGroot"
+        );
+        assert!(text.contains("← alpha"));
     }
 
     #[test]
