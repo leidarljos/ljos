@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.16.1 (2026-09-20)
 
 - `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)
   and skips cargo-quickinstall, which only had `ljos`.
