@@ -90,12 +90,14 @@ impl Pane {
 }
 
 /// Paint due, the trust canvas, claims, island, and the deed rail.
+/// `cue` is the draft island field; enter activates a read, not a write.
 pub fn view<'a>(
     snap: &'a Snapshot,
     pane: Pane,
     selected: usize,
     now: &'a str,
     now_unix: u64,
+    cue: &'a str,
 ) -> Element<'a, Message> {
     let tea = theme::tokens();
     let header: Element<'a, Message> = if snap.banner.is_empty() {
@@ -160,7 +162,7 @@ pub fn view<'a>(
         .padding(8)
         .height(Length::FillPortion(3)),
         row![
-            island_rail(snap, pane == Pane::Island, selected),
+            island_rail(snap, pane == Pane::Island, selected, cue, tea),
             deed_rail(snap, pane == Pane::Deeds, selected),
         ]
         .spacing(8)
@@ -296,27 +298,87 @@ fn graph_pane<'a>(
         .into()
 }
 
-fn island_rail(snap: &Snapshot, focused: bool, selected: usize) -> Element<'_, Message> {
-    let cue = if snap.cue.is_empty() {
-        "(no cue)".to_string()
+fn island_rail<'a>(
+    snap: &'a Snapshot,
+    focused: bool,
+    selected: usize,
+    cue: &'a str,
+    tea: Tokens,
+) -> Element<'a, Message> {
+    let title_color = if focused { theme::BLUE } else { theme::SUBTEXT };
+    let mut col = column![text("island").size(theme::SIZE_TITLE).color(title_color)].spacing(4);
+    col = col.push(widget::text_input(
+        "cue: enter activates a read",
+        cue,
+        Message::CueChanged,
+        Some(Message::CueActivate),
+        widget::FieldOpts::NONE,
+        tea,
+        A11y::new("island-cue", Role::TextBox),
+        None,
+    ));
+    for (i, notice) in snap.island_notices.iter().enumerate() {
+        col = col.push(widget::banner(
+            notice.clone(),
+            None,
+            Some(ToastKind::Warning),
+            tea,
+            A11y::new(format!("island-notice-{i}"), Role::Status),
+        ));
+    }
+    if snap.island.is_empty() && snap.hits.is_empty() {
+        col = col.push(
+            text("type a cue, enter to activate")
+                .size(theme::SIZE_META)
+                .color(theme::SUBTEXT),
+        );
     } else {
-        format!("cue  {}", snap.cue)
-    };
-    let mut lines: Vec<String> = vec![cue];
-    for row in &snap.island {
-        let seed = if row.seed { "seed" } else { "    " };
-        lines.push(format!(
-            "{}  {}  {}  {}  {}",
-            seed, row.activation, row.kind, row.id, row.text
-        ));
+        for (i, row) in snap.island.iter().enumerate() {
+            let focused_row = focused && i == selected;
+            let color = if focused_row {
+                theme::TEXT
+            } else {
+                theme::SUBTEXT
+            };
+            let prefix = if focused_row { "▸ " } else { "  " };
+            let seed = if row.seed { "seed" } else { "    " };
+            col = col.push(
+                text(format!(
+                    "{prefix}{seed}  {}  {}  {}  {}",
+                    row.activation, row.kind, row.id, row.text
+                ))
+                .size(theme::SIZE_BODY)
+                .color(color),
+            );
+        }
+        let island_n = snap.island.len();
+        for (i, hit) in snap.hits.iter().enumerate() {
+            let focused_row = focused && i + island_n == selected;
+            let color = if focused_row {
+                theme::TEXT
+            } else {
+                theme::SUBTEXT
+            };
+            let prefix = if focused_row { "▸ " } else { "  " };
+            col = col.push(
+                text(format!(
+                    "{prefix}hit  {}  {}  {}  {}",
+                    hit.score, hit.kind, hit.id, hit.text
+                ))
+                .size(theme::SIZE_BODY)
+                .color(color),
+            );
+        }
     }
-    for hit in &snap.hits {
-        lines.push(format!(
-            "hit  {}  {}  {}  {}",
-            hit.score, hit.kind, hit.id, hit.text
-        ));
-    }
-    rail_pane("island", focused, selected, lines)
+    container(scrollable(col).height(Length::Fill))
+        .padding(8)
+        .width(Length::FillPortion(1))
+        .style(if focused {
+            container::bordered_box
+        } else {
+            container::rounded_box
+        })
+        .into()
 }
 
 fn deed_rail(snap: &Snapshot, focused: bool, selected: usize) -> Element<'_, Message> {
@@ -527,6 +589,10 @@ mod tests {
         assert!(prod.contains("grade_chip"));
         assert!(prod.contains("island_rail"));
         assert!(prod.contains("deed_rail"));
+        assert!(prod.contains("widget::text_input"));
+        assert!(prod.contains("CueActivate"));
+        assert!(prod.contains("island_notices"));
+        assert!(prod.contains("type a cue, enter to activate"));
         assert!(
             !prod.contains(" → "),
             "trust pane must not be a from→to column"
