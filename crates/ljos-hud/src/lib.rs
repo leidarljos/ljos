@@ -6,6 +6,7 @@ pub mod app;
 pub mod cli;
 pub mod data;
 pub mod detach;
+pub mod graph;
 pub mod install_desktop;
 pub mod log;
 pub mod place;

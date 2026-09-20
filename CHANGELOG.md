@@ -15,12 +15,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   app_id, `--install-desktop`, guest `xdg_activation_v1`. Default
   detaches; `--foreground` stays attached. First-start `--show`/`--toggle`
   keeps `XDG_ACTIVATION_TOKEN` for the owner (hide still unsets without
-  activating). Overlay `Closed` hides. Three read-only panes (due,
-  claims, trust) over library APIs; a habitat that is down is a banner.
-  HUD sources never call `graded` / `post_atom` / `sweep` / `fire=true`.
-  `ljos doctor` lists `ljos-hud` and does not require it. crates.io
-  publishes `-p ljos-hud` after `-p ljos`. The HUD crate does not copy
-  the CLI launcher (`resolve_hud_bin` stays in `ljos-cli`).
+  activating). Overlay `Closed` hides. Three read-only panes over library
+  APIs: due, claims, and a trust-graph canvas (personas ∪ trust endpoints,
+  stroke by weight, ring by `(1 - anchor)`, dashed when scoped). Skip
+  chips sit in the layout. A habitat that is down is a banner and an empty
+  canvas. HUD sources never call `graded` / `post_atom` / `sweep` /
+  `fire=true`. `ljos doctor` lists `ljos-hud` and does not require it.
+  crates.io publishes `-p ljos-hud` after `-p ljos`. The HUD crate does
+  not copy the CLI launcher (`resolve_hud_bin` stays in `ljos-cli`).
 - `ljos remember` and `ljos search` start the default writer when none is
   answering. `PACKSET_URL=off` stays off. A URL pointed elsewhere is not
   replaced. The crates.io description and keywords name the first command.
