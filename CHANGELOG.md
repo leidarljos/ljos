@@ -16,16 +16,19 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   detaches; `--foreground` stays attached. First-start `--show`/`--toggle`
   keeps `XDG_ACTIVATION_TOKEN` for the owner (hide still unsets without
   activating). Overlay `Closed` hides. Three read-only panes over library
-  APIs: due (with `due_at`, overdue when `due_at` is past,
+  APIs: due (with `due_at`, overdue when `due_at` is past, later when
+  future, ungraded when empty; no exact-equality `due` chip;
   `review_summary`, display-only grade chips),
   claims (assignee, `cas_gen`, occupancy, lease remaining), a trust-graph
   canvas (personas ∪ trust endpoints, stroke by weight, ring by
   `(1 - anchor)`, missing persona a hollow disk, dashed when scoped),
   island (`packset_search` plus `packset_island(cue, false)`; idle until
   enter; `format_island` weak/dense banners; search-down is a banner), and a deed
-  rail (`ljos_cli::timeline_events` → `Vec<Event>`). Skip chips sit in
+  rail (`ljos_cli::timeline_events` → `Vec<Event>`; idle until the
+  operator enters an issue). Skip chips sit in
   the layout in key order 1-5 (due, claims, graph, island, deeds). Watch
-  `work.bin` plus pack `last_write_ts`; the 50 ms tick is chrome. A
+  `work.bin` plus pack `last_write_ts` (Snap stamps both; a missing
+  `pack_ts` is boot, not a load); the 50 ms tick is chrome. A
   habitat that is down is an icedtea banner and a status page; pack-down
   and honest-empty differ, and a claims banner does not blank an up-empty
   graph. HUD sources never call `graded` / `post_atom` / `sweep` /

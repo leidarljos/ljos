@@ -157,8 +157,9 @@ impl HudApp {
             }
             Message::Watch => {
                 let stamp = WatchStamp::read();
-                if stamp != self.watch {
-                    self.watch = stamp;
+                let load = self.watch.needs_load(&stamp);
+                self.watch = stamp;
+                if load {
                     return load_snap_with(self.keep_cue());
                 }
                 Task::none()
@@ -175,7 +176,7 @@ impl HudApp {
             }
             Message::Snap(snap) => {
                 self.snap = snap;
-                self.watch.work_mtime = work_bin_mtime();
+                self.watch = WatchStamp::read();
                 self.clamp_selected();
                 Task::none()
             }
@@ -598,6 +599,15 @@ mod tests {
         assert!(prod.contains("self.now_unix = unix_now()"));
         assert!(prod.contains("WatchStamp::read()"));
         assert!(prod.contains("load_snap_with"));
+        assert!(
+            prod.contains("self.watch = WatchStamp::read()"),
+            "Snap must stamp pack_ts, not only work.bin mtime"
+        );
+        assert!(
+            !prod.contains("self.watch.work_mtime = work_bin_mtime()"),
+            "Snap must not leave pack_ts as the Default empty string"
+        );
+        assert!(prod.contains("needs_load"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub struct DueRow {
     pub text: String,
     /// Review clock instant, empty when the atom has never been graded.
     pub due_at: String,
-    /// `due`, `overdue`, `later`, or `ungraded`. Display only.
+    /// `overdue`, `later`, or `ungraded`. Display only. No exact-equality `due`.
     pub clock: String,
     /// `recalled`, `lapsed`, or `ungraded`. Display only; never a POST.
     pub grade: String,
@@ -113,7 +113,8 @@ impl Snapshot {
     }
 
     /// [`Self::load`] around an explicit cue. Empty cue leaves the island
-    /// idle: no search, no activate. The operator types a cue and enters.
+    /// idle: no search, no activate. The deed rail stays idle until the
+    /// cue names an issue. The operator types a cue and enters.
     pub fn load_with_cue(cue: Option<&str>) -> Self {
         let mut banner = Vec::new();
         let (due, graph, pack_ok, review_summary) = match load_pack_panes() {
@@ -135,7 +136,7 @@ impl Snapshot {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_default();
-        let issue = issue_of(&cue, &claims);
+        let issue = issue_of(&cue);
         let (island, island_notices, hits) = if cue.is_empty() {
             (Vec::new(), Vec::new(), Vec::new())
         } else {
@@ -204,6 +205,21 @@ impl WatchStamp {
                 .unwrap_or_default(),
         }
     }
+
+    /// Whether `next` is a habitat write that needs a snapshot.
+    ///
+    /// An empty `pack_ts` on `self` is a boot fingerprint: the first load
+    /// already painted, so a later GET filling the stamp is not a write.
+    #[must_use]
+    pub fn needs_load(&self, next: &Self) -> bool {
+        if self == next {
+            return false;
+        }
+        if self.pack_ts.is_empty() && self.work_mtime == next.work_mtime {
+            return false;
+        }
+        true
+    }
 }
 
 /// Seconds since the epoch, for lease chrome.
@@ -266,7 +282,7 @@ pub fn looks_like_issue(s: &str) -> bool {
         && rest.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
-fn issue_of(cue: &str, claims: &[ClaimRow]) -> String {
+fn issue_of(cue: &str) -> String {
     if looks_like_issue(cue) {
         return cue
             .trim()
@@ -275,12 +291,6 @@ fn issue_of(cue: &str, claims: &[ClaimRow]) -> String {
     }
     cue.split_whitespace()
         .find(|w| looks_like_issue(w))
-        .or_else(|| {
-            claims
-                .iter()
-                .map(|c| c.summary.as_str())
-                .find(|s| looks_like_issue(s))
-        })
         .map(|s| {
             s.trim()
                 .trim_end_matches([',', '.', ';', ':'])
@@ -344,8 +354,6 @@ fn clock_label(due_at: &str, now: &str) -> &'static str {
         "ungraded"
     } else if due_at < now {
         "overdue"
-    } else if due_at == now {
-        "due"
     } else {
         "later"
     }
@@ -534,7 +542,7 @@ mod tests {
         let later = due_row(&atom, "2026-09-20T09:00:00.000Z");
         assert_eq!(later.clock, "later");
         let exact = due_row(&atom, "2026-09-20T10:00:00.000Z");
-        assert_eq!(exact.clock, "due");
+        assert_eq!(exact.clock, "later");
         let lapsed = due_row(
             &serde_json::json!({"id":"a","review":{"reps":0,"recalls":1},"due_at":"2026-01-01T00:00:00.000Z"}),
             "2026-09-20T00:00:00.000Z",
@@ -546,13 +554,19 @@ mod tests {
     fn clock_label_names_overdue() {
         let now = "2026-09-20T12:00:00.000Z";
         assert_eq!(clock_label("", now), "ungraded");
-        assert_eq!(clock_label(now, now), "due");
+        assert_eq!(clock_label(now, now), "later");
         assert_eq!(clock_label("2026-09-20T11:59:59.000Z", now), "overdue");
         assert_eq!(clock_label("2026-09-20T12:00:00.001Z", now), "later");
         assert_ne!(
             clock_label("2026-09-19T00:00:00.000Z", now),
             "due",
             "due_at < now is overdue, not due"
+        );
+        let src = include_str!("data.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("due_at == now"),
+            "exact RFC3339 equality is not a due chip"
         );
     }
 
@@ -568,6 +582,11 @@ mod tests {
             !prod.contains("claims.first()"),
             "boot cue must not steal first claim summary"
         );
+        assert!(
+            !prod.contains("c.summary"),
+            "issue_of must not steal a claim summary as the issue id"
+        );
+        assert!(prod.contains("fn issue_of(cue: &str)"));
         assert!(prod.contains("search: {err}"));
         assert!(prod.contains("format_island"));
         assert!(
@@ -636,22 +655,39 @@ mod tests {
         assert!(looks_like_issue("ljos-n7ly"));
         assert!(!looks_like_issue("not-an-issue"));
         assert!(!looks_like_issue("ljos"));
-        assert_eq!(issue_of("ljos-w8kb", &[]), "ljos-w8kb");
-        assert_eq!(
-            issue_of(
-                "work",
-                &[ClaimRow {
-                    id: "ab".into(),
-                    status: "claimed".into(),
-                    summary: "ljos-9ptd".into(),
-                    assignee: "abc".into(),
-                    cas_gen: 2,
-                    occupancy: 1,
-                    updated_unix: 1,
-                }]
-            ),
-            "ljos-9ptd"
+        assert_eq!(issue_of("ljos-w8kb"), "ljos-w8kb");
+        assert_eq!(issue_of(""), "");
+        assert_eq!(issue_of("work"), "");
+        assert_eq!(issue_of("fix ljos-9ptd leftover"), "ljos-9ptd");
+    }
+
+    #[test]
+    fn watchstamp_empty_pack_ts_is_boot_not_a_load() {
+        let boot = WatchStamp {
+            work_mtime: 1,
+            pack_ts: String::new(),
+        };
+        let filled = WatchStamp {
+            work_mtime: 1,
+            pack_ts: "2026-09-20T12:00:00Z".into(),
+        };
+        assert!(
+            !boot.needs_load(&filled),
+            "missing pack_ts is a boot snapshot already done"
         );
+        assert!(!filled.needs_load(&filled));
+        assert!(boot.needs_load(&WatchStamp {
+            work_mtime: 2,
+            pack_ts: "2026-09-20T12:00:00Z".into(),
+        }));
+        assert!(filled.needs_load(&WatchStamp {
+            work_mtime: 1,
+            pack_ts: "2026-09-20T12:00:01Z".into(),
+        }));
+        assert!(WatchStamp::default().needs_load(&WatchStamp {
+            work_mtime: 9,
+            pack_ts: String::new(),
+        }));
     }
 
     #[test]
