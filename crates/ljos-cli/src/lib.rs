@@ -743,7 +743,9 @@ pub fn whoami() -> Seat {
         // The first resolution in a conversation leaves a record under
         // every id stamped so far; a later process carrying one of them and
         // more finds this holder by the shared id rather than hashing the
-        // larger set into a new name.
+        // larger set into a new name. The tests stamp ids of their own
+        // into one process and must not leave records for each other.
+        #[cfg(not(test))]
         for (_, id) in stamped_sessions() {
             write_record(&session_record_path(&id), &seat);
         }
