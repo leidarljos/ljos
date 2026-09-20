@@ -116,6 +116,29 @@ Every piece of work has an issue before it has a claim.
   averaged into one position.
 - Progress goes on the issue, dated: `vissue note ISSUE "..."`.
 
+### A bump, and a build campaign
+
+A toolchain or version bump with eb-stack is one sitting on the ticket
+and one island per recipe. Before a recipe is touched, `ljos island
+"<name> <version> <toolchain>"` (the MCP `ljos_island` with that cue):
+what the last bump of it taught, the patch it needed, the step it failed
+in. Then the ladder in order, each rung its own claim with its own
+artifact: `eb_recipe_check`, `eb_package_bump` (the lock under
+`out/locks` is `resolves`), `eb_recipe_lint`, `eb_target_doctor`,
+`eb_campaign_run` and `eb_campaign_status` (`builds`,
+`binary-verified`). Say a rung only when its artifact exists.
+
+Every typed finding the campaign records is a lesson once somebody
+resolved it: `ljos findings out/campaign.json --remember --issue ISSUE`
+(the MCP `ljos_findings`) writes one lesson per resolved finding under
+the recipe's name, the package and the failure class, and cites the
+state file on the issue. A finding a later attempt merely got past is
+not a lesson; `--all` takes those too. A lesson the seat writes by hand
+names the recipe, the step, the error line and the fix: "GCCcore-15.2.0
+on terra: compile failed in the build step with linux/scc.h missing.
+Fix: the GCC 14 libsanitizer kernel headers patch." Not "verify the
+lock exists before proceeding": the next seat cannot act on that.
+
 ## After the work
 
 One verb closes the sitting:

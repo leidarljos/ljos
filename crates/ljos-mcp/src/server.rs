@@ -17,10 +17,10 @@ use ljos_cli::{
     habits, handover, identity_or_seat, island_entities, issue_words, learn_and_write, now_utc,
     on_path, other_seat, pack, packset_consolidate, packset_forget, packset_island_as,
     packset_search_as_of, packset_write_as, panel_steps, parse_every, personas_from_pack,
-    personas_speaking_to, policy_with_memory, predictions_of, receive, release, resolve_assignee,
-    rows_about, run_captured, runner_pid, seat_name, sitting, timeline, topic_words,
-    trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
-    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    personas_speaking_to, policy_with_memory, predictions_of, read_campaign, receive, release,
+    remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting,
+    timeline, topic_words, trust_from_pack, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -46,8 +46,11 @@ pub struct LjosServer {
 /// One explicit claim.
 #[derive(Deserialize, JsonSchema)]
 pub struct ClaimArgs {
-    /// The claim, as it will be stored. Two short sentences at most; the pack
-    /// refuses more. Not a transcript, not a summary of one.
+    /// The claim, as it will be stored. Two short sentences at most, in
+    /// plain words: the pack refuses a third sentence and prose above
+    /// readability grade 14. Name the thing (a recipe, a version, a file,
+    /// an error line), not the procedure. Not a transcript, not a summary
+    /// of one.
     pub text: String,
     /// Remember as this persona: the claim comes back to it first in its
     /// next brief. Absent, the seat's own.
@@ -1241,6 +1244,50 @@ impl LjosServer {
     }
 
     #[tool(
+        description = "Call this after eb_campaign_run or eb_campaign_status on a bump: the campaign's typed findings, one row each with its class, stage, recipe, the error line and the fix. With remember, one lesson per finding a person or a seat resolved goes to the pack under the recipe's name, so the next bump of that recipe recalls it; with issue, the state file is cited as a deed on the issue. Findings a later attempt merely got past are skipped unless all.",
+        annotations(
+            title = "Campaign findings",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_findings(
+        &self,
+        Parameters(args): Parameters<FindingsArgs>,
+    ) -> Result<Json<Rows<FindingRow>>, McpError> {
+        let state = Path::new(&args.state);
+        let campaign = read_campaign(state).map_err(refused)?;
+        let remembered = if args.remember || args.issue.is_some() {
+            remember_findings(state, args.issue.as_deref(), args.all).map_err(refused)?
+        } else {
+            Vec::new()
+        };
+        Ok(as_rows(
+            campaign
+                .findings
+                .iter()
+                .map(|f| {
+                    let done = remembered.iter().find(|r| r.id == f.id);
+                    FindingRow {
+                        id: f.id.clone(),
+                        status: f.status.clone(),
+                        class: f.class.clone(),
+                        stage: f.stage.clone(),
+                        recipe: f.recipe.clone(),
+                        summary: f.summary.clone(),
+                        error: f.error.clone(),
+                        action: f.action.clone(),
+                        lesson: done.map(|r| r.lesson.clone()).filter(|l| !l.is_empty()),
+                        remembered: done.map(|r| r.result.clone()),
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
         description = "Call this when another seat takes the work over: pack a slice of this seat for it, the tracker's satchel for the projects and issues named, the pack's atoms (trust rows included), the deeds both cite with their receipts, sealed, and signed when the host has a key.",
         annotations(
             title = "Handover",
@@ -1381,6 +1428,47 @@ impl LjosServer {
 pub struct PickUpArgs {
     /// The tracker id of the work, when known.
     pub issue: Option<String>,
+}
+
+/// An eb-stack campaign state to read or remember.
+#[derive(Deserialize, JsonSchema)]
+pub struct FindingsArgs {
+    /// The campaign state file (`campaign.json`) `eb_campaign_run` keeps.
+    pub state: String,
+    /// Write one lesson per finding a person or a seat resolved.
+    #[serde(default)]
+    pub remember: bool,
+    /// With remember, every finding, the ones a later attempt superseded too.
+    #[serde(default)]
+    pub all: bool,
+    /// Cite the state file as a deed on this issue.
+    #[serde(default)]
+    pub issue: Option<String>,
+}
+
+/// One typed finding of a campaign, and what the seat did with it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FindingRow {
+    /// `attempt:N:finding:M`, stable across runs.
+    pub id: String,
+    /// `open`, `in-progress`, `resolved`, `superseded`.
+    pub status: String,
+    /// `compile`, `configure`, `dependency-missing`, `resource`, ...
+    pub class: String,
+    /// The build stage that failed.
+    pub stage: String,
+    /// The recipe's file stem.
+    pub recipe: String,
+    /// One line to triage from.
+    pub summary: String,
+    /// The last error line the evidence carries.
+    pub error: String,
+    /// The resolution's action, when resolved.
+    pub action: String,
+    /// The lesson written for it, when remember was asked.
+    pub lesson: Option<String>,
+    /// The pack's answer to that lesson: an atom id, or the refusal.
+    pub remembered: Option<String>,
 }
 
 /// A handover to check.

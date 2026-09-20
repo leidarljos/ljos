@@ -5,17 +5,17 @@ use clap::{Parser, Subcommand};
 use ljos_cli::{
     age_of, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due_report, finish, format_consolidation, format_doctor,
-    format_hits, format_hubs, format_island, format_personas, format_readings, format_seat,
-    format_steps, format_write_ack, graded, habit, habits, handover, healthy, hold_hook_context,
-    hook_call, hook_context, hook_output_ruled, island_entities, join, learn_anchors,
-    learn_and_write, learn_shared, now_utc, on_path, onboard, pack, packset_consolidate,
-    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
-    panel_steps, parse_every, personas_from_pack, policy_with_memory, policyd_required,
-    predictions_of, receive, release, resolve_assignee, rows_about, rules_from_pack, run, run_as,
-    run_captured, session_end, sitting, take_hook_context, tcb_check, timeline, topic_words,
-    trim_num, trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB,
-    PROTOCOL,
+    format_findings, format_hits, format_hubs, format_island, format_personas, format_readings,
+    format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
+    handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
+    island_entities, join, learn_anchors, learn_and_write, learn_shared, now_utc, on_path, onboard,
+    pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
+    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
+    policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
+    remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
+    session_end, sitting, take_hook_context, tcb_check, timeline, topic_words, trim_num,
+    trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -278,6 +278,20 @@ enum Cmd {
     },
     /// Atoms whose review is due, then one line on the state of the clock.
     Due,
+    /// The typed findings of an eb-stack campaign state file, one per line; `--remember` writes one lesson per finding a person or a seat resolved, and `--issue` cites the state file on the issue.
+    Findings {
+        /// The campaign state file (`campaign.json`).
+        state: PathBuf,
+        /// Write one lesson per resolved finding to the pack.
+        #[arg(long)]
+        remember: bool,
+        /// With --remember, every finding, the ones a later attempt superseded too.
+        #[arg(long)]
+        all: bool,
+        /// Cite the state file as a deed on this issue.
+        #[arg(long)]
+        issue: Option<String>,
+    },
     /// A habit is a number the seat keeps measuring. `ljos habit NAME VALUE` takes a reading and closes the one before; `ljos habit NAME` shows one; `ljos habit` lists them all with the change since the last reading and when the next is due.
     Habit {
         /// The habit's name; absent, list every habit.
@@ -669,6 +683,21 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Due => print!("{}", due_report()?),
+        Cmd::Findings {
+            state,
+            remember,
+            all,
+            issue,
+        } => {
+            if remember || issue.is_some() {
+                print!(
+                    "{}",
+                    format_remembered(&remember_findings(&state, issue.as_deref(), all)?)
+                );
+            } else {
+                print!("{}", format_findings(&read_campaign(&state)?));
+            }
+        }
         Cmd::Habit {
             name,
             value,

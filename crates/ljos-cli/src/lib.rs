@@ -4579,7 +4579,10 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
-        Ok(said) => Ok(said.stdout),
+        Ok(said) => {
+            write_hold(&actor, assignee);
+            Ok(said.stdout)
+        }
         Err(e) => {
             let text = e.to_string();
             // A tracker id maps to one node. When an earlier sitting finished
@@ -4590,6 +4593,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
             {
                 run_captured("claimdag", &["reopen", &id, "--actor", &actor])?;
                 let said = run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
+                write_hold(&actor, assignee);
                 return Ok(format!("reopened a finished session node\n{}", said.stdout));
             }
             // The node is already claimed. By this name it is a sitting
@@ -4601,13 +4605,43 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                         let renewed = run_captured("claimdag", &["renew", &id, "--actor", &actor])
                             .map(|s| s.stdout)
                             .unwrap_or_default();
+                        write_hold(&actor, assignee);
                         Ok(format!(
                             "already held by {assignee}; the sitting resumes\n{renewed}"
                         ))
                     }
-                    Some(_) => bail!(
-                        "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
-                    ),
+                    Some(holder) => match read_hold(&holder) {
+                        // This seat's own conversation, and it is gone: a
+                        // runner that exited without finishing. The seat
+                        // owns its conversations, so the sitting takes the
+                        // node over rather than waiting on nobody.
+                        Some(h) if h.seat == seat_name() && !hold_alive(&h) => {
+                            run_captured("claimdag", &["release", &id, "--actor", &holder])?;
+                            drop_hold(&holder);
+                            let said =
+                                run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
+                            write_hold(&actor, assignee);
+                            Ok(format!(
+                                "took over from {}, this seat's conversation, gone (held since {})\n{}",
+                                h.assignee, h.since, said.stdout
+                            ))
+                        }
+                        Some(h) => bail!(
+                            "claim: {node} is held by {} (seat {}, {}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
+                            h.assignee,
+                            h.seat,
+                            if hold_alive(&h) {
+                                "still running"
+                            } else {
+                                "its runner is gone"
+                            },
+                            h.since,
+                            h.assignee
+                        ),
+                        None => bail!(
+                            "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from), and no record on this host names it. That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
+                        ),
+                    },
                     None => Err(e),
                 };
             }
@@ -4651,16 +4685,85 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
 /// The claim graph's refusal: not held, or held by somebody else.
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
-    Ok(run_captured(
-        "claimdag",
-        &[
-            "release",
-            &id,
-            "--actor",
-            &work_id(&occupancy_scope(assignee, node)),
-        ],
-    )?
-    .stdout)
+    let actor = work_id(&occupancy_scope(assignee, node));
+    let said = run_captured("claimdag", &["release", &id, "--actor", &actor])?;
+    drop_hold(&actor);
+    Ok(said.stdout)
+}
+
+/// What a conversation left beside the claim graph when it took a node:
+/// the name it held under, its seat, the runner process, and when. The
+/// claim graph keeps only the hashed actor; this is how a later
+/// conversation that finds the node held learns who holds it, and whether
+/// that conversation is still running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    pub assignee: String,
+    pub seat: String,
+    pub pid: u32,
+    pub comm: String,
+    pub since: String,
+}
+
+fn hold_record_path(actor: &str) -> PathBuf {
+    runtime_dir().join(format!("hold-{actor}"))
+}
+
+/// The process that owns this conversation: the first ancestor that is
+/// not a shell or a wrapper. For the MCP server that is the runner; for
+/// the command line it is the runner above the shell, else the shell the
+/// person types into.
+fn conversation_process() -> (u32, String) {
+    let chain = ancestry();
+    chain
+        .iter()
+        .skip(1)
+        .find(|(_, comm)| !WRAPPERS.contains(&comm.as_str()))
+        .or_else(|| chain.get(1))
+        .cloned()
+        .unwrap_or((std::process::id(), String::new()))
+}
+
+fn write_hold(actor: &str, assignee: &str) {
+    let (pid, comm) = conversation_process();
+    let path = hold_record_path(actor);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(
+        path,
+        format!(
+            "{assignee}\n{}\n{pid}\n{comm}\n{}\n",
+            seat_name(),
+            now_utc()
+        ),
+    );
+}
+
+fn drop_hold(actor: &str) {
+    let _ = std::fs::remove_file(hold_record_path(actor));
+}
+
+fn read_hold(actor: &str) -> Option<Hold> {
+    let text = std::fs::read_to_string(hold_record_path(actor)).ok()?;
+    let mut lines = text.lines();
+    Some(Hold {
+        assignee: lines.next()?.to_string(),
+        seat: lines.next()?.to_string(),
+        pid: lines.next()?.trim().parse().ok()?,
+        comm: lines.next()?.to_string(),
+        since: lines.next()?.to_string(),
+    })
+}
+
+/// Whether the conversation that wrote a hold is still running: its
+/// process exists and is still the program it was. Off Linux nothing can
+/// be read, and an unknown conversation is taken as running.
+fn hold_alive(hold: &Hold) -> bool {
+    match parent_and_comm(hold.pid) {
+        Some((_, comm)) => comm == hold.comm,
+        None => !cfg!(target_os = "linux"),
+    }
 }
 
 /// `; revises N earlier` when the pack closed earlier memories' windows
@@ -4974,7 +5077,9 @@ pub fn complete(node: &str, status: Option<&str>, assignee: &str, gen: u64) -> R
         args.push("--status");
         args.push(s);
     }
-    Ok(run_captured("claimdag", &args)?.stdout)
+    let said = run_captured("claimdag", &args)?;
+    drop_hold(&actor);
+    Ok(said.stdout)
 }
 
 pub fn finish(
@@ -5552,6 +5657,334 @@ pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
 
 pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
     CARD_NAMES.iter().map(|n| dir.join(n)).collect()
+}
+
+/// One typed finding from an eb-stack campaign state file, flattened to
+/// what a seat reads and remembers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub id: String,
+    pub status: String,
+    pub class: String,
+    pub disposition: String,
+    pub stage: String,
+    /// The recipe's file stem: `GCCcore-15.2.0`, `eOn-2.17.10-foss-2026.1`.
+    pub recipe: String,
+    pub summary: String,
+    /// The last error line the evidence carries, else the summary.
+    pub error: String,
+    /// The resolution's action, when it is resolved.
+    pub action: String,
+    pub changes: Vec<String>,
+}
+
+/// A campaign state file: the package it builds, the target, its findings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Campaign {
+    pub package: String,
+    pub version: String,
+    pub target: String,
+    pub status: String,
+    pub attempts: u64,
+    pub findings: Vec<Finding>,
+}
+
+fn recipe_stem(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// The line a reader recognises the failure by: the last line of the
+/// evidence that names an error, else the summary.
+fn error_line(evidence: &str, summary: &str) -> String {
+    let lower = |l: &str| l.to_ascii_lowercase();
+    evidence
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            let l = lower(l);
+            l.contains("error") || l.contains("fatal") || l.contains("failed")
+        })
+        .filter(|l| !l.starts_with("srun:"))
+        .last()
+        .map(str::to_string)
+        .unwrap_or_else(|| summary.to_string())
+}
+
+fn text_of(v: &Value, key: &str) -> String {
+    v.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Read an eb-stack campaign state (`campaign.json`).
+///
+/// # Errors
+///
+/// The file is missing, not JSON, or not a campaign state.
+pub fn read_campaign(state: &Path) -> Result<Campaign> {
+    let text = std::fs::read_to_string(state)
+        .with_context(|| format!("findings: cannot read {}", state.display()))?;
+    let doc: Value = serde_json::from_str(&text)
+        .with_context(|| format!("findings: {} is not JSON", state.display()))?;
+    let rows = doc
+        .get("findings")
+        .and_then(Value::as_array)
+        .with_context(|| format!("findings: {} has no findings list", state.display()))?;
+    let findings = rows
+        .iter()
+        .map(|f| {
+            let summary = text_of(f, "summary");
+            let resolution = f.get("resolution");
+            Finding {
+                id: text_of(f, "id"),
+                status: text_of(f, "status"),
+                class: text_of(f, "class"),
+                disposition: text_of(f, "disposition"),
+                stage: text_of(f, "stage"),
+                recipe: recipe_stem(&text_of(f, "recipe")),
+                error: error_line(&text_of(f, "evidence"), &summary),
+                summary,
+                action: resolution.map(|r| text_of(r, "action")).unwrap_or_default(),
+                changes: resolution
+                    .and_then(|r| r.get("changes"))
+                    .and_then(Value::as_array)
+                    .map(|c| {
+                        c.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    Ok(Campaign {
+        package: text_of(&doc, "package"),
+        version: text_of(&doc, "version"),
+        target: text_of(&doc, "target"),
+        status: text_of(&doc, "status"),
+        attempts: doc.get("attempts").and_then(Value::as_u64).unwrap_or(0),
+        findings,
+    })
+}
+
+/// The automatic resolution a campaign writes when a later attempt got
+/// past the stage: not a lesson, nothing was learned about the recipe.
+fn superseded_by_retry(f: &Finding) -> bool {
+    f.status == "superseded" || f.action.contains("superseded this finding")
+}
+
+/// At most `n` words, with the pack's sentence marks taken out so the
+/// lesson stays two sentences.
+fn clip_words(text: &str, n: usize) -> String {
+    // A stop inside a word (`scc.h`, `2.17.10`) is not a sentence mark.
+    let chars: Vec<char> = text.chars().collect();
+    let mut flat = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let ends_word = chars.get(i + 1).is_none_or(|n| n.is_whitespace());
+        flat.push(match c {
+            '.' | '!' | '?' | ';' if ends_word => ',',
+            '\n' | '\t' => ' ',
+            c => c,
+        });
+    }
+    let words: Vec<&str> = flat.split_whitespace().collect();
+    let mut out = words[..words.len().min(n)].join(" ");
+    while out.ends_with([',', ':', ' ']) {
+        out.pop();
+    }
+    out
+}
+
+/// The lesson a resolved finding leaves: what failed where, then the fix.
+/// Two short sentences; the pack refuses more, and refuses hard prose.
+#[must_use]
+pub fn finding_lesson(campaign: &Campaign, f: &Finding) -> String {
+    let what = clip_words(&f.error, 10);
+    let mut first = format!(
+        "{} on {}: {} failed in the {} step",
+        f.recipe, campaign.target, f.class, f.stage
+    );
+    if !what.is_empty() && what != f.summary {
+        first.push_str(&format!(" with {what}"));
+    }
+    first.push('.');
+    let mut fix = clip_words(&f.action, 14);
+    if !f.changes.is_empty() {
+        let files: Vec<String> = f
+            .changes
+            .iter()
+            .map(String::as_str)
+            .map(recipe_stem)
+            .collect();
+        fix.push_str(&format!(" in {}", files.join(", ")));
+    }
+    if fix.is_empty() {
+        first
+    } else {
+        format!("{first} Fix: {fix}.")
+    }
+}
+
+/// The entities a finding's lesson is about, so a later cue on the
+/// recipe, the package or the failure class activates it.
+fn finding_entities(campaign: &Campaign, f: &Finding) -> Vec<String> {
+    let mut out = vec![f.recipe.clone()];
+    if let Some(name) = f.recipe.split('-').next() {
+        if !name.is_empty() && name != f.recipe {
+            out.push(name.to_string());
+        }
+    }
+    if !campaign.package.is_empty() {
+        out.push(campaign.package.clone());
+    }
+    out.push(f.class.clone());
+    out.dedup();
+    out
+}
+
+/// One line per finding: id, status, class, stage, recipe, then the fix
+/// or the summary.
+#[must_use]
+pub fn format_findings(campaign: &Campaign) -> String {
+    let mut out = format!(
+        "{} {} on {}: {} after {} attempt{}, {} finding{}\n",
+        campaign.package,
+        campaign.version,
+        campaign.target,
+        campaign.status,
+        campaign.attempts,
+        if campaign.attempts == 1 { "" } else { "s" },
+        campaign.findings.len(),
+        if campaign.findings.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+    );
+    for f in &campaign.findings {
+        let tail = if f.action.is_empty() {
+            f.summary.clone()
+        } else {
+            format!("fix: {}", f.action)
+        };
+        out.push_str(&format!(
+            "{}\t{}\t{}/{}\t{}\t{}\t{}\n",
+            f.id, f.status, f.class, f.disposition, f.stage, f.recipe, tail
+        ));
+    }
+    out
+}
+
+/// What `remember_findings` did with one finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remembered {
+    pub id: String,
+    pub lesson: String,
+    /// The pack's answer: the atom id, `held` when the pack already had
+    /// it, `skipped` for a retry supersession, else the refusal.
+    pub result: String,
+}
+
+/// Write one lesson per finding a person or a seat resolved (every
+/// finding with `all`), cite the state file on the issue when one is
+/// named, and say what happened to each.
+///
+/// # Errors
+///
+/// The state cannot be read, or the pack is down. A refusal of one lesson
+/// is reported in its row, not returned.
+pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result<Vec<Remembered>> {
+    let campaign = read_campaign(state)?;
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut out = Vec::new();
+    for f in &campaign.findings {
+        if !all && superseded_by_retry(f) {
+            out.push(Remembered {
+                id: f.id.clone(),
+                lesson: String::new(),
+                result: "skipped: a later attempt got past it, nothing was learned".into(),
+            });
+            continue;
+        }
+        if !all && f.status != "resolved" {
+            out.push(Remembered {
+                id: f.id.clone(),
+                lesson: String::new(),
+                result: format!("skipped: {}", f.status),
+            });
+            continue;
+        }
+        let lesson = finding_lesson(&campaign, f);
+        let mut atom = atom_body("lesson", &lesson, &workspace);
+        add_entities(&mut atom, finding_entities(&campaign, f));
+        let result = match client.post_atom(&atom) {
+            Ok(body) => format!(
+                "{}{}",
+                body["id"].as_str().unwrap_or("written"),
+                revision_note(&body)
+            ),
+            Err(e) => format!("refused: {e}"),
+        };
+        out.push(Remembered {
+            id: f.id.clone(),
+            lesson,
+            result,
+        });
+    }
+    if let Some(issue) = issue.map(str::trim).filter(|i| !i.is_empty()) {
+        let name = format!(
+            "{} {} campaign state on {}, {} after {} attempts",
+            campaign.package, campaign.version, campaign.target, campaign.status, campaign.attempts
+        );
+        let seat = seat_name();
+        let said = run_captured(
+            "deedar",
+            &[
+                "create",
+                "file",
+                "--name",
+                &name,
+                "--path",
+                &state.display().to_string(),
+                "--agent",
+                &seat,
+            ],
+        )?;
+        let accession = said
+            .stdout
+            .split_whitespace()
+            .find(|w| w.starts_with("deed-"))
+            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+            .context("findings: deedar create printed no accession")?
+            .to_string();
+        run_captured("vissue", &["deed", issue, "--add", &accession])?;
+        out.push(Remembered {
+            id: "state".into(),
+            lesson: name,
+            result: format!("cited on {issue} as {accession}"),
+        });
+    }
+    Ok(out)
+}
+
+#[must_use]
+pub fn format_remembered(rows: &[Remembered]) -> String {
+    rows.iter()
+        .map(|r| {
+            if r.lesson.is_empty() {
+                format!("{}\t{}\n", r.id, r.result)
+            } else {
+                format!("{}\t{}\n\t{}\n", r.id, r.result, r.lesson)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -6967,6 +7400,48 @@ mod tests {
         assert_eq!(ids, ["never", "blank", "late", "later"]);
         assert!(now_utc().ends_with(".000Z"));
         assert!(now_utc().as_str() > "2026-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn a_finding_lesson_is_two_short_sentences_about_the_recipe() {
+        let campaign = Campaign {
+            package: "eOn".into(),
+            version: "2.17.10".into(),
+            target: "terra".into(),
+            status: "completed".into(),
+            attempts: 29,
+            findings: Vec::new(),
+        };
+        let f = Finding {
+            id: "attempt:6:finding:6".into(),
+            status: "resolved".into(),
+            class: "compile".into(),
+            disposition: "requires-judgment".into(),
+            stage: "build".into(),
+            recipe: recipe_stem("easyconfigs/g/GCCcore/GCCcore-15.2.0.eb"),
+            summary: "Compile failure from EasyBuild command (exit Some(1))".into(),
+            error: error_line(
+                "stdout:\n== building\nstderr:\nfatal error: linux/scc.h: No such file or directory.\nsrun: error: task 0 exited",
+                "Compile failure",
+            ),
+            action: "applied the GCC 14 libsanitizer kernel headers patch. Kept in the overlay".into(),
+            changes: vec!["overlay/g/GCCcore/GCCcore-15.2.0.eb".into()],
+        };
+        let lesson = finding_lesson(&campaign, &f);
+        assert!(lesson.starts_with("GCCcore-15.2.0 on terra: compile failed in the build step with fatal error: linux/scc.h: No such file or directory."), "{lesson}");
+        assert!(lesson.ends_with("in GCCcore-15.2.0."), "{lesson}");
+        assert_eq!(lesson.matches(". ").count(), 1, "{lesson}");
+        assert!(!lesson.contains("srun"));
+        assert_eq!(
+            finding_entities(&campaign, &f),
+            ["GCCcore-15.2.0", "GCCcore", "eOn", "compile"]
+        );
+        let retry = Finding {
+            action: "successful campaign retry superseded this finding".into(),
+            ..f.clone()
+        };
+        assert!(superseded_by_retry(&retry));
+        assert!(!superseded_by_retry(&f));
     }
 
     #[test]

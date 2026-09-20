@@ -2,6 +2,25 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.14.0 (2026-09-20)
+
+- `ljos findings STATE` reads an eb-stack campaign state file and prints
+  its typed findings; `--remember` writes one lesson per finding a person
+  or a seat resolved (the recipe, the step, the error line, the fix) under
+  the recipe's name, its package and the failure class; `--issue` cites
+  the state file as a deed. `ljos_findings` over MCP. The protocol and
+  the how-to carry the bump: one island per recipe before it is touched,
+  the ladder rung by rung, the findings remembered after.
+- A claim leaves a hold record beside the claim graph: the name it is
+  held under, the seat, the runner process and when. A sitting that finds
+  the node held by another conversation now names it and says whether its
+  runner still runs; when the holder is this seat's own conversation and
+  its runner is gone, the sitting takes the node over. A runner that
+  exited without finishing no longer blocks the next run of the same
+  seat.
+- `ljos_remember` says what the pack refuses: a third sentence, prose
+  above readability grade 14; and what a lesson names.
+
 ## 0.13.8 (2026-09-20)
 
 - A conversation's holder does not move when a second `*_SESSION_ID`

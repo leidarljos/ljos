@@ -135,6 +135,41 @@ the age column says when each was written. Add =--fire= when you go on to
 use the island: the strongest eight fire together and their links gain
 weight.
 
+* Bump a recipe with eb-stack, and keep what the campaign taught
+
+One sitting on the ticket, one island per recipe before it is touched:
+
+#+begin_src bash
+ljos sitting ebstack-319z
+ljos island "eOn 2.17.10 foss 2026.1"
+#+end_src
+
+Then the ladder, each rung its own artifact: =eb-stack recipe check=,
+=eb-stack package bump= (the lock under =out/locks= is =resolves=),
+=eb-stack recipe lint=, =eb-stack target doctor=, =eb-stack campaign
+run= and =campaign status= (=builds=, =binary-verified=). Over MCP the
+same verbs are =eb_recipe_check=, =eb_package_bump=, =eb_recipe_lint=,
+=eb_target_doctor=, =eb_campaign_run=, =eb_campaign_status=, beside
+=ljos_sitting=, =ljos_island=, =ljos_remember= and =ljos_finish=.
+
+When the campaign ends, its typed findings are the lessons:
+
+#+begin_src bash
+ljos findings out/campaign.json
+ljos findings out/campaign.json --remember --issue ebstack-319z
+#+end_src
+
+The first prints one line per finding. The second writes one lesson per
+finding a person or a seat resolved, under the recipe's name, the
+package and the failure class, and cites the state file on the issue as
+a deed. A finding a later attempt merely got past is skipped; =--all=
+takes it too. The next bump of that recipe recalls the lesson from its
+island:
+
+#+begin_example
+GCCcore-15.2.0 on terra: compile failed in the build step with fatal error: linux/scc,h. Fix: applied the GCC 14 libsanitizer kernel headers patch in GCCcore-15.2.0.
+#+end_example
+
 * Keep a number
 
 A number the seat measures again and again, a benchmark score, a hook
