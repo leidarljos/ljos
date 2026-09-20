@@ -69,7 +69,12 @@ impl HudApp {
             opening: None,
             popout_id: None,
             opening_popout: None,
-            pending_activation_token: summon::take_env_token(),
+            pending_activation_token: if visible {
+                summon::take_env_token()
+            } else {
+                let _ = summon::take_env_token();
+                None
+            },
             tray_quit: None,
             place_tries: 0,
             _summon: summon,
@@ -151,10 +156,16 @@ impl HudApp {
             Message::Closed(id) => {
                 if Some(id) == self.popout_id {
                     self.popout_id = None;
+                    self.visible = false;
+                    self.pending_activation_token = None;
                     return Task::none();
                 }
                 self.opening = None;
                 self.window_id = None;
+                if self.popout_id.is_none() && self.opening_popout.is_none() {
+                    self.visible = false;
+                    self.pending_activation_token = None;
+                }
                 Task::none()
             }
             Message::Key(key) => self.on_key(key),
@@ -464,6 +475,7 @@ mod tests {
     use super::*;
 
     fn empty_app() -> HudApp {
+        let _guard = crate::env_lock();
         HudApp::new(true, None)
     }
 
@@ -538,5 +550,63 @@ mod tests {
         assert_eq!(app.pending_activation_token.as_deref(), Some("tok-1"));
         let _ = app.on_summon(SummonRequest::new(SummonAction::Hide));
         assert_eq!(app.pending_activation_token, None);
+    }
+
+    #[test]
+    fn visible_boot_stashes_env_token() {
+        let _guard = crate::env_lock();
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-boot");
+            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+        }
+        let app = HudApp::new(true, None);
+        assert_eq!(app.pending_activation_token.as_deref(), Some("tok-boot"));
+        assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
+        assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
+    }
+
+    #[test]
+    fn hidden_boot_unsets_token_without_stashing() {
+        let _guard = crate::env_lock();
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-hid");
+            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+        }
+        let app = HudApp::new(false, None);
+        assert_eq!(app.pending_activation_token, None);
+        assert!(!app.visible);
+        assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
+        assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
+    }
+
+    #[test]
+    fn overlay_closed_hides() {
+        let mut app = empty_app();
+        let id = window::Id::unique();
+        app.opening = Some(id);
+        app.pending_activation_token = Some("tok".into());
+        let _ = app.update(Message::WindowId(Some(id)));
+        assert!(app.visible);
+        assert!(app.mapped());
+        let _ = app.update(Message::Closed(id));
+        assert!(!app.visible);
+        assert!(!app.mapped());
+        assert_eq!(app.pending_activation_token, None);
+    }
+
+    #[test]
+    fn overlay_closed_during_pop_out_keeps_visible() {
+        let mut app = empty_app();
+        let overlay = window::Id::unique();
+        app.opening = Some(overlay);
+        let _ = app.update(Message::WindowId(Some(overlay)));
+        let _ = app.pop_out();
+        assert!(app.visible);
+        assert!(app.popout_id.is_some());
+        let _ = app.update(Message::Closed(overlay));
+        assert!(app.visible, "pop-out is still the mapped surface");
+        assert!(app.popout_id.is_some());
     }
 }

@@ -45,17 +45,22 @@ pub fn start_detached(cli: &HudCli) -> anyhow::Result<i32> {
     );
     let exe = std::env::current_exe()?;
     let stdout = log_file.try_clone()?;
+    let token = summon::peek_env_token();
     let mut cmd = Command::new(&exe);
     cmd.args(child_args(cli))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(log_file));
+    if let Some(tok) = &token {
+        cmd.env("XDG_ACTIVATION_TOKEN", tok);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
     let _child = cmd.spawn()?;
+    let _ = summon::take_env_token();
     wait_until_accepts(&summon::default_socket_path(), Duration::from_secs(8));
     Ok(0)
 }
@@ -93,6 +98,10 @@ mod tests {
         let args = child_args(&cli);
         assert!(args.contains(&"--foreground".into()));
         assert!(!args.iter().any(|a| a == "--toggle"));
+        assert!(
+            !args.iter().any(|a| a.contains("XDG") || a.contains("tok")),
+            "token is forwarded in env, not argv"
+        );
     }
 
     #[test]

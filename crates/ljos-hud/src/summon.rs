@@ -136,6 +136,14 @@ pub fn sanitize_token(raw: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// Read `XDG_ACTIVATION_TOKEN` without unsetting it.
+pub fn peek_env_token() -> Option<String> {
+    std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .as_deref()
+        .and_then(sanitize_token)
+}
+
 /// Read `XDG_ACTIVATION_TOKEN` and unset it and `DESKTOP_STARTUP_ID`.
 pub fn take_env_token() -> Option<String> {
     let raw = std::env::var("XDG_ACTIVATION_TOKEN").ok();
@@ -225,16 +233,26 @@ pub fn plan_summon_cli(
     }
 }
 
-/// Send one summon command to a running HUD (takes env token).
+/// Send one summon command to a running HUD.
+///
+/// Hide always unsets the env token and does not activate. Show and toggle
+/// peek the token for the wire and unset only after a successful send, so a
+/// miss can still boot an owner that guest-activates.
 pub fn send_command(action: SummonAction) -> Result<(), SummonError> {
-    let token = match action {
+    match action {
         SummonAction::Hide => {
             let _ = take_env_token();
-            None
+            send_request(SummonRequest::new(action))
         }
-        _ => take_env_token(),
-    };
-    send_request(SummonRequest { action, token })
+        _ => {
+            let token = peek_env_token();
+            let result = send_request(SummonRequest { action, token });
+            if result.is_ok() {
+                let _ = take_env_token();
+            }
+            result
+        }
+    }
 }
 
 /// Send a parsed request to the default socket.
@@ -471,6 +489,78 @@ mod tests {
         assert_eq!(tok.as_deref(), Some("tok-xyz"));
         assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
         assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
+    }
+
+    #[test]
+    fn peek_env_token_leaves_activation_vars() {
+        let _guard = crate::env_lock();
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-peek");
+            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+        }
+        assert_eq!(peek_env_token().as_deref(), Some("tok-peek"));
+        assert_eq!(
+            std::env::var("XDG_ACTIVATION_TOKEN").ok().as_deref(),
+            Some("tok-peek")
+        );
+        assert_eq!(
+            std::env::var("DESKTOP_STARTUP_ID").ok().as_deref(),
+            Some("startup")
+        );
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var("XDG_ACTIVATION_TOKEN");
+            std::env::remove_var("DESKTOP_STARTUP_ID");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_command_show_miss_keeps_token() {
+        let _guard = crate::env_lock();
+        let path = format!("/tmp/ljos-hud-miss-show-{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(SOCKET_ENV, &path);
+            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-keep");
+            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+        }
+        let err = send_command(SummonAction::Show).unwrap_err();
+        assert!(is_summon_miss(&err));
+        assert_eq!(
+            std::env::var("XDG_ACTIVATION_TOKEN").ok().as_deref(),
+            Some("tok-keep")
+        );
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var(SOCKET_ENV);
+            std::env::remove_var("XDG_ACTIVATION_TOKEN");
+            std::env::remove_var("DESKTOP_STARTUP_ID");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_command_hide_miss_unsets_token() {
+        let _guard = crate::env_lock();
+        let path = format!("/tmp/ljos-hud-miss-hide-{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(SOCKET_ENV, &path);
+            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-hide");
+            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+        }
+        let err = send_command(SummonAction::Hide).unwrap_err();
+        assert!(is_summon_miss(&err));
+        assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
+        assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var(SOCKET_ENV);
+        }
     }
 
     #[test]
