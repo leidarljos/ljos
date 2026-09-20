@@ -25,7 +25,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   island (`packset_search` plus `packset_island(cue, false)`; idle until
   enter; `format_island` weak/dense banners; search-down is a banner), and a deed
   rail (`ljos_cli::timeline_events` → `Vec<Event>`; idle until the
-  operator enters an issue). Skip chips sit in
+  operator enters an issue; tracker rows from
+  `vissue_core::agent::show_json`, not `vissue show --json`). Skip chips sit in
   the layout in key order 1-5 (due, claims, graph, island, deeds). Watch
   `work.bin` plus pack `last_write_ts` (Snap stamps both; a missing
   `pack_ts` is boot, not a load); the 50 ms tick is chrome. A

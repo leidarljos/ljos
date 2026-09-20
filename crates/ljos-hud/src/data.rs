@@ -291,11 +291,7 @@ fn issue_of(cue: &str) -> String {
     }
     cue.split_whitespace()
         .find(|w| looks_like_issue(w))
-        .map(|s| {
-            s.trim()
-                .trim_end_matches([',', '.', ';', ':'])
-                .to_string()
-        })
+        .map(|s| s.trim().trim_end_matches([',', '.', ';', ':']).to_string())
         .unwrap_or_default()
 }
 
@@ -420,8 +416,7 @@ fn occupancy_of(nodes: &[&claimdag::WorkNode], assignee: WorkId) -> u32 {
     nodes
         .iter()
         .filter(|n| {
-            matches!(n.status, WorkStatus::Claimed | WorkStatus::Running)
-                && n.assignee == assignee
+            matches!(n.status, WorkStatus::Claimed | WorkStatus::Running) && n.assignee == assignee
         })
         .count() as u32
 }
@@ -430,7 +425,8 @@ fn load_hits(cue: &str) -> Result<Vec<HitRow>> {
     Ok(ljos_cli::packset_search(cue)?
         .into_iter()
         .map(|h| HitRow {
-            id: h.id
+            id: h
+                .id
                 .unwrap_or_else(|| "?".into())
                 .chars()
                 .take(12)
@@ -494,7 +490,9 @@ fn island_row(atom: &Value) -> IslandRow {
             .collect(),
         activation: format!(
             "{:.3}",
-            atom.get("activation").and_then(Value::as_f64).unwrap_or(0.0)
+            atom.get("activation")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
         ),
         seed: atom.get("seed").and_then(Value::as_bool).unwrap_or(false),
     }
@@ -704,6 +702,7 @@ mod tests {
         assert!(prod.contains("packset_island(cue, false)"));
         assert!(prod.contains("format_island"));
         assert!(prod.contains("timeline_events"));
+        assert!(!prod.contains("Command::new(\"vissue\")"));
         assert!(!prod.contains("due_report"));
         assert!(!prod.contains("sitting_due_report"));
         assert!(!prod.contains("WorkGraph::load_dir"));

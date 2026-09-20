@@ -13,9 +13,10 @@ use ljos_cli::{
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
     remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
-    session_end, sitting_gated, take_hook_context, tcb_check, timeline, topic_words, trim_num,
-    trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    session_end, sitting_gated, take_hook_context, tcb_check, timeline, topic_words,
+    tracker_show_json, trim_num, trust_from_pack, verdict_for, whoami, write_persona,
+    write_prediction, write_rule, write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE,
+    LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -925,10 +926,7 @@ fn main() -> Result<()> {
 /// The words an issue is about, from its title, and its tags; none of
 /// either when the tracker does not answer, which scopes nothing out.
 fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
-    let Some(v) = run_captured("vissue", &["show", id, "--json"])
-        .ok()
-        .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok())
-    else {
+    let Ok(v) = tracker_show_json(id) else {
         return (Vec::new(), Vec::new());
     };
     let topic = v

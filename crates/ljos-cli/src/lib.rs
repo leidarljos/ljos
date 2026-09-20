@@ -5434,10 +5434,23 @@ fn revision_note(body: &Value) -> String {
     }
 }
 
+/// One issue as JSON from the tracker library. Same card as `vissue show --json`.
+///
+/// # Errors
+///
+/// The tracker root cannot be resolved, or `id` is not in it.
+pub fn tracker_show_json(id: &str) -> Result<Value> {
+    let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
+    let found = vissue_core::Router::load(layout)
+        .map_err(anyhow::Error::from)?
+        .find_by_id(id)
+        .map_err(anyhow::Error::from)?;
+    vissue_core::agent::show_json(&found.layout, id).map_err(anyhow::Error::from)
+}
+
 /// The issue's title, for a cue, from the tracker.
 fn issue_title(issue: &str) -> Result<String> {
-    let said = run_captured("vissue", &["show", issue, "--json"])?;
-    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    let v = tracker_show_json(issue)?;
     Ok(v.get("title")
         .and_then(Value::as_str)
         .unwrap_or(issue)
@@ -5459,8 +5472,9 @@ pub struct Event {
 }
 
 /// The issue's timeline as dated rows. The HUD paints this; it does not
-/// parse `ljos timeline` stdout. The tracker shell still sits inside this
-/// function, a named gap (`vissue_core::show_json` / `deedar::Store::evidence`).
+/// parse `ljos timeline` stdout. Tracker rows come from
+/// [`vissue_core::agent::show_json`]. Deed rows still shell `deedar evidence`,
+/// a named gap (`deedar::Store::evidence`).
 ///
 /// # Errors
 ///
@@ -5471,8 +5485,7 @@ pub fn timeline_events(issue: &str, limit: usize) -> Result<Vec<Event>> {
 }
 
 fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
-    let said = run_captured("vissue", &["show", issue, "--json"])?;
-    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    let v = tracker_show_json(issue)?;
     let title = v["title"].as_str().unwrap_or(issue).to_string();
     let mut events = tracker_events(&v);
     for accession in v["deeds"].as_array().into_iter().flatten() {
@@ -5693,10 +5706,7 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
 /// from the tracker. Empty when the issue is workable, or when the tracker
 /// does not answer (the sitting's doctor already said so).
 pub fn open_blockers(issue: &str) -> Vec<String> {
-    let Some(shown) = run_captured("vissue", &["show", issue, "--json"])
-        .ok()
-        .and_then(|said| serde_json::from_str::<Value>(&said.stdout).ok())
-    else {
+    let Ok(shown) = tracker_show_json(issue) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -5706,9 +5716,8 @@ pub fn open_blockers(issue: &str) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
     {
-        let state = run_captured("vissue", &["show", id, "--json"])
+        let state = tracker_show_json(id)
             .ok()
-            .and_then(|said| serde_json::from_str::<Value>(&said.stdout).ok())
             .and_then(|v| v["state"].as_str().map(str::to_string))
             .unwrap_or_else(|| "?".to_string());
         if !matches!(state.as_str(), "DONE" | "CANCELLED") {
@@ -7001,7 +7010,7 @@ pub fn bump_plan(
         return Ok((generation, rows));
     }
     for row in &mut rows {
-        let exists = run_captured("vissue", &["show", &row.id, "--json"]).is_ok();
+        let exists = tracker_show_json(&row.id).is_ok();
         if exists {
             row.result = "held".into();
         } else {
@@ -7024,9 +7033,8 @@ pub fn bump_plan(
     }
     // Edges after every node exists; an edge already held is not an error.
     for row in &rows {
-        let held: Vec<String> = run_captured("vissue", &["show", &row.id, "--json"])
+        let held: Vec<String> = tracker_show_json(&row.id)
             .ok()
-            .and_then(|said| serde_json::from_str::<Value>(&said.stdout).ok())
             .and_then(|v| v["blocked_by"].as_array().cloned())
             .into_iter()
             .flatten()
@@ -8582,6 +8590,79 @@ mod tests {
         assert!(src.contains("Result<Vec<Event>>"));
         assert!(src.contains("pub fn pack_last_write_ts"));
         assert!(src.contains("GET /v1/status"));
+        assert!(src.contains("vissue_core::agent::show_json"));
+    }
+
+    #[test]
+    fn timeline_of_does_not_shell_vissue() {
+        let src = include_str!("lib.rs");
+        let start = src.find("fn timeline_of").expect("timeline_of");
+        let end = src[start..]
+            .find("\npub fn timeline(")
+            .map(|i| start + i)
+            .expect("timeline after timeline_of");
+        let body = &src[start..end];
+        assert!(
+            !body.contains("run_captured(\"vissue\""),
+            "timeline_of must not shell vissue"
+        );
+        assert!(
+            !body.contains("Command::new(\"vissue\")"),
+            "timeline_of must not Command::new vissue"
+        );
+        assert!(
+            body.contains("tracker_show_json"),
+            "timeline_of should call the tracker library"
+        );
+    }
+
+    #[test]
+    fn timeline_events_reads_the_tracker_without_shelling_vissue() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Deed rail library show\n:PROPERTIES:\n:ID:         sample-k2p2\n:CREATED:    [2026-09-20 Sat]\n:END:\n",
+        )
+        .unwrap();
+        let old_issue_root = std::env::var_os("ISSUE_ROOT");
+        let old_vissue_root = std::env::var_os("VISSUE_ROOT");
+        let old_no_route = std::env::var_os("VISSUE_NO_ROUTE");
+        let old_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("ISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::set_var("PATH", "/usr/bin");
+        }
+        let events = timeline_events("sample-k2p2", 12);
+        unsafe {
+            match old_issue_root {
+                Some(v) => std::env::set_var("ISSUE_ROOT", v),
+                None => std::env::remove_var("ISSUE_ROOT"),
+            }
+            match old_vissue_root {
+                Some(v) => std::env::set_var("VISSUE_ROOT", v),
+                None => std::env::remove_var("VISSUE_ROOT"),
+            }
+            match old_no_route {
+                Some(v) => std::env::set_var("VISSUE_NO_ROUTE", v),
+                None => std::env::remove_var("VISSUE_NO_ROUTE"),
+            }
+            match old_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let events = events.expect("timeline_events should read the tracker library");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.source == "tracker" && e.text == "created"),
+            "{events:?}"
+        );
     }
 
     const EVIDENCE: &str = "stdout:\n== building and installing GCCcore/15.2.0...\nstderr:\nERROR: Installation of GCCcore-15.2.0.eb failed: shell command 'make ...' failed with exit code 2 in build step for GCCcore-15.2.0.eb\nsrun: error: task 0 exited";
