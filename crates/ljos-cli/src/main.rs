@@ -236,6 +236,17 @@ enum Cmd {
     },
     /// Which habitats answer. Exit 1 when a required one does not.
     Doctor,
+    /// Read-only icedtea pane over due, live claims, and trust.
+    ///
+    /// Execs sibling `ljos-hud` (`LJOS_HUD_BIN`, next to this binary, or PATH).
+    /// The musl CLI never links iced. Missing binary: exit 127. `--hide` with
+    /// no binary: 0.
+    #[command(disable_help_flag = true)]
+    Hud {
+        /// Flags forwarded to ljos-hud.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print the sitting protocol: which store answers what, and the order of verbs.
     Protocol,
     /// Who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from.
@@ -659,6 +670,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::Hud { args } => std::process::exit(ljos_cli::hud::run("ljos", &args)),
         Cmd::Protocol => print!("{PROTOCOL}"),
         Cmd::Seat => print!("{}", format_seat(&whoami())),
         Cmd::Onboard {

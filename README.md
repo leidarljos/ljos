@@ -44,6 +44,7 @@ ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
 ljos doctor
+ljos hud                                       # read-only icedtea overlay; execs sibling ljos-hud
 ljos protocol
 ljos onboard                                   # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok ship as shapes

@@ -2,6 +2,17 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.17.0 (2026-09-20)
+
+- `ljos hud` execs a sibling `ljos-hud` icedtea overlay (due, live claims,
+  trust). The musl CLI never links iced; a missing binary exits 127, and
+  `--hide` with no binary exits 0. Dist of the HUD is gnu Linux and
+  Darwin only.
+- The overlay is an iced daemon: summon socket, StatusNotifier tray,
+  Sway float/center, a pop-out window, guest `xdg_activation_v1`, and
+  `--install-desktop`. `q` hides; tray Quit leaves the HUD only.
+- `ljos doctor` lists `ljos-hud`. It is not a required habitat.
+
 ## 0.16.1 (2026-09-20)
 
 - `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)
