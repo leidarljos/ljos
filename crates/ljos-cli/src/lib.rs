@@ -5850,7 +5850,9 @@ fn superseded_by_retry(f: &Finding) -> bool {
 /// At most `n` words, with the pack's sentence marks taken out so the
 /// lesson stays two sentences.
 fn clip_words(text: &str, n: usize) -> String {
-    // A stop inside a word (`scc.h`, `2.17.10`) is not a sentence mark.
+    // A stop inside a word (`scc.h`, `2.17.10`) is not a sentence mark; an
+    // ellipsis (`'make ...'`) is EasyBuild eliding a command and goes.
+    let text = text.replace("...", "");
     let chars: Vec<char> = text.chars().collect();
     let mut flat = String::with_capacity(text.len());
     for (i, &c) in chars.iter().enumerate() {
@@ -7533,7 +7535,7 @@ mod tests {
         assert_eq!(
             lesson,
             "GCCcore-15.2.0 for eOn-2.17.10-foss-2026.1 on terra: compile failed in the build step \
-             with shell command 'make ,,,' failed with exit code 2 in. \
+             with shell command 'make' failed with exit code 2 in build. \
              Fix: applied the GCC 14 libsanitizer kernel headers patch, Kept in the overlay in GCCcore-15.2.0."
         );
         assert!(!lesson.contains("srun"));
