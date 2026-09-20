@@ -3238,9 +3238,9 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("deedar", "deedar-cli"),
     ("claimdag", "claimdag-cli"),
     ("packset", "packset"),
-    ("packsetd", "packset-daemon"),
+    ("packsetd", "packset"),
     ("packset-embed", "packset-embed"),
-    ("packset-mcp", "packset-mcp"),
+    ("packset-mcp", "packset"),
 ];
 
 /// First `N.N.N` in a `--version` line.
