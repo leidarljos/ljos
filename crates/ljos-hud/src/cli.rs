@@ -1,4 +1,4 @@
-//! Process flags for `ljos-hud` and the `ljos hud` launcher.
+//! Process flags for `ljos-hud`. The `ljos hud` launcher lives in ljos-cli.
 
 use std::path::PathBuf;
 
@@ -6,9 +6,6 @@ use clap::Parser;
 
 use crate::detach;
 use crate::summon::{self, SummonAction, SummonCli};
-
-/// Env override for the HUD binary the launcher execs.
-pub const HUD_BIN_ENV: &str = "LJOS_HUD_BIN";
 
 /// Read-only pane over due, claims, and trust.
 #[derive(Debug, Clone, Parser)]
@@ -106,37 +103,6 @@ pub(crate) fn run_owner(cli: HudCli) -> anyhow::Result<i32> {
         summon: _summon,
     })?;
     Ok(0)
-}
-
-/// Locate `ljos-hud` for the `ljos hud` launcher. Missing means 127.
-pub fn resolve_hud_bin() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var(HUD_BIN_ENV) {
-        let t = raw.trim();
-        if !t.is_empty() {
-            return Some(PathBuf::from(t));
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("ljos-hud");
-            if sibling.is_file() {
-                return Some(sibling);
-            }
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("ljos-hud");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Hint printed when the launcher cannot find the HUD binary.
-pub fn missing_bin_message() -> &'static str {
-    "ljos-hud is not installed. Install it with:\n  cargo install ljos-hud"
 }
 
 #[cfg(test)]
