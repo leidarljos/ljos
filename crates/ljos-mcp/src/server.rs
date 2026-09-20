@@ -1732,13 +1732,13 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every tool is annotated, and the writers are the contract's twelve.
+    /// Every tool is annotated, and the writers are the ones the contract names.
     #[test]
-    fn the_writers_are_the_thirteen_the_contract_names() {
+    fn the_writers_are_the_ones_the_contract_names() {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            35,
+            36,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1774,6 +1774,7 @@ mod tests {
                 "ljos_complete",
                 "ljos_consolidate",
                 "ljos_deed",
+                "ljos_findings",
                 "ljos_finish",
                 "ljos_forget",
                 "ljos_graded",

@@ -5743,7 +5743,7 @@ fn error_line(evidence: &str, summary: &str) -> String {
             l.contains("error") || l.contains("fatal") || l.contains("failed")
         })
         .filter(|l| !l.starts_with("srun:"))
-        .last()
+        .next_back()
         .map(str::to_string)
         .unwrap_or_else(|| summary.to_string())
 }
@@ -6983,7 +6983,12 @@ mod tests {
     #[test]
     fn onboarding_a_config_file_runner_writes_once() {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
-        assert_eq!(all.harness.len(), 3);
+        // Three shapes, then the four runners this seat has carried.
+        assert_eq!(all.harness.len(), 7);
+        assert!(all.harness[3..].iter().all(|h| h.register.len()
+            + usize::from(h.config.is_some())
+            + usize::from(h.config_json.is_some())
+            > 0));
         assert_eq!(all.harness[1].marker.as_deref(), Some("[mcp_servers.ljos]"));
         assert_eq!(all.harness[2].json_pointer.as_deref(), Some("/mcp/ljos"));
 
