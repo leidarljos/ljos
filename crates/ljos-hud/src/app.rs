@@ -33,6 +33,8 @@ pub enum Message {
     /// Kick an off-thread load.
     Refresh,
     Key(Key),
+    /// Skip-chip or number-key pane focus.
+    Pane(view::Pane),
     Close(window::Id),
     Closed(window::Id),
     WindowId(Option<window::Id>),
@@ -85,7 +87,7 @@ impl HudApp {
         let n = match self.pane {
             Pane::Due => self.snap.due.len(),
             Pane::Claims => self.snap.claims.len(),
-            Pane::Trust => self.snap.trust.len(),
+            Pane::Trust => self.snap.graph.nodes.len(),
         };
         if n == 0 {
             self.selected = 0;
@@ -169,6 +171,11 @@ impl HudApp {
                 Task::none()
             }
             Message::Key(key) => self.on_key(key),
+            Message::Pane(pane) => {
+                self.pane = pane;
+                self.selected = 0;
+                Task::none()
+            }
         }
     }
 
@@ -321,11 +328,19 @@ impl HudApp {
                 self.selected = 0;
             }
             (Key::Named(Named::ArrowDown), _) | (_, Some("j")) => {
-                self.selected = self.selected.saturating_add(1);
-                self.clamp_selected();
+                if self.pane == Pane::Trust {
+                    self.selected = self.snap.graph.walk_next(self.selected);
+                } else {
+                    self.selected = self.selected.saturating_add(1);
+                    self.clamp_selected();
+                }
             }
             (Key::Named(Named::ArrowUp), _) | (_, Some("k")) => {
-                self.selected = self.selected.saturating_sub(1);
+                if self.pane == Pane::Trust {
+                    self.selected = self.snap.graph.walk_prev(self.selected);
+                } else {
+                    self.selected = self.selected.saturating_sub(1);
+                }
             }
             (_, Some("1")) => {
                 self.pane = Pane::Due;
@@ -608,5 +623,43 @@ mod tests {
         let _ = app.update(Message::Closed(overlay));
         assert!(app.visible, "pop-out is still the mapped surface");
         assert!(app.popout_id.is_some());
+    }
+
+    #[test]
+    fn skip_chip_focuses_the_graph_and_j_walks_nodes() {
+        use crate::graph::GraphLayout;
+        use ljos_cli::{Persona, Trust};
+        let mut app = empty_app();
+        app.snap.graph = GraphLayout::from_pack(
+            &[
+                Persona {
+                    name: "a".into(),
+                    anchor: 0.2,
+                    view: "v".into(),
+                    entities: vec![],
+                },
+                Persona {
+                    name: "b".into(),
+                    anchor: 0.8,
+                    view: "v".into(),
+                    entities: vec![],
+                },
+            ],
+            &[Trust {
+                from: "a".into(),
+                to: "b".into(),
+                weight: 0.7,
+                about: vec![],
+            }],
+        );
+        let _ = app.update(Message::Pane(Pane::Trust));
+        assert_eq!(app.pane, Pane::Trust);
+        assert_eq!(app.selected, 0);
+        let _ = app.update(Message::Key(Key::Character("j".into())));
+        assert_eq!(app.selected, 1);
+        let _ = app.update(Message::Key(Key::Character("j".into())));
+        assert_eq!(app.selected, 0);
+        let _ = app.update(Message::Key(Key::Character("k".into())));
+        assert_eq!(app.selected, 1);
     }
 }

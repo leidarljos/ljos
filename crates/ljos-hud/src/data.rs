@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use claimdag::{WorkGraph, WorkStatus};
 use serde_json::Value;
 
+use crate::graph::GraphLayout;
+
 /// One due atom.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueRow {
@@ -20,37 +22,29 @@ pub struct ClaimRow {
     pub summary: String,
 }
 
-/// One live trust row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TrustRow {
-    pub from: String,
-    pub to: String,
-    pub weight: f64,
-    pub about: String,
-}
-
 /// What the pane paints. Habitat errors become empty columns plus a banner.
+/// Trust is a graph, not a list of from→to floats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub due: Vec<DueRow>,
     pub claims: Vec<ClaimRow>,
-    pub trust: Vec<TrustRow>,
+    pub graph: GraphLayout,
     pub banner: String,
 }
 
 impl Snapshot {
     /// Load due, live claims, and trust. Never mutates a store.
     ///
-    /// One pack GET, then [`ljos_cli::due_of`] and [`ljos_cli::trust_rows`]
-    /// on the same atoms. Claims are [`WorkGraph::open_dir`]; the writer-empty
-    /// graph constructor is not used.
+    /// One pack GET, then [`ljos_cli::due_of`], [`ljos_cli::trust_rows`],
+    /// and [`ljos_cli::personas_of`] on the same atoms. Claims are
+    /// [`WorkGraph::open_dir`]; the writer-empty graph constructor is not used.
     pub fn load() -> Self {
         let mut banner = Vec::new();
-        let (due, trust) = match load_pack_panes() {
+        let (due, graph) = match load_pack_panes() {
             Ok(pair) => pair,
             Err(err) => {
                 banner.push(format!("pack: {err}"));
-                (Vec::new(), Vec::new())
+                (Vec::new(), GraphLayout::empty())
             }
         };
         let claims = match load_claims() {
@@ -63,39 +57,35 @@ impl Snapshot {
         Self {
             due,
             claims,
-            trust,
+            graph,
             banner: banner.join(" · "),
         }
     }
 
     /// A banner-only snapshot when the off-thread load cannot join.
+    /// The canvas stays empty; this must not invent personas or edges.
     pub fn banner_only(msg: String) -> Self {
         Self {
             due: Vec::new(),
             claims: Vec::new(),
-            trust: Vec::new(),
+            graph: GraphLayout::empty(),
             banner: msg,
         }
     }
 }
 
-fn load_pack_panes() -> Result<(Vec<DueRow>, Vec<TrustRow>)> {
+fn load_pack_panes() -> Result<(Vec<DueRow>, GraphLayout)> {
     let client = ljos_cli::pack()?;
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
         .context("pack: GET /v1/atoms failed")?;
     let now = ljos_cli::now_utc();
     let due = ljos_cli::due_of(&atoms, &now).iter().map(due_row).collect();
-    let trust = ljos_cli::trust_rows(&atoms)
-        .into_iter()
-        .map(|r| TrustRow {
-            from: r.from,
-            to: r.to,
-            weight: r.weight,
-            about: r.about.join(","),
-        })
-        .collect();
-    Ok((due, trust))
+    let graph = GraphLayout::from_pack(
+        &ljos_cli::personas_of(&atoms),
+        &ljos_cli::trust_rows(&atoms),
+    );
+    Ok((due, graph))
 }
 
 fn due_row(atom: &Value) -> DueRow {
@@ -163,12 +153,25 @@ mod tests {
         assert!(prod.contains("due_of"));
         assert!(prod.contains("open_dir"));
         assert!(prod.contains("trust_rows"));
+        assert!(prod.contains("personas_of"));
         assert!(!prod.contains("due_report"));
         assert!(!prod.contains("WorkGraph::load_dir"));
         assert!(!prod.contains(".load_dir("));
+        assert!(!prod.contains("personas_from_pack"));
+        assert!(!prod.contains("trust_from_pack"));
         assert!(
             !prod.contains("Ok(Vec::new())"),
             "open_dir Err must not become an empty column"
         );
+    }
+
+    #[test]
+    fn banner_only_is_an_empty_canvas() {
+        let snap = Snapshot::banner_only("pack: down".into());
+        assert!(snap.graph.is_empty());
+        assert!(snap.due.is_empty());
+        assert!(snap.claims.is_empty());
+        assert_eq!(snap.banner, "pack: down");
+        assert!(snap.graph.paint_ops(0, true, 400.0, 400.0).is_empty());
     }
 }
