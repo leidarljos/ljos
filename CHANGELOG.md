@@ -2,6 +2,14 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.14.1 (2026-09-20)
+
+- A finding names the module whose build failed (`GCCcore-15.2.0` for
+  `eOn-2.17.10-foss-2026.1`), read from EasyBuild's own line, not only
+  the recipe the campaign drives; the lesson and its entities carry both.
+  A finding a later attempt got past says so in its second sentence
+  instead of quoting the campaign's automatic resolution.
+
 ## 0.14.0 (2026-09-20)
 
 - `ljos findings STATE` reads an eb-stack campaign state file and prints

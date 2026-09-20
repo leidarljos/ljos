@@ -5702,8 +5702,13 @@ pub struct Finding {
     pub class: String,
     pub disposition: String,
     pub stage: String,
-    /// The recipe's file stem: `GCCcore-15.2.0`, `eOn-2.17.10-foss-2026.1`.
+    /// The recipe the campaign drives, as its file stem:
+    /// `eOn-2.17.10-foss-2026.1`.
     pub recipe: String,
+    /// The module whose build failed, when the evidence names one:
+    /// `GCCcore-15.2.0`, `gettext-0.26-GCCcore-15.2.0`. A campaign fails in
+    /// its dependencies far more often than in the recipe it drives.
+    pub module: String,
     pub summary: String,
     /// The last error line the evidence carries, else the summary.
     pub error: String,
@@ -5748,6 +5753,33 @@ fn error_line(evidence: &str, summary: &str) -> String {
         .unwrap_or_else(|| summary.to_string())
 }
 
+/// The module EasyBuild was installing when it stopped: `ERROR:
+/// Installation of X.eb failed` names it; else the last `== building and
+/// installing NAME/VERSION...` line does.
+fn failed_module(evidence: &str) -> Option<String> {
+    let installation = evidence.lines().rev().find_map(|l| {
+        let rest = l.split("Installation of ").nth(1)?;
+        let eb = rest.split(".eb failed").next()?;
+        (!eb.is_empty() && !eb.contains(' ')).then(|| recipe_stem(eb))
+    });
+    installation.or_else(|| {
+        evidence.lines().rev().find_map(|l| {
+            let rest = l.trim().strip_prefix("== building and installing ")?;
+            let name = rest.trim_end_matches('.').trim();
+            (!name.is_empty()).then(|| name.replacen('/', "-", 1))
+        })
+    })
+}
+
+/// What EasyBuild said after naming the module, else the whole line.
+fn error_reason(error: &str) -> &str {
+    error
+        .split(".eb failed: ")
+        .nth(1)
+        .unwrap_or(error)
+        .trim_start_matches("ERROR: ")
+}
+
 fn text_of(v: &Value, key: &str) -> String {
     v.get(key)
         .and_then(Value::as_str)
@@ -5774,6 +5806,7 @@ pub fn read_campaign(state: &Path) -> Result<Campaign> {
         .map(|f| {
             let summary = text_of(f, "summary");
             let resolution = f.get("resolution");
+            let evidence = text_of(f, "evidence");
             Finding {
                 id: text_of(f, "id"),
                 status: text_of(f, "status"),
@@ -5781,7 +5814,8 @@ pub fn read_campaign(state: &Path) -> Result<Campaign> {
                 disposition: text_of(f, "disposition"),
                 stage: text_of(f, "stage"),
                 recipe: recipe_stem(&text_of(f, "recipe")),
-                error: error_line(&text_of(f, "evidence"), &summary),
+                module: failed_module(&evidence).unwrap_or_default(),
+                error: error_line(&evidence, &summary),
                 summary,
                 action: resolution.map(|r| text_of(r, "action")).unwrap_or_default(),
                 changes: resolution
@@ -5835,19 +5869,30 @@ fn clip_words(text: &str, n: usize) -> String {
     out
 }
 
-/// The lesson a resolved finding leaves: what failed where, then the fix.
-/// Two short sentences; the pack refuses more, and refuses hard prose.
+/// The lesson a finding leaves: what failed where, then the fix, or that a
+/// later attempt got past it. Two short sentences; the pack refuses more,
+/// and refuses hard prose.
 #[must_use]
 pub fn finding_lesson(campaign: &Campaign, f: &Finding) -> String {
-    let what = clip_words(&f.error, 10);
+    let what = clip_words(error_reason(&f.error), 10);
+    let subject = if f.module.is_empty() {
+        f.recipe.clone()
+    } else if f.module == f.recipe {
+        f.module.clone()
+    } else {
+        format!("{} for {}", f.module, f.recipe)
+    };
     let mut first = format!(
-        "{} on {}: {} failed in the {} step",
-        f.recipe, campaign.target, f.class, f.stage
+        "{subject} on {}: {} failed in the {} step",
+        campaign.target, f.class, f.stage
     );
     if !what.is_empty() && what != f.summary {
         first.push_str(&format!(" with {what}"));
     }
     first.push('.');
+    if superseded_by_retry(f) {
+        return format!("{first} A later attempt got past it.");
+    }
     let mut fix = clip_words(&f.action, 14);
     if !f.changes.is_empty() {
         let files: Vec<String> = f
@@ -5868,10 +5913,16 @@ pub fn finding_lesson(campaign: &Campaign, f: &Finding) -> String {
 /// The entities a finding's lesson is about, so a later cue on the
 /// recipe, the package or the failure class activates it.
 fn finding_entities(campaign: &Campaign, f: &Finding) -> Vec<String> {
-    let mut out = vec![f.recipe.clone()];
-    if let Some(name) = f.recipe.split('-').next() {
-        if !name.is_empty() && name != f.recipe {
-            out.push(name.to_string());
+    let mut out: Vec<String> = Vec::new();
+    for stem in [&f.module, &f.recipe] {
+        if stem.is_empty() || out.contains(stem) {
+            continue;
+        }
+        out.push(stem.clone());
+        if let Some(name) = stem.split('-').next() {
+            if !name.is_empty() && name != stem && !out.iter().any(|e| e == name) {
+                out.push(name.to_string());
+            }
         }
     }
     if !campaign.package.is_empty() {
@@ -5909,7 +5960,17 @@ pub fn format_findings(campaign: &Campaign) -> String {
         };
         out.push_str(&format!(
             "{}\t{}\t{}/{}\t{}\t{}\t{}\n",
-            f.id, f.status, f.class, f.disposition, f.stage, f.recipe, tail
+            f.id,
+            f.status,
+            f.class,
+            f.disposition,
+            f.stage,
+            if f.module.is_empty() {
+                &f.recipe
+            } else {
+                &f.module
+            },
+            tail
         ));
     }
     out
@@ -7441,6 +7502,8 @@ mod tests {
         assert!(now_utc().as_str() > "2026-01-01T00:00:00.000Z");
     }
 
+    const EVIDENCE: &str = "stdout:\n== building and installing GCCcore/15.2.0...\nstderr:\nERROR: Installation of GCCcore-15.2.0.eb failed: shell command 'make ...' failed with exit code 2 in build step for GCCcore-15.2.0.eb\nsrun: error: task 0 exited";
+
     #[test]
     fn a_finding_lesson_is_two_short_sentences_about_the_recipe() {
         let campaign = Campaign {
@@ -7457,23 +7520,32 @@ mod tests {
             class: "compile".into(),
             disposition: "requires-judgment".into(),
             stage: "build".into(),
-            recipe: recipe_stem("easyconfigs/g/GCCcore/GCCcore-15.2.0.eb"),
+            recipe: recipe_stem("easyconfigs/e/eOn/eOn-2.17.10-foss-2026.1.eb"),
+            module: failed_module(EVIDENCE).unwrap_or_default(),
             summary: "Compile failure from EasyBuild command (exit Some(1))".into(),
-            error: error_line(
-                "stdout:\n== building\nstderr:\nfatal error: linux/scc.h: No such file or directory.\nsrun: error: task 0 exited",
-                "Compile failure",
-            ),
-            action: "applied the GCC 14 libsanitizer kernel headers patch. Kept in the overlay".into(),
+            error: error_line(EVIDENCE, "Compile failure"),
+            action: "applied the GCC 14 libsanitizer kernel headers patch. Kept in the overlay"
+                .into(),
             changes: vec!["overlay/g/GCCcore/GCCcore-15.2.0.eb".into()],
         };
+        assert_eq!(f.module, "GCCcore-15.2.0");
         let lesson = finding_lesson(&campaign, &f);
-        assert!(lesson.starts_with("GCCcore-15.2.0 on terra: compile failed in the build step with fatal error: linux/scc.h: No such file or directory."), "{lesson}");
-        assert!(lesson.ends_with("in GCCcore-15.2.0."), "{lesson}");
-        assert_eq!(lesson.matches(". ").count(), 1, "{lesson}");
+        assert_eq!(
+            lesson,
+            "GCCcore-15.2.0 for eOn-2.17.10-foss-2026.1 on terra: compile failed in the build step \
+             with shell command 'make ,,,' failed with exit code 2 in. \
+             Fix: applied the GCC 14 libsanitizer kernel headers patch, Kept in the overlay in GCCcore-15.2.0."
+        );
         assert!(!lesson.contains("srun"));
         assert_eq!(
             finding_entities(&campaign, &f),
-            ["GCCcore-15.2.0", "GCCcore", "eOn", "compile"]
+            [
+                "GCCcore-15.2.0",
+                "GCCcore",
+                "eOn-2.17.10-foss-2026.1",
+                "eOn",
+                "compile"
+            ]
         );
         let retry = Finding {
             action: "successful campaign retry superseded this finding".into(),
@@ -7481,6 +7553,11 @@ mod tests {
         };
         assert!(superseded_by_retry(&retry));
         assert!(!superseded_by_retry(&f));
+        assert!(finding_lesson(&campaign, &retry).ends_with("A later attempt got past it."));
+        assert_eq!(
+            failed_module("== building and installing gettext/0.26...\n== FAILED"),
+            Some("gettext-0.26".into())
+        );
     }
 
     #[test]

@@ -1276,6 +1276,7 @@ impl LjosServer {
                         class: f.class.clone(),
                         stage: f.stage.clone(),
                         recipe: f.recipe.clone(),
+                        module: f.module.clone(),
                         summary: f.summary.clone(),
                         error: f.error.clone(),
                         action: f.action.clone(),
@@ -1457,8 +1458,11 @@ pub struct FindingRow {
     pub class: String,
     /// The build stage that failed.
     pub stage: String,
-    /// The recipe's file stem.
+    /// The recipe the campaign drives, as its file stem.
     pub recipe: String,
+    /// The module whose build failed, when the evidence names one; a
+    /// campaign fails in its dependencies more often than in its recipe.
+    pub module: String,
     /// One line to triage from.
     pub summary: String,
     /// The last error line the evidence carries.
