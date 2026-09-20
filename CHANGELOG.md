@@ -14,10 +14,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   StatusNotifier tray, `--install-desktop`, guest `xdg_activation_v1`.
   Default detaches; `--foreground` stays attached. First-start
   `--show`/`--toggle` keeps `XDG_ACTIVATION_TOKEN` for the owner (hide
-  still unsets without activating). Overlay `Closed` hides. Three
-  read-only panes (due, claims, trust) over library APIs; a habitat that
-  is down is a banner. `ljos doctor` lists `ljos-hud` and does not
-  require it.
+  still unsets without activating). Overlay `Closed` hides. Due and
+  claims stay rails; trust is an iced canvas of persona rings and
+  weighted edges (`trust_from_pack` ∪ `personas_from_pack`), not a
+  from→to column. Pack down is a banner plus a blank canvas; an empty
+  pack is honest empty copy. Due rows keep `due_at`. `ljos doctor`
+  lists `ljos-hud` and does not require it.
 
 ## 0.16.1 (2026-09-20)
 

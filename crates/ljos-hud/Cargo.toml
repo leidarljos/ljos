@@ -32,6 +32,7 @@ claimdag = "0.6.2"
 iced = { version = "0.14", default-features = true, features = [
     "tokio",
     "advanced",
+    "canvas",
 ] }
 icedtea = "0.17.0"
 serde_json.workspace = true

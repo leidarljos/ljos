@@ -6,6 +6,7 @@ pub mod app;
 pub mod cli;
 pub mod data;
 pub mod detach;
+pub mod graph;
 pub mod install_desktop;
 pub mod log;
 pub mod place;
@@ -61,5 +62,36 @@ mod tests {
             !cargo.contains("ljos-hud"),
             "ljos-cli must not depend on the HUD crate"
         );
+    }
+
+    #[test]
+    fn hud_sources_have_no_mutations() {
+        let files = [
+            include_str!("app.rs"),
+            include_str!("bin.rs"),
+            include_str!("cli.rs"),
+            include_str!("data.rs"),
+            include_str!("detach.rs"),
+            include_str!("graph.rs"),
+            include_str!("install_desktop.rs"),
+            include_str!("log.rs"),
+            include_str!("place.rs"),
+            include_str!("summon.rs"),
+            include_str!("theme.rs"),
+            include_str!("tray.rs"),
+            include_str!("view.rs"),
+            include_str!("wlactivate.rs"),
+            include_str!("lib.rs"),
+        ];
+        for src in files {
+            let prod = src.split("#[cfg(test)]").next().unwrap();
+            assert!(!prod.contains("graded("), "HUD must not grade");
+            assert!(!prod.contains("post_atom"), "HUD must not write the pack");
+            assert!(!prod.contains("sweep("), "HUD must not sweep");
+            assert!(!prod.contains("fire: true"), "HUD must not fire an island");
+            assert!(!prod.contains("fire=true"), "HUD must not fire an island");
+            assert!(!prod.contains("due_report"), "HUD must not call due_report");
+            assert!(!prod.contains("load_dir"), "HUD must not call load_dir");
+        }
     }
 }

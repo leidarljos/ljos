@@ -4,12 +4,16 @@ use anyhow::{Context, Result};
 use claimdag::{WorkGraph, WorkStatus};
 use serde_json::Value;
 
+use crate::graph::TrustGraph;
+
 /// One due atom.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueRow {
     pub id: String,
     pub kind: String,
     pub text: String,
+    /// Review clock instant, empty when the atom has never been graded.
+    pub due_at: String,
 }
 
 /// One live claim-graph node.
@@ -20,37 +24,31 @@ pub struct ClaimRow {
     pub summary: String,
 }
 
-/// One live trust row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TrustRow {
-    pub from: String,
-    pub to: String,
-    pub weight: f64,
-    pub about: String,
-}
-
 /// What the pane paints. Habitat errors become empty columns plus a banner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub due: Vec<DueRow>,
     pub claims: Vec<ClaimRow>,
-    pub trust: Vec<TrustRow>,
+    /// Personas ∪ trust endpoints, laid out once per edge-set change.
+    pub graph: TrustGraph,
+    /// False when the pack GET failed. Distinct from an honest empty graph.
+    pub pack_ok: bool,
     pub banner: String,
 }
 
 impl Snapshot {
-    /// Load due, live claims, and trust. Never mutates a store.
+    /// Load due, live claims, and the trust graph. Never mutates a store.
     ///
-    /// One pack GET, then [`ljos_cli::due_of`] and [`ljos_cli::trust_rows`]
-    /// on the same atoms. Claims are [`WorkGraph::open_dir`]; the writer-empty
-    /// graph constructor is not used.
+    /// One pack GET, then [`ljos_cli::due_of`], [`ljos_cli::trust_rows`],
+    /// and [`ljos_cli::personas_of`] on the same atoms. Claims are
+    /// [`WorkGraph::open_dir`]; the writer-empty graph constructor is not used.
     pub fn load() -> Self {
         let mut banner = Vec::new();
-        let (due, trust) = match load_pack_panes() {
+        let (due, graph, pack_ok) = match load_pack_panes() {
             Ok(pair) => pair,
             Err(err) => {
                 banner.push(format!("pack: {err}"));
-                (Vec::new(), Vec::new())
+                (Vec::new(), TrustGraph::empty(), false)
             }
         };
         let claims = match load_claims() {
@@ -63,7 +61,8 @@ impl Snapshot {
         Self {
             due,
             claims,
-            trust,
+            graph,
+            pack_ok,
             banner: banner.join(" · "),
         }
     }
@@ -73,29 +72,24 @@ impl Snapshot {
         Self {
             due: Vec::new(),
             claims: Vec::new(),
-            trust: Vec::new(),
+            graph: TrustGraph::empty(),
+            pack_ok: false,
             banner: msg,
         }
     }
 }
 
-fn load_pack_panes() -> Result<(Vec<DueRow>, Vec<TrustRow>)> {
+fn load_pack_panes() -> Result<(Vec<DueRow>, TrustGraph, bool)> {
     let client = ljos_cli::pack()?;
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
         .context("pack: GET /v1/atoms failed")?;
     let now = ljos_cli::now_utc();
     let due = ljos_cli::due_of(&atoms, &now).iter().map(due_row).collect();
-    let trust = ljos_cli::trust_rows(&atoms)
-        .into_iter()
-        .map(|r| TrustRow {
-            from: r.from,
-            to: r.to,
-            weight: r.weight,
-            about: r.about.join(","),
-        })
-        .collect();
-    Ok((due, trust))
+    let trust = ljos_cli::trust_rows(&atoms);
+    let personas = ljos_cli::personas_of(&atoms);
+    let graph = TrustGraph::from_pack(&personas, &trust);
+    Ok((due, graph, true))
 }
 
 fn due_row(atom: &Value) -> DueRow {
@@ -119,6 +113,11 @@ fn due_row(atom: &Value) -> DueRow {
             .chars()
             .take(96)
             .collect(),
+        due_at: atom
+            .get("due_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -147,13 +146,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn due_row_truncates_text() {
-        let atom =
-            serde_json::json!({"id":"abcdefghijklmnop","kind":"lesson","text":"x".repeat(200)});
+    fn banner_only_is_pack_down() {
+        let snap = Snapshot::banner_only("pack: down".into());
+        assert!(!snap.pack_ok);
+        assert!(snap.graph.nodes.is_empty());
+        assert_eq!(snap.banner, "pack: down");
+    }
+
+    #[test]
+    fn due_row_keeps_due_at() {
+        let atom = serde_json::json!({
+            "id":"abcdefghijklmnop",
+            "kind":"lesson",
+            "text":"x".repeat(200),
+            "due_at":"2026-09-20T10:00:00.000Z"
+        });
         let row = due_row(&atom);
         assert_eq!(row.id.len(), 12);
         assert_eq!(row.kind, "lesson");
         assert_eq!(row.text.len(), 96);
+        assert_eq!(row.due_at, "2026-09-20T10:00:00.000Z");
     }
 
     #[test]
@@ -163,6 +175,7 @@ mod tests {
         assert!(prod.contains("due_of"));
         assert!(prod.contains("open_dir"));
         assert!(prod.contains("trust_rows"));
+        assert!(prod.contains("personas_of"));
         assert!(!prod.contains("due_report"));
         assert!(!prod.contains("WorkGraph::load_dir"));
         assert!(!prod.contains(".load_dir("));
@@ -170,5 +183,10 @@ mod tests {
             !prod.contains("Ok(Vec::new())"),
             "open_dir Err must not become an empty column"
         );
+        assert!(!prod.contains("graded("));
+        assert!(!prod.contains("post_atom"));
+        assert!(!prod.contains("sweep("));
+        assert!(!prod.contains("fire: true"));
+        assert!(!prod.contains("fire=true"));
     }
 }

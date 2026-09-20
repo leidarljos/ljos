@@ -32,6 +32,8 @@ pub enum Message {
     Snap(Snapshot),
     /// Kick an off-thread load.
     Refresh,
+    /// Skip chip: jump to a pane. Chips sit in the layout, not off-screen.
+    Skip(crate::view::Pane),
     Key(Key),
     Close(window::Id),
     Closed(window::Id),
@@ -85,7 +87,7 @@ impl HudApp {
         let n = match self.pane {
             Pane::Due => self.snap.due.len(),
             Pane::Claims => self.snap.claims.len(),
-            Pane::Trust => self.snap.trust.len(),
+            Pane::Trust => self.snap.graph.nodes.len(),
         };
         if n == 0 {
             self.selected = 0;
@@ -132,7 +134,10 @@ impl HudApp {
                 Task::none()
             }
             Message::Refresh => load_snap(),
-            Message::Snap(snap) => {
+            Message::Snap(mut snap) => {
+                let mut graph = std::mem::take(&mut self.snap.graph);
+                graph.replace_if_edge_set_changed(std::mem::take(&mut snap.graph));
+                snap.graph = graph;
                 self.snap = snap;
                 self.clamp_selected();
                 Task::none()
@@ -166,6 +171,11 @@ impl HudApp {
                     self.visible = false;
                     self.pending_activation_token = None;
                 }
+                Task::none()
+            }
+            Message::Skip(pane) => {
+                self.pane = pane;
+                self.selected = 0;
                 Task::none()
             }
             Message::Key(key) => self.on_key(key),
@@ -594,6 +604,15 @@ mod tests {
         assert!(!app.visible);
         assert!(!app.mapped());
         assert_eq!(app.pending_activation_token, None);
+    }
+
+    #[test]
+    fn skip_chip_jumps_pane() {
+        let mut app = empty_app();
+        assert_eq!(app.pane, Pane::Due);
+        let _ = app.update(Message::Skip(Pane::Trust));
+        assert_eq!(app.pane, Pane::Trust);
+        assert_eq!(app.selected, 0);
     }
 
     #[test]
