@@ -2060,6 +2060,24 @@ pub fn pack() -> Result<PacksetClient> {
         .with_workspace(workspace))
 }
 
+/// The pack's last write, RFC 3339, for a HUD watch. `None` when the
+/// status has no stamp yet.
+///
+/// # Errors
+///
+/// The pack not answering.
+pub fn pack_last_write_ts() -> Result<Option<String>> {
+    let client = pack()?;
+    let status = client
+        .status(Some(&client.workspace()))
+        .context("pack: GET /v1/status failed")?;
+    Ok(status
+        .get("last_write_ts")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string))
+}
+
 pub fn join(parts: &[String]) -> String {
     parts.join(" ")
 }
@@ -4840,19 +4858,19 @@ pub struct Event {
     pub text: String,
 }
 
-/// The issue's timeline, the three stores read as one dated list, oldest
-/// first: the tracker's logbook (creation, state changes, claims, notes),
-/// the deeds the issue cites with the time each was produced, and the
-/// memories the issue's title activates with the time each was written.
-/// The reader gets time as data, not as stamps to do arithmetic on: each
-/// line carries its age and the gap since the line before it, and a later
-/// line supersedes an earlier one on the same matter.
+/// The issue's timeline as dated rows. The HUD paints this; it does not
+/// parse `ljos timeline` stdout. The tracker shell still sits inside this
+/// function, a named gap (`vissue_core::show_json` / `deedar::Store::evidence`).
 ///
 /// # Errors
 ///
 /// The tracker not answering. A deed store or pack that does not answer
 /// leaves its rows out; the tracker's rows are the spine.
-pub fn timeline(issue: &str, limit: usize) -> Result<String> {
+pub fn timeline_events(issue: &str, limit: usize) -> Result<Vec<Event>> {
+    Ok(timeline_of(issue, limit)?.1)
+}
+
+fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
     let said = run_captured("vissue", &["show", issue, "--json"])?;
     let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
     let title = v["title"].as_str().unwrap_or(issue).to_string();
@@ -4889,13 +4907,29 @@ pub fn timeline(issue: &str, limit: usize) -> Result<String> {
             }
         }
     }
-    // Stable, so events sharing a minute keep the order their store gave.
     events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
     let skip = events.len().saturating_sub(limit);
+    Ok((title, events[skip..].to_vec()))
+}
+
+/// The issue's timeline, the three stores read as one dated list, oldest
+/// first: the tracker's logbook (creation, state changes, claims, notes),
+/// the deeds the issue cites with the time each was produced, and the
+/// memories the issue's title activates with the time each was written.
+/// The reader gets time as data, not as stamps to do arithmetic on: each
+/// line carries its age and the gap since the line before it, and a later
+/// line supersedes an earlier one on the same matter.
+///
+/// # Errors
+///
+/// The tracker not answering. A deed store or pack that does not answer
+/// leaves its rows out; the tracker's rows are the spine.
+pub fn timeline(issue: &str, limit: usize) -> Result<String> {
+    let (title, events) = timeline_of(issue, limit)?;
     Ok(format!(
         "timeline of {issue}: {title}
 {}",
-        format_events(&events[skip..], &now_utc())
+        format_events(&events, &now_utc())
     ))
 }
 
@@ -7826,6 +7860,15 @@ mod tests {
         assert_eq!(ids, ["never", "blank", "late", "later"]);
         assert!(now_utc().ends_with(".000Z"));
         assert!(now_utc().as_str() > "2026-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn timeline_exposes_event_rows() {
+        let src = include_str!("lib.rs");
+        assert!(src.contains("pub fn timeline_events"));
+        assert!(src.contains("Result<Vec<Event>>"));
+        assert!(src.contains("pub fn pack_last_write_ts"));
+        assert!(src.contains("GET /v1/status"));
     }
 
     const EVIDENCE: &str = "stdout:\n== building and installing GCCcore/15.2.0...\nstderr:\nERROR: Installation of GCCcore-15.2.0.eb failed: shell command 'make ...' failed with exit code 2 in build step for GCCcore-15.2.0.eb\nsrun: error: task 0 exited";

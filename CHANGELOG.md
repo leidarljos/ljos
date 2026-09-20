@@ -16,13 +16,18 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   detaches; `--foreground` stays attached. First-start `--show`/`--toggle`
   keeps `XDG_ACTIVATION_TOKEN` for the owner (hide still unsets without
   activating). Overlay `Closed` hides. Three read-only panes over library
-  APIs: due (with `due_at`), claims, and a trust-graph canvas (personas ∪
-  trust endpoints, stroke by weight, ring by `(1 - anchor)`, missing
-  persona a hollow disk, dashed when scoped). Skip chips sit in the
-  layout in key order 1/2/3 (due, claims, graph). A habitat that is down
-  is an icedtea banner and a status page; pack-down and honest-empty
-  differ, and a claims banner does not blank an up-empty graph. HUD
-  sources never call `graded` / `post_atom` / `sweep` / `fire=true`.
+  APIs: due (with `due_at`, `review_summary`, display-only grade chips),
+  claims (assignee, `cas_gen`, occupancy, lease remaining), a trust-graph
+  canvas (personas ∪ trust endpoints, stroke by weight, ring by
+  `(1 - anchor)`, missing persona a hollow disk, dashed when scoped),
+  island (`packset_search` plus `packset_island(cue, false)`), and a deed
+  rail (`ljos_cli::timeline_events` → `Vec<Event>`). Skip chips sit in
+  the layout in key order 1-5 (due, claims, graph, island, deeds). Watch
+  `work.bin` plus pack `last_write_ts`; the 50 ms tick is chrome. A
+  habitat that is down is an icedtea banner and a status page; pack-down
+  and honest-empty differ, and a claims banner does not blank an up-empty
+  graph. HUD sources never call `graded` / `post_atom` / `sweep` /
+  `fire=true` / `due_report` / `complete`.
   `ljos doctor` lists `ljos-hud` and does not require it. crates.io
   publishes `-p ljos-hud` after `-p ljos`. The HUD crate does not copy
   the CLI launcher (`resolve_hud_bin` stays in `ljos-cli`).

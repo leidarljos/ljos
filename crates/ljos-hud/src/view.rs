@@ -1,4 +1,4 @@
-//! Cockpit face: due and claims columns around a trust-graph canvas.
+//! Cockpit face: due and claims around a trust-graph canvas, island and deed rails.
 
 use iced::mouse;
 use iced::widget::canvas::{self, stroke, Geometry, Path, Stroke};
@@ -12,15 +12,17 @@ use icedtea::variant::Variant;
 use icedtea::widget;
 
 use crate::app::Message;
-use crate::data::Snapshot;
+use crate::data::{event_line, format_lease, Snapshot};
 use crate::graph::{GraphLayout, PaintOp};
 use crate::theme;
 
-/// Skip chips in layout order. Keys 1/2/3 are due, claims, graph.
-pub const SKIP_CHIPS: [(&str, Pane); 3] = [
+/// Skip chips in layout order. Keys 1..=5 match due, claims, graph, island, deeds.
+pub const SKIP_CHIPS: [(&str, Pane); 5] = [
     ("due", Pane::Due),
     ("claims", Pane::Claims),
     ("graph", Pane::Trust),
+    ("island", Pane::Island),
+    ("deeds", Pane::Deeds),
 ];
 
 /// What the graph pane paints. Pack-down is not honest-empty.
@@ -51,6 +53,8 @@ pub enum Pane {
     Due,
     Claims,
     Trust,
+    Island,
+    Deeds,
 }
 
 impl Pane {
@@ -58,15 +62,19 @@ impl Pane {
         match self {
             Self::Due => Self::Claims,
             Self::Claims => Self::Trust,
-            Self::Trust => Self::Due,
+            Self::Trust => Self::Island,
+            Self::Island => Self::Deeds,
+            Self::Deeds => Self::Due,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Due => Self::Trust,
+            Self::Due => Self::Deeds,
             Self::Claims => Self::Due,
             Self::Trust => Self::Claims,
+            Self::Island => Self::Trust,
+            Self::Deeds => Self::Island,
         }
     }
 
@@ -75,15 +83,23 @@ impl Pane {
             Self::Due => "due",
             Self::Claims => "claims",
             Self::Trust => "graph",
+            Self::Island => "island",
+            Self::Deeds => "deeds",
         }
     }
 }
 
-/// Paint due, the trust canvas, and claims. Skip chips sit in the layout.
-pub fn view<'a>(snap: &'a Snapshot, pane: Pane, selected: usize) -> Element<'a, Message> {
+/// Paint due, the trust canvas, claims, island, and the deed rail.
+pub fn view<'a>(
+    snap: &'a Snapshot,
+    pane: Pane,
+    selected: usize,
+    now: &'a str,
+    now_unix: u64,
+) -> Element<'a, Message> {
     let tea = theme::tokens();
     let header: Element<'a, Message> = if snap.banner.is_empty() {
-        text("ljos  due  claims  graph   j/k  h/l  1 2 3  P  r  q")
+        text("ljos  due claims graph island deeds   j/k  h/l  1-5  P  r  q")
             .size(theme::SIZE_META)
             .color(theme::SUBTEXT)
             .into()
@@ -107,31 +123,90 @@ pub fn view<'a>(snap: &'a Snapshot, pane: Pane, selected: usize) -> Element<'a, 
             } else {
                 r.due_at.as_str()
             };
-            format!("{}  {}  {}  {}", r.kind, r.id, when, r.text)
+            format!(
+                "{}  {}  {}  [{}] [{}]  {}",
+                r.kind, r.id, when, r.clock, r.grade, r.text
+            )
         }),
     );
     let claims = column_pane(
         "claims",
         pane == Pane::Claims,
         selected,
-        snap.claims
-            .iter()
-            .map(|r| format!("{}  {}  {}", r.status, r.id, r.summary)),
+        snap.claims.iter().map(|r| {
+            format!(
+                "{}  {}  gen={}  {}  occ={}  {}  {}",
+                r.status,
+                r.id,
+                r.cas_gen,
+                r.assignee,
+                r.occupancy,
+                format_lease(&r.status, r.updated_unix, now_unix),
+                r.summary
+            )
+        }),
     );
 
     column![
         container(header).padding(8).width(Length::Fill),
+        container(clock_bar(snap, pane, selected, now, tea)).padding([0, 8]),
         container(skip_chips(pane, tea)).padding([0, 8]),
         row![
             due,
             graph_pane(snap, pane == Pane::Trust, selected, tea),
             claims,
         ]
-            .spacing(8)
-            .padding(8)
-            .height(Length::Fill),
+        .spacing(8)
+        .padding(8)
+        .height(Length::FillPortion(3)),
+        row![
+            island_rail(snap, pane == Pane::Island, selected),
+            deed_rail(snap, pane == Pane::Deeds, selected),
+        ]
+        .spacing(8)
+        .padding(8)
+        .height(Length::FillPortion(1)),
     ]
     .into()
+}
+
+fn clock_bar<'a>(
+    snap: &'a Snapshot,
+    pane: Pane,
+    selected: usize,
+    now: &'a str,
+    tea: Tokens,
+) -> Element<'a, Message> {
+    let summary = if snap.review_summary.is_empty() {
+        "review clock silent".to_string()
+    } else {
+        snap.review_summary.clone()
+    };
+    let mut chips = row![
+        text(summary).size(theme::SIZE_META).color(theme::TEXT),
+        text(now).size(theme::SIZE_META).color(theme::SUBTEXT),
+    ]
+    .spacing(8);
+    if pane == Pane::Due {
+        if let Some(row) = snap.due.get(selected) {
+            chips = chips.push(grade_chip(&row.clock, tea));
+            chips = chips.push(grade_chip(&row.grade, tea));
+        }
+    }
+    chips.into()
+}
+
+fn grade_chip(label: &str, tea: Tokens) -> Element<'static, Message> {
+    widget::chip(
+        label.to_string(),
+        None,
+        None,
+        tea,
+        Variant::Chip,
+        widget::ChipKind::Assist,
+        Icons::NONE,
+        A11y::new(format!("grade {label}"), Role::Status),
+    )
 }
 
 fn skip_chips(pane: Pane, tea: Tokens) -> Element<'static, Message> {
@@ -219,6 +294,51 @@ fn graph_pane<'a>(
             container::rounded_box
         })
         .into()
+}
+
+fn island_rail(snap: &Snapshot, focused: bool, selected: usize) -> Element<'_, Message> {
+    let cue = if snap.cue.is_empty() {
+        "(no cue)".to_string()
+    } else {
+        format!("cue  {}", snap.cue)
+    };
+    let mut lines: Vec<String> = vec![cue];
+    for row in &snap.island {
+        let seed = if row.seed { "seed" } else { "    " };
+        lines.push(format!(
+            "{}  {}  {}  {}  {}",
+            seed, row.activation, row.kind, row.id, row.text
+        ));
+    }
+    for hit in &snap.hits {
+        lines.push(format!(
+            "hit  {}  {}  {}  {}",
+            hit.score, hit.kind, hit.id, hit.text
+        ));
+    }
+    rail_pane("island", focused, selected, lines)
+}
+
+fn deed_rail(snap: &Snapshot, focused: bool, selected: usize) -> Element<'_, Message> {
+    let issue = if snap.issue.is_empty() {
+        "(no issue)".to_string()
+    } else {
+        format!("issue  {}", snap.issue)
+    };
+    let mut lines: Vec<String> = vec![issue];
+    for e in &snap.events {
+        lines.push(event_line(e));
+    }
+    rail_pane("deeds", focused, selected, lines)
+}
+
+fn rail_pane(
+    title: &'static str,
+    active: bool,
+    selected: usize,
+    lines: Vec<String>,
+) -> Element<'static, Message> {
+    column_pane(title, active, selected, lines.into_iter())
 }
 
 struct TrustCanvas<'a> {
@@ -383,8 +503,10 @@ mod tests {
     #[test]
     fn pane_cycles() {
         assert_eq!(Pane::Due.next(), Pane::Claims);
-        assert_eq!(Pane::Trust.next(), Pane::Due);
-        assert_eq!(Pane::Due.prev(), Pane::Trust);
+        assert_eq!(Pane::Trust.next(), Pane::Island);
+        assert_eq!(Pane::Deeds.next(), Pane::Due);
+        assert_eq!(Pane::Due.prev(), Pane::Deeds);
+        assert_eq!(Pane::Island.prev(), Pane::Trust);
     }
 
     #[test]
@@ -397,13 +519,28 @@ mod tests {
         assert_eq!(SKIP_CHIPS[0], ("due", Pane::Due));
         assert_eq!(SKIP_CHIPS[1], ("claims", Pane::Claims));
         assert_eq!(SKIP_CHIPS[2], ("graph", Pane::Trust));
+        assert_eq!(SKIP_CHIPS[3], ("island", Pane::Island));
+        assert_eq!(SKIP_CHIPS[4], ("deeds", Pane::Deeds));
         assert!(prod.contains("canvas("));
         assert!(prod.contains("widget::banner"));
         assert!(prod.contains("status_page"));
+        assert!(prod.contains("grade_chip"));
+        assert!(prod.contains("island_rail"));
+        assert!(prod.contains("deed_rail"));
         assert!(
             !prod.contains(" → "),
             "trust pane must not be a from→to column"
         );
+    }
+
+    #[test]
+    fn grade_chips_are_display_only() {
+        let src = include_str!("view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("fn grade_chip"));
+        assert!(prod.contains("None,\n        None,\n        tea"));
+        assert!(!prod.contains("graded("));
+        assert!(!prod.contains("Message::Grade"));
     }
 
     #[test]
@@ -425,11 +562,8 @@ mod tests {
         assert_eq!(graph_instrument(&boot), GraphInstrument::Empty);
 
         let claims_banner = Snapshot {
-            due: Vec::new(),
-            claims: Vec::new(),
-            graph: GraphLayout::empty(),
-            pack_ok: true,
             banner: "claims: down".into(),
+            ..Snapshot::default()
         };
         assert_eq!(
             graph_instrument(&claims_banner),
