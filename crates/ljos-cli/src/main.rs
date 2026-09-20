@@ -3,11 +3,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
-    consensus_steps_for, doctor, due_report, finish, format_consolidation, format_doctor,
-    format_findings, format_hits, format_hubs, format_island, format_personas, format_readings,
-    format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
-    handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
+    age_of, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
+    consensus_steps_for, doctor, due_report, finish, format_bump_rows, format_consolidation,
+    format_doctor, format_findings, format_hits, format_hubs, format_island, format_personas,
+    format_readings, format_remembered, format_seat, format_steps, format_write_ack, graded, habit,
+    habits, handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
     island_entities, join, learn_anchors, learn_and_write, learn_shared, now_utc, on_path, onboard,
     pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
@@ -278,6 +278,23 @@ enum Cmd {
     },
     /// Atoms whose review is due, then one line on the state of the clock.
     Due,
+    /// Put an eb-stack bundle's modules on the tracker: one child issue per module under the parent, blockers along the dependency edges, the same ids on every run. `vissue ready` then lists what a seat can build now.
+    BumpPlan {
+        /// The bundle directory: `locks/default.lock.json` and `package.sbom.cdx.json` inside it.
+        bundle: PathBuf,
+        /// The tracker project the issues go in.
+        #[arg(long)]
+        project: String,
+        /// The bump ticket every module issue is a child of.
+        #[arg(long)]
+        parent: String,
+        /// The generation named in titles and ids; default the lock's toolchain (`foss/2026.1`).
+        #[arg(long)]
+        generation: Option<String>,
+        /// Print the rows and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// The typed findings of an eb-stack campaign state file, one per line; `--remember` writes one lesson per finding a person or a seat resolved, and `--issue` cites the state file on the issue.
     Findings {
         /// The campaign state file (`campaign.json`).
@@ -686,6 +703,17 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Due => print!("{}", due_report()?),
+        Cmd::BumpPlan {
+            bundle,
+            project,
+            parent,
+            generation,
+            dry_run,
+        } => {
+            let (generation, rows) =
+                bump_plan(&bundle, &project, &parent, generation.as_deref(), dry_run)?;
+            print!("{}", format_bump_rows(&generation, &rows));
+        }
         Cmd::Findings {
             state,
             remember,

@@ -2,6 +2,15 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.16.0 (2026-09-20)
+
+- `ljos bump-plan BUNDLE --project P --parent I` puts an eb-stack bundle
+  on the tracker: one child issue per module the lock builds, blocked by
+  the modules built before it along the SBOM's dependency edges, with ids
+  that are a hash of module and generation so a rerun holds what exists.
+  `vissue ready` is then the buildable frontier and a sitting refuses the
+  rest. `ljos_bump_plan` over MCP; `--dry-run` prints the rows.
+
 ## 0.15.0 (2026-09-20)
 
 - A sitting reads the issue's blockers from the tracker before it claims:

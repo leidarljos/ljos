@@ -12,15 +12,16 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 use ljos_cli::{
-    age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
-    consensus_steps_for, doctor, due, finish, format_change, format_consolidation, graded, habit,
-    habits, handover, identity_or_seat, island_entities, issue_words, learn_and_write, now_utc,
-    on_path, other_seat, pack, packset_consolidate, packset_forget, packset_island_as,
-    packset_search_as_of, packset_write_as, panel_steps, parse_every, personas_from_pack,
-    personas_speaking_to, policy_with_memory, predictions_of, read_campaign, receive, release,
-    remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, seat_name,
-    sitting_gated, timeline, topic_words, trust_from_pack, write_persona, write_prediction,
-    write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    age_of, announce_seat, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete,
+    conflicts, consensus_steps_for, doctor, due, finish, format_change, format_consolidation,
+    graded, habit, habits, handover, identity_or_seat, island_entities, issue_words,
+    learn_and_write, now_utc, on_path, other_seat, pack, packset_consolidate, packset_forget,
+    packset_island_as, packset_search_as_of, packset_write_as, panel_steps, parse_every,
+    personas_from_pack, personas_speaking_to, policy_with_memory, predictions_of, read_campaign,
+    receive, release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
+    seat_name, sitting_gated, timeline, topic_words, trust_from_pack, write_persona,
+    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1257,6 +1258,41 @@ impl LjosServer {
     }
 
     #[tool(
+        description = "Call this after eb_package_bump on a generation bump, before anybody builds: put the bundle's modules on the tracker as child issues of the bump ticket, blockers along the dependency edges, the same ids on every run. vissue_ready then lists the modules a seat can build now, and ljos_sitting refuses the rest until their blockers close. With dry_run the rows come back and nothing is written.",
+        annotations(
+            title = "Plan a bump on the tracker",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_bump_plan(
+        &self,
+        Parameters(args): Parameters<BumpPlanArgs>,
+    ) -> Result<Json<Rows<BumpRow>>, McpError> {
+        let (_generation, rows) = bump_plan(
+            Path::new(&args.bundle),
+            &args.project,
+            &args.parent,
+            args.generation.as_deref(),
+            args.dry_run,
+        )
+        .map_err(refused)?;
+        Ok(as_rows(
+            rows.into_iter()
+                .map(|r| BumpRow {
+                    id: r.id,
+                    module: r.module,
+                    recipe: r.recipe,
+                    blockers: r.blockers,
+                    result: r.result,
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
         description = "Call this after eb_campaign_run or eb_campaign_status on a bump: the campaign's typed findings, one row each with its class, stage, recipe, the error line and the fix. With remember, one lesson per finding a person or a seat resolved goes to the pack under the recipe's name, so the next bump of that recipe recalls it; with issue, the state file is cited as a deed on the issue. Findings a later attempt merely got past are skipped unless all.",
         annotations(
             title = "Campaign findings",
@@ -1458,6 +1494,38 @@ pub struct FindingsArgs {
     /// Cite the state file as a deed on this issue.
     #[serde(default)]
     pub issue: Option<String>,
+}
+
+/// A bundle to put on the tracker.
+#[derive(Deserialize, JsonSchema)]
+pub struct BumpPlanArgs {
+    /// The bundle directory `eb_package_bump` wrote (`out_dir`).
+    pub bundle: String,
+    /// The tracker project the module issues go in.
+    pub project: String,
+    /// The bump ticket every module issue is a child of.
+    pub parent: String,
+    /// The generation named in titles and ids; default the lock's toolchain.
+    #[serde(default)]
+    pub generation: Option<String>,
+    /// Print the rows and write nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// One module of a bump as the tracker holds it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BumpRow {
+    /// The issue id, the same on every run.
+    pub id: String,
+    /// The module as EasyBuild names it.
+    pub module: String,
+    /// The recipe path the lock names, when it does.
+    pub recipe: String,
+    /// The issues this one is blocked by: the modules built before it.
+    pub blockers: Vec<String>,
+    /// `made`, `held` (it existed), or `would make`.
+    pub result: String,
 }
 
 /// One typed finding of a campaign, and what the seat did with it.
@@ -1755,7 +1823,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            36,
+            37,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1786,6 +1854,7 @@ mod tests {
         assert_eq!(
             writers,
             [
+                "ljos_bump_plan",
                 "ljos_calibrate",
                 "ljos_claim",
                 "ljos_complete",

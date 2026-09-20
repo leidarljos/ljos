@@ -6158,6 +6158,239 @@ pub fn format_remembered(rows: &[Remembered]) -> String {
         .collect()
 }
 
+/// One module of a bump bundle as the tracker will hold it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BumpRow {
+    /// The issue id, the same on every run: a hash of the module and the
+    /// generation under the project.
+    pub id: String,
+    /// The module as EasyBuild names it: `CMake-4.2.1-GCCcore-15.2.0`.
+    pub module: String,
+    /// The recipe path the lock names, when it does.
+    pub recipe: String,
+    /// The modules this one is built after, by issue id.
+    pub blockers: Vec<String>,
+    /// What this run did: `made`, `held` (it existed), or `would make`.
+    pub result: String,
+}
+
+/// The stem of an EasyBuild module: `name-version[-toolchain-version]`.
+fn module_stem(name: &str, version: &str, toolchain: Option<(&str, &str)>) -> String {
+    match toolchain {
+        Some((tn, tv)) if !tn.is_empty() && tn != "system" => {
+            format!("{name}-{version}-{tn}-{tv}")
+        }
+        _ => format!("{name}-{version}"),
+    }
+}
+
+/// A deterministic issue id for a module of a generation: the project,
+/// then eight base-36 digits of the module and generation hashed.
+#[must_use]
+pub fn bump_issue_id(project: &str, module: &str, generation: &str) -> String {
+    let hex = work_id(&format!("bump:{module}:{generation}"));
+    let mut n = u128::from_str_radix(&hex[..24], 16).unwrap_or(0);
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    for _ in 0..8 {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+    }
+    format!("{project}-{}", String::from_utf8(out).unwrap_or_default())
+}
+
+/// The name behind a CycloneDX purl `pkg:generic/NAME@==VERSION`.
+fn purl_name(purl: &str) -> String {
+    purl.rsplit('/')
+        .next()
+        .unwrap_or(purl)
+        .split('@')
+        .next()
+        .unwrap_or(purl)
+        .to_string()
+}
+
+/// The plan a bundle implies for the tracker: one row per module the lock
+/// builds, blockers along the SBOM's dependency edges. Nothing is written.
+///
+/// # Errors
+///
+/// The bundle lacks `locks/default.lock.json` or `package.sbom.cdx.json`,
+/// or either is not what eb-stack writes.
+pub fn bump_rows(
+    bundle: &Path,
+    project: &str,
+    generation: Option<&str>,
+) -> Result<(String, Vec<BumpRow>)> {
+    let lock_path = bundle.join("locks").join("default.lock.json");
+    let sbom_path = bundle.join("package.sbom.cdx.json");
+    let lock: Value = serde_json::from_str(
+        &std::fs::read_to_string(&lock_path)
+            .with_context(|| format!("bump-plan: cannot read {}", lock_path.display()))?,
+    )
+    .with_context(|| format!("bump-plan: {} is not JSON", lock_path.display()))?;
+    let sbom: Value = serde_json::from_str(
+        &std::fs::read_to_string(&sbom_path)
+            .with_context(|| format!("bump-plan: cannot read {}", sbom_path.display()))?,
+    )
+    .with_context(|| format!("bump-plan: {} is not JSON", sbom_path.display()))?;
+    let tc = &lock["toolchain"];
+    let generation = generation.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "{}/{}",
+            tc["name"].as_str().unwrap_or("system"),
+            tc["version"].as_str().unwrap_or("")
+        )
+        .trim_end_matches('/')
+        .to_string()
+    });
+    // Every module the lock names, the root package first.
+    let mut modules: Vec<(String, String, String)> = Vec::new(); // name, stem, recipe
+    let root_name = lock["package"].as_str().unwrap_or("").to_string();
+    let root_stem = module_stem(
+        &root_name,
+        lock["version"].as_str().unwrap_or(""),
+        Some((
+            tc["name"].as_str().unwrap_or(""),
+            tc["version"].as_str().unwrap_or(""),
+        )),
+    ) + lock["versionsuffix"].as_str().unwrap_or("");
+    modules.push((root_name.clone(), root_stem, String::new()));
+    for dep in lock["dependencies"].as_array().into_iter().flatten() {
+        if dep["build"].as_bool() == Some(false) {
+            continue;
+        }
+        let name = dep["name"].as_str().unwrap_or("").to_string();
+        let dtc = &dep["toolchain"];
+        let stem = module_stem(
+            &name,
+            dep["version"].as_str().unwrap_or(""),
+            Some((
+                dtc["name"].as_str().unwrap_or(""),
+                dtc["version"].as_str().unwrap_or(""),
+            )),
+        );
+        let recipe = dep["easyconfig_path"].as_str().unwrap_or("").to_string();
+        if !name.is_empty() && !modules.iter().any(|(n, _, _)| *n == name) {
+            modules.push((name, stem, recipe));
+        }
+    }
+    let id_of = |name: &str| -> Option<String> {
+        modules
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, stem, _)| bump_issue_id(project, stem, &generation))
+    };
+    // Edges from the SBOM, by name; only edges between modules the lock builds.
+    let mut edges: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for d in sbom["dependencies"].as_array().into_iter().flatten() {
+        let from = purl_name(d["ref"].as_str().unwrap_or(""));
+        for on in d["dependsOn"].as_array().into_iter().flatten() {
+            let to = purl_name(on.as_str().unwrap_or(""));
+            if let Some(id) = id_of(&to) {
+                edges.entry(from.clone()).or_default().push(id);
+            }
+        }
+    }
+    let rows = modules
+        .iter()
+        .map(|(name, stem, recipe)| BumpRow {
+            id: bump_issue_id(project, stem, &generation),
+            module: stem.clone(),
+            recipe: recipe.clone(),
+            blockers: edges.get(name).cloned().unwrap_or_default(),
+            result: "would make".into(),
+        })
+        .collect();
+    Ok((generation, rows))
+}
+
+/// Put a bundle's modules on the tracker: one child issue per module under
+/// `parent`, blockers along the dependency edges, ids the same on every run
+/// so a rerun holds what exists and adds what is missing. `vissue ready`
+/// then lists the modules a seat can build now, and a sitting refuses the
+/// rest until their blockers close.
+///
+/// # Errors
+///
+/// The bundle is not readable, or the tracker refuses a create or an edge.
+pub fn bump_plan(
+    bundle: &Path,
+    project: &str,
+    parent: &str,
+    generation: Option<&str>,
+    dry: bool,
+) -> Result<(String, Vec<BumpRow>)> {
+    let (generation, mut rows) = bump_rows(bundle, project, generation)?;
+    if dry {
+        return Ok((generation, rows));
+    }
+    for row in &mut rows {
+        let exists = run_captured("vissue", &["show", &row.id, "--json"]).is_ok();
+        if exists {
+            row.result = "held".into();
+        } else {
+            let title = format!("Bump {} onto {generation}", row.module);
+            let body = if row.recipe.is_empty() {
+                format!("The bundle at {} names this module. Ladder: recipe check, package bump, lint, then the campaign.", bundle.display())
+            } else {
+                format!("Recipe {} in the bundle at {}. Ladder: recipe check, package bump, lint, then the campaign.", row.recipe, bundle.display())
+            };
+            run_captured(
+                "vissue",
+                &[
+                    "create", "-p", project, "--id", &row.id, "--parent", parent, "-t", "task",
+                    "--quiet", "--body", &body, &title,
+                ],
+            )
+            .with_context(|| format!("bump-plan: create {} ({})", row.id, row.module))?;
+            row.result = "made".into();
+        }
+    }
+    // Edges after every node exists; an edge already held is not an error.
+    for row in &rows {
+        let held: Vec<String> = run_captured("vissue", &["show", &row.id, "--json"])
+            .ok()
+            .and_then(|said| serde_json::from_str::<Value>(&said.stdout).ok())
+            .and_then(|v| v["blocked_by"].as_array().cloned())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        for dep in &row.blockers {
+            if held.iter().any(|h| h == dep) {
+                continue;
+            }
+            run_captured("vissue", &["update", &row.id, "--block", dep])
+                .with_context(|| format!("bump-plan: {} --block {dep}", row.id))?;
+        }
+    }
+    Ok((generation, rows))
+}
+
+#[must_use]
+pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
+    let mut out = format!(
+        "{} module{} onto {generation}\n",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{}\t{}\t{}\tafter {}\n",
+            r.id,
+            r.result,
+            r.module,
+            if r.blockers.is_empty() {
+                "nothing".to_string()
+            } else {
+                r.blockers.join(" ")
+            }
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     /// The tests that set or read the process environment take this lock:
@@ -7586,6 +7819,62 @@ mod tests {
     }
 
     const EVIDENCE: &str = "stdout:\n== building and installing GCCcore/15.2.0...\nstderr:\nERROR: Installation of GCCcore-15.2.0.eb failed: shell command 'make ...' failed with exit code 2 in build step for GCCcore-15.2.0.eb\nsrun: error: task 0 exited";
+
+    #[test]
+    fn a_bundle_becomes_rows_with_edges_and_steady_ids() {
+        let dir = std::env::temp_dir().join(format!("ljos-bump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("locks")).unwrap();
+        std::fs::write(
+            dir.join("locks/default.lock.json"),
+            r#"{"package":"eOn","version":"2.17.10","toolchain":{"name":"foss","version":"2026.1"},"versionsuffix":"",
+                "dependencies":[
+                 {"name":"CMake","version":"4.2.1","toolchain":{"name":"GCCcore","version":"15.2.0"},"easyconfig_path":"c/CMake/CMake-4.2.1-GCCcore-15.2.0.eb","build":true},
+                 {"name":"Eigen","version":"5.0.0","toolchain":{"name":"GCCcore","version":"15.2.0"},"easyconfig_path":"e/Eigen/Eigen-5.0.0-GCCcore-15.2.0.eb","build":true},
+                 {"name":"Python","version":"3.14.2","toolchain":{"name":"GCCcore","version":"15.2.0"},"easyconfig_path":"p/Python/Python-3.14.2-GCCcore-15.2.0.eb","build":false}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("package.sbom.cdx.json"),
+            r#"{"components":[],"dependencies":[
+                {"ref":"pkg:generic/eOn@2.17.10","dependsOn":["pkg:generic/CMake@==4.2.1","pkg:generic/Eigen@==5.0.0","pkg:generic/Python@==3.14.2"]},
+                {"ref":"pkg:generic/Eigen@==5.0.0","dependsOn":["pkg:generic/CMake@==4.2.1"]},
+                {"ref":"pkg:generic/CMake@==4.2.1"}]}"#,
+        )
+        .unwrap();
+        let (generation, rows) = bump_rows(&dir, "ebstack", None).unwrap();
+        assert_eq!(generation, "foss/2026.1");
+        let modules: Vec<&str> = rows.iter().map(|r| r.module.as_str()).collect();
+        assert_eq!(
+            modules,
+            [
+                "eOn-2.17.10-foss-2026.1",
+                "CMake-4.2.1-GCCcore-15.2.0",
+                "Eigen-5.0.0-GCCcore-15.2.0"
+            ],
+            "the root first; a module the lock does not build is not a row"
+        );
+        let cmake = &rows[1];
+        let eigen = &rows[2];
+        assert!(cmake.blockers.is_empty());
+        assert_eq!(eigen.blockers, [cmake.id.clone()]);
+        assert_eq!(
+            rows[0].blockers,
+            [cmake.id.clone(), eigen.id.clone()],
+            "an edge to an unbuilt module is dropped"
+        );
+        assert_eq!(
+            rows[0].id,
+            bump_issue_id("ebstack", "eOn-2.17.10-foss-2026.1", "foss/2026.1")
+        );
+        assert!(rows[0].id.starts_with("ebstack-") && rows[0].id.len() == "ebstack-".len() + 8);
+        assert_ne!(
+            rows[0].id,
+            bump_issue_id("ebstack", "eOn-2.17.10-foss-2026.1", "foss/2027a")
+        );
+        assert!(rows.iter().all(|r| r.result == "would make"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_finding_lesson_is_two_short_sentences_about_the_recipe() {

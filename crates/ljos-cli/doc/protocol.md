@@ -131,6 +131,17 @@ artifact: `eb_recipe_check`, `eb_package_bump` (the lock under
 `eb_campaign_run` and `eb_campaign_status` (`builds`,
 `binary-verified`). Say a rung only when its artifact exists.
 
+A generation bump is many modules under one ticket, and the tracker's
+graph is how a herd shares them: `ljos bump-plan out --project P
+--parent TICKET` (the MCP `ljos_bump_plan`) puts every module the
+bundle's lock builds on the tracker as a child issue, blocked by the
+modules built before it along the SBOM's edges, with the same ids on
+every run. `vissue ready -p P` is then the buildable frontier, each seat
+sits on one module, and a sitting on a module whose blockers are open
+is refused. Resolve each finding through eb-stack's `campaign finding
+resolve` with the action and the files it changed, so the lesson below
+carries the fix.
+
 Every typed finding the campaign records is a lesson once somebody
 resolved it: `ljos findings out/campaign.json --remember --issue ISSUE`
 (the MCP `ljos_findings`) writes one lesson per resolved finding under
