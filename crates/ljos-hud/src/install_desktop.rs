@@ -69,7 +69,7 @@ pub fn install(home: &Path, exe: &Path, xdg_data: Option<&Path>) -> io::Result<R
              Icon=ljos-hud\n\
              Terminal=false\n\
              Categories=Utility;Development;\n\
-             StartupWMClass={APP_ID}\n\
+             StartupWMClass={OVERLAY_APP_ID}\n\
              Keywords=ljos;seat;hud;\n"
         ),
     )?;
@@ -144,7 +144,11 @@ mod tests {
         assert!(report.wrote.iter().any(|p| p.ends_with("sway-hud.conf")));
         let desktop = fs::read_to_string(data.join("applications/ljos-hud.desktop")).unwrap();
         assert!(desktop.contains("Exec="));
-        assert!(desktop.contains(&format!("StartupWMClass={APP_ID}")));
+        assert!(desktop.contains(&format!("StartupWMClass={OVERLAY_APP_ID}")));
+        assert!(
+            !desktop.contains(&format!("StartupWMClass={APP_ID}")),
+            "default map is the overlay, not the pop-out"
+        );
         let sway = fs::read_to_string(config.join("ljos/sway-hud.conf")).unwrap();
         assert_eq!(sway, sway_overlay_rules());
         #[allow(unused_unsafe)]
