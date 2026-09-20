@@ -6,7 +6,7 @@ use iced::keyboard::{self, key::Named, Key};
 use iced::window;
 use iced::{event, time, Element, Event, Font, Pixels, Subscription, Task};
 
-use crate::data::Snapshot;
+use crate::data::{unix_now, work_bin_mtime, Snapshot, WatchStamp};
 use crate::install_desktop::{APP_ID as POPOUT_APP_ID, OVERLAY_APP_ID};
 use crate::summon::{self, SummonAction, SummonRequest, SummonServer};
 use crate::theme;
@@ -26,8 +26,10 @@ pub struct BootOpts {
 /// iced messages.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// 50 ms poll: summon socket, tray quit, place retry.
+    /// 50 ms poll: summon socket, tray quit, place retry, clock chrome.
     Tick,
+    /// Compare `work.bin` and pack `last_write_ts`; load only on a change.
+    Watch,
     /// Off-thread habitat snapshot.
     Snap(Snapshot),
     /// Kick an off-thread load.
@@ -58,6 +60,9 @@ pub struct HudApp {
     tray_quit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     place_tries: u8,
     _summon: Option<SummonServer>,
+    now: String,
+    now_unix: u64,
+    watch: WatchStamp,
 }
 
 impl HudApp {
@@ -80,6 +85,9 @@ impl HudApp {
             tray_quit: None,
             place_tries: 0,
             _summon: summon,
+            now: ljos_cli::now_utc(),
+            now_unix: unix_now(),
+            watch: WatchStamp::default(),
         }
     }
 
@@ -88,11 +96,42 @@ impl HudApp {
             Pane::Due => self.snap.due.len(),
             Pane::Claims => self.snap.claims.len(),
             Pane::Trust => self.snap.graph.nodes.len(),
+            Pane::Island => self
+                .snap
+                .island
+                .len()
+                .saturating_add(self.snap.hits.len())
+                .saturating_add(1),
+            Pane::Deeds => self.snap.events.len().saturating_add(1),
         };
         if n == 0 {
             self.selected = 0;
         } else if self.selected >= n {
             self.selected = n - 1;
+        }
+    }
+
+    fn selection_cue(&self) -> Option<String> {
+        match self.pane {
+            Pane::Due => self.snap.due.get(self.selected).map(|r| r.text.clone()),
+            Pane::Claims => self
+                .snap
+                .claims
+                .get(self.selected)
+                .map(|r| r.summary.clone()),
+            Pane::Trust => self
+                .snap
+                .graph
+                .nodes
+                .get(self.selected)
+                .map(|n| n.name.clone()),
+            Pane::Island | Pane::Deeds => {
+                if self.snap.cue.is_empty() {
+                    None
+                } else {
+                    Some(self.snap.cue.clone())
+                }
+            }
         }
     }
 
@@ -120,6 +159,8 @@ impl HudApp {
                 Task::none()
             }
             Message::Tick => {
+                self.now = ljos_cli::now_utc();
+                self.now_unix = unix_now();
                 if self
                     .tray_quit
                     .as_ref()
@@ -131,11 +172,23 @@ impl HudApp {
                 if let Some(req) = summon::try_recv() {
                     return self.on_summon(req);
                 }
+                if work_bin_mtime() != self.watch.work_mtime {
+                    return load_snap_with(self.keep_cue());
+                }
                 Task::none()
             }
-            Message::Refresh => load_snap(),
+            Message::Watch => {
+                let stamp = WatchStamp::read();
+                if stamp != self.watch {
+                    self.watch = stamp;
+                    return load_snap_with(self.keep_cue());
+                }
+                Task::none()
+            }
+            Message::Refresh => load_snap_with(self.selection_cue()),
             Message::Snap(snap) => {
                 self.snap = snap;
+                self.watch.work_mtime = work_bin_mtime();
                 self.clamp_selected();
                 Task::none()
             }
@@ -176,6 +229,14 @@ impl HudApp {
                 self.selected = 0;
                 Task::none()
             }
+        }
+    }
+
+    fn keep_cue(&self) -> Option<String> {
+        if self.snap.cue.is_empty() {
+            None
+        } else {
+            Some(self.snap.cue.clone())
         }
     }
 
@@ -354,8 +415,16 @@ impl HudApp {
                 self.pane = Pane::Trust;
                 self.selected = 0;
             }
+            (_, Some("4")) => {
+                self.pane = Pane::Island;
+                self.selected = 0;
+            }
+            (_, Some("5")) => {
+                self.pane = Pane::Deeds;
+                self.selected = 0;
+            }
             (_, Some("P") | Some("p")) => return self.pop_out(),
-            (_, Some("r")) => return load_snap(),
+            (_, Some("r")) => return load_snap_with(self.selection_cue()),
             (Key::Named(Named::Escape), _) | (_, Some("q")) => return self.hide(),
             _ => {}
         }
@@ -418,7 +487,7 @@ fn boot(opts: BootOpts) -> (HudApp, Task<Message>) {
     } else {
         Task::none()
     };
-    (app, Task::batch([open, load_snap()]))
+    (app, Task::batch([open, load_snap_with(None)]))
 }
 
 fn update(app: &mut HudApp, message: Message) -> Task<Message> {
@@ -426,7 +495,7 @@ fn update(app: &mut HudApp, message: Message) -> Task<Message> {
 }
 
 fn view(app: &HudApp, _id: window::Id) -> Element<'_, Message> {
-    view::view(&app.snap, app.pane, app.selected)
+    view::view(&app.snap, app.pane, app.selected, &app.now, app.now_unix)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,10 +515,10 @@ fn overlay_action(visible: bool, mapped: bool) -> OverlayAction {
     }
 }
 
-fn load_snap() -> Task<Message> {
+fn load_snap_with(cue: Option<String>) -> Task<Message> {
     Task::perform(
-        async {
-            tokio::task::spawn_blocking(Snapshot::load)
+        async move {
+            tokio::task::spawn_blocking(move || Snapshot::load_with_cue(cue.as_deref()))
                 .await
                 .unwrap_or_else(|e| Snapshot::banner_only(format!("load: {e}")))
         },
@@ -479,8 +548,8 @@ fn subscription(_app: &HudApp) -> Subscription<Message> {
         _ => None,
     });
     let tick = time::every(Duration::from_millis(50)).map(|_| Message::Tick);
-    let refresh = time::every(Duration::from_secs(2)).map(|_| Message::Refresh);
-    Subscription::batch([keys, tick, refresh])
+    let watch = time::every(Duration::from_secs(2)).map(|_| Message::Watch);
+    Subscription::batch([keys, tick, watch])
 }
 
 const _: Font = theme::FACE;
@@ -507,6 +576,8 @@ mod tests {
         assert!(prod.contains("window::Event::Closed"));
         assert!(prod.contains("wlactivate::activate"));
         assert!(prod.contains("ActivationApplied"));
+        assert!(prod.contains("Message::Watch"));
+        assert!(prod.contains("work_bin_mtime"));
         assert!(
             !prod.contains("let _ = tok"),
             "must not drop the activation token"
@@ -515,6 +586,20 @@ mod tests {
             !prod.contains("window::gain_focus"),
             "token-less must not steal focus"
         );
+        assert!(
+            !prod.contains("map(|_| Message::Refresh)"),
+            "tick/watch must not Snapshot::load on a timer"
+        );
+    }
+
+    #[test]
+    fn tick_is_chrome_not_a_snapshot_load() {
+        let src = include_str!("app.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("self.now = ljos_cli::now_utc()"));
+        assert!(prod.contains("self.now_unix = unix_now()"));
+        assert!(prod.contains("WatchStamp::read()"));
+        assert!(prod.contains("load_snap_with"));
     }
 
     #[test]
@@ -661,5 +746,16 @@ mod tests {
         assert_eq!(app.selected, 0);
         let _ = app.update(Message::Key(Key::Character("k".into())));
         assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn number_keys_reach_island_and_deeds() {
+        let mut app = empty_app();
+        let _ = app.update(Message::Key(Key::Character("4".into())));
+        assert_eq!(app.pane, Pane::Island);
+        let _ = app.update(Message::Key(Key::Character("5".into())));
+        assert_eq!(app.pane, Pane::Deeds);
+        let _ = app.update(Message::Key(Key::Character("1".into())));
+        assert_eq!(app.pane, Pane::Due);
     }
 }

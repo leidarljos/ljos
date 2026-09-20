@@ -87,9 +87,12 @@ mod tests {
             "sweep(",
             "fire=true",
             "fire: true",
+            "fire:true",
             "due_report",
+            "sitting_due_report",
             "WorkGraph::load_dir",
-            "packset_island",
+            "complete(",
+            "packset_island(cue, true)",
         ];
         let mut hits = Vec::new();
         fn walk(dir: &std::path::Path, verbs: &[&str], hits: &mut Vec<String>) {
@@ -116,5 +119,15 @@ mod tests {
             hits.is_empty(),
             "HUD crate is read-only; must not call write verbs: {hits:?}"
         );
+    }
+
+    #[test]
+    fn hud_island_is_fire_false() {
+        let src = include_str!("data.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("packset_island(cue, false)"));
+        assert!(prod.contains("packset_search"));
+        assert!(!prod.contains("packset_island(cue, true)"));
+        assert!(!prod.contains("fire: true"));
     }
 }
