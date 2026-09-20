@@ -7857,7 +7857,7 @@ mod tests {
         let cmake = &rows[1];
         let eigen = &rows[2];
         assert!(cmake.blockers.is_empty());
-        assert_eq!(eigen.blockers, [cmake.id.clone()]);
+        assert_eq!(eigen.blockers, std::slice::from_ref(&cmake.id));
         assert_eq!(
             rows[0].blockers,
             [cmake.id.clone(), eigen.id.clone()],
