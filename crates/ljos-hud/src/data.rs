@@ -14,7 +14,7 @@ pub struct DueRow {
     pub text: String,
     /// Review clock instant, empty when the atom has never been graded.
     pub due_at: String,
-    /// `due`, `later`, or `ungraded`. Display only.
+    /// `due`, `overdue`, `later`, or `ungraded`. Display only.
     pub clock: String,
     /// `recalled`, `lapsed`, or `ungraded`. Display only; never a POST.
     pub grade: String,
@@ -77,6 +77,8 @@ pub struct Snapshot {
     pub events: Vec<ljos_cli::Event>,
     pub cue: String,
     pub issue: String,
+    /// Weak/dense lines from [`ljos_cli::format_island`]. Empty when idle.
+    pub island_notices: Vec<String>,
 }
 
 impl Default for Snapshot {
@@ -93,6 +95,7 @@ impl Default for Snapshot {
             events: Vec::new(),
             cue: String::new(),
             issue: String::new(),
+            island_notices: Vec::new(),
         }
     }
 }
@@ -109,8 +112,8 @@ impl Snapshot {
         Self::load_with_cue(None)
     }
 
-    /// [`Self::load`] around an explicit cue. Empty cue uses the first due
-    /// text, else the first claim summary.
+    /// [`Self::load`] around an explicit cue. Empty cue leaves the island
+    /// idle: no search, no activate. The operator types a cue and enters.
     pub fn load_with_cue(cue: Option<&str>) -> Self {
         let mut banner = Vec::new();
         let (due, graph, pack_ok, review_summary) = match load_pack_panes() {
@@ -131,23 +134,23 @@ impl Snapshot {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .or_else(|| due.first().map(|r| r.text.clone()))
-            .or_else(|| claims.first().map(|r| r.summary.clone()))
             .unwrap_or_default();
         let issue = issue_of(&cue, &claims);
-        let hits = if cue.is_empty() {
-            Vec::new()
+        let (island, island_notices, hits) = if cue.is_empty() {
+            (Vec::new(), Vec::new(), Vec::new())
         } else {
-            load_hits(&cue)
-        };
-        let island = if cue.is_empty() {
-            Vec::new()
-        } else {
-            match load_island(&cue) {
+            let hits = match load_hits(&cue) {
                 Ok(rows) => rows,
                 Err(err) => {
-                    banner.push(format!("island: {err}"));
+                    banner.push(format!("search: {err}"));
                     Vec::new()
+                }
+            };
+            match load_island(&cue) {
+                Ok((rows, notices)) => (rows, notices, hits),
+                Err(err) => {
+                    banner.push(format!("island: {err}"));
+                    (Vec::new(), Vec::new(), hits)
                 }
             }
         };
@@ -174,6 +177,7 @@ impl Snapshot {
             events,
             cue,
             issue,
+            island_notices,
         }
     }
 
@@ -338,7 +342,9 @@ fn due_row(atom: &Value, now: &str) -> DueRow {
 fn clock_label(due_at: &str, now: &str) -> &'static str {
     if due_at.is_empty() {
         "ungraded"
-    } else if due_at <= now {
+    } else if due_at < now {
+        "overdue"
+    } else if due_at == now {
         "due"
     } else {
         "later"
@@ -412,9 +418,8 @@ fn occupancy_of(nodes: &[&claimdag::WorkNode], assignee: WorkId) -> u32 {
         .count() as u32
 }
 
-fn load_hits(cue: &str) -> Vec<HitRow> {
-    ljos_cli::packset_search(cue)
-        .unwrap_or_default()
+fn load_hits(cue: &str) -> Result<Vec<HitRow>> {
+    Ok(ljos_cli::packset_search(cue)?
         .into_iter()
         .map(|h| HitRow {
             id: h.id
@@ -426,18 +431,36 @@ fn load_hits(cue: &str) -> Vec<HitRow> {
             text: h.text.chars().take(96).collect(),
             score: format!("{:.3}", h.score),
         })
-        .collect()
+        .collect())
 }
 
-fn load_island(cue: &str) -> Result<Vec<IslandRow>> {
+fn load_island(cue: &str) -> Result<(Vec<IslandRow>, Vec<String>)> {
     let body = ljos_cli::packset_island(cue, false).context("island: activate failed")?;
-    Ok(body
+    let notices = island_notices_of(&body);
+    let rows = body
         .get("island")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .map(island_row)
-        .collect())
+        .collect();
+    Ok((rows, notices))
+}
+
+/// Weak/dense banners, wording from [`ljos_cli::format_island`].
+fn island_notices_of(body: &Value) -> Vec<String> {
+    let formatted = ljos_cli::format_island(body);
+    let mut notices: Vec<String> = formatted
+        .lines()
+        .filter(|line| line.starts_with("weak island:"))
+        .map(str::to_string)
+        .collect();
+    if !body["dense"].as_bool().unwrap_or(true)
+        && !notices.iter().any(|n| n.contains("encoder is down"))
+    {
+        notices.push("the encoder is down, ranking is lexical only".into());
+    }
+    notices
 }
 
 fn island_row(atom: &Value) -> IslandRow {
@@ -506,15 +529,81 @@ mod tests {
         assert_eq!(row.kind, "lesson");
         assert_eq!(row.text.len(), 96);
         assert_eq!(row.due_at, "2026-09-20T10:00:00.000Z");
-        assert_eq!(row.clock, "due");
+        assert_eq!(row.clock, "overdue");
         assert_eq!(row.grade, "recalled");
         let later = due_row(&atom, "2026-09-20T09:00:00.000Z");
         assert_eq!(later.clock, "later");
+        let exact = due_row(&atom, "2026-09-20T10:00:00.000Z");
+        assert_eq!(exact.clock, "due");
         let lapsed = due_row(
             &serde_json::json!({"id":"a","review":{"reps":0,"recalls":1},"due_at":"2026-01-01T00:00:00.000Z"}),
             "2026-09-20T00:00:00.000Z",
         );
         assert_eq!(lapsed.grade, "lapsed");
+    }
+
+    #[test]
+    fn clock_label_names_overdue() {
+        let now = "2026-09-20T12:00:00.000Z";
+        assert_eq!(clock_label("", now), "ungraded");
+        assert_eq!(clock_label(now, now), "due");
+        assert_eq!(clock_label("2026-09-20T11:59:59.000Z", now), "overdue");
+        assert_eq!(clock_label("2026-09-20T12:00:00.001Z", now), "later");
+        assert_ne!(
+            clock_label("2026-09-19T00:00:00.000Z", now),
+            "due",
+            "due_at < now is overdue, not due"
+        );
+    }
+
+    #[test]
+    fn load_with_cue_none_does_not_steal_due_text() {
+        let src = include_str!("data.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("due.first()"),
+            "boot cue must not steal first due text"
+        );
+        assert!(
+            !prod.contains("claims.first()"),
+            "boot cue must not steal first claim summary"
+        );
+        assert!(prod.contains("search: {err}"));
+        assert!(prod.contains("format_island"));
+        assert!(
+            !prod.contains(".unwrap_or_default()\n        .into_iter()"),
+            "packset_search Err must not become silent empty hits"
+        );
+    }
+
+    #[test]
+    fn island_notices_come_from_format_island() {
+        let weak = serde_json::json!({
+            "weak": true,
+            "dense": true,
+            "agreed_seeds": 1,
+            "island": []
+        });
+        let formatted = ljos_cli::format_island(&weak);
+        assert!(formatted.starts_with("weak island:"));
+        let notices = island_notices_of(&weak);
+        assert_eq!(notices, vec![formatted.lines().next().unwrap().to_string()]);
+        let dense_down = serde_json::json!({
+            "weak": false,
+            "dense": false,
+            "island": []
+        });
+        let notices = island_notices_of(&dense_down);
+        assert!(notices.iter().any(|n| n.contains("encoder is down")));
+        let both = serde_json::json!({
+            "weak": true,
+            "dense": false,
+            "agreed_seeds": 2,
+            "island": []
+        });
+        let notices = island_notices_of(&both);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("encoder is down"));
     }
 
     #[test]
@@ -577,6 +666,7 @@ mod tests {
         assert!(prod.contains("packset_search"));
         assert!(prod.contains("packset_island"));
         assert!(prod.contains("packset_island(cue, false)"));
+        assert!(prod.contains("format_island"));
         assert!(prod.contains("timeline_events"));
         assert!(!prod.contains("due_report"));
         assert!(!prod.contains("sitting_due_report"));

@@ -37,6 +37,10 @@ pub enum Message {
     Key(Key),
     /// Skip-chip or number-key pane focus.
     Pane(view::Pane),
+    /// Island cue draft. Enter activates a read, not a write.
+    CueChanged(String),
+    /// Activate `packset_search` + `packset_island(cue, false)`.
+    CueActivate,
     Close(window::Id),
     Closed(window::Id),
     WindowId(Option<window::Id>),
@@ -63,6 +67,8 @@ pub struct HudApp {
     now: String,
     now_unix: u64,
     watch: WatchStamp,
+    /// Island cue draft. Live cue is `snap.cue` after enter.
+    cue: String,
 }
 
 impl HudApp {
@@ -88,6 +94,7 @@ impl HudApp {
             now: ljos_cli::now_utc(),
             now_unix: unix_now(),
             watch: WatchStamp::default(),
+            cue: String::new(),
         }
     }
 
@@ -96,42 +103,13 @@ impl HudApp {
             Pane::Due => self.snap.due.len(),
             Pane::Claims => self.snap.claims.len(),
             Pane::Trust => self.snap.graph.nodes.len(),
-            Pane::Island => self
-                .snap
-                .island
-                .len()
-                .saturating_add(self.snap.hits.len())
-                .saturating_add(1),
+            Pane::Island => self.snap.island.len().saturating_add(self.snap.hits.len()),
             Pane::Deeds => self.snap.events.len().saturating_add(1),
         };
         if n == 0 {
             self.selected = 0;
         } else if self.selected >= n {
             self.selected = n - 1;
-        }
-    }
-
-    fn selection_cue(&self) -> Option<String> {
-        match self.pane {
-            Pane::Due => self.snap.due.get(self.selected).map(|r| r.text.clone()),
-            Pane::Claims => self
-                .snap
-                .claims
-                .get(self.selected)
-                .map(|r| r.summary.clone()),
-            Pane::Trust => self
-                .snap
-                .graph
-                .nodes
-                .get(self.selected)
-                .map(|n| n.name.clone()),
-            Pane::Island | Pane::Deeds => {
-                if self.snap.cue.is_empty() {
-                    None
-                } else {
-                    Some(self.snap.cue.clone())
-                }
-            }
         }
     }
 
@@ -185,7 +163,16 @@ impl HudApp {
                 }
                 Task::none()
             }
-            Message::Refresh => load_snap_with(self.selection_cue()),
+            Message::Refresh => load_snap_with(self.keep_cue()),
+            Message::CueChanged(s) => {
+                self.cue = s;
+                Task::none()
+            }
+            Message::CueActivate => {
+                let live = self.cue.trim().to_string();
+                self.snap.cue = live.clone();
+                load_snap_with(if live.is_empty() { None } else { Some(live) })
+            }
             Message::Snap(snap) => {
                 self.snap = snap;
                 self.watch.work_mtime = work_bin_mtime();
@@ -424,7 +411,7 @@ impl HudApp {
                 self.selected = 0;
             }
             (_, Some("P") | Some("p")) => return self.pop_out(),
-            (_, Some("r")) => return load_snap_with(self.selection_cue()),
+            (_, Some("r")) => return load_snap_with(self.keep_cue()),
             (Key::Named(Named::Escape), _) | (_, Some("q")) => return self.hide(),
             _ => {}
         }
@@ -495,7 +482,14 @@ fn update(app: &mut HudApp, message: Message) -> Task<Message> {
 }
 
 fn view(app: &HudApp, _id: window::Id) -> Element<'_, Message> {
-    view::view(&app.snap, app.pane, app.selected, &app.now, app.now_unix)
+    view::view(
+        &app.snap,
+        app.pane,
+        app.selected,
+        &app.now,
+        app.now_unix,
+        &app.cue,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,10 +535,14 @@ fn delayed_activate(attempt: u8) -> Task<Message> {
 }
 
 fn subscription(_app: &HudApp) -> Subscription<Message> {
-    let keys = event::listen_with(|event, _status, id| match event {
-        Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => Some(Message::Key(key)),
+    let keys = event::listen_with(|event, status, id| match event {
         Event::Window(window::Event::CloseRequested) => Some(Message::Close(id)),
         Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
+        Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+            if status != event::Status::Captured =>
+        {
+            Some(Message::Key(key))
+        }
         _ => None,
     });
     let tick = time::every(Duration::from_millis(50)).map(|_| Message::Tick);
@@ -757,5 +755,24 @@ mod tests {
         assert_eq!(app.pane, Pane::Deeds);
         let _ = app.update(Message::Key(Key::Character("1".into())));
         assert_eq!(app.pane, Pane::Due);
+    }
+
+    #[test]
+    fn cue_activate_is_a_read() {
+        let mut app = empty_app();
+        assert!(app.cue.is_empty());
+        assert!(app.snap.cue.is_empty());
+        let _ = app.update(Message::CueChanged("ljos-9ptd".into()));
+        assert_eq!(app.cue, "ljos-9ptd");
+        assert!(app.snap.cue.is_empty(), "draft is not a write");
+        let _ = app.update(Message::CueActivate);
+        assert_eq!(app.snap.cue, "ljos-9ptd");
+        let src = include_str!("app.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("Status::Captured"));
+        assert!(prod.contains("CueActivate"));
+        assert!(!prod.contains("graded("));
+        assert!(!prod.contains("fire: true"));
+        assert!(!prod.contains("selection_cue"));
     }
 }

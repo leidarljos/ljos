@@ -16,11 +16,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   detaches; `--foreground` stays attached. First-start `--show`/`--toggle`
   keeps `XDG_ACTIVATION_TOKEN` for the owner (hide still unsets without
   activating). Overlay `Closed` hides. Three read-only panes over library
-  APIs: due (with `due_at`, `review_summary`, display-only grade chips),
+  APIs: due (with `due_at`, overdue when `due_at` is past,
+  `review_summary`, display-only grade chips),
   claims (assignee, `cas_gen`, occupancy, lease remaining), a trust-graph
   canvas (personas ∪ trust endpoints, stroke by weight, ring by
   `(1 - anchor)`, missing persona a hollow disk, dashed when scoped),
-  island (`packset_search` plus `packset_island(cue, false)`), and a deed
+  island (`packset_search` plus `packset_island(cue, false)`; idle until
+  enter; `format_island` weak/dense banners; search-down is a banner), and a deed
   rail (`ljos_cli::timeline_events` → `Vec<Event>`). Skip chips sit in
   the layout in key order 1-5 (due, claims, graph, island, deeds). Watch
   `work.bin` plus pack `last_write_ts`; the 50 ms tick is chrome. A
