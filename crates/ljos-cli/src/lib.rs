@@ -5049,6 +5049,48 @@ fn civil_of_days(days: i64) -> String {
 /// A required habitat down, or the claim refused (the refusal names what
 /// the assignee still holds).
 pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> {
+    sitting_gated(issue, assignee, cards_dir, false)
+}
+
+/// The blockers of an issue that are still open, as `id (STATE)`, read
+/// from the tracker. Empty when the issue is workable, or when the tracker
+/// does not answer (the sitting's doctor already said so).
+pub fn open_blockers(issue: &str) -> Vec<String> {
+    let Some(shown) = run_captured("vissue", &["show", issue, "--json"])
+        .ok()
+        .and_then(|said| serde_json::from_str::<Value>(&said.stdout).ok())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for id in shown["blocked_by"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let state = run_captured("vissue", &["show", id, "--json"])
+            .ok()
+            .and_then(|said| serde_json::from_str::<Value>(&said.stdout).ok())
+            .and_then(|v| v["state"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "?".to_string());
+        if !matches!(state.as_str(), "DONE" | "CANCELLED") {
+            out.push(format!("{id} ({state})"));
+        }
+    }
+    out
+}
+
+/// [`sitting`], and with `anyway` the claim goes through even when the
+/// issue's blockers are open. Without it a blocked issue is refused before
+/// anything is claimed: the tracker's graph says what is workable, and a
+/// seat that sits on blocked work sits on nothing it can finish.
+pub fn sitting_gated(
+    issue: &str,
+    assignee: &str,
+    cards_dir: &Path,
+    anyway: bool,
+) -> Result<String> {
     let mut out = String::new();
     let rows = doctor_seat();
     out.push_str("== doctor\n");
@@ -5070,6 +5112,20 @@ pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> 
         rows.truncate(8);
     }
     out.push_str(&format_island(&top));
+    out.push_str("== blockers\n");
+    let blockers = open_blockers(issue);
+    if blockers.is_empty() {
+        out.push_str("none open; the issue is workable\n");
+    } else {
+        out.push_str(&format!("open: {}\n", blockers.join(", ")));
+        if !anyway {
+            bail!(
+                "{out}sitting: {issue} is blocked by {}; finish those first, or `ljos sitting {issue} --anyway` to sit on it regardless. Nothing was claimed",
+                blockers.join(", ")
+            );
+        }
+        out.push_str("sitting anyway, as asked\n");
+    }
     out.push_str("== recall\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     // The last twelve dated events across the three stores; `ljos

@@ -2,6 +2,14 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.15.0 (2026-09-20)
+
+- A sitting reads the issue's blockers from the tracker before it claims:
+  an issue whose blockers are still open is refused, with the blockers
+  and their states named, and nothing is claimed. `ljos sitting ISSUE
+  --anyway` (MCP `anyway: true`) sits on it regardless and says so. The
+  claim graph and the tracker's graph agree on what is workable.
+
 ## 0.14.3 (2026-09-20)
 
 - `ljos findings --issue` run twice on one state file cites the deed the

@@ -25,8 +25,11 @@ does not answer:
 
     ljos sitting ISSUE --assignee NAME
 
-It prints seven sections, and each one is a step you would otherwise run by
-hand. Each answers something the next one needs.
+It prints eight sections, and each one is a step you would otherwise run by
+hand. Each answers something the next one needs. Between the island and the
+recall it reads the issue's blockers from the tracker: an issue whose
+blockers are still open is refused before anything is claimed, because the
+graph says it is not workable; `--anyway` sits on it regardless and says so.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.

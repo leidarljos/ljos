@@ -13,9 +13,10 @@ use ljos_cli::{
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
     remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
-    session_end, sitting, take_hook_context, tcb_check, timeline, topic_words, trim_num,
-    trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    session_end, sitting, sitting_gated, take_hook_context, tcb_check, timeline, topic_words,
+    trim_num, trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB,
+    PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -318,6 +319,9 @@ enum Cmd {
         /// Where the cards are read from.
         #[arg(long, default_value = ".")]
         cards: PathBuf,
+        /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
+        #[arg(long)]
+        anyway: bool,
     },
     /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
     Finish {
@@ -742,9 +746,15 @@ fn main() -> Result<()> {
             issue,
             assignee,
             cards: cards_dir,
+            anyway,
         } => print!(
             "{}",
-            sitting(&issue, &resolve_assignee(assignee.as_deref()), &cards_dir)?
+            sitting_gated(
+                &issue,
+                &resolve_assignee(assignee.as_deref()),
+                &cards_dir,
+                anyway
+            )?
         ),
         Cmd::Finish {
             issue,

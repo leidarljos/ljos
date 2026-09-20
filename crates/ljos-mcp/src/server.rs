@@ -19,8 +19,8 @@ use ljos_cli::{
     packset_search_as_of, packset_write_as, panel_steps, parse_every, personas_from_pack,
     personas_speaking_to, policy_with_memory, predictions_of, read_campaign, receive, release,
     remember_findings, resolve_assignee, rows_about, run_captured, runner_pid, seat_name, sitting,
-    timeline, topic_words, trust_from_pack, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    sitting_gated, timeline, topic_words, trust_from_pack, write_persona, write_prediction,
+    write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -367,6 +367,10 @@ pub struct SittingArgs {
     /// named after the client that connected, tagged with the runner's process.
     #[serde(default)]
     pub assignee: Option<String>,
+    /// Sit even when the issue's blockers are open. Without it a blocked
+    /// issue is refused before anything is claimed.
+    #[serde(default)]
+    pub anyway: bool,
 }
 
 /// A sitting to close.
@@ -888,10 +892,11 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<SittingArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = sitting(
+        let text = sitting_gated(
             &args.issue,
             &resolve_assignee(args.assignee.as_deref()),
             &self.cards_dir,
+            args.anyway,
         )
         .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
