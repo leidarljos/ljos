@@ -6046,7 +6046,9 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
             campaign.package, campaign.version, campaign.target, campaign.status, campaign.attempts
         );
         let seat = seat_name();
-        let said = run_captured(
+        // The same state file under the same name is the same deed: a
+        // second run finds it frozen, and the refusal names the accession.
+        let said = match run_captured(
             "deedar",
             &[
                 "create",
@@ -6058,11 +6060,14 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
                 "--agent",
                 &seat,
             ],
-        )?;
+        ) {
+            Ok(said) => said.stdout,
+            Err(e) if e.to_string().contains("deed frozen") => e.to_string(),
+            Err(e) => return Err(e),
+        };
         // `deedar create` prints `id=deed-...` on its first line; an older
         // build printed the accession bare.
         let accession = said
-            .stdout
             .split_whitespace()
             .find_map(|w| {
                 let at = w.find("deed-")?;

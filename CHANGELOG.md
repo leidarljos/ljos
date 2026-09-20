@@ -2,6 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.14.3 (2026-09-20)
+
+- `ljos findings --issue` run twice on one state file cites the deed the
+  first run froze instead of failing on the store's refusal.
+
 ## 0.14.2 (2026-09-20)
 
 - `ljos findings --issue` reads the accession out of `id=deed-...`, which
