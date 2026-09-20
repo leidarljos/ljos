@@ -13,6 +13,8 @@ readme = "../../README.md"
 pkg-url = "{ repo }/releases/download/v{ version }/ljos-v{ version }-{ target }.tar.gz"
 bin-dir = "ljos-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
+# cargo-quickinstall only ships `ljos`. The GitHub tarball has ljos-mcp too.
+disabled-strategies = ["quick-install", "compile"]
 
 [lib]
 name = "ljos_cli"

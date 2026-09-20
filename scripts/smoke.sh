@@ -112,3 +112,6 @@ tampered=$(ls "$root/bag/data/atoms"/* | head -1)
 printf 'x' | dd of="$tampered" bs=1 seek=3 conv=notrunc status=none
 if ljos receive "$root/bag" >/dev/null 2>&1; then fail "a tampered bag was received"; fi
 echo "smoke: every loop ran"
+echo "smoke: running herd"
+"$here/herd.sh"
+echo "smoke: herd ran"
