@@ -18,6 +18,7 @@
 | =hubs [-n N]= | pack | the claims this seat's memory turns on, highest first: a weighted PageRank over the links |
 | =island CUE [--fire]= | pack | the memories a task activates: search hits spread along the links; =--fire= wires the strongest eight together |
 | =due= | pack | sweeps the pack first (reviews left due past twice their interval lapse; never-recalled claims missed three times are forgotten), then the claims whose review is due, unreviewed ones first, one line on the clock, and one on what the sweep moved |
+| =hud [--foreground] [--toggle\vert--show\vert--hide] [--install-desktop]= | none | exec sibling =ljos-hud=; missing is 127, hide-miss is 0; the musl CLI never links iced |
 | =habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]= | pack | with a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list the habits as they stand with the change since the last reading |
 | =graded ID [--lapsed]= | pack | one review graded |
 | =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
@@ -73,6 +74,8 @@ when to call it.
 | =DEEDAR_URL=, =DEEDAR_HOST_SIGNING_KEY= | the deed store; the key signs handovers, and =~/.config/deedar/host.key= is used when the variable is unset |
 | =CLAIMDAG_DIR= | the claim graph |
 | =LJOS_CARDS_DIR= | the server's cards directory |
+| =LJOS_HUD_BIN= | path to =ljos-hud=; else sibling of =ljos=, then PATH |
+| =LJOS_HUD_SOCKET= | summon socket; else =$XDG_RUNTIME_DIR/ljos/hud.sock= |
 | =XDG_CONFIG_HOME= | where =ljos/harnesses.toml= is read from; =~/.config= when unset |
 
 A runner's table in =harnesses.toml= may name =hooks=, a JSON settings

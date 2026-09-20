@@ -1,0 +1,542 @@
+//! iced daemon: overlay, pop-out, summon, guest xdg-activation.
+
+use std::time::Duration;
+
+use iced::keyboard::{self, key::Named, Key};
+use iced::window;
+use iced::{event, time, Element, Event, Font, Pixels, Subscription, Task};
+
+use crate::data::Snapshot;
+use crate::install_desktop::{APP_ID as POPOUT_APP_ID, OVERLAY_APP_ID};
+use crate::summon::{self, SummonAction, SummonRequest, SummonServer};
+use crate::theme;
+use crate::view::{self, Pane};
+
+const HUD_W: f32 = 1100.0;
+const HUD_H: f32 = 720.0;
+
+/// First-paint inputs.
+pub struct BootOpts {
+    /// Whether the overlay starts mapped.
+    pub visible: bool,
+    /// Bound summon socket, held for process lifetime.
+    pub summon: Option<SummonServer>,
+}
+
+/// iced messages.
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// 50 ms poll: summon socket, tray quit, place retry.
+    Tick,
+    /// Off-thread habitat snapshot.
+    Snap(Snapshot),
+    /// Kick an off-thread load.
+    Refresh,
+    Key(Key),
+    Close(window::Id),
+    Closed(window::Id),
+    WindowId(Option<window::Id>),
+    /// Retry guest xdg-activation while a token is pending.
+    ActivateRetry(u8),
+    /// Clear the token only on success.
+    ActivationApplied(bool),
+}
+
+/// iced application state.
+pub struct HudApp {
+    snap: Snapshot,
+    pane: Pane,
+    selected: usize,
+    visible: bool,
+    window_id: Option<window::Id>,
+    opening: Option<window::Id>,
+    popout_id: Option<window::Id>,
+    opening_popout: Option<window::Id>,
+    pending_activation_token: Option<String>,
+    tray_quit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    place_tries: u8,
+    _summon: Option<SummonServer>,
+}
+
+impl HudApp {
+    fn new(visible: bool, summon: Option<SummonServer>) -> Self {
+        Self {
+            snap: Snapshot::banner_only(String::new()),
+            pane: Pane::Due,
+            selected: 0,
+            visible,
+            window_id: None,
+            opening: None,
+            popout_id: None,
+            opening_popout: None,
+            pending_activation_token: summon::take_env_token(),
+            tray_quit: None,
+            place_tries: 0,
+            _summon: summon,
+        }
+    }
+
+    fn clamp_selected(&mut self) {
+        let n = match self.pane {
+            Pane::Due => self.snap.due.len(),
+            Pane::Claims => self.snap.claims.len(),
+            Pane::Trust => self.snap.trust.len(),
+        };
+        if n == 0 {
+            self.selected = 0;
+        } else if self.selected >= n {
+            self.selected = n - 1;
+        }
+    }
+
+    fn mapped(&self) -> bool {
+        self.window_id.is_some()
+    }
+
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::WindowId(id) => {
+                if id.is_some() && id == self.opening_popout {
+                    self.opening_popout = None;
+                    return Task::none();
+                }
+                if id != self.opening {
+                    return Task::none();
+                }
+                self.opening = None;
+                self.window_id = id;
+                if self.visible {
+                    self.place_tries = 20;
+                    self.try_place();
+                    return self.apply_activation(0);
+                }
+                Task::none()
+            }
+            Message::Tick => {
+                if self
+                    .tray_quit
+                    .as_ref()
+                    .is_some_and(|q| q.load(std::sync::atomic::Ordering::Relaxed))
+                {
+                    return iced::exit();
+                }
+                self.try_place();
+                if let Some(req) = summon::try_recv() {
+                    return self.on_summon(req);
+                }
+                Task::none()
+            }
+            Message::Refresh => load_snap(),
+            Message::Snap(snap) => {
+                self.snap = snap;
+                self.clamp_selected();
+                Task::none()
+            }
+            Message::ActivateRetry(attempt) => self.apply_activation(attempt),
+            Message::ActivationApplied(ok) => {
+                if ok {
+                    self.pending_activation_token = None;
+                }
+                Task::none()
+            }
+            Message::Close(id) => {
+                if Some(id) == self.popout_id {
+                    self.popout_id = None;
+                    self.opening_popout = None;
+                    self.visible = false;
+                    return window::close(id);
+                }
+                self.hide()
+            }
+            Message::Closed(id) => {
+                if Some(id) == self.popout_id {
+                    self.popout_id = None;
+                    return Task::none();
+                }
+                self.opening = None;
+                self.window_id = None;
+                Task::none()
+            }
+            Message::Key(key) => self.on_key(key),
+        }
+    }
+
+    fn on_summon(&mut self, req: SummonRequest) -> Task<Message> {
+        let SummonRequest { action, token } = req;
+        if self.summon_hides(action) {
+            self.pending_activation_token = None;
+        } else {
+            self.pending_activation_token = token;
+        }
+        match action {
+            SummonAction::Show => self.show(),
+            SummonAction::Hide => self.hide(),
+            SummonAction::Toggle => {
+                if self.visible {
+                    self.hide()
+                } else {
+                    self.show()
+                }
+            }
+        }
+    }
+
+    fn summon_hides(&self, action: SummonAction) -> bool {
+        matches!(action, SummonAction::Hide)
+            || (matches!(action, SummonAction::Toggle) && self.visible)
+    }
+
+    fn show(&mut self) -> Task<Message> {
+        self.visible = true;
+        let open = self.sync_window();
+        Task::batch([open, self.apply_activation(0)])
+    }
+
+    fn hide(&mut self) -> Task<Message> {
+        self.visible = false;
+        self.pending_activation_token = None;
+        self.sync_window()
+    }
+
+    fn sync_window(&mut self) -> Task<Message> {
+        if let Some(pop) = self.popout_id {
+            if self.visible {
+                return Task::none();
+            }
+            self.popout_id = None;
+            self.opening_popout = None;
+            return window::close(pop);
+        }
+        match overlay_action(self.visible, self.mapped()) {
+            OverlayAction::Open => self.open_overlay(),
+            OverlayAction::Close => {
+                self.place_tries = 0;
+                self.opening = None;
+                match self.window_id.take() {
+                    Some(id) => window::close(id),
+                    None => Task::none(),
+                }
+            }
+            OverlayAction::Place => {
+                self.place_tries = 20;
+                self.try_place();
+                Task::none()
+            }
+            OverlayAction::Idle => Task::none(),
+        }
+    }
+
+    fn open_overlay(&mut self) -> Task<Message> {
+        self.place_tries = 20;
+        let (id, open) = window::open(overlay_window());
+        self.window_id = Some(id);
+        self.opening = Some(id);
+        open.map(|id| Message::WindowId(Some(id)))
+    }
+
+    /// Open a decorated pop-out and take the overlay down. A second request
+    /// while one is open does nothing.
+    fn pop_out(&mut self) -> Task<Message> {
+        if self.popout_id.is_some() {
+            return Task::none();
+        }
+        let mut tasks = Vec::new();
+        self.place_tries = 0;
+        self.opening = None;
+        if let Some(id) = self.window_id.take() {
+            tasks.push(window::close(id));
+        }
+        self.visible = true;
+        let (id, open) = window::open(popout_window());
+        self.popout_id = Some(id);
+        self.opening_popout = Some(id);
+        tasks.push(open.map(|id| Message::WindowId(Some(id))));
+        Task::batch(tasks)
+    }
+
+    fn apply_activation(&self, attempt: u8) -> Task<Message> {
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        if !self.visible {
+            return Task::none();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // Retry while the token is still pending: attempt 0 often runs
+            // before iced has Wayland handles. Clear on success only
+            // (`ActivationApplied(true)`). Tray / token-less toggle must
+            // not steal the keyboard.
+            let activate = match self.pending_activation_token.clone() {
+                Some(tok) => window::run(id, move |win| crate::wlactivate::activate(win, &tok))
+                    .map(Message::ActivationApplied),
+                None => Task::none(),
+            };
+            if self.pending_activation_token.is_some() && attempt < 6 {
+                return Task::batch([activate, delayed_activate(attempt.saturating_add(1))]);
+            }
+            activate
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (id, attempt);
+            Task::none()
+        }
+    }
+
+    fn try_place(&mut self) {
+        if self.place_tries == 0 {
+            return;
+        }
+        if crate::place::place_overlay() || !crate::place::sway_available() {
+            self.place_tries = 0;
+        } else {
+            self.place_tries = self.place_tries.saturating_sub(1);
+        }
+    }
+
+    fn on_key(&mut self, key: Key) -> Task<Message> {
+        let ch = match &key {
+            Key::Character(c) => Some(c.as_str()),
+            _ => None,
+        };
+        match (&key, ch) {
+            (Key::Named(Named::Tab), _) | (_, Some("l")) => {
+                self.pane = self.pane.next();
+                self.selected = 0;
+            }
+            (_, Some("h")) => {
+                self.pane = self.pane.prev();
+                self.selected = 0;
+            }
+            (Key::Named(Named::ArrowDown), _) | (_, Some("j")) => {
+                self.selected = self.selected.saturating_add(1);
+                self.clamp_selected();
+            }
+            (Key::Named(Named::ArrowUp), _) | (_, Some("k")) => {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            (_, Some("1")) => {
+                self.pane = Pane::Due;
+                self.selected = 0;
+            }
+            (_, Some("2")) => {
+                self.pane = Pane::Claims;
+                self.selected = 0;
+            }
+            (_, Some("3")) => {
+                self.pane = Pane::Trust;
+                self.selected = 0;
+            }
+            (_, Some("P") | Some("p")) => return self.pop_out(),
+            (_, Some("r")) => return load_snap(),
+            (Key::Named(Named::Escape), _) | (_, Some("q")) => return self.hide(),
+            _ => {}
+        }
+        Task::none()
+    }
+}
+
+/// The pop-out: a decorated window at the compositor's own level.
+pub fn popout_window() -> window::Settings {
+    let boot = icedtea::app::Boot::new("ljos", POPOUT_APP_ID)
+        .decorations(true)
+        .size(HUD_W, HUD_H)
+        .min_size(360.0, 420.0);
+    icedtea::app::bootstrap(&boot).window
+}
+
+/// Undecorated always-on-top overlay. Sway is told to float it over IPC.
+pub fn overlay_window() -> window::Settings {
+    let boot = icedtea::app::Boot::new("ljos", OVERLAY_APP_ID)
+        .overlay()
+        .size(HUD_W, HUD_H)
+        .min_size(360.0, 420.0);
+    icedtea::app::bootstrap(&boot).window
+}
+
+/// First paint, tray, then the iced daemon.
+pub fn run(opts: BootOpts) -> anyhow::Result<()> {
+    crate::log::info(&format!("hud start log={}", crate::log::path().display()));
+    run_iced(opts).map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+fn run_iced(opts: BootOpts) -> iced::Result {
+    icedtea::typo::install_platform_faces();
+    let cell = std::sync::Mutex::new(Some(opts));
+    iced::daemon(
+        move || {
+            let opts = cell.lock().expect("boot").take().expect("boot once");
+            boot(opts)
+        },
+        update,
+        view,
+    )
+    .subscription(subscription)
+    .theme(|_: &HudApp, _| theme::theme())
+    .title(|_: &HudApp, _| "ljos".to_string())
+    .default_font(icedtea::typo::UI)
+    .settings(iced::Settings {
+        default_text_size: Pixels::from(icedtea::typo::BODY),
+        default_font: icedtea::typo::UI,
+        ..Default::default()
+    })
+    .run()
+}
+
+fn boot(opts: BootOpts) -> (HudApp, Task<Message>) {
+    let mut app = HudApp::new(opts.visible, opts.summon);
+    app.tray_quit = crate::tray::start();
+    let open = if app.visible {
+        app.open_overlay()
+    } else {
+        Task::none()
+    };
+    (app, Task::batch([open, load_snap()]))
+}
+
+fn update(app: &mut HudApp, message: Message) -> Task<Message> {
+    app.update(message)
+}
+
+fn view(app: &HudApp, _id: window::Id) -> Element<'_, Message> {
+    view::view(&app.snap, app.pane, app.selected)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayAction {
+    Open,
+    Close,
+    Place,
+    Idle,
+}
+
+fn overlay_action(visible: bool, mapped: bool) -> OverlayAction {
+    match (visible, mapped) {
+        (true, false) => OverlayAction::Open,
+        (false, true) => OverlayAction::Close,
+        (true, true) => OverlayAction::Place,
+        (false, false) => OverlayAction::Idle,
+    }
+}
+
+fn load_snap() -> Task<Message> {
+    Task::perform(
+        async {
+            tokio::task::spawn_blocking(Snapshot::load)
+                .await
+                .unwrap_or_else(|e| Snapshot::banner_only(format!("load: {e}")))
+        },
+        Message::Snap,
+    )
+}
+
+fn delayed_activate(attempt: u8) -> Task<Message> {
+    let wait_ms = if attempt == 0 {
+        30
+    } else {
+        40 + u64::from(attempt) * 20
+    };
+    Task::perform(
+        async move {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        },
+        move |_| Message::ActivateRetry(attempt),
+    )
+}
+
+fn subscription(_app: &HudApp) -> Subscription<Message> {
+    let keys = event::listen_with(|event, _status, id| match event {
+        Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => Some(Message::Key(key)),
+        Event::Window(window::Event::CloseRequested) => Some(Message::Close(id)),
+        Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
+        _ => None,
+    });
+    let tick = time::every(Duration::from_millis(50)).map(|_| Message::Tick);
+    let refresh = time::every(Duration::from_secs(2)).map(|_| Message::Refresh);
+    Subscription::batch([keys, tick, refresh])
+}
+
+const _: Font = theme::FACE;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_app() -> HudApp {
+        HudApp::new(true, None)
+    }
+
+    #[test]
+    fn hide_closes_the_overlay_window() {
+        assert_eq!(overlay_action(false, true), OverlayAction::Close);
+        assert_eq!(overlay_action(true, false), OverlayAction::Open);
+        assert_eq!(overlay_action(true, true), OverlayAction::Place);
+        assert_eq!(overlay_action(false, false), OverlayAction::Idle);
+        let src = include_str!("app.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("window::close"));
+        assert!(prod.contains("iced::daemon"));
+        assert!(prod.contains("window::Event::Closed"));
+        assert!(prod.contains("wlactivate::activate"));
+        assert!(prod.contains("ActivationApplied"));
+        assert!(
+            !prod.contains("let _ = tok"),
+            "must not drop the activation token"
+        );
+        assert!(
+            !prod.contains("window::gain_focus"),
+            "token-less must not steal focus"
+        );
+    }
+
+    #[test]
+    fn activation_applied_true_clears_token() {
+        let mut app = empty_app();
+        app.pending_activation_token = Some("tok".into());
+        let _ = app.update(Message::ActivationApplied(false));
+        assert_eq!(app.pending_activation_token.as_deref(), Some("tok"));
+        let _ = app.update(Message::ActivationApplied(true));
+        assert_eq!(app.pending_activation_token, None);
+    }
+
+    #[test]
+    fn hide_clears_pending_token() {
+        let mut app = empty_app();
+        app.pending_activation_token = Some("tok".into());
+        let _ = app.hide();
+        assert_eq!(app.pending_activation_token, None);
+        assert!(!app.visible);
+    }
+
+    #[test]
+    fn pop_out_takes_the_overlay_down_and_its_close_hides_the_hud() {
+        let mut app = empty_app();
+        let id = window::Id::unique();
+        app.opening = Some(id);
+        let _ = app.update(Message::WindowId(Some(id)));
+        assert!(app.mapped());
+        let _ = app.pop_out();
+        assert!(!app.mapped(), "the overlay goes down");
+        let pop = app.popout_id.expect("a pop-out window");
+        assert!(app.visible);
+        let _ = app.pop_out();
+        assert_eq!(app.popout_id, Some(pop));
+        let _ = app.update(Message::Close(pop));
+        assert!(app.popout_id.is_none());
+        assert!(!app.visible, "closing the pop-out hides, process stays");
+    }
+
+    #[test]
+    fn summon_show_keeps_token_hide_drops_it() {
+        let mut app = empty_app();
+        app.visible = false;
+        let _ = app.on_summon(SummonRequest {
+            action: SummonAction::Show,
+            token: Some("tok-1".into()),
+        });
+        assert_eq!(app.pending_activation_token.as_deref(), Some("tok-1"));
+        let _ = app.on_summon(SummonRequest::new(SummonAction::Hide));
+        assert_eq!(app.pending_activation_token, None);
+    }
+}

@@ -2,6 +2,20 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.17.0 (2026-09-20)
+
+- `ljos hud` execs sibling `ljos-hud` (`LJOS_HUD_BIN`, same directory, then
+  PATH). Missing is 127; `--hide` with nothing running is 0. The `ljos`
+  crate does not link iced. Dist ships the HUD on
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu` only.
+- `ljos-hud` is a long-lived icedtea daemon: summon socket
+  (`LJOS_HUD_SOCKET`, `$XDG_RUNTIME_DIR/ljos/hud.sock`), overlay
+  `me.rgoswami.ljos-hud`, pop-out `me.rgoswami.ljos-hud.window` (P),
+  StatusNotifier tray, `--install-desktop`, guest `xdg_activation_v1`.
+  Default detaches; `--foreground` stays attached. Three read-only panes
+  (due, claims, trust) over library APIs; a habitat that is down is a
+  banner. `ljos doctor` lists `ljos-hud` and does not require it.
+
 ## 0.16.1 (2026-09-20)
 
 - `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)

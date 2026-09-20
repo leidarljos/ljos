@@ -38,6 +38,7 @@ ljos panel vissue-xxxx --out panel             # every persona's brief as a file
 ljos vote vissue-xxxx --for hold --as reviewer
 ljos learn vissue-xxxx --outcome ship
 ljos due
+ljos hud                                       # execs sibling ljos-hud (overlay; P pops out)
 ljos habit mab-cr-all 0.579 --unit acc --every 7d --source 11793   # a reading; the one before closes and is kept as what it was
 ljos habit                                     # every habit as it stands, the change since the last reading, when the next is due
 ljos graded <atom-id> [--lapsed]
