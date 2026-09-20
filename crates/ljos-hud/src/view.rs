@@ -1,4 +1,4 @@
-//! Cockpit face: due and claims columns around a trust-graph canvas.
+//! Cockpit face: clock, leases, trust canvas, island, deed rail.
 
 use iced::mouse;
 use iced::widget::canvas::{self, stroke, Geometry, Path, Stroke};
@@ -12,15 +12,17 @@ use icedtea::variant::Variant;
 use icedtea::widget;
 
 use crate::app::Message;
-use crate::data::Snapshot;
+use crate::data::{claim_lease_label, ClockState, IslandSnap, Snapshot};
 use crate::graph::{GraphLayout, PaintOp};
 use crate::theme;
 
-/// Skip chips in layout order. Keys 1/2/3 are due, claims, graph.
-pub const SKIP_CHIPS: [(&str, Pane); 3] = [
+/// Skip chips in layout order. Keys 1–5.
+pub const SKIP_CHIPS: [(&str, Pane); 5] = [
     ("due", Pane::Due),
     ("claims", Pane::Claims),
     ("graph", Pane::Trust),
+    ("island", Pane::Island),
+    ("timeline", Pane::Timeline),
 ];
 
 /// What the graph pane paints. Pack-down is not honest-empty.
@@ -51,6 +53,8 @@ pub enum Pane {
     Due,
     Claims,
     Trust,
+    Island,
+    Timeline,
 }
 
 impl Pane {
@@ -58,15 +62,19 @@ impl Pane {
         match self {
             Self::Due => Self::Claims,
             Self::Claims => Self::Trust,
-            Self::Trust => Self::Due,
+            Self::Trust => Self::Island,
+            Self::Island => Self::Timeline,
+            Self::Timeline => Self::Due,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Due => Self::Trust,
+            Self::Due => Self::Timeline,
             Self::Claims => Self::Due,
             Self::Trust => Self::Claims,
+            Self::Island => Self::Trust,
+            Self::Timeline => Self::Island,
         }
     }
 
@@ -75,18 +83,37 @@ impl Pane {
             Self::Due => "due",
             Self::Claims => "claims",
             Self::Trust => "graph",
+            Self::Island => "island",
+            Self::Timeline => "timeline",
         }
     }
 }
 
-/// Paint due, the trust canvas, and claims. Skip chips sit in the layout.
-pub fn view<'a>(snap: &'a Snapshot, pane: Pane, selected: usize) -> Element<'a, Message> {
+/// Paint the cockpit. Skip chips sit in the layout. `cue` is the draft
+/// island field; enter activates a read, not a write.
+pub fn view<'a>(
+    snap: &'a Snapshot,
+    pane: Pane,
+    selected: usize,
+    cue: &'a str,
+) -> Element<'a, Message> {
     let tea = theme::tokens();
     let header: Element<'a, Message> = if snap.banner.is_empty() {
-        text("ljos  due  claims  graph   j/k  h/l  1 2 3  P  r  q")
+        let chrome = text("ljos  due  claims  graph  island  timeline   j/k  h/l  1-5  P  r  q")
             .size(theme::SIZE_META)
-            .color(theme::SUBTEXT)
+            .color(theme::SUBTEXT);
+        if snap.review.is_empty() {
+            chrome.into()
+        } else {
+            column![
+                chrome,
+                text(snap.review.clone())
+                    .size(theme::SIZE_META)
+                    .color(theme::TEXT),
+            ]
+            .spacing(2)
             .into()
+        }
     } else {
         widget::banner(
             snap.banner.clone(),
@@ -97,39 +124,24 @@ pub fn view<'a>(snap: &'a Snapshot, pane: Pane, selected: usize) -> Element<'a, 
         )
     };
 
-    let due = column_pane(
-        "due",
-        pane == Pane::Due,
-        selected,
-        snap.due.iter().map(|r| {
-            let when = if r.due_at.is_empty() {
-                "-"
-            } else {
-                r.due_at.as_str()
-            };
-            format!("{}  {}  {}  {}", r.kind, r.id, when, r.text)
-        }),
-    );
-    let claims = column_pane(
-        "claims",
-        pane == Pane::Claims,
-        selected,
-        snap.claims
-            .iter()
-            .map(|r| format!("{}  {}  {}", r.status, r.id, r.summary)),
-    );
-
     column![
         container(header).padding(8).width(Length::Fill),
         container(skip_chips(pane, tea)).padding([0, 8]),
         row![
-            due,
+            due_pane(snap, pane == Pane::Due, selected, tea),
             graph_pane(snap, pane == Pane::Trust, selected, tea),
-            claims,
+            claims_pane(snap, pane == Pane::Claims, selected, tea),
         ]
-            .spacing(8)
-            .padding(8)
-            .height(Length::Fill),
+        .spacing(8)
+        .padding([0, 8])
+        .height(Length::FillPortion(3)),
+        row![
+            island_pane(snap, pane == Pane::Island, selected, cue, tea),
+            timeline_pane(snap, pane == Pane::Timeline, selected, tea),
+        ]
+        .spacing(8)
+        .padding(8)
+        .height(Length::FillPortion(2)),
     ]
     .into()
 }
@@ -158,6 +170,260 @@ fn skip_chip(label: &str, active: bool, msg: Message, tea: Tokens) -> Element<'s
         Icons::NONE,
         A11y::button(format!("skip to {label}")),
     )
+}
+
+fn display_chip(label: &str, tea: Tokens, variant: Variant) -> Element<'static, Message> {
+    widget::chip(
+        label.to_string(),
+        None,
+        None,
+        tea,
+        variant,
+        widget::ChipKind::Assist,
+        Icons::NONE,
+        A11y::new(label.to_string(), Role::Status),
+    )
+}
+
+fn due_pane<'a>(
+    snap: &'a Snapshot,
+    active: bool,
+    selected: usize,
+    tea: Tokens,
+) -> Element<'a, Message> {
+    let title_color = if active { theme::BLUE } else { theme::SUBTEXT };
+    let mut col = column![text("due").size(theme::SIZE_TITLE).color(title_color)].spacing(4);
+    col = col.push(
+        row![
+            display_chip(
+                &format!("{} unreviewed", snap.clock.unreviewed),
+                tea,
+                Variant::Chip,
+            ),
+            display_chip(&format!("{} due", snap.clock.due), tea, Variant::Primary),
+            display_chip(
+                &format!("{} overdue", snap.clock.overdue),
+                tea,
+                Variant::Chip,
+            ),
+        ]
+        .spacing(4),
+    );
+    if snap.due.is_empty() {
+        col = col.push(text("(none)").size(theme::SIZE_META).color(theme::SUBTEXT));
+    } else {
+        for (i, r) in snap.due.iter().enumerate() {
+            let focused = active && i == selected;
+            let color = if focused { theme::TEXT } else { theme::SUBTEXT };
+            let prefix = if focused { "▸ " } else { "  " };
+            let when = if r.due_at.is_empty() {
+                "-"
+            } else {
+                r.due_at.as_str()
+            };
+            let clock_var = match r.clock {
+                ClockState::Overdue => Variant::Chip,
+                ClockState::Due => Variant::Primary,
+                _ => Variant::Chip,
+            };
+            col = col.push(
+                column![
+                    row![
+                        display_chip(r.clock.as_str(), tea, clock_var),
+                        display_chip("recalled", tea, Variant::Chip),
+                        display_chip("lapsed", tea, Variant::Chip),
+                    ]
+                    .spacing(4),
+                    text(format!(
+                        "{prefix}{}  {}  {}  {}",
+                        r.kind, r.id, when, r.text
+                    ))
+                    .size(theme::SIZE_BODY)
+                    .color(color),
+                ]
+                .spacing(2),
+            );
+        }
+    }
+    pane_box(scrollable(col).height(Length::Fill), active, 1)
+}
+
+fn claims_pane<'a>(
+    snap: &'a Snapshot,
+    active: bool,
+    selected: usize,
+    _tea: Tokens,
+) -> Element<'a, Message> {
+    let title_color = if active { theme::BLUE } else { theme::SUBTEXT };
+    let mut col = column![text("claims").size(theme::SIZE_TITLE).color(title_color)].spacing(4);
+    if snap.claims.is_empty() {
+        col = col.push(text("(none)").size(theme::SIZE_META).color(theme::SUBTEXT));
+    } else {
+        for (i, r) in snap.claims.iter().enumerate() {
+            let focused = active && i == selected;
+            let color = if focused { theme::TEXT } else { theme::SUBTEXT };
+            let prefix = if focused { "▸ " } else { "  " };
+            let lease = claim_lease_label(r);
+            col = col.push(
+                text(format!(
+                    "{prefix}{}  {}  as {}  gen {}  {}  {}  {}",
+                    r.status, r.id, r.assignee, r.cas_gen, r.occupancy, lease, r.summary
+                ))
+                .size(theme::SIZE_BODY)
+                .color(color),
+            );
+        }
+    }
+    pane_box(scrollable(col).height(Length::Fill), active, 1)
+}
+
+fn island_pane<'a>(
+    snap: &'a Snapshot,
+    active: bool,
+    selected: usize,
+    cue: &'a str,
+    tea: Tokens,
+) -> Element<'a, Message> {
+    let title_color = if active { theme::BLUE } else { theme::SUBTEXT };
+    let mut col = column![text("island").size(theme::SIZE_TITLE).color(title_color)].spacing(4);
+    col = col.push(widget::text_input(
+        "cue: enter activates a read",
+        cue,
+        Message::CueChanged,
+        Some(Message::CueActivate),
+        widget::FieldOpts::NONE,
+        tea,
+        A11y::new("island-cue", Role::TextBox),
+        None,
+    ));
+    col = col.push(island_banners(&snap.island, tea));
+    if snap.island.hits.is_empty() && snap.island.rows.is_empty() {
+        col = col.push(
+            text("type a cue, enter to activate")
+                .size(theme::SIZE_META)
+                .color(theme::SUBTEXT),
+        );
+    } else {
+        for (i, h) in snap.island.hits.iter().enumerate() {
+            let focused = active && i == selected;
+            let color = if focused { theme::TEXT } else { theme::SUBTEXT };
+            let prefix = if focused { "▸ " } else { "  " };
+            col = col.push(
+                text(format!(
+                    "{prefix}{:.3}  {}  {}  {}",
+                    h.score, h.kind, h.id, h.text
+                ))
+                .size(theme::SIZE_BODY)
+                .color(color),
+            );
+        }
+        let hit_n = snap.island.hits.len();
+        for (i, r) in snap.island.rows.iter().enumerate() {
+            let focused = active && i + hit_n == selected;
+            let color = if focused { theme::TEXT } else { theme::SUBTEXT };
+            let prefix = if focused { "▸ " } else { "  " };
+            let seed = if r.seed { "seed" } else { "    " };
+            col = col.push(
+                text(format!(
+                    "{prefix}{:.3}  {seed}  {}  {}  {}",
+                    r.activation, r.kind, r.id, r.text
+                ))
+                .size(theme::SIZE_BODY)
+                .color(color),
+            );
+        }
+    }
+    pane_box(scrollable(col).height(Length::Fill), active, 1)
+}
+
+fn island_banners(island: &IslandSnap, tea: Tokens) -> Element<'static, Message> {
+    let mut col = column![].spacing(4);
+    if island.weak {
+        col = col.push(widget::banner(
+            "weak island: seeds two scorers did not agree on; read it as the pack's best-connected cluster, not as what the cue is about; it will not fire",
+            None,
+            Some(ToastKind::Warning),
+            tea,
+            A11y::new("island-weak", Role::Status),
+        ));
+    }
+    if !island.dense {
+        col = col.push(widget::banner(
+            "encoder is down; ranking is lexical only",
+            None,
+            Some(ToastKind::Warning),
+            tea,
+            A11y::new("island-dense", Role::Status),
+        ));
+    }
+    if !island.banner.is_empty() {
+        col = col.push(widget::banner(
+            island.banner.clone(),
+            None,
+            Some(ToastKind::Warning),
+            tea,
+            A11y::new("island-banner", Role::Status),
+        ));
+    }
+    col.into()
+}
+
+fn timeline_pane<'a>(
+    snap: &'a Snapshot,
+    active: bool,
+    selected: usize,
+    _tea: Tokens,
+) -> Element<'a, Message> {
+    let title_color = if active { theme::BLUE } else { theme::SUBTEXT };
+    let title = if snap.timeline_issue.is_empty() {
+        "timeline".to_string()
+    } else {
+        format!("timeline  {}", snap.timeline_issue)
+    };
+    let mut col = column![text(title).size(theme::SIZE_TITLE).color(title_color)].spacing(4);
+    if !snap.timeline_banner.is_empty() {
+        col = col.push(
+            text(snap.timeline_banner.clone())
+                .size(theme::SIZE_META)
+                .color(theme::PEACH),
+        );
+    }
+    if snap.timeline.is_empty() {
+        col = col.push(
+            text("(activate an issue cue, or hold a live claim)")
+                .size(theme::SIZE_META)
+                .color(theme::SUBTEXT),
+        );
+    } else {
+        for (i, e) in snap.timeline.iter().enumerate() {
+            let focused = active && i == selected;
+            let color = if focused { theme::TEXT } else { theme::SUBTEXT };
+            let prefix = if focused { "▸ " } else { "  " };
+            col = col.push(
+                text(format!("{prefix}{}  {}  {}", e.source, e.clock, e.text))
+                    .size(theme::SIZE_BODY)
+                    .color(color),
+            );
+        }
+    }
+    pane_box(scrollable(col).height(Length::Fill), active, 1)
+}
+
+fn pane_box<'a>(
+    body: impl Into<Element<'a, Message>>,
+    active: bool,
+    portion: u16,
+) -> Element<'a, Message> {
+    container(body)
+        .padding(8)
+        .width(Length::FillPortion(portion))
+        .height(Length::Fill)
+        .style(if active {
+            container::bordered_box
+        } else {
+            container::rounded_box
+        })
+        .into()
 }
 
 fn graph_pane<'a>(
@@ -286,9 +552,7 @@ fn paint(frame: &mut canvas::Frame, op: &PaintOp) {
             if *hollow {
                 frame.stroke(
                     &circle,
-                    Stroke::default()
-                        .with_width(1.5)
-                        .with_color(theme::TEXT),
+                    Stroke::default().with_width(1.5).with_color(theme::TEXT),
                 );
             } else {
                 frame.fill(&circle, theme::BLUE);
@@ -328,52 +592,6 @@ fn pt(xy: (f32, f32)) -> iced::Point {
     iced::Point::new(xy.0, xy.1)
 }
 
-fn column_pane<'a, I, S>(
-    title: &'static str,
-    active: bool,
-    selected: usize,
-    rows: I,
-) -> Element<'a, Message>
-where
-    I: Iterator<Item = S>,
-    S: AsRef<str>,
-{
-    let title_color = if active { theme::BLUE } else { theme::SUBTEXT };
-    let mut col = column![text(title).size(theme::SIZE_TITLE).color(title_color)].spacing(4);
-    let mut empty = true;
-    for (i, line) in rows.enumerate() {
-        empty = false;
-        let color = if active && i == selected {
-            theme::TEXT
-        } else {
-            theme::SUBTEXT
-        };
-        let prefix = if active && i == selected {
-            "▸ "
-        } else {
-            "  "
-        };
-        col = col.push(
-            text(format!("{prefix}{}", line.as_ref()))
-                .size(theme::SIZE_BODY)
-                .color(color),
-        );
-    }
-    if empty {
-        col = col.push(text("(none)").size(theme::SIZE_META).color(theme::SUBTEXT));
-    }
-    let body = scrollable(col).height(Length::Fill);
-    container(body)
-        .padding(8)
-        .width(Length::FillPortion(1))
-        .style(if active {
-            container::bordered_box
-        } else {
-            container::rounded_box
-        })
-        .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,8 +601,9 @@ mod tests {
     #[test]
     fn pane_cycles() {
         assert_eq!(Pane::Due.next(), Pane::Claims);
-        assert_eq!(Pane::Trust.next(), Pane::Due);
-        assert_eq!(Pane::Due.prev(), Pane::Trust);
+        assert_eq!(Pane::Trust.next(), Pane::Island);
+        assert_eq!(Pane::Timeline.next(), Pane::Due);
+        assert_eq!(Pane::Due.prev(), Pane::Timeline);
     }
 
     #[test]
@@ -397,13 +616,39 @@ mod tests {
         assert_eq!(SKIP_CHIPS[0], ("due", Pane::Due));
         assert_eq!(SKIP_CHIPS[1], ("claims", Pane::Claims));
         assert_eq!(SKIP_CHIPS[2], ("graph", Pane::Trust));
+        assert_eq!(SKIP_CHIPS[3], ("island", Pane::Island));
+        assert_eq!(SKIP_CHIPS[4], ("timeline", Pane::Timeline));
         assert!(prod.contains("canvas("));
         assert!(prod.contains("widget::banner"));
         assert!(prod.contains("status_page"));
+        assert!(prod.contains("widget::text_input"));
+        assert!(prod.contains("CueActivate"));
+        assert!(prod.contains("\"recalled\""));
+        assert!(prod.contains("\"lapsed\""));
         assert!(
             !prod.contains(" → "),
             "trust pane must not be a from→to column"
         );
+        assert!(!prod.contains("graded("));
+        assert!(!prod.contains("fire: true"));
+    }
+
+    #[test]
+    fn grade_chips_are_display_only() {
+        let src = include_str!("view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("display_chip(\"recalled\""));
+        assert!(prod.contains("display_chip(\"lapsed\""));
+        assert!(prod.contains("fn display_chip"));
+        let chip = prod
+            .split("fn display_chip")
+            .nth(1)
+            .unwrap()
+            .split("fn due_pane")
+            .next()
+            .unwrap();
+        assert!(chip.contains("None,"), "display chips send no message");
+        assert!(!chip.contains("Some("), "display chips send no message");
     }
 
     #[test]
@@ -424,13 +669,8 @@ mod tests {
         assert!(boot.pack_ok);
         assert_eq!(graph_instrument(&boot), GraphInstrument::Empty);
 
-        let claims_banner = Snapshot {
-            due: Vec::new(),
-            claims: Vec::new(),
-            graph: GraphLayout::empty(),
-            pack_ok: true,
-            banner: "claims: down".into(),
-        };
+        let mut claims_banner = Snapshot::banner_only(String::new());
+        claims_banner.banner = "claims: down".into();
         assert_eq!(
             graph_instrument(&claims_banner),
             GraphInstrument::Empty,

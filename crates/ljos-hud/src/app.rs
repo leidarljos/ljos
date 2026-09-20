@@ -6,14 +6,14 @@ use iced::keyboard::{self, key::Named, Key};
 use iced::window;
 use iced::{event, time, Element, Event, Font, Pixels, Subscription, Task};
 
-use crate::data::Snapshot;
+use crate::data::{looks_like_issue, Snapshot};
 use crate::install_desktop::{APP_ID as POPOUT_APP_ID, OVERLAY_APP_ID};
 use crate::summon::{self, SummonAction, SummonRequest, SummonServer};
 use crate::theme;
 use crate::view::{self, Pane};
 
 const HUD_W: f32 = 1100.0;
-const HUD_H: f32 = 720.0;
+const HUD_H: f32 = 840.0;
 
 /// First-paint inputs.
 pub struct BootOpts {
@@ -29,12 +29,16 @@ pub enum Message {
     /// 50 ms poll: summon socket, tray quit, place retry.
     Tick,
     /// Off-thread habitat snapshot.
-    Snap(Snapshot),
+    Snap(Box<Snapshot>),
     /// Kick an off-thread load.
     Refresh,
     Key(Key),
     /// Skip-chip or number-key pane focus.
     Pane(view::Pane),
+    /// Island cue draft. Enter activates a read, not a write.
+    CueChanged(String),
+    /// Activate `packset_search` + `packset_island(cue, false)`.
+    CueActivate,
     Close(window::Id),
     Closed(window::Id),
     WindowId(Option<window::Id>),
@@ -58,6 +62,10 @@ pub struct HudApp {
     tray_quit: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     place_tries: u8,
     _summon: Option<SummonServer>,
+    /// Island cue draft.
+    cue: String,
+    /// Last activated cue. Empty means the island is idle.
+    live_cue: String,
 }
 
 impl HudApp {
@@ -80,7 +88,40 @@ impl HudApp {
             tray_quit: None,
             place_tries: 0,
             _summon: summon,
+            cue: String::new(),
+            live_cue: String::new(),
         }
+    }
+
+    fn island_len(&self) -> usize {
+        self.snap.island.hits.len() + self.snap.island.rows.len()
+    }
+
+    fn timeline_issue(&self) -> String {
+        let cue = self.live_cue.trim();
+        if looks_like_issue(cue) {
+            return cue.to_string();
+        }
+        self.snap
+            .claims
+            .iter()
+            .map(|c| c.summary.as_str())
+            .find(|s| looks_like_issue(s))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn refresh(&self) -> Task<Message> {
+        let cue = self.live_cue.clone();
+        let issue = self.timeline_issue();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || Snapshot::load_for(&cue, &issue))
+                    .await
+                    .unwrap_or_else(|e| Snapshot::banner_only(format!("load: {e}")))
+            },
+            |snap| Message::Snap(Box::new(snap)),
+        )
     }
 
     fn clamp_selected(&mut self) {
@@ -88,6 +129,8 @@ impl HudApp {
             Pane::Due => self.snap.due.len(),
             Pane::Claims => self.snap.claims.len(),
             Pane::Trust => self.snap.graph.nodes.len(),
+            Pane::Island => self.island_len(),
+            Pane::Timeline => self.snap.timeline.len(),
         };
         if n == 0 {
             self.selected = 0;
@@ -133,11 +176,19 @@ impl HudApp {
                 }
                 Task::none()
             }
-            Message::Refresh => load_snap(),
+            Message::Refresh => self.refresh(),
             Message::Snap(snap) => {
-                self.snap = snap;
+                self.snap = *snap;
                 self.clamp_selected();
                 Task::none()
+            }
+            Message::CueChanged(s) => {
+                self.cue = s;
+                Task::none()
+            }
+            Message::CueActivate => {
+                self.live_cue = self.cue.trim().to_string();
+                self.refresh()
             }
             Message::ActivateRetry(attempt) => self.apply_activation(attempt),
             Message::ActivationApplied(ok) => {
@@ -354,8 +405,16 @@ impl HudApp {
                 self.pane = Pane::Trust;
                 self.selected = 0;
             }
+            (_, Some("4")) => {
+                self.pane = Pane::Island;
+                self.selected = 0;
+            }
+            (_, Some("5")) => {
+                self.pane = Pane::Timeline;
+                self.selected = 0;
+            }
             (_, Some("P") | Some("p")) => return self.pop_out(),
-            (_, Some("r")) => return load_snap(),
+            (_, Some("r")) => return self.refresh(),
             (Key::Named(Named::Escape), _) | (_, Some("q")) => return self.hide(),
             _ => {}
         }
@@ -418,7 +477,8 @@ fn boot(opts: BootOpts) -> (HudApp, Task<Message>) {
     } else {
         Task::none()
     };
-    (app, Task::batch([open, load_snap()]))
+    let refresh = app.refresh();
+    (app, Task::batch([open, refresh]))
 }
 
 fn update(app: &mut HudApp, message: Message) -> Task<Message> {
@@ -426,7 +486,7 @@ fn update(app: &mut HudApp, message: Message) -> Task<Message> {
 }
 
 fn view(app: &HudApp, _id: window::Id) -> Element<'_, Message> {
-    view::view(&app.snap, app.pane, app.selected)
+    view::view(&app.snap, app.pane, app.selected, &app.cue)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,17 +506,6 @@ fn overlay_action(visible: bool, mapped: bool) -> OverlayAction {
     }
 }
 
-fn load_snap() -> Task<Message> {
-    Task::perform(
-        async {
-            tokio::task::spawn_blocking(Snapshot::load)
-                .await
-                .unwrap_or_else(|e| Snapshot::banner_only(format!("load: {e}")))
-        },
-        Message::Snap,
-    )
-}
-
 fn delayed_activate(attempt: u8) -> Task<Message> {
     let wait_ms = if attempt == 0 {
         30
@@ -472,10 +521,14 @@ fn delayed_activate(attempt: u8) -> Task<Message> {
 }
 
 fn subscription(_app: &HudApp) -> Subscription<Message> {
-    let keys = event::listen_with(|event, _status, id| match event {
-        Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => Some(Message::Key(key)),
+    let keys = event::listen_with(|event, status, id| match event {
         Event::Window(window::Event::CloseRequested) => Some(Message::Close(id)),
         Event::Window(window::Event::Closed) => Some(Message::Closed(id)),
+        Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+            if status != event::Status::Captured =>
+        {
+            Some(Message::Key(key))
+        }
         _ => None,
     });
     let tick = time::every(Duration::from_millis(50)).map(|_| Message::Tick);
@@ -661,5 +714,26 @@ mod tests {
         assert_eq!(app.selected, 0);
         let _ = app.update(Message::Key(Key::Character("k".into())));
         assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn cue_activate_is_a_read_and_keys_4_5_focus_rails() {
+        let mut app = empty_app();
+        let _ = app.update(Message::CueChanged("ljos-9ptd".into()));
+        assert_eq!(app.cue, "ljos-9ptd");
+        assert!(app.live_cue.is_empty(), "draft is not a write");
+        let _ = app.update(Message::CueActivate);
+        assert_eq!(app.live_cue, "ljos-9ptd");
+        assert!(looks_like_issue(&app.live_cue));
+        let _ = app.update(Message::Key(Key::Character("4".into())));
+        assert_eq!(app.pane, Pane::Island);
+        let _ = app.update(Message::Key(Key::Character("5".into())));
+        assert_eq!(app.pane, Pane::Timeline);
+        let src = include_str!("app.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("Status::Captured"));
+        assert!(prod.contains("load_for"));
+        assert!(!prod.contains("graded("));
+        assert!(!prod.contains("fire: true"));
     }
 }
