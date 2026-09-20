@@ -5760,7 +5760,10 @@ fn failed_module(evidence: &str) -> Option<String> {
     let installation = evidence.lines().rev().find_map(|l| {
         let rest = l.split("Installation of ").nth(1)?;
         let eb = rest.split(".eb failed").next()?;
-        (!eb.is_empty() && !eb.contains(' ')).then(|| recipe_stem(eb))
+        // `.eb` is already off; a stem call here would take a version's
+        // last component for an extension.
+        let name = eb.rsplit('/').next()?;
+        (!name.is_empty() && !name.contains(' ')).then(|| name.to_string())
     });
     installation.or_else(|| {
         evidence.lines().rev().find_map(|l| {
