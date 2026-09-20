@@ -133,7 +133,7 @@ artifact: `eb_recipe_check`, `eb_package_bump` (the lock under
 
 A generation bump is many modules under one ticket, and the tracker's
 graph is how a herd shares them: `ljos bump-plan out --project P
---parent TICKET` (the MCP `ljos_bump_plan`) puts every module the
+--parent TICKET` (over MCP, the tool `bump_plan`) puts every module the
 bundle's lock builds on the tracker as a child issue, blocked by the
 modules built before it along the SBOM's edges, with the same ids on
 every run. `vissue ready -p P` is then the buildable frontier, each seat
