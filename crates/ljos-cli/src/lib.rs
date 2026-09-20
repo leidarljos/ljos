@@ -6178,7 +6178,12 @@ mod tests {
     #[test]
     fn doctor_names_the_session_not_the_default_seat() {
         let _g = env_guard();
+        // A runtime directory of its own: a record another process left for
+        // this id would name its holder instead.
+        let dir = std::env::temp_dir().join(format!("ljos-rt-doctor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
             std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
@@ -6195,7 +6200,9 @@ mod tests {
         assert!(!row.contains("the default"), "{row}");
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
+            std::env::remove_var("XDG_RUNTIME_DIR");
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
