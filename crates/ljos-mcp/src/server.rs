@@ -19,9 +19,9 @@ use ljos_cli::{
     packset_island_as, packset_search_as_of, packset_write_as, panel_steps, parse_every,
     personas_from_pack, personas_speaking_to, policy_with_memory, predictions_of, read_campaign,
     receive, release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
-    seat_name, sitting_gated, timeline, topic_words, trust_from_pack, write_persona,
-    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    seat_name, sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack,
+    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES,
+    LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1046,9 +1046,7 @@ impl LjosServer {
     ) -> Result<Json<Rows<Said>>, McpError> {
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.
-        let shown = run_captured("vissue", &["show", &args.issue, "--json"])
-            .ok()
-            .and_then(|said| serde_json::from_str::<serde_json::Value>(&said.stdout).ok());
+        let shown = tracker_show_json(&args.issue).ok();
         let topic = shown
             .as_ref()
             .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(topic_words))
