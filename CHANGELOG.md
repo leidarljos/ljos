@@ -12,9 +12,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   (`LJOS_HUD_SOCKET`, `$XDG_RUNTIME_DIR/ljos/hud.sock`), overlay
   `me.rgoswami.ljos-hud`, pop-out `me.rgoswami.ljos-hud.window` (P),
   StatusNotifier tray, `--install-desktop`, guest `xdg_activation_v1`.
-  Default detaches; `--foreground` stays attached. Three read-only panes
-  (due, claims, trust) over library APIs; a habitat that is down is a
-  banner. `ljos doctor` lists `ljos-hud` and does not require it.
+  Default detaches; `--foreground` stays attached. First-start
+  `--show`/`--toggle` keeps `XDG_ACTIVATION_TOKEN` for the owner (hide
+  still unsets without activating). Overlay `Closed` hides. Three
+  read-only panes (due, claims, trust) over library APIs; a habitat that
+  is down is a banner. `ljos doctor` lists `ljos-hud` and does not
+  require it.
 
 ## 0.16.1 (2026-09-20)
 
