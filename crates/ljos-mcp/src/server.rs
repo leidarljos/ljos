@@ -9,13 +9,16 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
+
 use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due, finish, format_change, format_consolidation, graded, habit,
     habits, handover, identity_or_seat, island_entities, issue_words, learn_and_write, now_utc,
-    on_path, other_seat, packset_consolidate, packset_forget, packset_island_as,
-    packset_search_as_of, packset_write_as, parse_every, personas_from_pack, personas_speaking_to,
-    policy_line, receive, release, resolve_assignee, rows_about, run_captured, runner_pid,
+    on_path, other_seat, pack, packset_consolidate, packset_forget, packset_island_as,
+    packset_search_as_of, packset_write_as, panel_steps, parse_every, personas_from_pack,
+    personas_speaking_to, policy_with_memory, predictions_of, receive, release, resolve_assignee,
+    rows_about, run_captured, runner_pid,
     seat_name, sitting, timeline, topic_words, trust_from_pack, write_persona, write_prediction,
     write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
@@ -483,6 +486,10 @@ pub struct HitRow {
 pub struct PolicyRow {
     /// The line as it would run.
     pub argv: String,
+    /// What `ljos policy` prints under the line: the TCB's verdict when
+    /// `ljos-policyd` is on PATH, then the rule that fired and the
+    /// memories the line activates.
+    pub ruling: String,
     /// What this process is not: a check. Reloading a pack is not one either.
     pub note: String,
 }
@@ -1003,15 +1010,17 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ArgvArgs>,
     ) -> Result<Json<PolicyRow>, McpError> {
-        let argv = policy_line(&args.argv).map_err(refused)?;
+        let said = policy_with_memory(&args.argv).map_err(refused)?;
+        let (argv, ruling) = said.split_once('\n').unwrap_or((said.as_str(), ""));
         Ok(Json(PolicyRow {
-            argv,
+            argv: argv.to_string(),
+            ruling: ruling.trim_end().to_string(),
             note: POLICY_TCB.to_string(),
         }))
     }
 
     #[tool(
-        description = "Call this after the ballots are in on an issue: the consensus model first, DeGroot or Friedkin-Johnsen over the trust rows the pack holds, then the tracker's own verb. Not a vote count. With no rows every voter weighs the same.",
+        description = "Call this after the ballots are in on an issue: the consensus model first, DeGroot or Friedkin-Johnsen over the trust rows the pack holds, then the tracker's own verb; beside them the surprisingly popular answer when two or more voters forecast and the voters' standing when trust rows exist, as `ljos consensus` prints. Not a vote count. With no rows every voter weighs the same.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
@@ -1047,6 +1056,20 @@ impl LjosServer {
         .map_err(refused)?;
         let mut out = Vec::new();
         for step in steps {
+            let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+            out.push(habitat(step.bin, &args)?.0);
+        }
+        // Beside the settle, as the CLI: the surprisingly popular answer
+        // when two or more voters forecast, and the voters' standing when
+        // trust rows exist.
+        let predictions = pack()
+            .and_then(|c| {
+                c.atoms_as_of(&c.workspace(), None)
+                    .context("consensus: GET /v1/atoms failed")
+            })
+            .map(|atoms| predictions_of(&atoms, &args.issue))
+            .unwrap_or_default();
+        for step in panel_steps(&args.issue, on_path("ljos-consensus"), &trust, &predictions) {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
             out.push(habitat(step.bin, &args)?.0);
         }

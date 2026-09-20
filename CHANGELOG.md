@@ -2,7 +2,22 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.13.8 (2026-09-20)
+
+- A conversation's holder does not move when a second `*_SESSION_ID`
+  appears: the first resolution leaves a record under every stamped id,
+  and a later process carrying one of them and more finds the holder by
+  the shared id. A sitting opened under one id is finished under it when
+  a line editor has stamped another since.
+- `ljos doctor` says where a registry answer came from (`crates.io
+  (cached)` when read from the day cache) and labels a binary ahead of it
+  as well as one behind; a cached answer the binary on `PATH` is already
+  ahead of is asked again.
+- `ljos_policy` returns what `ljos policy` prints: the TCB verdict, the
+  rule that fired and the memories the line activates, under `ruling`.
+  `ljos_consensus` runs the surprisingly popular answer and the voters'
+  standing beside the settle, as `ljos consensus` does.
+- The `ljos-mcp` crate page carries the README.
 
 ## 0.13.7 (2026-09-20)
 

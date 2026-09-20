@@ -480,7 +480,7 @@ fn seat_from_session_records() -> Option<Seat> {
     stamped_sessions().into_iter().find_map(|(key, id)| {
         read_record(
             &session_record_path(&id),
-            format!("the server the runner opened, session {key}"),
+            format!("this conversation's record, session {key}"),
         )
     })
 }
@@ -701,11 +701,19 @@ pub fn whoami() -> Seat {
         };
     }
     if let Some((holder, keys)) = session {
-        return Seat {
+        let seat = Seat {
             seat: seat_name,
             holder,
             source: keys,
         };
+        // The first resolution in a conversation leaves a record under
+        // every id stamped so far; a later process carrying one of them and
+        // more finds this holder by the shared id rather than hashing the
+        // larger set into a new name.
+        for (_, id) in stamped_sessions() {
+            write_record(&session_record_path(&id), &seat);
+        }
+        return seat;
     }
     match (&named, &program) {
         (Some((name, key)), Some(p)) => Seat {
@@ -3265,18 +3273,31 @@ fn crate_version_cache(name: &str) -> Option<PathBuf> {
     Some(dir.join(format!("crate-{name}")))
 }
 
-fn crate_max_version(name: &str) -> Option<String> {
+/// A registry answer and where it came from: the day cache on disk, or
+/// the registry itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrateVersion {
+    pub version: String,
+    pub cached: bool,
+}
+
+/// The newest version crates.io lists for `name`, from the day cache when
+/// it holds one. `refresh` skips the cache: a binary on `PATH` ahead of
+/// the cached answer proves the cache stale.
+fn crate_max_version(name: &str, refresh: bool) -> Option<CrateVersion> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<CrateVersion>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some(hit) = guard.get(name) {
-            return hit.clone();
+    if !refresh {
+        if let Ok(guard) = cache.lock() {
+            if let Some(hit) = guard.get(name) {
+                return hit.clone();
+            }
         }
     }
     let on_disk = crate_version_cache(name);
-    if let Some(path) = &on_disk {
+    if let Some(path) = on_disk.as_ref().filter(|_| !refresh) {
         let fresh = std::fs::metadata(path)
             .and_then(|m| m.modified())
             .ok()
@@ -3285,7 +3306,10 @@ fn crate_max_version(name: &str) -> Option<String> {
         if fresh {
             if let Ok(text) = std::fs::read_to_string(path) {
                 let v = text.trim();
-                let got = (!v.is_empty()).then(|| v.to_string());
+                let got = (!v.is_empty()).then(|| CrateVersion {
+                    version: v.to_string(),
+                    cached: true,
+                });
                 if let Ok(mut guard) = cache.lock() {
                     guard.insert(name.to_string(), got.clone());
                 }
@@ -3303,13 +3327,16 @@ fn crate_max_version(name: &str) -> Option<String> {
             return None;
         }
         let v: serde_json::Value = serde_json::from_slice(&said.stdout).ok()?;
-        v["crate"]["max_version"].as_str().map(str::to_string)
+        v["crate"]["max_version"].as_str().map(|v| CrateVersion {
+            version: v.to_string(),
+            cached: false,
+        })
     });
     if let (Some(path), Some(v)) = (&on_disk, &got) {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, format!("{v}\n"));
+        let _ = std::fs::write(path, format!("{}\n", v.version));
     }
     if let Ok(mut guard) = cache.lock() {
         guard.insert(name.to_string(), got.clone());
@@ -3344,15 +3371,40 @@ pub fn doctor() -> Vec<Habitat> {
 }
 
 /// A binary on PATH answers even when crates.io is ahead. Sitting refuses
-/// a missing required habitat, not a stale one.
-fn bin_health(path: &str, have: Option<&str>, latest: Option<&str>) -> (String, bool) {
+/// a missing required habitat, not a stale one. Behind and ahead are both
+/// said; a registry answer read from the day cache says so.
+fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> (String, bool) {
+    use std::cmp::Ordering;
     let ver = have.unwrap_or("?");
-    match latest {
-        Some(cr) if have.is_some_and(|v| cmp_semver(v, cr) == Some(std::cmp::Ordering::Less)) => {
-            (format!("{path}  {ver}  behind crates.io {cr}"), true)
-        }
-        Some(cr) => (format!("{path}  {ver}  crates.io {cr}"), true),
-        None => (format!("{path}  {ver}"), true),
+    let Some(cr) = latest else {
+        return (format!("{path}  {ver}"), true);
+    };
+    let source = if cr.cached {
+        "crates.io (cached)"
+    } else {
+        "crates.io"
+    };
+    let word = match have.and_then(|v| cmp_semver(v, &cr.version)) {
+        Some(Ordering::Less) => "behind ",
+        Some(Ordering::Greater) => "ahead of ",
+        _ => "",
+    };
+    (format!("{path}  {ver}  {word}{source} {}", cr.version), true)
+}
+
+/// The registry answer for a seat binary. A cached answer the binary on
+/// `PATH` is already ahead of is stale by construction, so the registry
+/// is asked again before the row is written.
+fn crate_version_for(crate_name: &str, have: Option<&str>) -> Option<CrateVersion> {
+    let first = crate_max_version(crate_name, false)?;
+    let ahead = first.cached
+        && have.is_some_and(|v| {
+            cmp_semver(v, &first.version) == Some(std::cmp::Ordering::Greater)
+        });
+    if ahead {
+        crate_max_version(crate_name, true).or(Some(first))
+    } else {
+        Some(first)
     }
 }
 
@@ -3362,11 +3414,14 @@ pub fn doctor_seat() -> Vec<Habitat> {
     let mut out = Vec::new();
     for (bin, crate_name) in SEAT_BINS {
         let found = which::which(bin).ok();
-        let latest = crate_max_version(crate_name);
         let have = found.as_ref().and_then(|_| bin_version(bin));
-        let (state, ok) = match (found, have.as_deref(), latest.as_deref()) {
+        let latest = crate_version_for(crate_name, have.as_deref());
+        let (state, ok) = match (found, have.as_deref(), latest.as_ref()) {
             (None, _, Some(cr)) => (
-                format!("not on PATH; cargo binstall {crate_name} (crates.io {cr})"),
+                format!(
+                    "not on PATH; cargo binstall {crate_name} (crates.io {})",
+                    cr.version
+                ),
                 false,
             ),
             (None, _, None) => ("not on PATH".into(), false),
@@ -6914,8 +6969,25 @@ mod tests {
     }
 
     #[test]
+    fn ahead_of_a_cached_registry_answer_is_said() {
+        let cached = super::CrateVersion {
+            version: "0.12.16".into(),
+            cached: true,
+        };
+        let (state, ok) = super::bin_health("/bin/ljos", Some("0.13.5"), Some(&cached));
+        assert!(ok, "{state}");
+        assert!(state.contains("ahead of crates.io (cached) 0.12.16"), "{state}");
+        let (same, _) = super::bin_health("/bin/ljos", Some("0.12.16"), Some(&cached));
+        assert!(same.ends_with("crates.io (cached) 0.12.16"), "{same}");
+    }
+
+    #[test]
     fn a_behind_required_bin_still_answers() {
-        let (state, ok) = super::bin_health("/bin/packsetd", Some("0.9.2"), Some("0.9.5"));
+        let latest = super::CrateVersion {
+            version: "0.9.5".into(),
+            cached: false,
+        };
+        let (state, ok) = super::bin_health("/bin/packsetd", Some("0.9.2"), Some(&latest));
         assert!(ok, "{state}");
         assert!(state.contains("behind crates.io 0.9.5"), "{state}");
         let rows = vec![Habitat {
