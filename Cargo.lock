@@ -594,7 +594,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "ljos"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "ljos-mcp"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "ljos",

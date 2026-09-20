@@ -6059,13 +6059,21 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
                 &seat,
             ],
         )?;
+        // `deedar create` prints `id=deed-...` on its first line; an older
+        // build printed the accession bare.
         let accession = said
             .stdout
             .split_whitespace()
-            .find(|w| w.starts_with("deed-"))
-            .map(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
-            .context("findings: deedar create printed no accession")?
-            .to_string();
+            .find_map(|w| {
+                let at = w.find("deed-")?;
+                let tail = &w[at..];
+                let end = tail
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                    .unwrap_or(tail.len());
+                Some(tail[..end].to_string())
+            })
+            .filter(|a| a.len() > "deed-".len())
+            .context("findings: deedar create printed no accession")?;
         run_captured("vissue", &["deed", issue, "--add", &accession])?;
         out.push(Remembered {
             id: "state".into(),

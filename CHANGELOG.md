@@ -2,6 +2,12 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.14.2 (2026-09-20)
+
+- `ljos findings --issue` reads the accession out of `id=deed-...`, which
+  is what `deedar create` prints; the first run against a real campaign
+  wrote its lessons and then failed to cite the state file.
+
 ## 0.14.1 (2026-09-20)
 
 - A finding names the module whose build failed (`GCCcore-15.2.0` for
