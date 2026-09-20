@@ -7,8 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use packset_client::{Hit, PacksetClient};
+use packset_client::PacksetClient;
 use serde_json::Value;
+
+pub use packset_client::Hit;
 
 pub mod hud;
 
@@ -4840,19 +4842,36 @@ pub struct Event {
     pub text: String,
 }
 
-/// The issue's timeline, the three stores read as one dated list, oldest
-/// first: the tracker's logbook (creation, state changes, claims, notes),
-/// the deeds the issue cites with the time each was produced, and the
-/// memories the issue's title activates with the time each was written.
-/// The reader gets time as data, not as stamps to do arithmetic on: each
-/// line carries its age and the gap since the line before it, and a later
-/// line supersedes an earlier one on the same matter.
+/// Dated events for an issue, oldest first, capped at `limit`.
+///
+/// The tracker is still read by `vissue show --json` inside this crate
+/// (`vissue_core::agent::show_json` is the follow-up). Callers consume
+/// [`Event`]; they do not parse `ljos timeline` stdout.
+///
+/// # Errors
+///
+/// The tracker not answering. A deed store or pack that does not answer
+/// leaves its rows out; the tracker's rows are the spine.
+pub fn timeline_events(issue: &str, limit: usize) -> Result<Vec<Event>> {
+    Ok(timeline_parts(issue, limit)?.1)
+}
+
+/// The issue's timeline as a printed list. A façade over
+/// [`timeline_events`]: same events, then the dated lines.
 ///
 /// # Errors
 ///
 /// The tracker not answering. A deed store or pack that does not answer
 /// leaves its rows out; the tracker's rows are the spine.
 pub fn timeline(issue: &str, limit: usize) -> Result<String> {
+    let (title, events) = timeline_parts(issue, limit)?;
+    Ok(format!(
+        "timeline of {issue}: {title}\n{}",
+        format_events(&events, &now_utc())
+    ))
+}
+
+fn timeline_parts(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
     let said = run_captured("vissue", &["show", issue, "--json"])?;
     let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
     let title = v["title"].as_str().unwrap_or(issue).to_string();
@@ -4892,11 +4911,7 @@ pub fn timeline(issue: &str, limit: usize) -> Result<String> {
     // Stable, so events sharing a minute keep the order their store gave.
     events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
     let skip = events.len().saturating_sub(limit);
-    Ok(format!(
-        "timeline of {issue}: {title}
-{}",
-        format_events(&events[skip..], &now_utc())
-    ))
+    Ok((title, events[skip..].to_vec()))
 }
 
 /// The tracker's own events on an issue: created, each state change, the
@@ -6908,6 +6923,29 @@ mod tests {
     fn sitting_caps_are_the_protocol_numbers() {
         assert_eq!(SITTING_DUE, 8);
         assert_eq!(SITTING_TIMELINE, 12);
+    }
+
+    #[test]
+    fn timeline_string_is_a_facade_over_events() {
+        let src = include_str!("lib.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("pub fn timeline_events")
+            .expect("timeline_events");
+        let end = prod[start..]
+            .find("fn tracker_events")
+            .map(|i| start + i)
+            .unwrap_or(prod.len());
+        let timeline = &prod[start..end];
+        assert!(prod.contains("pub struct Event"));
+        assert!(
+            timeline.contains("let (title, events) = timeline_parts(issue, limit)?"),
+            "timeline() must be a façade over Vec<Event>"
+        );
+        assert!(
+            !timeline.contains("vissue update"),
+            "timeline must not write the tracker"
+        );
     }
 
     #[test]
