@@ -61,6 +61,28 @@ ok	skill	wrote /home/you/.runner/skills/ljos/SKILL.md
 
 =--dry-run= reports what would be written.
 
+The example carries the runners this seat has carried through one piece
+of work, each in the shape it takes the server: a runner with an =mcp
+add= of its own by that command; =grok= and a runner with a TOML config
+by a table appended to it; =opencode= and =omp= by a JSON pointer set in
+their MCP file; =hermes= by its =mcp add= with the tool question
+answered. Copy the tables for the runners on the machine into
+=harnesses.toml=, then one verb each:
+
+#+begin_src console
+$ for h in opencode hermes omp grok; do ljos onboard --harness $h; done
+$ ljos doctor | grep runner
+ok	runner mcp	opencode: ljos registered
+ok	runner skill	opencode: /home/you/.config/opencode/skills/ljos/SKILL.md
+ok	runner mcp	hermes: ljos registered
+ok	runner skill	hermes: /home/you/.hermes/skills/ljos/SKILL.md
+...
+#+end_src
+
+A runner with a hooks file (=hooks= in its table) takes the memory hook
+too; for the others the skill and the =ljos://protocol= resource carry
+what the seat knows, and the sitting's island brings the memories in.
+
 * Inject memory at the point of action
 
 Add =hooks= to the runner's table and onboard again:

@@ -20,6 +20,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   seat.
 - `ljos_remember` says what the pack refuses: a third sentence, prose
   above readability grade 14; and what a lesson names.
+- `ljos onboard --example` carries the runners this seat has carried
+  through one piece of work (opencode, hermes, omp, grok beside the two
+  generic shapes), each in the shape it takes the server; the how-to says
+  which take the memory hook.
 
 ## 0.13.8 (2026-09-20)
 

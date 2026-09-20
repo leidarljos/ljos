@@ -122,6 +122,40 @@ config_json = "~/.config/runner/runner.json"
 json_pointer = "/mcp/ljos"
 json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "environment": {"LJOS_SEAT": "{name}"}}'
 skills = "~/.config/runner/skills"
+
+# Runners this seat has carried through the same work, as they take the
+# server on this machine: a runner with an `mcp add` of its own is the
+# first shape above, a runner with a TOML config the second. Copy the
+# ones you run.
+
+[[harness]]
+name = "opencode"
+config_json = "~/.config/opencode/opencode.json"
+json_pointer = "/mcp/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "environment": {"LJOS_SEAT": "{name}"}}'
+skills = "~/.config/opencode/skills"
+
+[[harness]]
+name = "hermes"
+# `hermes mcp add` asks which tools to enable; the answer is all of them.
+register = ["sh", "-c", "printf 'Y\\n' | hermes mcp add ljos --command {server}"]
+config = "~/.hermes/config.yaml"
+marker = "\n  ljos:\n    command:"
+skills = "~/.hermes/skills"
+
+[[harness]]
+name = "omp"
+config_json = "~/.omp/agent/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.omp/agent/skills"
+
+[[harness]]
+name = "grok"
+config = "~/.grok/config.toml"
+marker = "[mcp_servers.ljos]"
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenabled = true\n"
+skills = "~/.grok/skills"
 "#;
 
 fn home() -> Result<PathBuf> {
