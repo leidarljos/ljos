@@ -11,13 +11,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `ljos-hud` is a long-lived icedtea daemon: summon socket
   (`LJOS_HUD_SOCKET`, `$XDG_RUNTIME_DIR/ljos/hud.sock`), overlay
   `me.rgoswami.ljos-hud`, pop-out `me.rgoswami.ljos-hud.window` (P),
-  StatusNotifier tray, `--install-desktop`, guest `xdg_activation_v1`.
-  Default detaches; `--foreground` stays attached. First-start
-  `--show`/`--toggle` keeps `XDG_ACTIVATION_TOKEN` for the owner (hide
-  still unsets without activating). Overlay `Closed` hides. Three
-  read-only panes (due, claims, trust) over library APIs; a habitat that
-  is down is a banner. `ljos doctor` lists `ljos-hud` and does not
-  require it.
+  StatusNotifier tray id and `.desktop` `StartupWMClass` are the overlay
+  app_id, `--install-desktop`, guest `xdg_activation_v1`. Default
+  detaches; `--foreground` stays attached. First-start `--show`/`--toggle`
+  keeps `XDG_ACTIVATION_TOKEN` for the owner (hide still unsets without
+  activating). Overlay `Closed` hides. Three read-only panes (due,
+  claims, trust) over library APIs; a habitat that is down is a banner.
+  HUD sources never call `graded` / `post_atom` / `sweep` / `fire=true`.
+  `ljos doctor` lists `ljos-hud` and does not require it. crates.io
+  publishes `-p ljos-hud` after `-p ljos`. The HUD crate does not copy
+  the CLI launcher (`resolve_hud_bin` stays in `ljos-cli`).
 - `ljos remember` and `ljos search` start the default writer when none is
   answering. `PACKSET_URL=off` stays off. A URL pointed elsewhere is not
   replaced. The crates.io description and keywords name the first command.
