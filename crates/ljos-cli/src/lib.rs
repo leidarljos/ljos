@@ -3389,7 +3389,10 @@ fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> 
         Some(Ordering::Greater) => "ahead of ",
         _ => "",
     };
-    (format!("{path}  {ver}  {word}{source} {}", cr.version), true)
+    (
+        format!("{path}  {ver}  {word}{source} {}", cr.version),
+        true,
+    )
 }
 
 /// The registry answer for a seat binary. A cached answer the binary on
@@ -3398,9 +3401,7 @@ fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> 
 fn crate_version_for(crate_name: &str, have: Option<&str>) -> Option<CrateVersion> {
     let first = crate_max_version(crate_name, false)?;
     let ahead = first.cached
-        && have.is_some_and(|v| {
-            cmp_semver(v, &first.version) == Some(std::cmp::Ordering::Greater)
-        });
+        && have.is_some_and(|v| cmp_semver(v, &first.version) == Some(std::cmp::Ordering::Greater));
     if ahead {
         crate_max_version(crate_name, true).or(Some(first))
     } else {
@@ -6976,7 +6977,10 @@ mod tests {
         };
         let (state, ok) = super::bin_health("/bin/ljos", Some("0.13.5"), Some(&cached));
         assert!(ok, "{state}");
-        assert!(state.contains("ahead of crates.io (cached) 0.12.16"), "{state}");
+        assert!(
+            state.contains("ahead of crates.io (cached) 0.12.16"),
+            "{state}"
+        );
         let (same, _) = super::bin_health("/bin/ljos", Some("0.12.16"), Some(&cached));
         assert!(same.ends_with("crates.io (cached) 0.12.16"), "{same}");
     }

@@ -18,9 +18,9 @@ use ljos_cli::{
     on_path, other_seat, pack, packset_consolidate, packset_forget, packset_island_as,
     packset_search_as_of, packset_write_as, panel_steps, parse_every, personas_from_pack,
     personas_speaking_to, policy_with_memory, predictions_of, receive, release, resolve_assignee,
-    rows_about, run_captured, runner_pid,
-    seat_name, sitting, timeline, topic_words, trust_from_pack, write_persona, write_prediction,
-    write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    rows_about, run_captured, runner_pid, seat_name, sitting, timeline, topic_words,
+    trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
+    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
