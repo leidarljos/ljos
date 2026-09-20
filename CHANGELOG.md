@@ -16,13 +16,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   detaches; `--foreground` stays attached. First-start `--show`/`--toggle`
   keeps `XDG_ACTIVATION_TOKEN` for the owner (hide still unsets without
   activating). Overlay `Closed` hides. Three read-only panes over library
-  APIs: due, claims, and a trust-graph canvas (personas ∪ trust endpoints,
-  stroke by weight, ring by `(1 - anchor)`, dashed when scoped). Skip
-  chips sit in the layout. A habitat that is down is a banner and an empty
-  canvas. HUD sources never call `graded` / `post_atom` / `sweep` /
-  `fire=true`. `ljos doctor` lists `ljos-hud` and does not require it.
-  crates.io publishes `-p ljos-hud` after `-p ljos`. The HUD crate does
-  not copy the CLI launcher (`resolve_hud_bin` stays in `ljos-cli`).
+  APIs: due (with `due_at`), claims, and a trust-graph canvas (personas ∪
+  trust endpoints, stroke by weight, ring by `(1 - anchor)`, missing
+  persona a hollow disk, dashed when scoped). Skip chips sit in the
+  layout in key order 1/2/3 (due, claims, graph). A habitat that is down
+  is an icedtea banner and a status page; pack-down and honest-empty
+  differ, and a claims banner does not blank an up-empty graph. HUD
+  sources never call `graded` / `post_atom` / `sweep` / `fire=true`.
+  `ljos doctor` lists `ljos-hud` and does not require it. crates.io
+  publishes `-p ljos-hud` after `-p ljos`. The HUD crate does not copy
+  the CLI launcher (`resolve_hud_bin` stays in `ljos-cli`).
 - `ljos remember` and `ljos search` start the default writer when none is
   answering. `PACKSET_URL=off` stays off. A URL pointed elsewhere is not
   replaced. The crates.io description and keywords name the first command.
@@ -64,7 +67,6 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   voter's running record keeps mean probability against the event rate,
   and from the second forecast Murphy's reliability, resolution, and
   uncertainty. Those scores stay off the trust weight.
-
 ## 0.16.1 (2026-09-20)
 
 - `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)

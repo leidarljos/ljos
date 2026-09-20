@@ -12,6 +12,8 @@ pub struct DueRow {
     pub id: String,
     pub kind: String,
     pub text: String,
+    /// Review clock instant, empty when the atom has never been graded.
+    pub due_at: String,
 }
 
 /// One live claim-graph node.
@@ -29,6 +31,8 @@ pub struct Snapshot {
     pub due: Vec<DueRow>,
     pub claims: Vec<ClaimRow>,
     pub graph: GraphLayout,
+    /// False when the pack GET failed. Distinct from an honest empty graph.
+    pub pack_ok: bool,
     pub banner: String,
 }
 
@@ -40,11 +44,11 @@ impl Snapshot {
     /// [`WorkGraph::open_dir`]; the writer-empty graph constructor is not used.
     pub fn load() -> Self {
         let mut banner = Vec::new();
-        let (due, graph) = match load_pack_panes() {
+        let (due, graph, pack_ok) = match load_pack_panes() {
             Ok(pair) => pair,
             Err(err) => {
                 banner.push(format!("pack: {err}"));
-                (Vec::new(), GraphLayout::empty())
+                (Vec::new(), GraphLayout::empty(), false)
             }
         };
         let claims = match load_claims() {
@@ -58,23 +62,26 @@ impl Snapshot {
             due,
             claims,
             graph,
+            pack_ok,
             banner: banner.join(" · "),
         }
     }
 
     /// A banner-only snapshot when the off-thread load cannot join.
     /// The canvas stays empty; this must not invent personas or edges.
+    /// An empty message is first paint, not a fake pack-down.
     pub fn banner_only(msg: String) -> Self {
         Self {
             due: Vec::new(),
             claims: Vec::new(),
             graph: GraphLayout::empty(),
+            pack_ok: msg.is_empty(),
             banner: msg,
         }
     }
 }
 
-fn load_pack_panes() -> Result<(Vec<DueRow>, GraphLayout)> {
+fn load_pack_panes() -> Result<(Vec<DueRow>, GraphLayout, bool)> {
     let client = ljos_cli::pack()?;
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
@@ -85,7 +92,7 @@ fn load_pack_panes() -> Result<(Vec<DueRow>, GraphLayout)> {
         &ljos_cli::personas_of(&atoms),
         &ljos_cli::trust_rows(&atoms),
     );
-    Ok((due, graph))
+    Ok((due, graph, true))
 }
 
 fn due_row(atom: &Value) -> DueRow {
@@ -109,6 +116,11 @@ fn due_row(atom: &Value) -> DueRow {
             .chars()
             .take(96)
             .collect(),
+        due_at: atom
+            .get("due_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -144,6 +156,22 @@ mod tests {
         assert_eq!(row.id.len(), 12);
         assert_eq!(row.kind, "lesson");
         assert_eq!(row.text.len(), 96);
+        assert!(row.due_at.is_empty());
+    }
+
+    #[test]
+    fn due_row_keeps_due_at() {
+        let atom = serde_json::json!({
+            "id":"abcdefghijklmnop",
+            "kind":"lesson",
+            "text":"x".repeat(200),
+            "due_at":"2026-09-20T10:00:00.000Z"
+        });
+        let row = due_row(&atom);
+        assert_eq!(row.id.len(), 12);
+        assert_eq!(row.kind, "lesson");
+        assert_eq!(row.text.len(), 96);
+        assert_eq!(row.due_at, "2026-09-20T10:00:00.000Z");
     }
 
     #[test]
@@ -171,7 +199,16 @@ mod tests {
         assert!(snap.graph.is_empty());
         assert!(snap.due.is_empty());
         assert!(snap.claims.is_empty());
+        assert!(!snap.pack_ok);
         assert_eq!(snap.banner, "pack: down");
         assert!(snap.graph.paint_ops(0, true, 400.0, 400.0).is_empty());
+    }
+
+    #[test]
+    fn boot_banner_only_is_not_pack_down() {
+        let snap = Snapshot::banner_only(String::new());
+        assert!(snap.pack_ok, "first paint must not fake pack-down");
+        assert!(snap.graph.is_empty());
+        assert!(snap.banner.is_empty());
     }
 }

@@ -4,9 +4,10 @@ use iced::mouse;
 use iced::widget::canvas::{self, stroke, Geometry, Path, Stroke};
 use iced::widget::{column, container, row, scrollable, text};
 use iced::{Element, Length, Rectangle, Renderer};
-use icedtea::a11y::A11y;
+use icedtea::a11y::{A11y, Role};
 use icedtea::icon::Icons;
 use icedtea::theme::Tokens;
+use icedtea::toast::ToastKind;
 use icedtea::variant::Variant;
 use icedtea::widget;
 
@@ -15,12 +16,32 @@ use crate::data::Snapshot;
 use crate::graph::{GraphLayout, PaintOp};
 use crate::theme;
 
-/// Skip chips in layout order. Always visible; not `:focus-visible`-only.
+/// Skip chips in layout order. Keys 1/2/3 are due, claims, graph.
 pub const SKIP_CHIPS: [(&str, Pane); 3] = [
-    ("graph", Pane::Trust),
     ("due", Pane::Due),
     ("claims", Pane::Claims),
+    ("graph", Pane::Trust),
 ];
+
+/// What the graph pane paints. Pack-down is not honest-empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphInstrument {
+    PackDown,
+    Empty,
+    Canvas,
+}
+
+/// Pack-down vs empty-up must differ. A claims banner must not blank an
+/// honest-empty graph.
+pub fn graph_instrument(snap: &Snapshot) -> GraphInstrument {
+    if !snap.pack_ok {
+        GraphInstrument::PackDown
+    } else if snap.graph.is_empty() {
+        GraphInstrument::Empty
+    } else {
+        GraphInstrument::Canvas
+    }
+}
 
 const DASH: [f32; 2] = [6.0, 4.0];
 
@@ -61,23 +82,33 @@ impl Pane {
 /// Paint due, the trust canvas, and claims. Skip chips sit in the layout.
 pub fn view<'a>(snap: &'a Snapshot, pane: Pane, selected: usize) -> Element<'a, Message> {
     let tea = theme::tokens();
-    let header = if snap.banner.is_empty() {
-        text("ljos  graph  due  claims   j/k  h/l  1 2 3  P  r  q")
+    let header: Element<'a, Message> = if snap.banner.is_empty() {
+        text("ljos  due  claims  graph   j/k  h/l  1 2 3  P  r  q")
             .size(theme::SIZE_META)
             .color(theme::SUBTEXT)
+            .into()
     } else {
-        text(format!("ljos  {}", snap.banner))
-            .size(theme::SIZE_META)
-            .color(theme::PEACH)
+        widget::banner(
+            snap.banner.clone(),
+            None,
+            Some(ToastKind::Warning),
+            tea,
+            A11y::new("banner", Role::Status),
+        )
     };
 
     let due = column_pane(
         "due",
         pane == Pane::Due,
         selected,
-        snap.due
-            .iter()
-            .map(|r| format!("{}  {}  {}", r.kind, r.id, r.text)),
+        snap.due.iter().map(|r| {
+            let when = if r.due_at.is_empty() {
+                "-"
+            } else {
+                r.due_at.as_str()
+            };
+            format!("{}  {}  {}  {}", r.kind, r.id, when, r.text)
+        }),
     );
     let claims = column_pane(
         "claims",
@@ -91,7 +122,11 @@ pub fn view<'a>(snap: &'a Snapshot, pane: Pane, selected: usize) -> Element<'a, 
     column![
         container(header).padding(8).width(Length::Fill),
         container(skip_chips(pane, tea)).padding([0, 8]),
-        row![due, graph_pane(snap, pane == Pane::Trust, selected), claims,]
+        row![
+            due,
+            graph_pane(snap, pane == Pane::Trust, selected, tea),
+            claims,
+        ]
             .spacing(8)
             .padding(8)
             .height(Length::Fill),
@@ -125,30 +160,56 @@ fn skip_chip(label: &str, active: bool, msg: Message, tea: Tokens) -> Element<'s
     )
 }
 
-fn graph_pane(snap: &Snapshot, focused: bool, selected: usize) -> Element<'_, Message> {
+fn graph_pane<'a>(
+    snap: &'a Snapshot,
+    focused: bool,
+    selected: usize,
+    tea: Tokens,
+) -> Element<'a, Message> {
     let title_color = if focused { theme::BLUE } else { theme::SUBTEXT };
-    let mut col = column![text("graph").size(theme::SIZE_TITLE).color(title_color)].spacing(4);
-    if snap.graph.is_empty() {
-        if snap.banner.is_empty() {
-            col = col.push(text("(none)").size(theme::SIZE_META).color(theme::SUBTEXT));
+    let title = text("graph").size(theme::SIZE_TITLE).color(title_color);
+    let body: Element<'a, Message> = match graph_instrument(snap) {
+        GraphInstrument::PackDown => icedtea::pattern::status_page(
+            "Pack is down",
+            if snap.banner.is_empty() {
+                "the pack did not answer".to_string()
+            } else {
+                snap.banner.clone()
+            },
+            None,
+            tea,
+            A11y::new("pack-down", Role::Status),
+        ),
+        GraphInstrument::Empty => icedtea::pattern::status_page(
+            "No trust graph",
+            "This pack has no personas and no trust rows.",
+            None,
+            tea,
+            A11y::new("graph-empty", Role::Status),
+        ),
+        GraphInstrument::Canvas => {
+            let canvas_el = iced::widget::canvas(TrustCanvas {
+                layout: &snap.graph,
+                selected,
+                focused,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill);
+            let readout = snap.graph.readout(selected);
+            column![
+                canvas_el,
+                text(readout).size(theme::SIZE_META).color(if focused {
+                    theme::TEXT
+                } else {
+                    theme::SUBTEXT
+                })
+            ]
+            .spacing(4)
+            .height(Length::Fill)
+            .into()
         }
-    } else {
-        let canvas_el = iced::widget::canvas(TrustCanvas {
-            layout: &snap.graph,
-            selected,
-            focused,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill);
-        col = col.push(canvas_el);
-        let readout = snap.graph.readout(selected);
-        col = col.push(text(readout).size(theme::SIZE_META).color(if focused {
-            theme::TEXT
-        } else {
-            theme::SUBTEXT
-        }));
-    }
-    container(col)
+    };
+    container(column![title, body].spacing(4).height(Length::Fill))
         .padding(8)
         .width(Length::FillPortion(2))
         .height(Length::Fill)
@@ -220,16 +281,18 @@ fn paint(frame: &mut canvas::Frame, op: &PaintOp) {
                 },
             );
         }
-        PaintOp::Node { at, r, persona } => {
+        PaintOp::Node { at, r, hollow } => {
             let circle = Path::circle(pt(*at), *r);
-            frame.fill(
-                &circle,
-                if *persona {
-                    theme::BLUE
-                } else {
-                    theme::SURFACE0
-                },
-            );
+            if *hollow {
+                frame.stroke(
+                    &circle,
+                    Stroke::default()
+                        .with_width(1.5)
+                        .with_color(theme::TEXT),
+                );
+            } else {
+                frame.fill(&circle, theme::BLUE);
+            }
         }
         PaintOp::Ring { at, r, width } => {
             let circle = Path::circle(pt(*at), *r);
@@ -331,8 +394,12 @@ mod tests {
         assert!(prod.contains("widget::chip"));
         assert!(prod.contains("skip to"));
         assert!(prod.contains("SKIP_CHIPS"));
-        assert_eq!(SKIP_CHIPS[0], ("graph", Pane::Trust));
+        assert_eq!(SKIP_CHIPS[0], ("due", Pane::Due));
+        assert_eq!(SKIP_CHIPS[1], ("claims", Pane::Claims));
+        assert_eq!(SKIP_CHIPS[2], ("graph", Pane::Trust));
         assert!(prod.contains("canvas("));
+        assert!(prod.contains("widget::banner"));
+        assert!(prod.contains("status_page"));
         assert!(
             !prod.contains(" → "),
             "trust pane must not be a from→to column"
@@ -342,8 +409,33 @@ mod tests {
     #[test]
     fn habitat_down_canvas_stays_empty() {
         let snap = Snapshot::banner_only("pack: down".into());
+        assert!(!snap.pack_ok);
         assert!(snap.graph.is_empty());
         assert!(snap.graph.paint_ops(0, true, 640.0, 480.0).is_empty());
+        assert_eq!(graph_instrument(&snap), GraphInstrument::PackDown);
+    }
+
+    #[test]
+    fn pack_down_and_honest_empty_differ() {
+        let down = Snapshot::banner_only("pack: down".into());
+        assert_eq!(graph_instrument(&down), GraphInstrument::PackDown);
+
+        let boot = Snapshot::banner_only(String::new());
+        assert!(boot.pack_ok);
+        assert_eq!(graph_instrument(&boot), GraphInstrument::Empty);
+
+        let claims_banner = Snapshot {
+            due: Vec::new(),
+            claims: Vec::new(),
+            graph: GraphLayout::empty(),
+            pack_ok: true,
+            banner: "claims: down".into(),
+        };
+        assert_eq!(
+            graph_instrument(&claims_banner),
+            GraphInstrument::Empty,
+            "a claims banner must not blank an honest-empty graph"
+        );
     }
 
     #[test]

@@ -13,12 +13,19 @@ pub const FOCUS_RING_W: f32 = 0.035;
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphNode {
     pub name: String,
-    /// `[0, 1]`. Endpoints with no persona atom sit at `1.0` (no ring).
-    pub anchor: f64,
-    pub is_persona: bool,
+    /// `None` when the pack has no persona of this name (hollow disk).
+    pub anchor: Option<f64>,
     /// Unit-circle coordinates, origin at the centre, computed from the pack.
     pub x: f32,
     pub y: f32,
+}
+
+impl GraphNode {
+    /// Missing persona: stroke only, no fill.
+    #[must_use]
+    pub fn hollow(&self) -> bool {
+        self.anchor.is_none()
+    }
 }
 
 /// One directed trust edge. `from` / `to` index [`GraphLayout::nodes`].
@@ -49,7 +56,7 @@ pub enum PaintOp {
     Node {
         at: (f32, f32),
         r: f32,
-        persona: bool,
+        hollow: bool,
     },
     Ring {
         at: (f32, f32),
@@ -82,20 +89,20 @@ impl GraphLayout {
     /// Positions sit on a circle sorted by name. That pass runs here, once,
     /// not inside a canvas `draw`.
     pub fn from_pack(personas: &[Persona], trust: &[Trust]) -> Self {
-        let mut by_name: BTreeMap<String, (f64, bool)> = BTreeMap::new();
+        let mut by_name: BTreeMap<String, Option<f64>> = BTreeMap::new();
         for p in personas {
             let name = p.name.trim();
             if name.is_empty() {
                 continue;
             }
-            by_name.insert(name.to_string(), (p.anchor.clamp(0.0, 1.0), true));
+            by_name.insert(name.to_string(), Some(p.anchor.clamp(0.0, 1.0)));
         }
         for t in trust {
             for end in [t.from.trim(), t.to.trim()] {
                 if end.is_empty() {
                     continue;
                 }
-                by_name.entry(end.to_string()).or_insert((1.0, false));
+                by_name.entry(end.to_string()).or_insert(None);
             }
         }
         let names: Vec<String> = by_name.keys().cloned().collect();
@@ -105,11 +112,10 @@ impl GraphLayout {
             .enumerate()
             .map(|(i, name)| {
                 let (x, y) = unit_pos(i, n);
-                let &(anchor, is_persona) = by_name.get(name).expect("name from map");
+                let &anchor = by_name.get(name).expect("name from map");
                 GraphNode {
                     name: name.clone(),
                     anchor,
-                    is_persona,
                     x,
                     y,
                 }
@@ -175,10 +181,16 @@ impl GraphLayout {
         let Some(node) = self.nodes.get(selected) else {
             return String::new();
         };
-        let ring = (1.0 - node.anchor).clamp(0.0, 1.0);
+        let (anchor, ring) = match node.anchor {
+            Some(a) => (a, (1.0 - a).clamp(0.0, 1.0)),
+            None => (1.0, 0.0),
+        };
         let mut lines = vec![format!(
-            "{}  anchor={:.2}  ring={:.2}",
-            node.name, node.anchor, ring
+            "{}  anchor={:.2}  ring={:.2}{}",
+            node.name,
+            anchor,
+            ring,
+            if node.hollow() { "  hollow" } else { "" }
         )];
         for edge in &self.edges {
             if edge.from == selected {
@@ -232,9 +244,9 @@ impl GraphLayout {
             ops.push(PaintOp::Node {
                 at,
                 r,
-                persona: node.is_persona,
+                hollow: node.hollow(),
             });
-            let extra = Self::ring_extra(node.anchor);
+            let extra = node.anchor.map(Self::ring_extra).unwrap_or(0.0);
             if extra > 0.001 {
                 ops.push(PaintOp::Ring {
                     at,
@@ -344,9 +356,9 @@ mod tests {
         );
         let names: Vec<&str> = g.nodes.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["alpha", "beta"]);
-        assert!(g.nodes[0].is_persona);
-        assert!(!g.nodes[1].is_persona);
-        assert_eq!(g.nodes[1].anchor, 1.0);
+        assert!(!g.nodes[0].hollow());
+        assert!(g.nodes[1].hollow(), "missing persona is hollow");
+        assert_eq!(g.nodes[1].anchor, None);
         assert_eq!(g.edges.len(), 1);
         assert_eq!(g.edges[0].from, 0);
         assert_eq!(g.edges[0].to, 1);
@@ -471,6 +483,28 @@ mod tests {
         assert!(text.contains("a  anchor=0.40  ring=0.60"));
         assert!(text.contains("→ b"));
         assert!(text.contains("seat"));
+    }
+
+    #[test]
+    fn missing_persona_is_hollow_disk() {
+        let g = GraphLayout::from_pack(
+            &[persona("alpha", 0.2)],
+            &[trust("alpha", "beta", 0.8, &[])],
+        );
+        assert!(g.nodes[1].hollow());
+        assert!(!g.nodes[0].hollow());
+        let ops = g.paint_ops(0, true, 400.0, 400.0);
+        let hollow = ops
+            .iter()
+            .filter(|op| matches!(op, PaintOp::Node { hollow: true, .. }))
+            .count();
+        let filled = ops
+            .iter()
+            .filter(|op| matches!(op, PaintOp::Node { hollow: false, .. }))
+            .count();
+        assert_eq!(hollow, 1);
+        assert_eq!(filled, 1);
+        assert!(g.readout(1).contains("hollow"));
     }
 
     #[test]
