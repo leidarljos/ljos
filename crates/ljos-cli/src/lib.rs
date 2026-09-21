@@ -8518,12 +8518,16 @@ mod tests {
         assert!((floor.weight - 1.0).abs() < 1e-9);
         assert!(floor.about.is_empty());
         assert!(inbound_floor(&p, "reviewer").is_none());
-        assert!(has_unscoped_inbound(&[floor.clone()], "reviewer"));
+        assert!(has_unscoped_inbound(
+            std::slice::from_ref(&floor),
+            "reviewer"
+        ));
+        let scoped = Trust {
+            about: vec!["docs".into()],
+            ..floor
+        };
         assert!(!has_unscoped_inbound(
-            &[Trust {
-                about: vec!["docs".into()],
-                ..floor
-            }],
+            std::slice::from_ref(&scoped),
             "reviewer"
         ));
         let arena_pb = shipped_playbooks()

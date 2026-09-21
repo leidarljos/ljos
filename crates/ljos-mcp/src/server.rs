@@ -1806,7 +1806,7 @@ impl LjosServer {
              A panel is refused until a playbook is bound: `ljos_playbook` with {issue} and a \
              recipe name, or `ljos_sitting` with playbook set. Mid-sitting turns re-read that \
              recipe; a new task is a new sitting. Model names on the recipe are optional spawn \
-             hints; every member still ends with `ljos_vote` `--as` then `ljos_consensus`.\n\n\
+             hints; every member still ends with vote --as then consensus.\n\n\
              {seated}\n{roster}\n\n\
              1. `ljos_recall` on {issue}, and `ljos_search` for what the seat knows about it.\n\
              2. For each persona, `ljos_brief` with its name and {issue}, and start one \
