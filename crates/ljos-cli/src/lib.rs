@@ -2791,7 +2791,8 @@ pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
     if let Some(have) = bound_playbook(issue) {
         if have != name {
             bail!(
-                "playbook: {issue} is bound to {have} until finish or release; a new task is a new sitting"
+                "playbook: {issue} is bound to {have} until finish or release; \
+                 a new task is a new sitting"
             );
         }
         return Ok(());
@@ -2822,10 +2823,9 @@ pub fn playbook_opening(issue: &str, name: Option<&str>) -> Result<String> {
                 let p = playbook_named(&have)?;
                 Ok(format_playbook_copy(&p))
             }
-            None => Ok(
-                "none bound; `ljos sitting ISSUE --playbook NAME` or `ljos playbook ISSUE NAME` names one. A panel is refused until then.\n"
-                    .to_string(),
-            ),
+            None => Ok("none bound; `ljos sitting ISSUE --playbook NAME` or \
+                 `ljos playbook ISSUE NAME` names one. A panel is refused until then.\n"
+                .to_string()),
         },
     }
 }
@@ -3035,7 +3035,8 @@ pub fn issue_words(issue: &str) -> Vec<String> {
 pub fn panel(issue: &str, out: &Path) -> Result<String> {
     if bound_playbook(issue).is_none() {
         bail!(
-            "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or `ljos sitting {issue} --playbook NAME` names one before personas enter"
+            "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
+             `ljos sitting {issue} --playbook NAME` names one before personas enter"
         );
     }
     let all = personas_from_pack()?;

@@ -17,5 +17,5 @@ stays open until vissue closes it.
 | Who agrees, weighted? | ljos-consensus | [[https://leidarljos.github.io/consensus/][consensus]] |
 | May this argv run? | ljos-policyd | [[https://leidarljos.github.io/ljos-policyd/][ljos-policyd]] |
 
-=ljos sitting= opens: doctor, cards, due, island, recall, timeline, claim.
+=ljos sitting= opens: doctor, cards, due, island, playbook, recall, timeline, claim.
 =ljos finish= closes the session node. Walk: [[https://leidarljos.github.io/docs/sit/][Sit]] · [[https://leidarljos.github.io/docs/start/][First write]].

@@ -1881,10 +1881,10 @@ impl ServerHandler for LjosServer {
             "One seat over five habitats: tracker, pack, deed store, claim graph, \
              consensus. Read ljos://protocol first; it says which store answers \
              which question and the order of tools in a sitting. ljos_sitting \
-             runs the whole opening (doctor, cards, due, island, recall, timeline, claim) \
+             runs the whole opening (doctor, cards, due, island, playbook, recall, timeline, claim) \
              and ljos_finish the whole closing (remember, fire, complete, learn); \
              prefer them. By hand: ljos_doctor, ljos_cards, ljos_due then \
-             ljos_graded, ljos_search then ljos_island, ljos_recall, \
+             ljos_graded, ljos_search then ljos_island, ljos_playbook, ljos_recall, \
              ljos_timeline, ljos_claim; \
              during the work ljos_deed, ljos_remember, ljos_vote; after it \
              ljos_island with fire, ljos_complete, ljos_learn. ljos_calibrate \
