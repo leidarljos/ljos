@@ -8440,10 +8440,8 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
         }
-        let names: Vec<&str> = shipped_playbooks()
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
+        let shipped = shipped_playbooks();
+        let names: Vec<&str> = shipped.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, SHIPPED_PLAYBOOK_NAMES);
         for p in shipped_playbooks() {
             assert!(!p.body.is_empty(), "{}", p.name);
@@ -8528,12 +8526,11 @@ mod tests {
             }],
             "reviewer"
         ));
-        let arena = format_playbook_copy(
-            &shipped_playbooks()
-                .into_iter()
-                .find(|p| p.name == "arena")
-                .unwrap(),
-        );
+        let arena_pb = shipped_playbooks()
+            .into_iter()
+            .find(|p| p.name == "arena")
+            .unwrap();
+        let arena = format_playbook_copy(&arena_pb);
         assert!(
             arena.contains("spawn hints (optional): judgment, instruction, fast"),
             "{arena}"
