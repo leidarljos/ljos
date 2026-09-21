@@ -24,7 +24,7 @@
 | =persona NAME --anchor A --view TEXT [--about DOMAIN]...= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot; writes one unscoped inbound trust row |
 | =personas= | pack | the roster: name, anchor, domains, view, one per line |
 | =playbook ISSUE NAME= | pack | bind a recipe to the issue and copy its full body; the name is a tracker =playbook:= note until finish or release |
-| =playbooks= | pack | the five shipped recipes (sit, arena, land, company-panel, overnight) and any others |
+| =playbooks= | pack | the closed set sit, arena, land, company-panel, overnight; pack latest per name, shipped seed when missing |
 | =brief NAME ISSUE= | pack, tracker | what a subagent playing the persona starts from: view, the bound playbook's full recipe, five named principles, the arena rubric, what the seat knows on its domains, the working set |
 | =panel ISSUE [--out DIR]= | pack, tracker | one brief per persona whose domains the issue speaks to as =DIR/<name>.md=, then the settle line; refused until a playbook is bound |
 | =learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]= | tracker, pack | reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights; =hedge= shrinks refuted voters by =B= with =S= recovery |

@@ -49,11 +49,13 @@ tracker as a `playbook:` note until `finish` or `release`.
    the work, not this opening.
 5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
    five shipped recipes are `sit`, `arena`, `land`, `company-panel`,
-   `overnight`. Kind `playbook`, weighed not recalled. `ljos playbooks`
-   lists them. Absent a name, the sitting matches the title or binds
-   `sit`. Mid-sitting turns re-read the same note; a new task is a new
-   sitting. Finish and release write `playbook:` so the next sitting
-   does not reprint the previous recipe.
+   `overnight`. Kind `playbook`, weighed not recalled. Pack latest per
+   name is the copy; shipped bodies seed only when the pack has no live
+   atom of that name. Write, list, bind, and copy refuse any other name.
+   `ljos playbooks` lists the five. Absent a name, the sitting matches
+   the title or binds `sit`. Mid-sitting turns re-read the same note; a
+   new task is a new sitting. Finish and release write `playbook:` so
+   the next sitting does not reprint the previous recipe.
 6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 7. `ljos timeline ISSUE`. The last twelve dated events across the three

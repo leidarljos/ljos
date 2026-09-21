@@ -2383,8 +2383,11 @@ pub struct Playbook {
     pub models: Vec<String>,
 }
 
+/// The closed set. Write, list, bind, and copy refuse any other name.
+pub const PLAYBOOK_NAMES: &[&str] = &["sit", "arena", "land", "company-panel", "overnight"];
+
 /// The five shipped recipes. Kind `playbook`, weighed not recalled.
-pub const SHIPPED_PLAYBOOK_NAMES: &[&str] = &["sit", "arena", "land", "company-panel", "overnight"];
+pub const SHIPPED_PLAYBOOK_NAMES: &[&str] = PLAYBOOK_NAMES;
 
 /// Five named principles, invocable mid-sitting, mapped onto existing law.
 pub const PRINCIPLES: &str = "\
@@ -2492,16 +2495,38 @@ pub fn shipped_playbooks() -> Vec<Playbook> {
     ]
 }
 
+/// Refuse a name that is not in [`PLAYBOOK_NAMES`].
+///
+/// # Errors
+///
+/// An unknown name.
+pub fn parse_playbook_name(name: &str) -> Result<&'static str> {
+    let n = name.trim();
+    if n.is_empty() {
+        bail!(
+            "playbook: a name is required ({})",
+            PLAYBOOK_NAMES.join(", ")
+        );
+    }
+    PLAYBOOK_NAMES
+        .iter()
+        .copied()
+        .find(|k| *k == n)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "playbook: unknown name {n:?}; the closed set is {}",
+                PLAYBOOK_NAMES.join(", ")
+            )
+        })
+}
+
 /// The `playbook` atom: kind `playbook`, the recipe as text.
 ///
 /// # Errors
 ///
-/// An empty name or an empty body.
+/// An unknown name or an empty body.
 pub fn playbook_atom(p: &Playbook, workspace: &str) -> Result<Value> {
-    let name = p.name.trim();
-    if name.is_empty() {
-        bail!("playbook: a name is required");
-    }
+    let name = parse_playbook_name(&p.name)?;
     let body = p.body.trim();
     if body.is_empty() {
         bail!("playbook: {name} needs a recipe body");
@@ -2558,6 +2583,9 @@ pub fn playbooks_of(atoms: &[Value]) -> Vec<Playbook> {
         let Some(name) = atom.get("name").and_then(Value::as_str) else {
             continue;
         };
+        if parse_playbook_name(name).is_err() {
+            continue;
+        }
         let ts = atom
             .get("ts")
             .and_then(Value::as_str)
@@ -2620,34 +2648,37 @@ pub fn playbooks_from_pack() -> Result<Vec<Playbook>> {
     Ok(got)
 }
 
-/// Look up one playbook by name among the pack and the shipped five.
+/// Pack latest for `name`, else the shipped seed. Unknown names are refused
+/// even when the pack holds them.
 ///
 /// # Errors
 ///
-/// Unknown name; the error lists the shipped names.
-pub fn playbook_named(name: &str) -> Result<Playbook> {
-    let name = name.trim();
-    if name.is_empty() {
-        bail!(
-            "playbook: a name is required ({})",
-            SHIPPED_PLAYBOOK_NAMES.join(", ")
-        );
+/// An unknown name; the error lists the closed set.
+pub fn playbook_among(name: &str, pack: &[Playbook]) -> Result<Playbook> {
+    let name = parse_playbook_name(name)?;
+    if let Some(p) = pack.iter().find(|p| p.name == name) {
+        return Ok(p.clone());
     }
-    if let Some(p) = shipped_playbooks().into_iter().find(|p| p.name == name) {
-        return Ok(p);
-    }
-    match playbooks_from_pack() {
-        Ok(all) => all.into_iter().find(|p| p.name == name).ok_or_else(|| {
+    shipped_playbooks()
+        .into_iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| {
             anyhow::anyhow!(
-                "playbook: unknown {name:?}; the shipped recipes are {}",
-                SHIPPED_PLAYBOOK_NAMES.join(", ")
+                "playbook: unknown name {name:?}; the closed set is {}",
+                PLAYBOOK_NAMES.join(", ")
             )
-        }),
-        Err(_) => bail!(
-            "playbook: unknown {name:?}; the shipped recipes are {}",
-            SHIPPED_PLAYBOOK_NAMES.join(", ")
-        ),
-    }
+        })
+}
+
+/// Look up one playbook by name: pack latest first, shipped seed only when
+/// the pack has no live atom of that name.
+///
+/// # Errors
+///
+/// Unknown name; the error lists the closed set.
+pub fn playbook_named(name: &str) -> Result<Playbook> {
+    let pack = playbooks_from_pack().unwrap_or_default();
+    playbook_among(name, &pack)
 }
 
 /// The recipe body a sitting copies, including optional spawn hints.
@@ -2812,6 +2843,7 @@ pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("playbook: a name is required");
     }
+    let name = parse_playbook_name(name)?;
     if let Some(have) = bound_playbook(issue) {
         if have != name {
             bail!(
@@ -2850,7 +2882,7 @@ pub fn playbook_from_title(title: &str) -> &'static str {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let mut names: Vec<&'static str> = SHIPPED_PLAYBOOK_NAMES.to_vec();
+    let mut names: Vec<&'static str> = PLAYBOOK_NAMES.to_vec();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
     for name in names {
         if tokens.iter().any(|t| t == name) {
@@ -8062,6 +8094,51 @@ mod tests {
         );
         assert_eq!(playbook_from_title("sitting on a ticket"), "sit");
         assert_eq!(playbook_from_title("arena then compose"), "arena");
+        assert_eq!(
+            playbook_from_title("Benny and poteto-mode"),
+            "sit",
+            "title-match binds only closed-set tokens"
+        );
+    }
+
+    #[test]
+    fn playbook_among_pack_latest_wins_and_unknown_names_are_refused() {
+        let rewritten = Playbook {
+            name: "sit".into(),
+            body: "rewritten sit body".into(),
+            models: vec![],
+        };
+        let got = playbook_among("sit", std::slice::from_ref(&rewritten)).unwrap();
+        assert_eq!(got.body, "rewritten sit body");
+        let seed = playbook_among("sit", &[]).unwrap();
+        assert!(
+            seed.body.contains("Grade due claims"),
+            "shipped seed when the pack has no live atom: {}",
+            seed.body
+        );
+        let err = playbook_among("Benny", &[]).unwrap_err().to_string();
+        assert!(err.contains("unknown"), "{err}");
+        let sneaky = Playbook {
+            name: "poteto-mode".into(),
+            body: "second roster".into(),
+            models: vec![],
+        };
+        let err = playbook_among("poteto-mode", std::slice::from_ref(&sneaky))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown"), "{err}");
+        assert!(playbook_atom(&sneaky, "ws").is_err());
+        assert!(parse_playbook_name("overnight").is_ok());
+        assert!(parse_playbook_name("company-panel").is_ok());
+        let listed = playbooks_of(&[serde_json::json!({
+            "kind": "playbook",
+            "name": "Benny",
+            "text": "no",
+            "ts": "2026-01-01T00:00:00Z"
+        })]);
+        assert!(listed.is_empty(), "{listed:?}");
+        let err = bind_playbook("proj-1a2b", "Benny").unwrap_err().to_string();
+        assert!(err.contains("unknown"), "{err}");
     }
 
     #[test]
