@@ -396,7 +396,7 @@ pub struct PlaybookBindArgs {
     pub name: String,
 }
 
-/// One shipped or pack playbook.
+/// One closed-set playbook: pack latest, else the shipped seed.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PlaybookRow {
     pub name: String,
@@ -1550,7 +1550,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to see the playbooks the pack holds: the five shipped recipes (sit, arena, land, company-panel, overnight) and any others. Kind playbook, weighed not recalled. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
+        description = "Call this to see the playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight. Kind playbook, weighed not recalled. Pack latest per name, shipped seed only when the pack has no live atom. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
         annotations(title = "Playbooks", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_playbooks(&self) -> Result<Json<Rows<PlaybookRow>>, McpError> {

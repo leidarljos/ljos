@@ -21,7 +21,7 @@ Verb                                                                            
 ``trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...``                    pack                      one trust row; scoped when ``--about`` is given
 ``persona NAME --anchor A --view TEXT [--about DOMAIN]...``                     pack                      a voter with a view; writes one unscoped inbound trust row
 ``playbook ISSUE NAME``                                                         pack                      bind a recipe to the issue and copy its full body; tracker ``playbook:`` note until finish or release
-``playbooks``                                                                   pack                      the five shipped recipes (sit, arena, land, company-panel, overnight) and any others
+``playbooks``                                                                   pack                      the closed set sit, arena, land, company-panel, overnight; pack latest per name, shipped seed when missing
 ``brief NAME ISSUE``                                                            pack, tracker             view, bound playbook body, five principles, arena rubric, domains, working set
 ``panel ISSUE [--out DIR]``                                                     pack, tracker             one brief per persona as ``DIR/<name>.md``; refused until a playbook is bound
 ``learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]`` tracker, pack             reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights; ``hedge`` shrinks refuted voters by ``B`` with ``S`` recovery

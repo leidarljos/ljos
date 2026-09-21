@@ -170,7 +170,7 @@ enum Cmd {
         /// The recipe name: sit, arena, land, company-panel, overnight.
         name: String,
     },
-    /// The playbooks the pack holds: the five shipped recipes and any others.
+    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight.
     Playbooks,
     /// Take a session node for an issue. One live claim per assignee.
     Claim {

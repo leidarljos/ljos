@@ -12,7 +12,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   reprint it. A different name while one is held is refused. `ljos sitting
   ISSUE --playbook NAME` (MCP `playbook`) prints `== playbook` with that
   body before recall; absent a name, a closed-set token in the title else
-  `sit`, so a sitting always binds one of the five before claim.
+  `sit`, so a sitting always binds one of the five before claim. Pack
+  latest per name is the copy source; shipped bodies seed only when the
+  pack has no live atom of that name. Write, list, bind, and copy refuse
+  names outside the five.
 - The unscoped inbound floor a persona is owed is the seat's own row
   (`from` is the seat). A third-party unscoped row does not skip it.
 - `ljos brief` carries three blocks: the bound playbook's full recipe,
