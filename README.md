@@ -8,7 +8,7 @@ cargo binstall ljos
 
 That installs `ljos` and `ljos-mcp`.
 
-Citing a deed names it; the bytes stay in deedar. A finish with status done closes the ticket; completing a node alone does not. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
+Citing a deed names it; the bytes stay in deedar. Neither a finish nor completing a node closes the ticket; `finish --close` does, when the work is accepted. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
 ljos sitting vissue-xxxx                       # doctor, cards, due, island, recall, timeline, claim

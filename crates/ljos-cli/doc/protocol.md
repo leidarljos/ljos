@@ -159,7 +159,7 @@ lock exists before proceeding": the next seat cannot act on that.
 
 One verb closes the sitting:
 
-    ljos finish ISSUE --status done --lesson "..." [--outcome OPTION]
+    ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 
 It remembers the lesson, fires the island, completes the session node, and
 learns from the outcome when one is named. Without `--lesson` it says so;
@@ -171,6 +171,7 @@ same four steps are:
 2. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
    the session node does not close the ticket: `vissue update ISSUE -s DONE`
    does, when the work is accepted.
+   Nor does `finish`: `--close` on it does, for the same acceptance.
 3. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter it refuted shrinks in every other voter's row, and a
    persona it refuted holds its next ballot less firmly.

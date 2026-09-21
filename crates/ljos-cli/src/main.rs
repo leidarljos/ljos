@@ -178,9 +178,9 @@ enum Cmd {
         /// done (default), failed, or cancelled.
         #[arg(long)]
         status: Option<String>,
-        /// Generation from the sitting's claim. Required. A stale gen is refused.
+        /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
         #[arg(long)]
-        gen: u64,
+        gen: Option<u64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -355,12 +355,15 @@ enum Cmd {
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
-        /// Generation from the sitting's claim. Required. A stale gen is refused.
+        /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
         #[arg(long)]
-        gen: u64,
+        gen: Option<u64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
+        /// Also close the tracker ticket. Only when the work is accepted, not when the sitting ends.
+        #[arg(long)]
+        close: bool,
     },
     /// Write trust rows from a project's voting history: Dawid-Skene accuracy per voter, no truth labels.
     Calibrate {
@@ -791,6 +794,7 @@ fn main() -> Result<()> {
             beta,
             gen,
             assignee,
+            close,
         } => print!(
             "{}",
             finish(
@@ -800,7 +804,8 @@ fn main() -> Result<()> {
                 outcome.as_deref(),
                 beta,
                 &resolve_assignee(assignee.as_deref()),
-                gen
+                gen,
+                close
             )?
         ),
         Cmd::Calibrate { project, rounds } => {

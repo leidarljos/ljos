@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos finish` no longer closes the tracker ticket on `--status done`; a
+  sitting ending is not the work being accepted, and a ticket closed early
+  released every blocker on it. `--close` (`close` over MCP) closes it.
+  The protocol document already said so; the tool now agrees.
+- `--gen` on `ljos finish` and `ljos complete` (and `gen` over MCP) is
+  optional: absent, the live generation is read off the claim graph. An
+  explicit stale generation is still refused.
+
 - `ljos claim`, and so a sitting, stamps the tracker as well as the claim
   graph: `vissue claim ISSUE` runs under the assignee's name, so the issue
   reads STARTED and `vissue claims` names who holds it. A tracker that

@@ -4595,6 +4595,25 @@ pub fn packset_search_as_of(
 }
 
 /// The actor id in a `claimdag get` line (`assignee=HEX`), if any.
+/// The live generation on a `claimdag get` line: the `gen=N` field.
+fn gen_of(get_output: &str) -> Option<u64> {
+    get_output
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("gen="))
+        .and_then(|g| g.parse().ok())
+}
+
+/// The generation a finish or complete acts on: the one given, else the live
+/// one read off the claim graph, so a sitting need not carry a number the
+/// graph already holds. A stale explicit gen is still refused by the graph.
+fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
+    if let Some(g) = gen {
+        return Ok(g);
+    }
+    let got = run_captured("claimdag", &["get", id])?.stdout;
+    gen_of(&got).ok_or_else(|| anyhow::anyhow!("complete: no generation on the claim graph's line for {id}: {got}"))
+}
+
 fn holder_of(get_output: &str) -> Option<String> {
     get_output
         .split_whitespace()
@@ -5201,10 +5220,15 @@ pub fn sitting_gated(
 ///
 /// The claim graph refuses a stale generation, a missing actor, or a
 /// status that is not terminal.
-pub fn complete(node: &str, status: Option<&str>, assignee: &str, gen: u64) -> Result<String> {
+pub fn complete(
+    node: &str,
+    status: Option<&str>,
+    assignee: &str,
+    gen: Option<u64>,
+) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
-    let gen_s = gen.to_string();
+    let gen_s = live_gen(&id, gen)?.to_string();
     let mut args = vec![
         "complete",
         id.as_str(),
@@ -5229,7 +5253,8 @@ pub fn finish(
     outcome: Option<&str>,
     beta: f64,
     assignee: &str,
-    gen: u64,
+    gen: Option<u64>,
+    close: bool,
 ) -> Result<String> {
     let mut out = String::new();
     match lesson.map(str::trim).filter(|l| !l.is_empty()) {
@@ -5287,16 +5312,16 @@ pub fn finish(
             ));
         }
     }
-    // The ticket follows the sitting's verdict: done closes it, so a board
-    // never shows TODO over a completed claim and hands the work out again.
-    // Failed or cancelled leaves the ticket where it is, for a person.
-    if status.eq_ignore_ascii_case("done") {
+    // A sitting ending is not the work being accepted: a review can be
+    // posted and still be open, a build can be green and still unmerged.
+    // The ticket closes only when asked, so a blocker on it stays a blocker.
+    if close && status.eq_ignore_ascii_case("done") {
         run_as("vissue", &["update", issue, "-s", "DONE"], None)
             .with_context(|| format!("finish: could not close the ticket {issue}"))?;
         out.push_str(&format!("closed the ticket {issue}\n"));
     } else {
         out.push_str(&format!(
-            "the ticket stays {issue}'s state; `vissue update {issue} -s DONE` closes it\n"
+            "the ticket {issue} keeps its state; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
         ));
     }
     Ok(out)
@@ -6865,6 +6890,14 @@ mod tests {
         assert!(!agreed(&hit(Some(1), Some(3))));
         assert!(agreed(&hit(Some(1), Some(1))));
         assert!(agreed(&hit(None, None)));
+    }
+
+    #[test]
+    fn the_generation_is_read_off_a_get_line() {
+        let line = "a25a…  claimed  task  unset  gen=2  assignee=69f917124f757277b806e9a0f48c0318  parent=0  x-1";
+        assert_eq!(gen_of(line), Some(2));
+        assert_eq!(gen_of("deps  -"), None);
+        assert_eq!(gen_of("a  ready  task  unset  gen=x"), None);
     }
 
     #[test]

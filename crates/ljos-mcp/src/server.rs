@@ -278,8 +278,9 @@ pub struct FinishArgs {
     /// `done` (the default), `failed`, or `cancelled`. To stop without
     /// finishing, use `ljos_release` instead.
     pub status: Option<String>,
-    /// Generation from the sitting's claim. Required. A stale gen is refused.
-    pub gen: u64,
+    /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
+    #[serde(default)]
+    pub gen: Option<u64>,
     /// The name that holds it. Absent: the runner's seat name.
     #[serde(default)]
     pub assignee: Option<String>,
@@ -387,11 +388,16 @@ pub struct FinishSittingArgs {
     /// The option that turned out right, when the ballots are in and the
     /// world has said. Omit when nobody knows yet.
     pub outcome: Option<String>,
-    /// Generation from the sitting's claim. Required. A stale gen is refused.
-    pub gen: u64,
+    /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
+    #[serde(default)]
+    pub gen: Option<u64>,
     /// The name that holds it. Absent: the runner's seat name.
     #[serde(default)]
     pub assignee: Option<String>,
+    /// Also close the tracker ticket. Only when the work is accepted; a
+    /// sitting ending is not that, and a blocker on the ticket must hold.
+    #[serde(default)]
+    pub close: bool,
 }
 
 /// A project whose history calibrates the voters.
@@ -925,6 +931,7 @@ impl LjosServer {
             LEARN_BETA,
             &resolve_assignee(args.assignee.as_deref()),
             args.gen,
+            args.close,
         )
         .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
@@ -1727,10 +1734,10 @@ impl ServerHandler for LjosServer {
              The pack is written by remember, prefer, trust, learn, graded and an \
              imported handover; the text is the claim. Cards are read at \
              ljos://cards/ and never written. Citing a deed on a node names an \
-             accession and does not paste the product. Completing a session node \
-             does not close a ticket; ljos_finish with status done does, so a \
-             board never shows TODO over finished work; ljos_release hands one \
-             back unfinished. A \
+             accession and does not paste the product. Neither completing a session \
+             node nor ljos_finish closes a ticket; ljos_finish with close does, \
+             when the work is accepted, so a blocker on it holds until then; \
+             ljos_release hands one back unfinished. A \
              tool that fails means a habitat refused or is not running; it is not \
              an empty answer. The seat is named after the client that connected. \
              The holder is any `*_SESSION_ID` the runner stamped, the whole value, \
