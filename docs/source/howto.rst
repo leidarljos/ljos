@@ -166,6 +166,8 @@ Start a sitting, and end one
    1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
    == island: Ship the fuse change?
    1.000   seed    ab8c... 3 weeks ago CombMNZ over RRF for fusing two ballots.
+   == playbook
+   none bound; ``ljos sitting ISSUE --playbook NAME`` or ``ljos playbook ISSUE NAME`` names one. A panel is refused until then.
    == recall
    ...
    == timeline
@@ -175,8 +177,11 @@ Start a sitting, and end one
    == claim
    gen=2
 
-One verb, seven sections, in the protocol's order; it stops at the first
-store that does not answer and claims nothing. The ``start_a_sitting``
+One verb, in the protocol's order; it stops at the first store that does
+not answer and claims nothing. ``--playbook NAME`` copies a recipe
+(``sit``, ``arena``, ``land``, ``company-panel``, ``overnight``) into the
+playbook section before recall and holds the name until finish or release.
+``ljos panel`` refuses until one is bound. The ``start_a_sitting``
 prompt gives the same order to a runner that prefers single tools. A claim
 refused as busy names the issue you still hold; ``ljos complete`` finishes it
 and ``ljos release`` hands it back.

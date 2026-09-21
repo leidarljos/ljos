@@ -14,6 +14,7 @@ name with the prefix `ljos_`.
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
 | who votes with a view of its own | pack, persona atoms | `persona`, `vote --as` |
+| which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
 
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
@@ -23,13 +24,16 @@ fails, run `doctor` before drawing any conclusion.
 One verb runs the whole opening in order and stops at the first store that
 does not answer:
 
-    ljos sitting ISSUE --assignee NAME
+    ljos sitting ISSUE --assignee NAME [--playbook NAME]
 
-It prints eight sections, and each one is a step you would otherwise run by
+It prints nine sections, and each one is a step you would otherwise run by
 hand. Each answers something the next one needs. Between the island and the
 recall it reads the issue's blockers from the tracker: an issue whose
 blockers are still open is refused before anything is claimed, because the
 graph says it is not workable; `--anyway` sits on it regardless and says so.
+Then it copies one playbook into `== playbook` before recall: `--playbook`
+names it, a name already bound to the issue is reprinted, and a panel is
+refused until one is bound. The name sticks until `finish` or `release`.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
@@ -44,11 +48,16 @@ graph says it is not workable; `--anyway` sits on it regardless and says so.
    was used rewrites those weights, and the next walk follows them. A
    weak island does not fire. `ljos search TOPIC` and a full
    `ljos island TASK` are during the work, not this opening.
-5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
+5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
+   five shipped recipes are `sit`, `arena`, `land`, `company-panel`,
+   `overnight`. Kind `playbook`, weighed not recalled. `ljos playbooks`
+   lists them. Mid-sitting turns re-read the same file; a new task is a
+   new sitting.
+6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
-6. `ljos timeline ISSUE`. The last twelve dated events across the three
+7. `ljos timeline ISSUE`. The last twelve dated events across the three
    stores; `ljos timeline` without a sitting prints them all.
-7. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
+8. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
    two conversations hold two tickets. The same issue is still one
    holder. `busy` on a named worker means that name still holds another
    node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
@@ -132,20 +141,28 @@ Every piece of work has an issue before it has a claim.
   carries that word; `learn` writes its rows scoped to what the issue's
   island is about, so being wrong on one topic costs nothing elsewhere.
   A panel is one subagent per persona, each started from
-  `ljos brief NAME ISSUE` (the view, what the seat knows on its domains,
-  the working set), each casting one ballot as itself, then
+  `ljos brief NAME ISSUE` (the view, the bound playbook's full recipe,
+  the five named principles, the arena rubric, what the seat knows on its
+  domains, the working set), each casting one ballot as itself, then
   `ljos consensus`; over MCP the `run_a_panel` prompt orders it, and
   without MCP `ljos panel ISSUE --out DIR` writes one brief per persona.
-  Both seat only the personas whose `--about` domains the issue's title
-  or island names. A persona with no domains sits only when no domain
-  matches. Specialists stay seated out: a panel that seats everyone is a
-  count. Each brief is a file to start a
+  A panel is refused until a playbook is bound (`ljos playbook ISSUE NAME`
+  or `ljos sitting ISSUE --playbook NAME`). Both seat only the personas
+  whose `--about` domains the issue's title or island names. A persona
+  with no domains sits only when no domain matches. Specialists stay
+  seated out: a panel that seats everyone is a count. Model names on a
+  playbook are optional spawn hints; every member still ends with
+  `ljos vote --as` then `ljos consensus`. One playbook step per
+  subagent; no resume across phases. Each brief is a file to start a
   subagent from. A panel
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. The kind of work sets the dynamics: tag
   the issue `broad` when the panel is a broad audience, and the settle runs
   bounded confidence, so clusters are allowed and reported instead of being
   averaged into one position.
+  Writing a persona also writes one unscoped inbound trust row (the seat
+  weighs it at 1, everywhere); `--about` on a later trust row only adds
+  weight.
 - Progress goes on the issue, dated: `vissue note ISSUE "..."`.
 
 ### A bump, and a build campaign
@@ -230,6 +247,10 @@ under equal weights is a count; under calibrated rows it is not.
   another seat, the claim names that actor and the two verbs that free it.
 - `complete: status not terminal`: the statuses are `done`, `failed`,
   `cancelled`. To stop without finishing, `release`.
+- `panel: no playbook bound`: personas cannot enter until a recipe is
+  named. `ljos playbook ISSUE NAME` or `ljos sitting ISSUE --playbook NAME`.
+- `playbook: ISSUE is bound to NAME until finish or release`: mid-sitting
+  turns re-read that file. A new task is a new sitting.
 - A claim on an issue whose earlier sitting finished reopens its session
   node and takes it: a new sitting on old work, with the ledger kept.
 - `not a deed accession`: `--why` on `forget` and `trust` takes accessions

@@ -2,6 +2,24 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.17.0 (2026-09-21)
+
+- Five playbooks (`sit`, `arena`, `land`, `company-panel`, `overnight`) are
+  kind `playbook`, weighed not recalled. `ljos playbooks` lists them;
+  `ljos playbook ISSUE NAME` binds one and copies the full recipe body.
+  The name sticks on the sitting until finish or release; a different
+  name while one is held is refused. `ljos sitting ISSUE --playbook NAME`
+  (MCP `playbook`) prints `== playbook` with that body before recall.
+- `ljos brief` carries three blocks: the bound playbook's full recipe,
+  five named principles (split-fence, prove-on-real-surface,
+  open-sibling-first, arena-then-compose, one-step-delegate), and the
+  arena rubric. `ljos panel` refuses until a playbook is bound.
+  Model names on a recipe are optional spawn hints; every panel still
+  ends in `ljos vote --as` then `ljos consensus`.
+- Writing a persona also writes one unscoped inbound trust row (the seat
+  weighs it at 1, everywhere). `--about` on a later trust row only adds
+  weight.
+
 ## 0.16.3 (2026-09-22)
 
 - `ljos remember` and `ljos search` start the default writer when none is
