@@ -373,7 +373,8 @@ pub struct SittingArgs {
     #[serde(default)]
     pub anyway: bool,
     /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
-    /// `company-panel`, `overnight`). Held until finish or release.
+    /// `company-panel`, `overnight`). Absent, a closed-set token in the
+    /// title else sit. Held until finish or release.
     #[serde(default)]
     pub playbook: Option<String>,
 }
@@ -903,7 +904,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); it sticks until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
+        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the five before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -1457,7 +1458,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to name the recipe a sitting copies before personas enter: bind NAME to ISSUE and print the full body. The name sticks until finish or release. Mid-sitting turns re-read it. A new task is a new sitting. A panel is refused until one is bound.",
+        description = "Call this to name the recipe a sitting copies before personas enter: bind NAME to ISSUE and print the full body. The name is a tracker playbook: note until finish or release. Mid-sitting turns re-read it. A new task is a new sitting. A panel is refused until one is bound.",
         annotations(
             title = "Bind a playbook",
             read_only_hint = false,
@@ -1651,8 +1652,8 @@ impl LjosServer {
              3. `ljos_search` then `ljos_island` with the task in your own words.\n\
              4. `ljos_playbook` on the node with a recipe name (sit, arena, land,\n\
                 company-panel, overnight) unless this sitting already holds one.\n\
-                The sitting copies the full body before recall; a panel is refused\n\
-                until one is bound.\n\
+                Absent a name, the sitting matches the title or binds sit. The sitting\n\
+                copies the full body before recall; a panel is refused until one is bound.\n\
              5. `ljos_recall` on the node. What it stands on and what it cited.\n\
              6. `ljos_timeline` the last twelve dated events across the stores.\n\
              7. `ljos_claim` a session node for it. A harness seat occupies per\n\

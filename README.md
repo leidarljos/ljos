@@ -54,7 +54,7 @@ ljos findings out/campaign.json --remember     # an eb-stack campaign's typed fi
 
 ## The loop, in two verbs
 
-`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. The playbook name sticks until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, the ticket closes, and a named outcome shrinks the voters it refuted. The loop that makes the seat a memory runs every time, not only when somebody remembers it.
+`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. Absent `--playbook`, a name already bound, else a closed-set token in the title, else `sit`. The playbook name is a tracker note until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, the ticket closes, and a named outcome shrinks the voters it refuted. The loop that makes the seat a memory runs every time, not only when somebody remembers it.
 
 ## Who is sitting
 

@@ -348,7 +348,7 @@ enum Cmd {
         /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
         #[arg(long)]
         anyway: bool,
-        /// The recipe this sitting copies before recall. Held until finish or release; mid-sitting turns re-read it.
+        /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
         #[arg(long)]
         playbook: Option<String>,
     },

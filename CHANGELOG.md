@@ -7,9 +7,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - Five playbooks (`sit`, `arena`, `land`, `company-panel`, `overnight`) are
   kind `playbook`, weighed not recalled. `ljos playbooks` lists them;
   `ljos playbook ISSUE NAME` binds one and copies the full recipe body.
-  The name sticks on the sitting until finish or release; a different
-  name while one is held is refused. `ljos sitting ISSUE --playbook NAME`
-  (MCP `playbook`) prints `== playbook` with that body before recall.
+  The name is a tracker `playbook:` note until finish or release; those
+  verbs write an empty `playbook:` sentinel so the next sitting does not
+  reprint it. A different name while one is held is refused. `ljos sitting
+  ISSUE --playbook NAME` (MCP `playbook`) prints `== playbook` with that
+  body before recall; absent a name, a closed-set token in the title else
+  `sit`, so a sitting always binds one of the five before claim.
+- The unscoped inbound floor a persona is owed is the seat's own row
+  (`from` is the seat). A third-party unscoped row does not skip it.
 - `ljos brief` carries three blocks: the bound playbook's full recipe,
   five named principles (split-fence, prove-on-real-surface,
   open-sibling-first, arena-then-compose, one-step-delegate), and the
