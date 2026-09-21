@@ -2349,20 +2349,23 @@ pub fn inbound_floor(p: &Persona, seat: &str) -> Option<Trust> {
     })
 }
 
-/// Whether `name` already has an unscoped inbound row in `rows`.
+/// Whether `name` already has the seat's unscoped inbound row in `rows`.
+/// A third-party unscoped row does not seat this persona.
 #[must_use]
-pub fn has_unscoped_inbound(rows: &[Trust], name: &str) -> bool {
+pub fn has_unscoped_inbound(rows: &[Trust], name: &str, seat: &str) -> bool {
     let name = name.trim();
+    let seat = seat.trim();
     rows.iter()
-        .any(|r| r.to == name && r.about.is_empty() && r.weight > 0.0)
+        .any(|r| r.from == seat && r.to == name && r.about.is_empty() && r.weight > 0.0)
 }
 
 fn ensure_unscoped_inbound(p: &Persona) -> Result<()> {
     let name = p.name.trim();
-    if has_unscoped_inbound(&trust_from_pack().unwrap_or_default(), name) {
+    let seat = seat_name();
+    if has_unscoped_inbound(&trust_from_pack().unwrap_or_default(), name, &seat) {
         return Ok(());
     }
-    let Some(row) = inbound_floor(p, &seat_name()) else {
+    let Some(row) = inbound_floor(p, &seat) else {
         return Ok(());
     };
     write_trust(&row, &[]).map(|_| ())
@@ -2737,6 +2740,10 @@ pub fn format_playbooks(playbooks: &[Playbook]) -> String {
         .collect()
 }
 
+/// A tracker logbook note that binds a playbook name to an issue. Latest
+/// such note wins; empty rest is the sitting-scoped drop finish/release write.
+pub const PLAYBOOK_NOTE_PREFIX: &str = "playbook:";
+
 fn playbook_key(issue: &str) -> String {
     issue
         .trim()
@@ -2755,9 +2762,7 @@ fn playbook_bind_path(issue: &str) -> PathBuf {
     runtime_dir().join(format!("playbook-{}", playbook_key(issue)))
 }
 
-/// The playbook name this sitting holds, if one was bound.
-#[must_use]
-pub fn bound_playbook(issue: &str) -> Option<String> {
+fn cached_playbook(issue: &str) -> Option<String> {
     let text = std::fs::read_to_string(playbook_bind_path(issue)).ok()?;
     let name = text.trim();
     if name.is_empty() {
@@ -2767,14 +2772,81 @@ pub fn bound_playbook(issue: &str) -> Option<String> {
     }
 }
 
+fn write_playbook_cache(issue: &str, name: &str) -> Result<()> {
+    let path = playbook_bind_path(issue);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, format!("{name}\n"))
+        .with_context(|| format!("playbook: could not bind {name} on {issue}"))
+}
+
+/// The playbook name bound on an issue JSON: the latest logbook note that
+/// opens with [`PLAYBOOK_NOTE_PREFIX`]. Empty rest means this sitting dropped
+/// it; do not walk back to an earlier bind.
+#[must_use]
+pub fn playbook_name_from_issue(v: &Value) -> Option<String> {
+    let mut dated: Vec<(String, Option<String>)> = Vec::new();
+    for e in v["logbook"].as_array().into_iter().flatten() {
+        let Some(note) = e["note"].as_str() else {
+            continue;
+        };
+        let Some(rest) = note.trim().strip_prefix(PLAYBOOK_NOTE_PREFIX) else {
+            continue;
+        };
+        let name = rest.trim();
+        let live = if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        };
+        let ts = e["timestamp"].as_str().unwrap_or("").to_string();
+        dated.push((ts, live));
+    }
+    if dated.iter().any(|(ts, _)| !ts.is_empty()) {
+        dated
+            .into_iter()
+            .max_by_key(|(ts, _)| ts.clone())
+            .and_then(|(_, n)| n)
+    } else {
+        dated.into_iter().next().and_then(|(_, n)| n)
+    }
+}
+
+/// The playbook name bound on a tracker issue, if any.
+///
+/// # Errors
+///
+/// The tracker not answering.
+pub fn playbook_named_on(issue: &str) -> Result<Option<String>> {
+    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    Ok(playbook_name_from_issue(&v))
+}
+
+/// The playbook name this sitting holds, if one was bound. Tracker note is
+/// the bind that survives the process; the runtime cache is only when the
+/// tracker does not answer.
+#[must_use]
+pub fn bound_playbook(issue: &str) -> Option<String> {
+    match playbook_named_on(issue) {
+        Ok(name) => name,
+        Err(_) => cached_playbook(issue),
+    }
+}
+
 /// Drop the sticky name. Finish and release call this; a new task is a
-/// new sitting.
+/// new sitting. Writes an empty `playbook:` note so the next sitting does
+/// not reprint the previous recipe, and unlinks the runtime cache.
 pub fn drop_playbook(issue: &str) {
+    if bound_playbook(issue).is_some() {
+        let _ = run_captured("vissue", &["note", issue, PLAYBOOK_NOTE_PREFIX]);
+    }
     let _ = std::fs::remove_file(playbook_bind_path(issue));
 }
 
 /// Hold `name` on `issue` until finish or release. A different name while
-/// one is held is refused: mid-sitting turns re-read the same file.
+/// one is held is refused: mid-sitting turns re-read the same note.
 ///
 /// # Errors
 ///
@@ -2795,14 +2867,17 @@ pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
                  a new task is a new sitting"
             );
         }
+        let _ = write_playbook_cache(issue, name);
         return Ok(());
     }
-    let path = playbook_bind_path(issue);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let note = format!("{PLAYBOOK_NOTE_PREFIX} {name}");
+    match run_captured("vissue", &["note", issue, &note]) {
+        Ok(_) => {
+            let _ = write_playbook_cache(issue, name);
+            Ok(())
+        }
+        Err(_) => write_playbook_cache(issue, name),
     }
-    std::fs::write(&path, format!("{name}\n"))
-        .with_context(|| format!("playbook: could not bind {name} on {issue}"))
 }
 
 /// Bind `name` to `issue` and return the full recipe body. This is the
@@ -2811,6 +2886,43 @@ pub fn copy_playbook(issue: &str, name: &str) -> Result<String> {
     let p = playbook_named(name)?;
     bind_playbook(issue, &p.name)?;
     Ok(format_playbook_copy(&p))
+}
+
+/// A closed-set name the issue title names, else `sit`. Longer names win
+/// (`company-panel` before a stray `sit` token); `sitting` is not `sit`.
+#[must_use]
+pub fn playbook_from_title(title: &str) -> &'static str {
+    let tokens: Vec<String> = title
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut names: Vec<&'static str> = SHIPPED_PLAYBOOK_NAMES.to_vec();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    for name in names {
+        if tokens.iter().any(|t| t == name) {
+            return name;
+        }
+    }
+    "sit"
+}
+
+/// Which playbook a sitting copies: an explicit name, else the name already
+/// bound on the issue (sticky until finish/release), else a closed-set
+/// token in the title, else `sit`.
+///
+/// # Errors
+///
+/// An unknown explicit name.
+pub fn resolve_sitting_playbook(issue: &str, title: &str, asked: Option<&str>) -> Result<String> {
+    if let Some(name) = asked.map(str::trim).filter(|n| !n.is_empty()) {
+        return Ok(playbook_named(name)?.name);
+    }
+    if let Some(name) = bound_playbook(issue) {
+        return Ok(name);
+    }
+    Ok(playbook_from_title(title).to_string())
 }
 
 /// The `== playbook` section of a sitting: bind when a name is given,
@@ -6161,8 +6273,9 @@ pub fn open_blockers(issue: &str) -> Vec<String> {
 /// anything is claimed: the tracker's graph says what is workable, and a
 /// seat that sits on blocked work sits on nothing it can finish.
 /// `playbook` names the recipe copied into `== playbook` before recall;
-/// absent, a name already bound to the issue is reprinted. Finish and
-/// release drop it.
+/// absent, a name already bound, else a closed-set token in the title,
+/// else `sit`. Sitting always binds one of the five before claim. Finish
+/// and release drop the sticky name.
 pub fn sitting_gated(
     issue: &str,
     assignee: &str,
@@ -6205,8 +6318,9 @@ pub fn sitting_gated(
         }
         out.push_str("sitting anyway, as asked\n");
     }
+    let name = resolve_sitting_playbook(issue, &title, playbook)?;
     out.push_str("== playbook\n");
-    out.push_str(&playbook_opening(issue, playbook)?);
+    out.push_str(&copy_playbook(issue, &name)?);
     out.push_str("== recall\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     // The last twelve dated events across the three stores; `ljos
@@ -8520,7 +8634,8 @@ mod tests {
         assert!(inbound_floor(&p, "reviewer").is_none());
         assert!(has_unscoped_inbound(
             std::slice::from_ref(&floor),
-            "reviewer"
+            "reviewer",
+            "seat"
         ));
         let scoped = Trust {
             about: vec!["docs".into()],
@@ -8528,8 +8643,19 @@ mod tests {
         };
         assert!(!has_unscoped_inbound(
             std::slice::from_ref(&scoped),
-            "reviewer"
+            "reviewer",
+            "seat"
         ));
+        let other = Trust {
+            from: "other".into(),
+            to: "reviewer".into(),
+            weight: 1.0,
+            about: Vec::new(),
+        };
+        assert!(
+            !has_unscoped_inbound(std::slice::from_ref(&other), "reviewer", "seat"),
+            "a third-party unscoped row is not the seat floor"
+        );
         let arena_pb = shipped_playbooks()
             .into_iter()
             .find(|p| p.name == "arena")
@@ -8540,6 +8666,88 @@ mod tests {
             "{arena}"
         );
         assert!(arena.contains("ljos vote --as"), "{arena}");
+        match before {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playbook_note_latest_wins_and_empty_rest_drops() {
+        let v = serde_json::json!({
+            "logbook": [
+                {"note": "playbook: land", "timestamp": "2026-09-21"},
+                {"note": "playbook: sit", "timestamp": "2026-09-20"},
+                {"note": "progress", "timestamp": "2026-09-19"}
+            ]
+        });
+        assert_eq!(playbook_name_from_issue(&v).as_deref(), Some("land"));
+        let empty = serde_json::json!({"logbook": []});
+        assert_eq!(playbook_name_from_issue(&empty), None);
+        let dropped = serde_json::json!({
+            "logbook": [
+                {"note": "playbook:", "timestamp": "2026-09-22T00:00:00Z"},
+                {"note": "playbook: sit", "timestamp": "2026-09-21T00:00:00Z"}
+            ]
+        });
+        assert_eq!(playbook_name_from_issue(&dropped), None);
+        let undated = serde_json::json!({
+            "logbook": [
+                {"note": "playbook:"},
+                {"note": "playbook: sit"}
+            ]
+        });
+        assert_eq!(
+            playbook_name_from_issue(&undated),
+            None,
+            "newest-first empty rest drops without walking back"
+        );
+    }
+
+    #[test]
+    fn playbook_from_title_matches_a_closed_name_else_sit() {
+        assert_eq!(playbook_from_title("Seat playbooks: routing"), "sit");
+        assert_eq!(playbook_from_title("x5jz compose: land B"), "land");
+        assert_eq!(
+            playbook_from_title("Run the company-panel overnight"),
+            "company-panel"
+        );
+        assert_eq!(playbook_from_title("sitting on a ticket"), "sit");
+        assert_eq!(playbook_from_title("arena then compose"), "arena");
+    }
+
+    #[test]
+    fn sitting_resolves_asked_else_bound_else_title_else_sit() {
+        let _g = env_guard();
+        let dir =
+            std::env::temp_dir().join(format!("ljos-playbook-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        }
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "Seat playbooks", Some("arena")).unwrap(),
+            "arena"
+        );
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "x5jz compose: land B", None).unwrap(),
+            "land"
+        );
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "Ship the fuse change?", None).unwrap(),
+            "sit"
+        );
+        bind_playbook("proj-1a2b", "sit").unwrap();
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "x5jz compose: land B", None).unwrap(),
+            "sit",
+            "sticky wins over title"
+        );
+        drop_playbook("proj-1a2b");
+        assert_eq!(bound_playbook("proj-1a2b"), None);
         match before {
             Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },

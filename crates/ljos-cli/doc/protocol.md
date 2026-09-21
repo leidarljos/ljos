@@ -32,8 +32,10 @@ recall it reads the issue's blockers from the tracker: an issue whose
 blockers are still open is refused before anything is claimed, because the
 graph says it is not workable; `--anyway` sits on it regardless and says so.
 Then it copies one playbook into `== playbook` before recall: `--playbook`
-names it, a name already bound to the issue is reprinted, and a panel is
-refused until one is bound. The name sticks until `finish` or `release`.
+names it, else a name already bound on the issue, else a closed-set token
+in the title, else `sit`. Sitting always binds one of the five before
+claim. A panel is refused until one is bound. The name lives on the
+tracker as a `playbook:` note until `finish` or `release`.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
@@ -51,8 +53,10 @@ refused until one is bound. The name sticks until `finish` or `release`.
 5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
    five shipped recipes are `sit`, `arena`, `land`, `company-panel`,
    `overnight`. Kind `playbook`, weighed not recalled. `ljos playbooks`
-   lists them. Mid-sitting turns re-read the same file; a new task is a
-   new sitting.
+   lists them. Absent a name, the sitting matches the title or binds
+   `sit`. Mid-sitting turns re-read the same note; a new task is a new
+   sitting. Finish and release write `playbook:` so the next sitting
+   does not reprint the previous recipe.
 6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 7. `ljos timeline ISSUE`. The last twelve dated events across the three
@@ -250,7 +254,7 @@ under equal weights is a count; under calibrated rows it is not.
 - `panel: no playbook bound`: personas cannot enter until a recipe is
   named. `ljos playbook ISSUE NAME` or `ljos sitting ISSUE --playbook NAME`.
 - `playbook: ISSUE is bound to NAME until finish or release`: mid-sitting
-  turns re-read that file. A new task is a new sitting.
+  turns re-read that note. A new task is a new sitting.
 - A claim on an issue whose earlier sitting finished reopens its session
   node and takes it: a new sitting on old work, with the ledger kept.
 - `not a deed accession`: `--why` on `forget` and `trust` takes accessions
