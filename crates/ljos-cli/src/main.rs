@@ -6,16 +6,17 @@ use ljos_cli::{
     age_of, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, doctor, due_report, finish, format_bump_rows, format_consolidation,
     format_doctor, format_findings, format_hits, format_hubs, format_island, format_personas,
-    format_readings, format_remembered, format_seat, format_steps, format_write_ack, graded, habit,
-    habits, handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
-    island_entities, join, learn_anchors, learn_and_write, learn_shared, now_utc, on_path, onboard,
-    pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
-    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
-    policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
-    remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
-    session_end, sitting_gated, take_hook_context, tcb_check, timeline, topic_words, trim_num,
-    trust_from_pack, verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    format_playbooks, format_readings, format_remembered, format_seat, format_steps,
+    format_write_ack, graded, habit, habits, handover, healthy, hold_hook_context, hook_call,
+    hook_context, hook_output_ruled, island_entities, join, learn_anchors, learn_and_write,
+    learn_shared, now_utc, on_path, onboard, pack, packset_consolidate, packset_forget,
+    packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps,
+    parse_every, personas_from_pack, playbook_verb, playbooks_from_pack, policy_with_memory,
+    policyd_required, predictions_of, read_campaign, receive, release, remember_findings,
+    resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
+    sitting_gated, take_hook_context, tcb_check, timeline, topic_words, trim_num, trust_from_pack,
+    verdict_for, whoami, write_persona, write_prediction, write_rule, write_trust, Persona,
+    Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -123,6 +124,9 @@ enum Cmd {
         name: String,
         /// The tracker id of the issue.
         issue: String,
+        /// Playbook step to name in the brief (`k` of `step k/n`). One when absent.
+        #[arg(long)]
+        step: Option<u32>,
     },
     /// An issue's timeline: the tracker's logbook, the deeds it cites, and the memories it activates, one dated list oldest first with age and gap.
     Timeline {
@@ -155,6 +159,18 @@ enum Cmd {
     },
     /// The personas the pack holds: name, anchor, domains and view, one per line.
     Personas,
+    /// Write a playbook, bind one to an issue, or print the bound recipe.
+    Playbook {
+        /// Playbook name (with --view) or issue id (to bind or print).
+        target: String,
+        /// Playbook name when binding to an issue.
+        name: Option<String>,
+        /// The recipe text; writes the playbook named by the first argument.
+        #[arg(long)]
+        view: Option<String>,
+    },
+    /// The playbooks the pack holds: name and first line, one per line.
+    Playbooks,
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
         /// A tracker id, or a 32-hex claim-graph id.
@@ -325,7 +341,7 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, recall, timeline, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
@@ -338,6 +354,9 @@ enum Cmd {
         /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
         #[arg(long)]
         anyway: bool,
+        /// Bind this closed-set playbook, then sit. Absent: a name already on the issue stays, else the title is matched, else sit.
+        #[arg(long)]
+        playbook: Option<String>,
     },
     /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
     Finish {
@@ -479,7 +498,7 @@ fn main() -> Result<()> {
             )?,
             None => run("vissue", &["vote", &issue])?,
         },
-        Cmd::Brief { name, issue } => print!("{}", brief(&name, &issue)?),
+        Cmd::Brief { name, issue, step } => print!("{}", brief(&name, &issue, step)?),
         Cmd::Timeline { issue, limit } => print!("{}", timeline(&issue, limit)?),
         Cmd::Panel { issue, out } => print!("{}", panel(&issue, &out)?),
         Cmd::Persona {
@@ -498,6 +517,13 @@ fn main() -> Result<()> {
         }
         Cmd::Personas => {
             print!("{}", format_personas(&personas_from_pack()?));
+        }
+        Cmd::Playbook { target, name, view } => print!(
+            "{}",
+            playbook_verb(&target, name.as_deref(), view.as_deref())?
+        ),
+        Cmd::Playbooks => {
+            print!("{}", format_playbooks(&playbooks_from_pack()?));
         }
         Cmd::Claim { node, assignee } => {
             print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)
@@ -774,13 +800,15 @@ fn main() -> Result<()> {
             assignee,
             cards: cards_dir,
             anyway,
+            playbook,
         } => print!(
             "{}",
             sitting_gated(
                 &issue,
                 &resolve_assignee(assignee.as_deref()),
                 &cards_dir,
-                anyway
+                anyway,
+                playbook.as_deref()
             )?
         ),
         Cmd::Finish {

@@ -2,6 +2,30 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- Playbooks are pack atoms (`kind` playbook) on a closed set of names:
+  sit, arena, land, company-panel, overnight. Latest per name wins;
+  unknown names are refused. `ljos playbooks` prints the roster;
+  `ljos playbook NAME --view TEXT` writes one; `ljos playbook ISSUE NAME`
+  binds it with a tracker note and prints the body; `ljos playbook ISSUE`
+  prints the bound recipe. `ljos_playbooks` and `ljos_playbook` over MCP.
+  A healthy sitting seeds any of the five the pack does not hold.
+- `ljos brief` carries three blocks after the identity lines: the bound
+  playbook with its full recipe body and optional `--step`, the five
+  named principles (split-fence, prove-on-the-real-surface,
+  open-the-sibling-before-writing, arena-then-compose, one-step-delegate),
+  and a rubric line from the issue or its compose parent (a named gap
+  when none).
+- `ljos sitting ISSUE --playbook NAME` binds then sits and prints
+  `== playbook` with the recipe body after blockers, before recall. Absent
+  the flag, a name already on the issue stays until finish or release
+  (occupancy already keys the issue; there is no second store), else the
+  title is matched, else `sit`. `ljos panel` refuses until a playbook is
+  named. Writing a persona plants an unscoped inbound trust row from the
+  seat at weight 1.0 when none exists. Seed texts may carry an optional
+  `[role:…]` line; hosts may ignore it. Personas still vote `--as`.
+
 ## 0.16.1 (2026-09-20)
 
 - `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)

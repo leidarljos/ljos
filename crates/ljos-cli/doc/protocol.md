@@ -14,6 +14,7 @@ name with the prefix `ljos_`.
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
 | who votes with a view of its own | pack, persona atoms | `persona`, `vote --as` |
+| which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
 
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
@@ -25,11 +26,18 @@ does not answer:
 
     ljos sitting ISSUE --assignee NAME
 
-It prints eight sections, and each one is a step you would otherwise run by
+It prints nine sections, and each one is a step you would otherwise run by
 hand. Each answers something the next one needs. Between the island and the
 recall it reads the issue's blockers from the tracker: an issue whose
 blockers are still open is refused before anything is claimed, because the
 graph says it is not workable; `--anyway` sits on it regardless and says so.
+After the blockers it copies one named playbook (`== playbook` and the
+recipe body) before recall. `ljos sitting ISSUE --playbook NAME` binds that
+closed-set name (`sit`, `arena`, `land`, `company-panel`, `overnight`);
+absent, a name already on the issue stays until finish or release, else the
+title is matched, else `sit`. Occupancy already keys `{name}:{issue}`; the
+playbook name is a tracker note on that same issue, not a second store. A
+new task is a new sitting.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
@@ -41,11 +49,13 @@ graph says it is not workable; `--anyway` sits on it regardless and says so.
 4. `ljos island` on the issue's title. The sitting takes the strongest
    eight. `ljos search TOPIC` and a full `ljos island TASK` are during
    the work, not this opening.
-5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
+5. `ljos playbook ISSUE NAME` (or the sitting's `--playbook`). The recipe
+   body is printed in full before recall; mid-sitting turns re-read it.
+6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
-6. `ljos timeline ISSUE`. The last twelve dated events across the three
+7. `ljos timeline ISSUE`. The last twelve dated events across the three
    stores; `ljos timeline` without a sitting prints them all.
-7. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
+8. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
    two conversations hold two tickets. The same issue is still one
    holder. `busy` on a named worker means that name still holds another
    node (`ljos complete` or `ljos release`).
@@ -94,6 +104,11 @@ Every piece of work has an issue before it has a claim.
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks at the point of action and
   `ljos policy` says the same; the rule is memory and travels in handovers.
+- Copy the named playbook before any persona enters: sitting prints
+  `== playbook` with the recipe body, and `ljos brief` reprints that body
+  (not only the name) with the five principles and the rubric. `ljos panel`
+  refuses until a playbook is named on the issue. A skip stays a line:
+  `brief: no playbook named on ISSUE`.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and

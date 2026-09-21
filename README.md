@@ -11,7 +11,7 @@ That installs `ljos` and `ljos-mcp`.
 Citing a deed names it; the bytes stay in deedar. A finish with status done closes the ticket; completing a node alone does not. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
-ljos sitting vissue-xxxx                       # doctor, cards, due, island, recall, timeline, claim
+ljos sitting vissue-xxxx [--playbook land]     # doctor, cards, due, island, playbook, recall, timeline, claim
 ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # remember, fire, complete, learn
 ljos calibrate -p project                      # trust rows from the voting history, no truth labels
 ljos remember "the default fuse is CombMNZ"
@@ -32,7 +32,11 @@ ljos trust alice bob 0.8 --why deed-… [--about docs]
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
 ljos predict vissue-xxxx --expect ship          # forecast the others; two forecasts and consensus names the surprisingly popular answer
 ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it
-ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
+ljos brief reviewer vissue-xxxx [--step 1]     # what a subagent playing reviewer starts from
+ljos playbooks                                 # the recipes the pack holds
+ljos playbook land --view "..."                # write a closed-set recipe
+ljos playbook vissue-xxxx land                 # bind it; print the body
+ljos playbook vissue-xxxx                      # print the bound recipe
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
 ljos vote vissue-xxxx --for hold --as reviewer
@@ -66,7 +70,7 @@ Nothing needs a variable set: the pack answers on `127.0.0.1:8761`, the seat's m
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio: thirty-six tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
+`ljos-mcp` serves the same verbs over stdio: thirty-nine tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
