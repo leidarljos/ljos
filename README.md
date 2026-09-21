@@ -11,7 +11,7 @@ That installs `ljos` and `ljos-mcp`.
 Citing a deed names it; the bytes stay in deedar. A finish with status done closes the ticket; completing a node alone does not. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
 ```
-ljos sitting vissue-xxxx                       # doctor, cards, due, island, recall, timeline, claim
+ljos sitting vissue-xxxx --playbook sit        # doctor, cards, due, island, playbook, recall, timeline, claim
 ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # remember, fire, complete, learn
 ljos calibrate -p project                      # trust rows from the voting history, no truth labels
 ljos remember "the default fuse is CombMNZ"
@@ -30,6 +30,8 @@ ljos policy -- ls
 ljos consensus vissue-xxxx
 ljos trust alice bob 0.8 --why deed-… [--about docs]
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
+ljos playbooks                                 # sit, arena, land, company-panel, overnight
+ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos predict vissue-xxxx --expect ship          # forecast the others; two forecasts and consensus names the surprisingly popular answer
 ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
@@ -52,7 +54,7 @@ ljos findings out/campaign.json --remember     # an eb-stack campaign's typed fi
 
 ## The loop, in two verbs
 
-`ljos sitting ISSUE` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, the timeline, the claim. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, the ticket closes, and a named outcome shrinks the voters it refuted. The loop that makes the seat a memory runs every time, not only when somebody remembers it.
+`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. The playbook name sticks until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, the ticket closes, and a named outcome shrinks the voters it refuted. The loop that makes the seat a memory runs every time, not only when somebody remembers it.
 
 ## Who is sitting
 
@@ -66,7 +68,7 @@ Nothing needs a variable set: the pack answers on `127.0.0.1:8761`, the seat's m
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio: thirty-six tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
+`ljos-mcp` serves the same verbs over stdio: thirty-nine tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}

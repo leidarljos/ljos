@@ -23,7 +23,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-ljos = { path = "../ljos-cli", version = "0.16.1" }
+ljos = { path = "../ljos-cli", version = "0.17.0" }
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true

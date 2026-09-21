@@ -13,15 +13,15 @@ use anyhow::Context as _;
 
 use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete,
-    conflicts, consensus_steps_for, doctor, due, finish, format_change, format_consolidation,
-    graded, habit, habits, handover, identity_or_seat, island_entities, issue_words,
-    learn_and_write, now_utc, on_path, other_seat, pack, packset_consolidate, packset_forget,
-    packset_island_as, packset_search_as_of, packset_write_as, panel_steps, parse_every,
-    personas_from_pack, personas_speaking_to, policy_with_memory, predictions_of, read_campaign,
-    receive, release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
-    seat_name, sitting_gated, timeline, topic_words, trust_from_pack, write_persona,
-    write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    conflicts, consensus_steps_for, copy_playbook, doctor, due, finish, format_change,
+    format_consolidation, graded, habit, habits, handover, identity_or_seat, island_entities,
+    issue_words, learn_and_write, now_utc, on_path, other_seat, pack, packset_consolidate,
+    packset_forget, packset_island_as, packset_search_as_of, packset_write_as, panel_steps,
+    parse_every, personas_from_pack, personas_speaking_to, playbooks_from_pack, policy_with_memory,
+    predictions_of, read_campaign, receive, release, remember_findings, resolve_assignee,
+    rows_about, run_captured, runner_pid, seat_name, sitting_gated, timeline, topic_words,
+    trust_from_pack, write_persona, write_prediction, write_rule, write_trust, Persona, Rule,
+    Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -372,6 +372,29 @@ pub struct SittingArgs {
     /// issue is refused before anything is claimed.
     #[serde(default)]
     pub anyway: bool,
+    /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
+    /// `company-panel`, `overnight`). Held until finish or release.
+    #[serde(default)]
+    pub playbook: Option<String>,
+}
+
+/// Bind a playbook to an issue.
+#[derive(Deserialize, JsonSchema)]
+pub struct PlaybookBindArgs {
+    /// The tracker id of the issue.
+    pub issue: String,
+    /// The recipe name: sit, arena, land, company-panel, overnight.
+    pub name: String,
+}
+
+/// One shipped or pack playbook.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PlaybookRow {
+    pub name: String,
+    /// Optional model-family spawn hints; empty means none.
+    pub models: Vec<String>,
+    /// The full recipe body.
+    pub body: String,
 }
 
 /// A sitting to close.
@@ -880,7 +903,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the working set, and the claim. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
+        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); it sticks until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -898,6 +921,7 @@ impl LjosServer {
             &resolve_assignee(args.assignee.as_deref()),
             &self.cards_dir,
             args.anyway,
+            args.playbook.as_deref(),
         )
         .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
@@ -1165,7 +1189,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to start a subagent that plays a persona on an issue: the text it should begin from. The persona's view and anchor, what the seat knows on its domains (preferences first), the issue's working set, and the one ballot it must end with. Read-only.",
+        description = "Call this to start a subagent that plays a persona on an issue: the text it should begin from. The persona's view and anchor, the bound playbook's full recipe, the five named principles, the arena rubric, what the seat knows on its domains (preferences first), the issue's working set, and the one ballot it must end with. Read-only.",
         annotations(
             title = "Brief a persona",
             read_only_hint = true,
@@ -1433,6 +1457,42 @@ impl LjosServer {
     }
 
     #[tool(
+        description = "Call this to name the recipe a sitting copies before personas enter: bind NAME to ISSUE and print the full body. The name sticks until finish or release. Mid-sitting turns re-read it. A new task is a new sitting. A panel is refused until one is bound.",
+        annotations(
+            title = "Bind a playbook",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_playbook(
+        &self,
+        Parameters(args): Parameters<PlaybookBindArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = copy_playbook(&args.issue, &args.name).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this to see the playbooks the pack holds: the five shipped recipes (sit, arena, land, company-panel, overnight) and any others. Kind playbook, weighed not recalled. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
+        annotations(title = "Playbooks", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_playbooks(&self) -> Result<Json<Rows<PlaybookRow>>, McpError> {
+        Ok(as_rows(
+            playbooks_from_pack()
+                .map_err(refused)?
+                .into_iter()
+                .map(|p| PlaybookRow {
+                    name: p.name,
+                    models: p.models,
+                    body: p.body,
+                })
+                .collect(),
+        ))
+    }
+
+    #[tool(
         description = "Call this at the start of a sitting, after the cards: the claims whose review is due, soonest first. Read each, then ljos_graded it recalled or lapsed; the review clock moves only when you grade.",
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
@@ -1589,9 +1649,13 @@ impl LjosServer {
              2. `ljos_due` for the claims whose review is due; a sitting prints a\n\
                 short prefix. Read each shown row and `ljos_graded` it.\n\
              3. `ljos_search` then `ljos_island` with the task in your own words.\n\
-             4. `ljos_recall` on the node. What it stands on and what it cited.\n\
-             5. `ljos_timeline` the last twelve dated events across the stores.\n\
-             6. `ljos_claim` a session node for it. A harness seat occupies per\n\
+             4. `ljos_playbook` on the node with a recipe name (sit, arena, land,\n\
+                company-panel, overnight) unless this sitting already holds one.\n\
+                The sitting copies the full body before recall; a panel is refused\n\
+                until one is bound.\n\
+             5. `ljos_recall` on the node. What it stands on and what it cited.\n\
+             6. `ljos_timeline` the last twelve dated events across the stores.\n\
+             7. `ljos_claim` a session node for it. A harness seat occupies per\n\
                 issue; a named worker occupies one slot.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
@@ -1652,17 +1716,23 @@ impl LjosServer {
         };
         Ok(asked(format!(
             "Run a panel on {issue}.\n\n\
+             A panel is refused until a playbook is bound: `ljos_playbook` with {issue} and a \
+             recipe name, or `ljos_sitting` with playbook set. Mid-sitting turns re-read that \
+             recipe; a new task is a new sitting. Model names on the recipe are optional spawn \
+             hints; every member still ends with `ljos_vote` `--as` then `ljos_consensus`.\n\n\
              {seated}\n{roster}\n\n\
              1. `ljos_recall` on {issue}, and `ljos_search` for what the seat knows about it.\n\
              2. For each persona, `ljos_brief` with its name and {issue}, and start one \
-                subagent with that text as its whole brief: the persona's view, what the seat \
-                knows on its domains, the working set. Each subagent reads the work in its own \
-                way: `ljos_island` on {issue} with `as` set to its name walks the pack through \
+                subagent with that text as its whole brief: the persona's view, the bound \
+                playbook's full recipe, the five named principles, the arena rubric, what the \
+                seat knows on its domains, the working set. Each subagent reads the work in its \
+                own way: `ljos_island` on {issue} with `as` set to its name walks the pack through \
                 its own weights, and with `fire` true once it has read the work tightens the \
                 paths it walked and nobody else's; `ljos_remember` with `as` writes what it \
                 concluded into its own set. It ends by casting exactly one ballot: `ljos_vote` \
                 on {issue} with `as` set to the persona's name, for the option it would defend. \
-                Subagents run in parallel and do not see each other's ballots.\n\
+                Subagents run in parallel and do not see each other's ballots. One playbook \
+                step per subagent; do not resume across phases.\n\
              3. `ljos_consensus` on {issue}. The settle weighs the ballots by the trust rows \
                 the pack holds and holds each persona to its ballot by its anchor; it \
                 reports polarization and disagreement, not only shares. A tally is not this.\n\
@@ -1823,7 +1893,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            37,
+            39,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -1869,6 +1939,7 @@ mod tests {
                 "ljos_island",
                 "ljos_learn",
                 "ljos_persona",
+                "ljos_playbook",
                 "ljos_predict",
                 "ljos_prefer",
                 "ljos_receive",
@@ -2024,6 +2095,7 @@ mod tests {
                 "`ljos_graded`",
                 "`ljos_search`",
                 "`ljos_island`",
+                "`ljos_playbook`",
                 "`ljos_recall`",
                 "`ljos_claim`",
                 "`ljos_remember`",
