@@ -4611,7 +4611,9 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
         return Ok(g);
     }
     let got = run_captured("claimdag", &["get", id])?.stdout;
-    gen_of(&got).ok_or_else(|| anyhow::anyhow!("complete: no generation on the claim graph's line for {id}: {got}"))
+    gen_of(&got).ok_or_else(|| {
+        anyhow::anyhow!("complete: no generation on the claim graph's line for {id}: {got}")
+    })
 }
 
 fn holder_of(get_output: &str) -> Option<String> {
