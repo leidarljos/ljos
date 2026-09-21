@@ -8254,9 +8254,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = fake_vissue(dir.path(), true, true);
         let said = with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice")).unwrap();
-        assert_eq!(said.as_deref(), Some("tracker: proj-1a2b STARTED under alice"));
+        assert_eq!(
+            said.as_deref(),
+            Some("tracker: proj-1a2b STARTED under alice")
+        );
         let calls = std::fs::read_to_string(log).unwrap();
-        assert!(calls.contains("claim proj-1a2b VISSUE_AGENT=alice"), "{calls}");
+        assert!(
+            calls.contains("claim proj-1a2b VISSUE_AGENT=alice"),
+            "{calls}"
+        );
     }
 
     #[test]
@@ -8267,7 +8273,10 @@ mod tests {
         let said = with_fake_on_path(dir.path(), || stamp_tracker("deadbeef", "alice")).unwrap();
         assert_eq!(said, None);
         let calls = std::fs::read_to_string(log).unwrap();
-        assert!(!calls.contains("claim"), "asked to claim a non-issue: {calls}");
+        assert!(
+            !calls.contains("claim"),
+            "asked to claim a non-issue: {calls}"
+        );
     }
 
     #[test]
