@@ -48,7 +48,9 @@ graph says it is not workable; `--anyway` sits on it regardless and says so.
 7. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
    two conversations hold two tickets. The same issue is still one
    holder. `busy` on a named worker means that name still holds another
-   node (`ljos complete` or `ljos release`).
+   node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
+   `vissue claims` answers who holds it; a tracker that refuses the name
+   refuses the sitting, and `ljos release` frees the claim graph.
 
 No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
 Every piece of work has an issue before it has a claim.

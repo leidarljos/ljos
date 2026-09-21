@@ -4603,6 +4603,44 @@ fn holder_of(get_output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Stamp the tracker to match the claim graph. The claim graph holds
+/// occupancy; the tracker answers who holds what, and a sitting that takes
+/// one without the other leaves `vissue claims` blind to a held issue.
+/// `vissue claim ISSUE` moves the issue to STARTED under `assignee` and is
+/// idempotent for the name that already holds it. A node the tracker does
+/// not know (a raw claim-graph id) has nothing to stamp and gives `None`.
+///
+/// # Errors
+///
+/// The tracker refusing the name. The claim graph already holds the node
+/// by then, so the message names the verb that frees it.
+fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
+    if run_captured("vissue", &["show", node, "--json"]).is_err() {
+        return Ok(None);
+    }
+    run_captured_as("vissue", &["claim", node], Some(assignee))
+        .map(|_| Some(format!("tracker: {node} STARTED under {assignee}")))
+        .with_context(|| {
+            format!(
+                "claim: the claim graph took {node} but the tracker refused to stamp it under {assignee}; `ljos release {node} --assignee {assignee}` frees the graph, or `vissue claim {node} --force` takes the tracker over"
+            )
+        })
+}
+
+/// What the claim graph said, followed by the tracker's line when the node
+/// is an issue.
+fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
+    let mut out = said;
+    if let Some(line) = stamp_tracker(node, assignee)? {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Take a session node, and when the claim graph refuses because the
 /// assignee still holds another node, say which tracker id that is and the
 /// two verbs that free it. The bare refusal names a 32-hex id nobody can
@@ -4617,7 +4655,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
         Ok(said) => {
             write_hold(&actor, assignee);
-            Ok(said.stdout)
+            with_tracker(said.stdout, node, assignee)
         }
         Err(e) => {
             let text = e.to_string();
@@ -4630,7 +4668,11 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                 run_captured("claimdag", &["reopen", &id, "--actor", &actor])?;
                 let said = run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
                 write_hold(&actor, assignee);
-                return Ok(format!("reopened a finished session node\n{}", said.stdout));
+                return with_tracker(
+                    format!("reopened a finished session node\n{}", said.stdout),
+                    node,
+                    assignee,
+                );
             }
             // The node is already claimed. By this name it is a sitting
             // resumed: renew the lease and go on. By another it is theirs.
@@ -4642,9 +4684,11 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             .map(|s| s.stdout)
                             .unwrap_or_default();
                         write_hold(&actor, assignee);
-                        Ok(format!(
-                            "already held by {assignee}; the sitting resumes\n{renewed}"
-                        ))
+                        with_tracker(
+                            format!("already held by {assignee}; the sitting resumes\n{renewed}"),
+                            node,
+                            assignee,
+                        )
                     }
                     Some(holder) => match read_hold(&holder) {
                         // This seat's own conversation, and it is gone: a
@@ -4657,10 +4701,14 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             let said =
                                 run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
                             write_hold(&actor, assignee);
-                            Ok(format!(
-                                "took over from {}, this seat's conversation, gone (held since {})\n{}",
-                                h.assignee, h.since, said.stdout
-                            ))
+                            with_tracker(
+                                format!(
+                                    "took over from {}, this seat's conversation, gone (held since {})\n{}",
+                                    h.assignee, h.since, said.stdout
+                                ),
+                                node,
+                                assignee,
+                            )
                         }
                         Some(h) => bail!(
                             "claim: {node} is held by {} (seat {}, {}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
@@ -5722,9 +5770,23 @@ pub struct Said {
 }
 
 pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
+    run_captured_as(bin, args, None)
+}
+
+/// [`run_captured`] with `VISSUE_AGENT` set to `identity`, for a tracker
+/// write whose output the caller has to hand on. `None` leaves the
+/// environment as it is.
+pub fn run_captured_as(
+    bin: &str,
+    args: &[impl AsRef<str>],
+    identity: Option<&str>,
+) -> Result<Said> {
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
+    if let Some(who) = identity {
+        cmd.env("VISSUE_AGENT", who);
+    }
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -8148,5 +8210,75 @@ mod tests {
     fn forget_refuses_an_empty_id() {
         let err = packset_forget("   ", None).unwrap_err();
         assert!(err.to_string().contains("atom id is required"), "{err}");
+    }
+
+    /// A fake tracker on PATH: `show` answers as told, `claim` logs its
+    /// argv and the identity it was given.
+    fn fake_vissue(dir: &std::path::Path, show_ok: bool, claim_ok: bool) -> std::path::PathBuf {
+        let log = dir.join("calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{}'\ncase \"$1\" in\n  show) {} ;;\n  claim) {} ;;\nesac\nexit 0\n",
+            log.display(),
+            if show_ok { "echo '{}'" } else { "exit 1" },
+            if claim_ok { "echo claimed" } else { "echo refused >&2; exit 1" },
+        );
+        let path = dir.join("vissue");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        log
+    }
+
+    /// Run `f` with `dir` first on PATH, then put PATH back.
+    fn with_fake_on_path<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        let mut new = std::ffi::OsString::from(dir.as_os_str());
+        new.push(":");
+        new.push(&old);
+        unsafe {
+            std::env::set_var("PATH", &new);
+        }
+        let out = f();
+        unsafe {
+            std::env::set_var("PATH", old);
+        }
+        out
+    }
+
+    #[test]
+    fn a_claim_stamps_the_tracker_under_the_assignee() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = fake_vissue(dir.path(), true, true);
+        let said = with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice")).unwrap();
+        assert_eq!(said.as_deref(), Some("tracker: proj-1a2b STARTED under alice"));
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("claim proj-1a2b VISSUE_AGENT=alice"), "{calls}");
+    }
+
+    #[test]
+    fn a_node_the_tracker_does_not_know_stamps_nothing() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = fake_vissue(dir.path(), false, true);
+        let said = with_fake_on_path(dir.path(), || stamp_tracker("deadbeef", "alice")).unwrap();
+        assert_eq!(said, None);
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(!calls.contains("claim"), "asked to claim a non-issue: {calls}");
+    }
+
+    #[test]
+    fn a_tracker_refusal_names_the_way_out() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _log = fake_vissue(dir.path(), true, false);
+        let err =
+            with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice")).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("ljos release proj-1a2b"), "{text}");
+        assert!(text.contains("refused"), "{text}");
     }
 }

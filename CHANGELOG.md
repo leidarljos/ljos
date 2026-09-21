@@ -2,6 +2,14 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- `ljos claim`, and so a sitting, stamps the tracker as well as the claim
+  graph: `vissue claim ISSUE` runs under the assignee's name, so the issue
+  reads STARTED and `vissue claims` names who holds it. A tracker that
+  refuses the name fails the claim with `ljos release` named as the way
+  out; a node the tracker does not know is left alone.
+
 ## 0.16.1 (2026-09-20)
 
 - `cargo binstall ljos` takes the GitHub tarball (`ljos` and `ljos-mcp`)

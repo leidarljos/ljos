@@ -21,7 +21,7 @@ ljos island "rebuild the packset site"
 ljos evidence deed-…
 ljos deed vissue-xxxx --add deed-…
 ljos recall vissue-xxxx
-ljos claim <node>
+ljos claim <node>                              # the session node, and the tracker issue to STARTED under the same name
 ljos release <node>
 ljos seat                                      # who is sitting: the seat, this conversation's holder, and where the names came from
 ljos complete <node> --status done
