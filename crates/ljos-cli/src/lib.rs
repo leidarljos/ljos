@@ -2047,6 +2047,50 @@ fn load_seat_env() {
     }
 }
 
+/// A transport failure, as distinct from a writer that answered and refused.
+fn writer_unreachable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<packset_client::Error>()
+            .is_some_and(|inner| matches!(inner, packset_client::Error::Http(_)))
+    })
+}
+
+/// Start the default writer when a memory verb could not connect.
+/// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
+/// replaced with the default writer.
+fn ensure_writer() -> Result<()> {
+    if std::env::var("PACKSET_URL").ok().as_deref() == Some("off") {
+        return Ok(());
+    }
+    if std::env::var("PACKSET_URL")
+        .ok()
+        .is_some_and(|url| !url.is_empty())
+    {
+        bail!(
+            "the pack writer at PACKSET_URL is not answering. This seat is not pointed at the default writer, so it was not started"
+        );
+    }
+    if !on_path("packset") {
+        bail!(
+            "no pack writer is answering, and packset is not on PATH. cargo binstall packset"
+        );
+    }
+    run_captured("packset", &["ensure"]).context("packset ensure")?;
+    Ok(())
+}
+
+fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
+    match op() {
+        Ok(value) => Ok(value),
+        Err(err) if writer_unreachable(&err) => {
+            ensure_writer()?;
+            op()
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
     let workspace = std::env::var("PACKSET_WORKSPACE")
@@ -2117,9 +2161,11 @@ pub fn post_claim(
     }
     let kind = atom_kind(label)?;
     let atom = atom_body(kind, trimmed, workspace);
-    client
-        .post_atom(&atom)
-        .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    with_writer(|| {
+        client
+            .post_atom(&atom)
+            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
@@ -2169,9 +2215,11 @@ pub fn packset_write_as(label: &str, text: &str, persona: Option<&str>) -> Resul
     // Its own tree: the persona's conclusions replace and duplicate among
     // themselves, not against the seat's or another persona's.
     atom["set"] = Value::String(persona_set(name));
-    client
-        .post_atom(&atom)
-        .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    with_writer(|| {
+        client
+            .post_atom(&atom)
+            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })
 }
 
 /// Retire one atom from the workspace the cwd resolves to, optionally naming
@@ -2431,9 +2479,15 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     out.push_str("\nThe work:\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     out.push_str(&format!(
-        "\nRead it your way and end with one ballot: `ljos vote {issue} --for OPTION --as {}`. \
+        "\nWalk the island as yourself before the ballot: `ljos island` on the work with `--as {}`. \
+         The number on a row is spread along your links, not a rank of what is true. \
+         Pass `--fire` only after you have used that island. Fire rewrites your weights, not the seat's, and the next walk of the same cue follows them. \
+         End with one ballot: `ljos vote {{issue}} --for OPTION --confidence P --used deed-... --as {}`. \
+         P is the probability you give that the choice is the outcome. \
+         --used none records that the ballot drew on no deed. \
+         The line it prints is a count. `ljos consensus {{issue}}` is the settle. \
          A lesson of your own goes in with `ljos remember --as {} \"...\"`.\n",
-        p.name, p.name
+        p.name, p.name, p.name
     ));
     Ok(out)
 }
@@ -2488,11 +2542,16 @@ pub fn personas_speaking_to(personas: &[Persona], words: &[String]) -> Vec<Perso
         })
         .cloned()
         .collect();
-    if speaking.is_empty() {
-        personas.to_vec()
-    } else {
-        speaking
+    if !speaking.is_empty() {
+        return speaking;
     }
+    // No domain matched. Personas with no domains speak to every issue.
+    // Specialists stay seated out: seating the whole pack is a count.
+    personas
+        .iter()
+        .filter(|p| p.entities.is_empty())
+        .cloned()
+        .collect()
 }
 
 /// The words an issue speaks in: its title's topic words and the entities
@@ -2839,27 +2898,290 @@ pub fn learn_anchors(
 /// # Errors
 ///
 /// The pack refusing a row or a persona.
+/// A ballot as a forecast: the choice, and the probability the voter stated
+/// for that choice. Absent confidence is not a claim of certainty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forecast {
+    pub agent: String,
+    pub choice: String,
+    pub confidence: Option<f64>,
+}
+
+/// Quadratic score of a stated probability against the outcome.
+///
+/// `p` is the probability the voter assigned to its own choice being the
+/// outcome. The outcome indicator is 1 when the choice matches and 0
+/// otherwise. The score is `(p - o)^2` (Brier 1950; Gneiting and Raftery
+/// 2007, doi:10.1198/016214506000001437). Lower is better. It is not a
+/// trust weight.
+#[must_use]
+pub fn brier(choice: &str, outcome: &str, p: f64) -> f64 {
+    let o = if choice == outcome { 1.0 } else { 0.0 };
+    let d = p - o;
+    d * d
+}
+
+/// Logarithmic score of the probability assigned to the event that occurred.
+///
+/// Good 1952, doi:10.1111/j.2517-6161.1952.tb00104.x. The score is
+/// `-ln` of the probability the forecast put on what happened. It is
+/// unbounded when that probability is 0, which a stated certainty on the
+/// wrong choice is. `None` in that case, rather than a stand-in number.
+#[must_use]
+pub fn log_score(choice: &str, outcome: &str, p: f64) -> Option<f64> {
+    let assigned = if choice == outcome { p } else { 1.0 - p };
+    if assigned <= 0.0 {
+        None
+    } else {
+        Some(-assigned.ln())
+    }
+}
+
+/// Mean logarithmic score over the forecasts that stated a probability,
+/// how many of those scores were finite, and how many were unbounded.
+#[must_use]
+pub fn mean_log(rows: &[Forecast], outcome: &str) -> (Option<f64>, usize, usize) {
+    let mut sum = 0.0;
+    let mut finite = 0usize;
+    let mut unbounded = 0usize;
+    for row in rows {
+        let Some(p) = row.confidence else { continue };
+        match log_score(&row.choice, outcome, p) {
+            Some(score) => {
+                sum += score;
+                finite += 1;
+            }
+            None => unbounded += 1,
+        }
+    }
+    let mean = (finite > 0).then_some(sum / finite as f64);
+    (mean, finite, unbounded)
+}
+
+/// One voter's forecast record. The bins are the probabilities actually
+/// stated, in thousandths, each with how many times it was stated and how
+/// many of those events occurred. Murphy's categories are those values,
+/// not a grid this seat invented.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Calibration {
+    pub n: u32,
+    pub sum_p: f64,
+    pub sum_o: f64,
+    pub sum_brier: f64,
+    pub sum_log: f64,
+    pub log_n: u32,
+    pub bins: std::collections::BTreeMap<u16, (u32, u32)>,
+}
+
+/// Murphy's partition of the Brier score (1973,
+/// doi:10.1175/1520-0450(1973)012<0595:ANVPOT>2.0.CO;2).
+/// `brier = reliability - resolution + uncertainty`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Partition {
+    pub reliability: f64,
+    pub resolution: f64,
+    pub uncertainty: f64,
+}
+
+/// Add one stated probability to a voter's record.
+#[must_use]
+pub fn observe(cal: &Calibration, choice: &str, outcome: &str, p: f64) -> Calibration {
+    let mut next = cal.clone();
+    let occurred = choice == outcome;
+    let o = if occurred { 1.0 } else { 0.0 };
+    next.n += 1;
+    next.sum_p += p;
+    next.sum_o += o;
+    next.sum_brier += brier(choice, outcome, p);
+    if let Some(score) = log_score(choice, outcome, p) {
+        next.sum_log += score;
+        next.log_n += 1;
+    }
+    let key = (p.clamp(0.0, 1.0) * 1000.0).round() as u16;
+    let slot = next.bins.entry(key).or_insert((0, 0));
+    slot.0 += 1;
+    if occurred {
+        slot.1 += 1;
+    }
+    next
+}
+
+/// Reliability, resolution, and uncertainty. `None` until the voter has
+/// two forecasts: one forecast makes the partition the score itself.
+#[must_use]
+pub fn murphy(cal: &Calibration) -> Option<Partition> {
+    if cal.n < 2 || cal.bins.is_empty() {
+        return None;
+    }
+    let n = f64::from(cal.n);
+    let base = cal.sum_o / n;
+    let mut reliability = 0.0;
+    let mut resolution = 0.0;
+    for (thou, (count, occurred)) in &cal.bins {
+        let nk = f64::from(*count);
+        if nk == 0.0 {
+            continue;
+        }
+        let forecast = f64::from(*thou) / 1000.0;
+        let rate = f64::from(*occurred) / nk;
+        reliability += nk * (forecast - rate) * (forecast - rate);
+        resolution += nk * (rate - base) * (rate - base);
+    }
+    Some(Partition {
+        reliability: reliability / n,
+        resolution: resolution / n,
+        uncertainty: base * (1.0 - base),
+    })
+}
+
+/// Mean Brier score over the forecasts that stated a probability, and how
+/// many those were. `None` when nobody stated one.
+#[must_use]
+pub fn mean_brier(rows: &[Forecast], outcome: &str) -> Option<(f64, usize)> {
+    let scores: Vec<f64> = rows
+        .iter()
+        .filter_map(|r| r.confidence.map(|p| brier(&r.choice, outcome, p)))
+        .collect();
+    if scores.is_empty() {
+        None
+    } else {
+        Some((scores.iter().sum::<f64>() / scores.len() as f64, scores.len()))
+    }
+}
+
+/// `(agent, choice, confidence)` from a tracker's `vote --json`.
+pub fn forecasts_from_json(raw: &str) -> Result<Vec<Forecast>> {
+    let rows: Vec<Value> = serde_json::from_str(raw).context("ballots: not a JSON array")?;
+    rows.iter()
+        .map(|row| {
+            let agent = row.get("agent").and_then(Value::as_str);
+            let choice = row.get("choice").and_then(Value::as_str);
+            match (agent, choice) {
+                (Some(a), Some(c)) => Ok(Forecast {
+                    agent: a.to_string(),
+                    choice: c.to_string(),
+                    confidence: row.get("confidence").and_then(Value::as_f64),
+                }),
+                _ => bail!("ballots: a row without agent and choice"),
+            }
+        })
+        .collect()
+}
+
+/// What a learn did. The rows are the next settle's weights. This call is not a settle.
+/// The scores, when any ballot stated a probability, are not trust weights.
+/// `calibration` is each voter's record after this outcome is folded in.
+#[must_use]
+pub fn learn_reading(
+    rows: usize,
+    moved: usize,
+    forecasts: &[Forecast],
+    outcome: &str,
+    calibration: &std::collections::BTreeMap<String, Calibration>,
+) -> String {
+    let mut out = format!(
+        "Learned. {rows} trust rows rewritten. A voter the outcome refuted shrinks; a vindicated one keeps its weight. {moved} persona anchors moved. This is not a new settle; the next ljos consensus uses these rows."
+    );
+    match mean_brier(forecasts, outcome) {
+        Some((mean, n)) => {
+            let silent = forecasts.len().saturating_sub(n);
+            out.push_str(&format!(
+                " Brier {mean:.3} over {n} stated probabilities (doi:10.1198/016214506000001437). {silent} ballots stated none and were not scored. The score is not a trust weight."
+            ));
+        }
+        None => out.push_str(
+            " No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.",
+        ),
+    }
+    let (mean_log, finite, unbounded) = mean_log(forecasts, outcome);
+    if let Some(mean) = mean_log {
+        out.push_str(&format!(
+            " Logarithmic score {mean:.3} over {finite} (doi:10.1111/j.2517-6161.1952.tb00104.x)."
+        ));
+    }
+    if unbounded > 0 {
+        out.push_str(&format!(
+            " {unbounded} assigned probability 0 to the event that occurred, so those logarithmic scores are unbounded."
+        ));
+    }
+    let mut named: Vec<(&str, &Calibration)> = forecasts
+        .iter()
+        .filter(|f| f.confidence.is_some())
+        .filter_map(|f| calibration.get(&f.agent).map(|cal| (f.agent.as_str(), cal)))
+        .collect();
+    named.sort_by(|a, b| {
+        let gap = |c: &Calibration| {
+            if c.n == 0 {
+                0.0
+            } else {
+                (c.sum_p / f64::from(c.n) - c.sum_o / f64::from(c.n)).abs()
+            }
+        };
+        gap(b.1)
+            .partial_cmp(&gap(a.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(b.0))
+    });
+    named.dedup_by_key(|row| row.0);
+    for (name, cal) in named.into_iter().take(8) {
+        if cal.n == 0 {
+            continue;
+        }
+        let n = f64::from(cal.n);
+        let mean_p = cal.sum_p / n;
+        let rate = cal.sum_o / n;
+        out.push_str(&format!(
+            " {name}: {} forecasts, mean probability {mean_p:.3}, event rate {rate:.3} (doi:10.1080/01621459.1982.10477856)",
+            cal.n
+        ));
+        if let Some(part) = murphy(cal) {
+            out.push_str(&format!(
+                "; reliability {:.3}, resolution {:.3}, uncertainty {:.3} (doi:10.1175/1520-0450(1973)012<0595:ANVPOT>2.0.CO;2)",
+                part.reliability, part.resolution, part.uncertainty
+            ));
+        }
+        out.push('.');
+    }
+    out
+}
+
 pub fn learn_and_write(
     ballots: &[(String, String)],
     outcome: &str,
     beta: f64,
     about: &[String],
-) -> Result<(Vec<Trust>, Vec<Persona>)> {
+    forecasts: &[Forecast],
+) -> Result<(
+    Vec<Trust>,
+    Vec<Persona>,
+    std::collections::BTreeMap<String, Calibration>,
+)> {
     let client = pack()?;
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
         .context("learn: GET /v1/atoms failed")?;
     let (rows, records) = learn_record(ballots, outcome, &records_from_atoms(&atoms), about)?;
+    let mut calibration = calibration_from_atoms(&atoms);
+    for forecast in forecasts {
+        let Some(p) = forecast.confidence else { continue };
+        let slot = calibration.entry(forecast.agent.clone()).or_default();
+        *slot = observe(slot, &forecast.choice, outcome, p);
+    }
     let moved = learn_anchors(&personas_from_pack()?, ballots, outcome, beta);
     // Every row lands before anything is printed, so a closed pipe cannot
     // leave the graph half written.
     for row in &rows {
-        write_trust_record(row, &[], records.get(&row.to).copied())?;
+        write_trust_record(
+            row,
+            &[],
+            records.get(&row.to).copied(),
+            calibration.get(&row.to),
+        )?;
     }
     for p in &moved {
         write_persona(p)?;
     }
-    Ok((rows, moved))
+    Ok((rows, moved, calibration))
 }
 
 /// A voter's record: how often the outcome agreed with its ballot, and
@@ -2960,7 +3282,12 @@ pub fn learn_record(
 }
 
 /// [`write_trust`] carrying the voter's record on the row.
-pub fn write_trust_record(row: &Trust, why: &[String], record: Option<Standing>) -> Result<Value> {
+pub fn write_trust_record(
+    row: &Trust,
+    why: &[String],
+    record: Option<Standing>,
+    calibration: Option<&Calibration>,
+) -> Result<Value> {
     let client = pack()?;
     let workspace = client.workspace();
     let mut atom = trust_atom(row, why, &workspace)?;
@@ -2968,9 +3295,88 @@ pub fn write_trust_record(row: &Trust, why: &[String], record: Option<Standing>)
         atom["hits"] = serde_json::json!(hits);
         atom["misses"] = serde_json::json!(misses);
     }
+    if let Some(cal) = calibration.filter(|c| c.n > 0) {
+        atom["forecast_n"] = serde_json::json!(cal.n);
+        atom["forecast_sum_p"] = serde_json::json!(cal.sum_p);
+        atom["forecast_sum_o"] = serde_json::json!(cal.sum_o);
+        atom["forecast_sum_brier"] = serde_json::json!(cal.sum_brier);
+        atom["forecast_sum_log"] = serde_json::json!(cal.sum_log);
+        atom["forecast_log_n"] = serde_json::json!(cal.log_n);
+        let mut bins = serde_json::Map::new();
+        for (key, (count, occurred)) in &cal.bins {
+            bins.insert(key.to_string(), serde_json::json!([count, occurred]));
+        }
+        atom["forecast_bins"] = Value::Object(bins);
+    }
     client
         .post_atom(&atom)
         .context("trust: POST /v1/atoms failed")
+}
+
+/// The latest forecast record per voter, from the trust rows that carry one.
+#[must_use]
+pub fn calibration_from_atoms(atoms: &[Value]) -> std::collections::BTreeMap<String, Calibration> {
+    let mut latest: std::collections::BTreeMap<String, (String, Calibration)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("trust") {
+            continue;
+        }
+        let Some(to) = atom.get("to").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(n) = atom.get("forecast_n").and_then(Value::as_u64) else {
+            continue;
+        };
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let cal = Calibration {
+            n: n as u32,
+            sum_p: atom
+                .get("forecast_sum_p")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            sum_o: atom
+                .get("forecast_sum_o")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            sum_brier: atom
+                .get("forecast_sum_brier")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            sum_log: atom
+                .get("forecast_sum_log")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            log_n: atom.get("forecast_log_n").and_then(Value::as_u64).unwrap_or(0) as u32,
+            bins: bins_of(atom.get("forecast_bins")),
+        };
+        match latest.get(to) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(to.to_string(), (ts, cal));
+            }
+        }
+    }
+    latest.into_iter().map(|(k, (_, cal))| (k, cal)).collect()
+}
+
+fn bins_of(value: Option<&Value>) -> std::collections::BTreeMap<u16, (u32, u32)> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(obj) = value.and_then(Value::as_object) else {
+        return out;
+    };
+    for (key, row) in obj {
+        let Ok(thou) = key.parse::<u16>() else { continue };
+        let Some(pair) = row.as_array() else { continue };
+        let count = pair.first().and_then(Value::as_u64).unwrap_or(0) as u32;
+        let occurred = pair.get(1).and_then(Value::as_u64).unwrap_or(0) as u32;
+        out.insert(thou, (count, occurred));
+    }
+    out
 }
 
 /// The factor a refuted voter's rows shrink by (Hedge, doi:10.1006/jcss.1997.1504).
@@ -2999,8 +3405,13 @@ pub fn trust_atom(row: &Trust, why: &[String], workspace: &str) -> Result<Value>
     atom["from"] = Value::String(from.into());
     atom["to"] = Value::String(to.into());
     atom["weight"] = serde_json::json!(row.weight);
-    // A trust row's entities are the deeds it stands on and nothing else;
-    // the pack checks each one is an accession. Who wrote it is `from`.
+    // A trust row's entities are the deeds it stands on. The pack refuses
+    // an entity that is not an accession. Who wrote the row is `from`.
+    for w in why {
+        if !w.starts_with("deed-") && !w.starts_with("sha256:") {
+            bail!("trust: {w} is not a deed accession");
+        }
+    }
     atom["entities"] = Value::Array(why.iter().map(|w| Value::String(w.clone())).collect());
     if !row.about.is_empty() {
         atom["about"] = Value::Array(
@@ -3231,7 +3642,9 @@ pub const REQUIRED: &[&str] = &[
 /// Binary on PATH and the crates.io name it should track.
 const SEAT_BINS: &[(&str, &str)] = &[
     ("ljos", "ljos"),
-    ("ljos-mcp", "ljos-mcp"),
+    // The published `ljos` crate ships this binary. The crates.io name
+    // `ljos-mcp` stopped at 0.14.0 and is not the binary's version line.
+    ("ljos-mcp", "ljos"),
     ("ljos-policyd", "ljos-policyd"),
     ("ljos-consensus", "ljos-consensus"),
     ("vissue", "vissue-cli"),
@@ -3909,6 +4322,9 @@ pub const SITTING_TIMELINE: usize = 12;
 /// The review clock as a sitting prints it: a short prefix, then the summary.
 pub fn sitting_due_report() -> Result<String> {
     let client = pack()?;
+    // The same sweep `ljos due` runs. A sitting is the clock's ordinary
+    // opening; a review left due past twice its interval lapses here.
+    let swept = client.sweep(&client.workspace()).ok();
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
         .context("due: GET /v1/atoms failed")?;
@@ -3916,9 +4332,10 @@ pub fn sitting_due_report() -> Result<String> {
     let due = due_of(&atoms, &now);
     let shown = due.len().min(SITTING_DUE);
     Ok(format!(
-        "{}{}",
+        "{}{}{}\n",
         format_due(&due[..shown]),
-        review_summary(&atoms, &now)
+        review_summary(&atoms, &now),
+        format_sweep(swept.as_ref())
     ))
 }
 
@@ -3965,6 +4382,20 @@ pub fn due() -> Result<Vec<Value>> {
         .atoms_as_of(&client.workspace(), None)
         .context("due: GET /v1/atoms failed")?;
     Ok(due_of(&atoms, &now_utc()))
+}
+
+/// The soonest [`SITTING_DUE`] claims, how many are due in all, and the
+/// clock line. Read-only: the sweep stays on `ljos due` and on a sitting.
+pub fn due_page() -> Result<(Vec<Value>, usize, String)> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_as_of(&client.workspace(), None)
+        .context("due: GET /v1/atoms failed")?;
+    let now = now_utc();
+    let all = due_of(&atoms, &now);
+    let total = all.len();
+    let shown: Vec<Value> = all.into_iter().take(SITTING_DUE).collect();
+    Ok((shown, total, review_summary(&atoms, &now)))
 }
 
 // ---- habits ----------------------------------------------------------------
@@ -4355,9 +4786,53 @@ pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Va
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_lowercase);
-    client
+    let mut body = client
         .activate_as(&workspace, cue, 24, fire, lens.as_deref())
-        .context("island: GET /v1/activate failed")
+        .context("island: GET /v1/activate failed")?;
+    if body["fired"].as_u64().unwrap_or(0) > 0 {
+        match record_fire(cue, lens.as_deref(), &body) {
+            Ok(id) => body["trace"] = Value::String(id),
+            Err(err) => body["trace_error"] = Value::String(err.to_string()),
+        }
+    }
+    Ok(body)
+}
+
+/// Record a fire as why-provenance: which links were strengthened, under
+/// whose weights. A trace does not replace another trace.
+fn record_fire(cue: &str, lens: Option<&str>, body: &Value) -> Result<String> {
+    let fired = body["fired"].as_u64().unwrap_or(0);
+    let who = lens.unwrap_or("seat");
+    let ids: Vec<String> = body["island"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+        .take(8)
+        .collect();
+    let mut nonce = 0xcbf29ce484222325u64;
+    for part in [cue, who].into_iter().chain(ids.iter().map(String::as_str)) {
+        for byte in part.as_bytes() {
+            nonce ^= u64::from(*byte);
+            nonce = nonce.wrapping_mul(0x100000001b3);
+        }
+    }
+    let text = format!(
+        "Fire {:08x} under {who} strengthened {fired} links.",
+        nonce as u32
+    );
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = atom_body("trace", &text, &workspace);
+    add_entities(&mut atom, ids);
+    let posted = client
+        .post_atom(&atom)
+        .context("trace: POST /v1/atoms failed")?;
+    Ok(posted
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string())
 }
 
 /// The claims the pack's link graph turns on, highest first: what matters
@@ -4516,9 +4991,63 @@ pub fn format_hubs(body: &Value) -> String {
     out
 }
 
+/// What an activation number is, and whether this call rewrote weights.
+///
+/// The number on a row is spread from the search seeds along the pack's
+/// links. It is not a relevance rank. `fire` strengthens the links of the
+/// strongest rows under the lens that walked them, so the next walk of the
+/// same cue follows those links. A weak island does not fire.
+#[must_use]
+pub fn island_reading(body: &Value) -> String {
+    let lens = body["as"].as_str().unwrap_or("").trim();
+    let fired = body["fired"].as_u64().unwrap_or(0);
+    let held = body["held"].as_bool().unwrap_or(false);
+    let weak = body["weak"].as_bool().unwrap_or(false);
+    let rows = body["island"].as_array().is_some_and(|a| !a.is_empty());
+    if !rows && !weak && fired == 0 && !held && lens.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    if lens.is_empty() {
+        out.push_str(
+            "Seat island. Activation is spread from search seeds along links. It is not a relevance rank.\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "Persona {lens} island. The spread follows the weights that persona fired, not the seat's. It is not a relevance rank.\n"
+        ));
+    }
+    if weak {
+        out.push_str(
+            "Not fired: fewer than two seeds that two scorers agreed on, so firing would wire the wrong links.\n",
+        );
+    } else if held {
+        out.push_str(
+            "Not fired: this cue already fired inside the hour, so the weights were left as they were.\n",
+        );
+    } else if fired > 0 {
+        let who = if lens.is_empty() { "the seat" } else { lens };
+        out.push_str(&format!(
+            "Fired: {fired} links gained weight under {who}. The next walk of this cue follows those links. Fire only after the island was used.\n"
+        ));
+        if let Some(id) = body["trace"].as_str().filter(|s| !s.is_empty()) {
+            out.push_str(&format!(
+                "Recorded as trace {id}: the links this fire strengthened.\n"
+            ));
+        } else if let Some(err) = body["trace_error"].as_str() {
+            out.push_str(&format!("The fire was not recorded: {err}\n"));
+        }
+    } else {
+        out.push_str(
+            "Not fired. Pass fire after the island is used, so the links that served gain weight. Firing on the first look wires whatever the spread touched.\n",
+        );
+    }
+    out
+}
+
 /// One line per activated memory: activation, seed mark, id, text.
 pub fn format_island(body: &Value) -> String {
-    let mut out = String::new();
+    let mut out = island_reading(body);
     let now = now_utc();
     if body["weak"].as_bool().unwrap_or(false) {
         out.push_str(&format!(
@@ -4587,11 +5116,13 @@ pub fn packset_search_as_of(
         Some(at) => Some(at.to_string()),
         None => None,
     };
-    let client = pack()?;
-    let workspace = client.workspace();
-    client
-        .search_opts(&workspace, q, limit, stamp.as_deref(), rerank)
-        .context("search: GET /v1/search failed")
+    with_writer(|| {
+        let client = pack()?;
+        let workspace = client.workspace();
+        client
+            .search_opts(&workspace, q, limit, stamp.as_deref(), rerank)
+            .context("search: GET /v1/search failed")
+    })
 }
 
 /// The actor id in a `claimdag get` line (`assignee=HEX`), if any.
@@ -5288,7 +5819,7 @@ pub fn finish(
     } else {
         let fired = island["island"].as_array().map_or(0, Vec::len);
         out.push_str(&format!(
-            "fired the island for {title:?}: {fired} memories\n"
+            "fired the seat's island for {title:?}: {fired} memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.\n"
         ));
     }
     let terminal = ["done", "failed", "cancelled"];
@@ -5301,17 +5832,25 @@ pub fn finish(
     ));
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
         let said = run_captured("vissue", &["vote", issue, "--json"])?;
-        let ballots = ballots_from_json(&said.stdout)?;
-        if ballots.len() < 2 {
+        let forecasts = forecasts_from_json(&said.stdout)?;
+        if forecasts.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
         } else {
+            let ballots: Vec<(String, String)> = forecasts
+                .iter()
+                .map(|f| (f.agent.clone(), f.choice.clone()))
+                .collect();
             let about = island_entities(issue).unwrap_or_default();
-            let (rows, moved) = learn_and_write(&ballots, option, beta, &about)?;
-            out.push_str(&format!(
-                "learned from outcome {option:?}: {} trust rows rewritten, {} persona anchors moved\n",
+            let (rows, moved, calibration) =
+                learn_and_write(&ballots, option, beta, &about, &forecasts)?;
+            out.push_str(&learn_reading(
                 rows.len(),
-                moved.len()
+                moved.len(),
+                &forecasts,
+                option,
+                &calibration,
             ));
+            out.push('\n');
         }
     }
     // A sitting ending is not the work being accepted: a review can be
@@ -5415,13 +5954,24 @@ pub fn calibrate(project: &str, rounds: usize) -> Result<Vec<Trust>> {
     Ok(rows)
 }
 
+/// What a search score is. Empty and nonempty are different facts from a
+/// writer that did not answer.
+#[must_use]
+pub fn search_reading(n: usize) -> &'static str {
+    if n == 0 {
+        "No hits. The pack holds nothing on this query. A failure would say the writer did not answer."
+    } else {
+        "Score is how the scorers ranked this query. The fraction is how many of them named the hit. Neither is whether the claim is true. A later line on the same matter supersedes an earlier one."
+    }
+}
+
 /// One line per hit: score, how many scorers named it out of how many
 /// ran, kind, id, age, text. The age is the one column a reader needs to
 /// lay the hits on a timeline; the count is what the hook keys on.
 pub fn format_hits(hits: &[Hit]) -> String {
     let now = now_utc();
     let mine = seat_name();
-    let mut out = String::new();
+    let mut out = format!("{}\n", search_reading(hits.len()));
     for h in hits {
         let id = h.id.as_deref().unwrap_or("-");
         let named = match (h.ballots, h.of) {
@@ -6734,7 +7284,13 @@ mod tests {
             ["reviewer"]
         );
         let nobody = personas_speaking_to(&all, &["fortran".to_string()]);
-        assert_eq!(nobody.len(), 3, "none matching, all sit");
+        assert_eq!(
+            nobody.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["reader"],
+            "no domain match seats only personas with no domains"
+        );
+        let specialists = vec![mk("reviewer", &["docs"]), mk("cuda", &["gpu"])];
+        assert!(personas_speaking_to(&specialists, &["fortran".to_string()]).is_empty());
     }
 
     #[test]
@@ -7785,16 +8341,76 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_is_not_a_writer_that_is_down() {
+        let refused = anyhow::Error::from(packset_client::Error::Bad("no".into()));
+        assert!(!writer_unreachable(&refused));
+    }
+
+    #[test]
+    fn a_stated_probability_has_a_brier_score_and_a_hard_vote_does_not() {
+        let rows = vec![
+            Forecast {
+                agent: "a".into(),
+                choice: "ship".into(),
+                confidence: Some(0.8),
+            },
+            Forecast {
+                agent: "b".into(),
+                choice: "hold".into(),
+                confidence: None,
+            },
+        ];
+        assert!((brier("ship", "ship", 0.8) - 0.04).abs() < 1e-12);
+        assert!((brier("hold", "ship", 0.8) - 0.64).abs() < 1e-12);
+        let (mean, n) = mean_brier(&rows, "ship").unwrap();
+        assert_eq!(n, 1);
+        assert!((mean - 0.04).abs() < 1e-12);
+        let said = learn_reading(2, 0, &rows, "ship", &std::collections::BTreeMap::new());
+        assert!(said.contains("Brier 0.040"), "{said}");
+        assert!(said.contains("not a trust weight"), "{said}");
+        let silent = learn_reading(
+            2,
+            0,
+            &rows[1..],
+            "ship",
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(silent.contains("No stated probability"), "{silent}");
+        assert!(log_score("ship", "ship", 0.8).unwrap() > 0.0);
+        assert!(log_score("hold", "ship", 1.0).is_none());
+        let mut cal = Calibration::default();
+        cal = observe(&cal, "ship", "ship", 0.8);
+        cal = observe(&cal, "ship", "hold", 0.8);
+        let part = murphy(&cal).unwrap();
+        let mean_b = cal.sum_brier / f64::from(cal.n);
+        assert!((part.reliability - part.resolution + part.uncertainty - mean_b).abs() < 1e-9);
+        assert!((cal.sum_p / f64::from(cal.n) - 0.8).abs() < 1e-12);
+        assert!((cal.sum_o / f64::from(cal.n) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
     fn an_island_prints_one_memory_a_line() {
         let body = serde_json::json!({"island": [
             {"id": "a", "text": "one", "activation": 1.0, "seed": true, "ts": now_utc()},
             {"id": "b", "text": "two", "activation": 0.25, "seed": false}
         ]});
-        assert_eq!(
-            format_island(&body),
-            "1.000\tseed\ta\ttoday\tone\n0.250\t    \tb\t\ttwo\n"
+        let printed = format_island(&body);
+        assert!(
+            printed.contains("Seat island") && printed.contains("Not fired"),
+            "{printed}"
         );
+        assert!(printed.contains("1.000\tseed\ta\ttoday\tone\n"), "{printed}");
+        assert!(printed.contains("0.250\t    \tb\t\ttwo\n"), "{printed}");
         assert!(format_island(&serde_json::json!({})).is_empty());
+        let persona = serde_json::json!({
+            "as": "reviewer",
+            "fired": 3,
+            "island": [{"id": "a", "text": "one", "activation": 1.0, "seed": true, "ts": now_utc()}]
+        });
+        let walked = format_island(&persona);
+        assert!(walked.contains("Persona reviewer"), "{walked}");
+        assert!(walked.contains("Fired: 3"), "{walked}");
+        assert!(!walked.contains("Seat island"), "{walked}");
     }
 
     #[test]
@@ -8044,6 +8660,15 @@ mod tests {
         );
         let (same, _) = super::bin_health("/bin/ljos", Some("0.12.16"), Some(&cached));
         assert!(same.ends_with("crates.io (cached) 0.12.16"), "{same}");
+    }
+
+    #[test]
+    fn the_mcp_binary_tracks_the_ljos_crate() {
+        let crate_name = super::SEAT_BINS
+            .iter()
+            .find(|(bin, _)| *bin == "ljos-mcp")
+            .map(|(_, name)| *name);
+        assert_eq!(crate_name, Some("ljos"));
     }
 
     #[test]

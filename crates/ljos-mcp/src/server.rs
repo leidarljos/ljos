@@ -13,9 +13,10 @@ use anyhow::Context as _;
 
 use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete,
-    conflicts, consensus_steps_for, doctor, due, finish, format_change, format_consolidation,
+    search_reading,
+    conflicts, consensus_steps_for, doctor, due_page, finish, format_change, format_consolidation,
     graded, habit, habits, handover, identity_or_seat, island_entities, issue_words,
-    learn_and_write, now_utc, on_path, other_seat, pack, packset_consolidate, packset_forget,
+    forecasts_from_json, learn_and_write, learn_reading, now_utc, on_path, other_seat, pack, packset_consolidate, packset_forget,
     packset_island_as, packset_search_as_of, packset_write_as, panel_steps, parse_every,
     personas_from_pack, personas_speaking_to, policy_with_memory, predictions_of, read_campaign,
     receive, release, remember_findings, resolve_assignee, rows_about, run_captured, runner_pid,
@@ -188,6 +189,12 @@ pub struct VoteArgs {
     pub issue: String,
     /// `accept` or `reject`. Absent, the tool shows the tally.
     pub choice: Option<String>,
+    /// Probability in (0, 1] that `choice` is the outcome. Absent, the
+    /// ballot is not a forecast and will not be scored.
+    pub confidence: Option<f64>,
+    /// Deed accessions this ballot used, comma-separated, or `none`.
+    /// Required when `choice` is set.
+    pub used: Option<String>,
     /// Cast as this persona (a name written with `ljos_persona`) instead of
     /// the seat's own identity.
     #[serde(rename = "as")]
@@ -455,6 +462,18 @@ pub struct DueRow {
     pub due_at: String,
 }
 
+/// The review clock as an agent reads it: the soonest claims, and how many
+/// are due in all. The full list is `ljos due`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DuePage {
+    /// The soonest claims. Eight, or fewer when fewer are due.
+    pub rows: Vec<DueRow>,
+    /// How many claims are due, including the ones `rows` does not carry.
+    pub due: usize,
+    /// The clock line: how many are due, how many are scheduled, when the next comes up.
+    pub summary: String,
+}
+
 /// One row of the influence graph.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TrustRow {
@@ -475,6 +494,20 @@ pub struct Said {
 }
 
 /// One remembered thing.
+/// What learn wrote, and the rows the next settle uses.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LearnPage {
+    pub reading: String,
+    pub rows: Vec<TrustRow>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchPage {
+    /// What the score is, and what an empty list means.
+    pub reading: String,
+    pub rows: Vec<HitRow>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HitRow {
     /// The atom's id, when it has one.
@@ -677,7 +710,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words: what the seat already knows, ranked, each hit with its age so the list reads as a timeline. Pass as_of to ask what the seat knew at an earlier time. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: `packset ensure` starts one. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: `packset ensure` starts one. Pass as_of to ask what the seat knew at an earlier time. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -687,13 +720,16 @@ impl LjosServer {
     async fn ljos_search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
-    ) -> Result<Json<Rows<HitRow>>, McpError> {
+    ) -> Result<Json<SearchPage>, McpError> {
         let hits =
             packset_search_as_of(&args.query, 10, args.as_of.as_deref(), false).map_err(refused)?;
         let now = args.as_of.clone().unwrap_or_else(now_utc);
         let mine = seat_name();
-        Ok(as_rows(
-            hits.into_iter()
+        let reading = search_reading(hits.len()).to_string();
+        Ok(Json(SearchPage {
+            reading,
+            rows: hits
+                .into_iter()
                 .map(|h| HitRow {
                     id: h.id,
                     kind: h.kind,
@@ -704,7 +740,7 @@ impl LjosServer {
                     ts: h.ts,
                 })
                 .collect(),
-        ))
+        }))
     }
 
     #[tool(
@@ -841,7 +877,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a decision on an issue has more than one defensible answer: cast this identity's ballot for an option, or omit the option to read the tally. One ballot per identity (VISSUE_AGENT); a recast replaces. Then ljos_consensus settles it; the tally is only a count.",
+        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. Pass `as` for a persona.",
         annotations(
             title = "Vote",
             read_only_hint = false,
@@ -855,11 +891,28 @@ impl LjosServer {
         Parameters(args): Parameters<VoteArgs>,
     ) -> Result<Json<Said>, McpError> {
         match &args.choice {
-            Some(c) => habitat_as(
-                "vissue",
-                &["vote", &args.issue, "--for", c],
-                args.as_persona.as_deref(),
-            ),
+            Some(c) => {
+                let used = args.used.as_deref().unwrap_or("");
+                if used.is_empty() {
+                    return Err(refused(anyhow::anyhow!(
+                        "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass used as deed accessions or none"
+                    )));
+                }
+                let mut argv = vec![
+                    "vote".to_string(),
+                    args.issue.clone(),
+                    "--for".into(),
+                    c.clone(),
+                    "--used".into(),
+                    used.to_string(),
+                ];
+                if let Some(p) = args.confidence {
+                    argv.push("--confidence".into());
+                    argv.push(format!("{p}"));
+                }
+                let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                habitat_as("vissue", &refs, args.as_persona.as_deref())
+            }
             None => habitat("vissue", &["vote", &args.issue]),
         }
     }
@@ -1044,7 +1097,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after the ballots are in on an issue: the consensus model first, DeGroot or Friedkin-Johnsen over the trust rows the pack holds, then the tracker's own verb; beside them the surprisingly popular answer when two or more voters forecast and the voters' standing when trust rows exist, as `ljos consensus` prints. Not a vote count. With no rows every voter weighs the same.",
+        description = "Call this after the ballots are in. The first lines are the reading: act on those, not on a later count. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
@@ -1211,7 +1264,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the world has said which option on an issue was right: reweigh the voters by it; every voter whose ballot the outcome refuted shrinks in every other voter's row (Hedge), a vindicated one keeps its weight. Writes the complete set of rows to the pack and returns them.",
+        description = "Call this when the world has said which option on an issue was right. The reading gives the trust rows for the next settle, this outcome's Brier score and logarithmic score, and each voter's running calibration: mean stated probability against how often the event occurred (Dawid 1982). From the second forecast it also gives Murphy's reliability, resolution, and uncertainty. None of those scores is a trust weight. A ballot that stated no probability is not scored. A probability of 1 on an event that did not occur has an unbounded logarithmic score.",
         annotations(
             title = "Learn",
             read_only_hint = false,
@@ -1223,28 +1276,42 @@ impl LjosServer {
     async fn ljos_learn(
         &self,
         Parameters(args): Parameters<LearnArgs>,
-    ) -> Result<Json<Rows<TrustRow>>, McpError> {
+    ) -> Result<Json<LearnPage>, McpError> {
         let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
-        let ballots = ballots_from_json(&said.stdout).map_err(refused)?;
+        let forecasts = forecasts_from_json(&said.stdout).map_err(refused)?;
+        let ballots: Vec<(String, String)> = forecasts
+            .iter()
+            .map(|f| (f.agent.clone(), f.choice.clone()))
+            .collect();
         // Scoped to what the issue's island is about, so a voter wrong here
         // keeps its standing elsewhere; a refuted persona listens more.
         let about = island_entities(&args.issue).unwrap_or_default();
-        let (rows, _moved) = learn_and_write(
+        let (rows, moved, calibration) = learn_and_write(
             &ballots,
             &args.outcome,
             args.beta.unwrap_or(LEARN_BETA),
             &about,
+            &forecasts,
         )
         .map_err(refused)?;
-        Ok(as_rows(
-            rows.into_iter()
+        let reading = learn_reading(
+            rows.len(),
+            moved.len(),
+            &forecasts,
+            &args.outcome,
+            &calibration,
+        );
+        Ok(Json(LearnPage {
+            reading,
+            rows: rows
+                .into_iter()
                 .map(|r| TrustRow {
                     from: r.from,
                     to: r.to,
                     weight: r.weight,
                 })
                 .collect(),
-        ))
+        }))
     }
 
     #[tool(
@@ -1387,7 +1454,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after ljos_search with the task in your own words: the memories the task activates, the top search hits as seeds, spread two hops along the pack's links, strongest first. Not a persona or a view; the cluster this task touches. Read it before starting the work; pass fire when you go on to use it, so those links gain weight.",
+        description = "Call this after ljos_search with the task in your own words. The first lines say whose island this is. Activation is spread from search seeds along links, two hops. It is not a relevance rank. Pass `as` for a persona: the spread follows the weights that persona fired, and a fire rewrites those weights, not the seat's. Pass fire only after the island was used. A weak island does not fire. A cue that already fired inside the hour is left as it was.",
         annotations(
             title = "Island",
             read_only_hint = false,
@@ -1440,22 +1507,25 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of a sitting, after the cards: the claims whose review is due, soonest first. Read each, then ljos_graded it recalled or lapsed; the review clock moves only when you grade.",
+        description = "Call this at the start of a sitting, after the cards: the soonest eight claims whose review is due, plus how many are due in all. Read each shown row, then ljos_graded it recalled or lapsed. The full list and the sweep are `ljos due`. The review clock moves only when you grade.",
         annotations(title = "Due", read_only_hint = true, open_world_hint = false)
     )]
-    async fn ljos_due(&self) -> Result<Json<Rows<DueRow>>, McpError> {
-        Ok(as_rows(
-            due()
-                .map_err(refused)?
-                .into_iter()
-                .map(|a| DueRow {
-                    id: a["id"].as_str().map(str::to_string),
-                    kind: a["kind"].as_str().unwrap_or("").to_string(),
-                    text: a["text"].as_str().unwrap_or("").to_string(),
-                    due_at: a["due_at"].as_str().unwrap_or("").to_string(),
-                })
-                .collect(),
-        ))
+    async fn ljos_due(&self) -> Result<Json<DuePage>, McpError> {
+        let (shown, due_n, summary) = due_page().map_err(refused)?;
+        let rows = shown
+            .into_iter()
+            .map(|a| DueRow {
+                id: a["id"].as_str().map(str::to_string),
+                kind: a["kind"].as_str().unwrap_or("").to_string(),
+                text: a["text"].as_str().unwrap_or("").to_string(),
+                due_at: a["due_at"].as_str().unwrap_or("").to_string(),
+            })
+            .collect();
+        Ok(Json(DuePage {
+            rows,
+            due: due_n,
+            summary,
+        }))
     }
 
     #[tool(
@@ -1589,16 +1659,21 @@ impl LjosServer {
         Ok(asked(format!(
             "Begin a sitting on {work}.\n\
              \n\
-             Five habitats answer five different questions, and the order matters:\n\
+             Prefer `ljos_sitting` for the whole opening and `ljos_finish` for\n\
+             the close. Neither completing a session node nor `ljos_finish`\n\
+             closes a ticket; `ljos_finish` with close does, when the work is\n\
+             accepted.\n\
              \n\
-             1. `ljos_cards`. What the human froze. Read them first and leave them\n\
-                as they are; if they are empty, they are empty.\n\
-             2. `ljos_due` for the claims whose review is due; a sitting prints a\n\
-                short prefix. Read each shown row and `ljos_graded` it.\n\
-             3. `ljos_search` then `ljos_island` with the task in your own words.\n\
-             4. `ljos_recall` on the node. What it stands on and what it cited.\n\
-             5. `ljos_timeline` the last twelve dated events across the stores.\n\
-             6. `ljos_claim` a session node for it. A harness seat occupies per\n\
+             By hand, in order:\n\
+             \n\
+             1. `ljos_doctor`. A habitat that refuses is the answer.\n\
+             2. `ljos_cards`. What the human froze. Read them and leave them.\n\
+             3. `ljos_due` returns the soonest eight claims and the total due.\n\
+                Read each shown row and `ljos_graded` it.\n\
+             4. `ljos_search` then `ljos_island` with the task in your own words.\n\
+             5. `ljos_recall` on the node. What it stands on and what it cited.\n\
+             6. `ljos_timeline` the last twelve dated events across the stores.\n\
+             7. `ljos_claim` a session node for it. A harness seat occupies per\n\
                 issue; a named worker occupies one slot.\n\
              \n\
              When something is learned that will still be true next sitting, say it\n\
@@ -1624,10 +1699,15 @@ impl LjosServer {
         // that runs every persona on every issue is a count, not a panel.
         let all = personas_from_pack().unwrap_or_default();
         let personas = personas_speaking_to(&all, &issue_words(&issue));
-        let roster = if personas.is_empty() {
+        let roster = if all.is_empty() {
             "The pack holds no personas yet. Write two or three with `ljos_persona` first: a \
              name, an anchor in [0, 1] (0 never moves off its ballot), a sentence on how it \
              reads the work, and the domains it speaks to."
+                .to_string()
+        } else if personas.is_empty() {
+            "No persona's domains are among this issue's words. Write one with `ljos_persona` \
+             whose `--about` is one of those words, or a persona with no domains. Specialists \
+             stay seated out."
                 .to_string()
         } else {
             personas
@@ -1665,18 +1745,26 @@ impl LjosServer {
                 subagent with that text as its whole brief: the persona's view, what the seat \
                 knows on its domains, the working set. Each subagent reads the work in its own \
                 way: `ljos_island` on {issue} with `as` set to its name walks the pack through \
-                its own weights, and with `fire` true once it has read the work tightens the \
-                paths it walked and nobody else's; `ljos_remember` with `as` writes what it \
+                its own weights. The number on a row is spread along those links, not a rank. \
+                Pass `fire` true only after it has used that island: fire rewrites its weights, \
+                not the seat's, and the next walk follows them. `ljos_remember` with `as` writes what it \
                 concluded into its own set. It ends by casting exactly one ballot: `ljos_vote` \
                 on {issue} with `as` set to the persona's name, for the option it would defend. \
+                The ballot carries `confidence` in (0, 1] and `used` as the deeds it drew on, or `none`. \
+                The line that comes back is a count. The settle is the next step. \
                 Subagents run in parallel and do not see each other's ballots.\n\
-             3. `ljos_consensus` on {issue}. The settle weighs the ballots by the trust rows \
-                the pack holds and holds each persona to its ballot by its anchor; it \
-                reports polarization and disagreement, not only shares. A tally is not this.\n\
-             4. Act on the settle, not on the count. When the world later says which option \
+             3. `ljos_consensus` on {issue}. Read the first lines and act on them. \
+                Polarization is how far voters still sit from the mean. Disagreement is \
+                how far neighbors still sit from each other. Both zero with one option \
+                means there was one option. Act on the shares when polarization is about \
+                zero and two or more options were named. When polarization is away from \
+                zero, the mean is not a position the group reached. A count printed later \
+                is who voted.\n\
+             4. When the world later says which option \
                 was right, `ljos_learn` on {issue} with that outcome, and the personas that \
                 were wrong lose weight on this topic.\n\n\
-             A panel with equal rows is a count. Run `ljos_calibrate` on the project once it \
+             Equal weights with nobody anchored repeat the count. Anchors still hold each \
+             voter to its ballot. Run `ljos_calibrate` on the project once it \
              holds a few voted issues, so the rows carry what the personas' history says."
         )))
     }
@@ -1726,7 +1814,8 @@ impl ServerHandler for LjosServer {
              runs the whole opening (doctor, cards, due, island, recall, timeline, claim) \
              and ljos_finish the whole closing (remember, fire, complete, learn); \
              prefer them. By hand: ljos_doctor, ljos_cards, ljos_due then \
-             ljos_graded, ljos_search then ljos_island, ljos_recall, ljos_claim; \
+             ljos_graded, ljos_search then ljos_island, ljos_recall, \
+             ljos_timeline, ljos_claim; \
              during the work ljos_deed, ljos_remember, ljos_vote; after it \
              ljos_island with fire, ljos_complete, ljos_learn. ljos_calibrate \
              moves the trust rows from a project's history when nobody names an \
@@ -2026,6 +2115,9 @@ mod tests {
         ordered(
             said,
             &[
+                "`ljos_sitting`",
+                "`ljos_finish`",
+                "`ljos_doctor`",
                 "`ljos_cards`",
                 "`ljos_due`",
                 "`ljos_graded`",
@@ -2036,7 +2128,6 @@ mod tests {
                 "`ljos_remember`",
                 "`ljos_forget`",
                 "`ljos_deed`",
-                "`ljos_doctor`",
             ],
         );
         let checked = server

@@ -5,7 +5,7 @@ Command line
 Verb                                                                            Habitat                   Does
 =============================================================================== ========================= ================================================================================================================================================================================================================================================================================================
 ``sitting ISSUE [--assignee NAME] [--cards DIR]``                               all                       open a sitting: doctor, cards, due, island, recall, timeline, claim; stops at the first store down; the name defaults to ``LJOS_SEAT``
-``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B]``     all                       close a sitting: remember, fire the island, complete, learn
+``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--close]``   all                  close a sitting: remember, fire the island, complete, learn; ``--close`` closes the ticket when the work is accepted
 ``calibrate -p PROJECT [--rounds N]``                                           consensus, pack           trust rows from the project's voting history (Dawid-Skene accuracy)
 ``remember TEXT [--as PERSONA]``                                                pack                      one lesson, stored as written; as a persona, it carries that persona's entity and opens its next brief
 ``prefer TEXT``                                                                 pack                      one standing preference

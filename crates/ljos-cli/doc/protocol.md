@@ -39,8 +39,11 @@ graph says it is not workable; `--anyway` sits on it regardless and says so.
    (`--lapsed` when you had to look it up). The review clock moves only
    when you grade.
 4. `ljos island` on the issue's title. The sitting takes the strongest
-   eight. `ljos search TOPIC` and a full `ljos island TASK` are during
-   the work, not this opening.
+   eight. The number on a row is spread along links, not a rank.
+   `--as NAME` walks that persona's weights. `--fire` after the island
+   was used rewrites those weights, and the next walk follows them. A
+   weak island does not fire. `ljos search TOPIC` and a full
+   `ljos island TASK` are during the work, not this opening.
 5. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 6. `ljos timeline ISSUE`. The last twelve dated events across the three
@@ -82,9 +85,32 @@ Every piece of work has an issue before it has a claim.
   benchmark score, a latency, a count of open tickets: readings, not
   lessons.
 - Every decision with more than one defensible answer is a ballot:
-  `ljos vote ISSUE --for OPTION` once per identity (`VISSUE_AGENT`), then
-  `ljos consensus ISSUE`. A tally is a count; the consensus is the settle
-  under the trust rows. On a hard question add a forecast beside the
+  `ljos vote ISSUE --for OPTION --confidence P --used DEED` once per
+  identity (`VISSUE_AGENT`). `P` in `(0, 1]` is the probability the voter
+  gives that its choice is the outcome (DeGroot 1974,
+  doi:10.1080/01621459.1974.10480137). Omit it and the ballot is not a
+  forecast. `--used` is the deeds the ballot drew on, or `none`
+  (Buneman, Khanna and Tan 2001, doi:10.1007/3-540-44503-X_20). The
+  line it prints is a count, not the settle. When an outcome is named,
+  a stated probability is scored by the quadratic score `(p - o)^2`
+  (Brier 1950; Gneiting and Raftery 2007,
+  doi:10.1198/016214506000001437). The logarithmic score is `-ln` of the
+  probability put on what happened (Good 1952,
+  doi:10.1111/j.2517-6161.1952.tb00104.x); it is unbounded when that
+  probability is 0. Across a voter's forecasts, mean probability against
+  the event rate is calibration in the large (Dawid 1982,
+  doi:10.1080/01621459.1982.10477856). From the second forecast, Murphy's
+  partition splits the Brier score into reliability, resolution, and
+  uncertainty (1973,
+  doi:10.1175/1520-0450(1973)012<0595:ANVPOT>2.0.CO;2). None of these
+  scores is a trust weight. Then
+  `ljos consensus ISSUE`. The first lines are the reading. Polarization is
+  how far voters still sit from the mean after listening, disagreement how
+  far neighbors still sit from each other. Both zero with one option means
+  there was one option. Act on the shares when polarization is about zero
+  and two or more options were named. When polarization is away from zero,
+  the mean is not a position the group reached. A tally printed later is
+  who voted. On a hard question add a forecast beside the
   ballot, `ljos predict ISSUE --expect OPTION`; with two or more forecasts
   the settle also names the surprisingly popular answer, the option whose
   actual share most exceeds its forecast, and shows each voter's standing.
@@ -111,8 +137,9 @@ Every piece of work has an issue before it has a claim.
   `ljos consensus`; over MCP the `run_a_panel` prompt orders it, and
   without MCP `ljos panel ISSUE --out DIR` writes one brief per persona.
   Both seat only the personas whose `--about` domains the issue's title
-  or island names, and every persona when none does; a panel that seats
-  everyone on everything is a count. Each brief is a file to start a
+  or island names. A persona with no domains sits only when no domain
+  matches. Specialists stay seated out: a panel that seats everyone is a
+  count. Each brief is a file to start a
   subagent from. A panel
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. The kind of work sets the dynamics: tag
@@ -166,18 +193,20 @@ learns from the outcome when one is named. Without `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
 same four steps are:
 
-1. `ljos island TASK --fire` when the island served: the strongest memories
+1. `ljos remember "..."` when the sitting taught a lesson.
+2. `ljos island TASK --fire` when the island served: the strongest memories
    fire together and their links gain weight.
-2. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
+3. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
    the session node does not close the ticket: `vissue update ISSUE -s DONE`
    does, when the work is accepted.
    Nor does `finish`: `--close` on it does, for the same acceptance.
-3. `ljos learn ISSUE --outcome OPTION` when the world says which option was
+4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter it refuted shrinks in every other voter's row, and a
    persona it refuted holds its next ballot less firmly.
-4. `ljos handover --out DIR --issue ISSUE [--to user@host:path]` when
-   another seat takes over; the receiver runs `ljos receive DIR`, then
-   `--import`.
+
+`ljos handover --out DIR --issue ISSUE [--to user@host:path]` is a separate
+verb for when another seat takes over. The receiver runs `ljos receive DIR`,
+then `--import`.
 
 ## When nobody names an outcome
 

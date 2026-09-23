@@ -2,8 +2,11 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.16.3 (2026-09-22)
 
+- `ljos remember` and `ljos search` start the default writer when none is
+  answering. `PACKSET_URL=off` stays off. A URL pointed elsewhere is not
+  replaced. The crates.io description and keywords name the first command.
 - `ljos finish` no longer closes the tracker ticket on `--status done`; a
   sitting ending is not the work being accepted, and a ticket closed early
   released every blocker on it. `--close` (`close` over MCP) closes it.
@@ -11,12 +14,37 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `--gen` on `ljos finish` and `ljos complete` (and `gen` over MCP) is
   optional: absent, the live generation is read off the claim graph. An
   explicit stale generation is still refused.
-
 - `ljos claim`, and so a sitting, stamps the tracker as well as the claim
   graph: `vissue claim ISSUE` runs under the assignee's name, so the issue
   reads STARTED and `vissue claims` names who holds it. A tracker that
   refuses the name fails the claim with `ljos release` named as the way
   out; a node the tracker does not know is left alone.
+
+## 0.16.2 (2026-09-22)
+
+- Doctor compares the `ljos-mcp` binary to the `ljos` crate. That crate
+  ships the binary; the crates.io name `ljos-mcp` stopped at 0.14.0.
+- A sitting sweeps the review clock before it prints the due prefix, the
+  same sweep `ljos due` already ran.
+- `ljos_due` returns the soonest eight claims, the total due, and the
+  clock summary. The full list stays `ljos due`.
+- A panel that matches no domain seats only the personas that name no
+  domain. It does not seat every specialist in the pack.
+- `ljos vote` prints a count and says so. The settle stays `ljos consensus`.
+- An island prints whose weights it walked, and whether fire rewrote them.
+  Activation is spread along links, not a rank. A persona brief says to
+  walk its own island and to fire only after that island was used.
+- A search score is a rank from the scorers, named as such. Learn names
+  the rows it rewrote and says the call is not a settle. Finish names
+  that the island it fires is the seat's.
+- A ballot can state a probability and the deeds it used. The probability
+  is the voter's initial opinion and, once an outcome is known, a Brier
+  score. The score is not a trust weight. A fire records a trace of the
+  links it strengthened.
+- A stated probability is also scored by the logarithmic score. The
+  voter's running record keeps mean probability against the event rate,
+  and from the second forecast Murphy's reliability, resolution, and
+  uncertainty. Those scores stay off the trust weight.
 
 ## 0.16.1 (2026-09-20)
 

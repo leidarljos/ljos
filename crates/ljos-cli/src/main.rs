@@ -1,6 +1,6 @@
 //! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
     age_of, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
@@ -8,7 +8,7 @@ use ljos_cli::{
     format_doctor, format_findings, format_hits, format_hubs, format_island, format_personas,
     format_readings, format_remembered, format_seat, format_steps, format_write_ack, graded, habit,
     habits, handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
-    island_entities, join, learn_anchors, learn_and_write, learn_shared, now_utc, on_path, onboard,
+    forecasts_from_json, island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, now_utc, on_path, onboard,
     pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
@@ -113,6 +113,13 @@ enum Cmd {
         /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
+        /// Probability in (0, 1] that the choice is the outcome.
+        #[arg(long)]
+        confidence: Option<f64>,
+        /// Deed accessions this ballot used, comma-separated, or `none`.
+        /// Required when `--for` is set.
+        #[arg(long)]
+        used: Option<String>,
         /// Cast as this persona instead of the seat's identity.
         #[arg(long = "as")]
         as_persona: Option<String>,
@@ -473,13 +480,25 @@ fn main() -> Result<()> {
         Cmd::Vote {
             issue,
             choice,
+            confidence,
+            used,
             as_persona,
         } => match choice {
-            Some(c) => run_as(
-                "vissue",
-                &["vote", &issue, "--for", &c],
-                as_persona.as_deref(),
-            )?,
+            Some(c) => {
+                let used = used.as_deref().unwrap_or("");
+                if used.is_empty() {
+                    bail!(
+                        "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-... or --used none"
+                    );
+                }
+                let mut args = vec!["vote".to_string(), issue, "--for".into(), c, "--used".into(), used.to_string()];
+                if let Some(p) = confidence {
+                    args.push("--confidence".into());
+                    args.push(format!("{p}"));
+                }
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                run_as("vissue", &refs, as_persona.as_deref())?;
+            }
             None => run("vissue", &["vote", &issue])?,
         },
         Cmd::Brief { name, issue } => print!("{}", brief(&name, &issue)?),
@@ -827,11 +846,15 @@ fn main() -> Result<()> {
             rule,
         } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
-            let ballots = ballots_from_json(&said.stdout)?;
+            let forecasts = forecasts_from_json(&said.stdout)?;
+            let ballots: Vec<(String, String)> = forecasts
+                .iter()
+                .map(|f| (f.agent.clone(), f.choice.clone()))
+                .collect();
             // The rows written are scoped to what the issue's island is
             // about, so a voter wrong here keeps its standing elsewhere.
             let about = island_entities(&id).unwrap_or_default();
-            let (rows, moved) = if rule == "hedge" {
+            let (rows, moved, calibration) = if rule == "hedge" {
                 let rows =
                     learn_shared(&ballots, &outcome, &trust_from_pack()?, beta, &about, share)?;
                 let moved = learn_anchors(&personas_from_pack()?, &ballots, &outcome, beta);
@@ -841,10 +864,20 @@ fn main() -> Result<()> {
                 for p in &moved {
                     write_persona(p)?;
                 }
-                (rows, moved)
+                (rows, moved, std::collections::BTreeMap::new())
             } else {
-                learn_and_write(&ballots, &outcome, beta, &about)?
+                learn_and_write(&ballots, &outcome, beta, &about, &forecasts)?
             };
+            println!(
+                "{}",
+                learn_reading(
+                    rows.len(),
+                    moved.len(),
+                    &forecasts,
+                    &outcome,
+                    &calibration
+                )
+            );
             for row in &rows {
                 println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
             }

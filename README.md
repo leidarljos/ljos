@@ -3,10 +3,12 @@
 One seat over five habitats and argv law. Each habitat keeps its own crate.
 
 ```
-cargo binstall ljos
+cargo binstall ljos packset
+ljos remember "the default fuse is CombMNZ"
+ljos search fuse
 ```
 
-That installs `ljos` and `ljos-mcp`.
+That installs `ljos` and `ljos-mcp`. `ljos remember` starts the writer when none is answering. `cargo install ljos packset` is the same without `cargo-binstall`.
 
 Citing a deed names it; the bytes stay in deedar. Neither a finish nor completing a node closes the ticket; `finish --close` does, when the work is accepted. Cards are read-only. Consensus is a [different crate](https://github.com/leidarljos/consensus).
 
@@ -66,7 +68,7 @@ Nothing needs a variable set: the pack answers on `127.0.0.1:8761`, the seat's m
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio: thirty-six tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. Paste this where the runner keeps its servers:
+`ljos-mcp` serves the same verbs over stdio: thirty-seven tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the soonest eight claims and the total still due. Paste this where the runner keeps its servers:
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
