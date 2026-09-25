@@ -115,7 +115,7 @@ node does not close the ticket. To stop without finishing,
    issues=1 deeds=1 files=6
    2 atoms to /tmp/bag/data/atoms/default.jsonl
    exported 1 deeds, 4 files
-   unsigned: DEEDAR_HOST_SIGNING_KEY unset
+   /tmp/bag/manifest-sha256.txt.sig
 
 On the receiving seat, with its own stores:
 
@@ -129,10 +129,10 @@ On the receiving seat, with its own stores:
    8 atoms imported, 0 refused
 
 The receiver now knows what the sender learned, who the sender trusts, and
-which deeds the work produced, and checked all of it before importing. Set
-``DEEDAR_HOST_SIGNING_KEY`` on the sender to a 32-byte seed and the manifest
-and log head come signed; the receiver accepts the key in its store's
-``layout``.
+which deeds the work produced, and checked all of it before importing. The
+handover is signed when ``~/.config/deedar/host.key`` exists, a 32-byte seed;
+the last line is that signature beside the manifest. The receiver accepts
+the key in its store's ``layout``.
 
 5. Hand the protocol to an agent
 ================================
