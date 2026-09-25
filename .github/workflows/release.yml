@@ -22,7 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p ljos -p ljos-mcp -p ljos-hud
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p ljos -p ljos-hud
       - run: |
           set -eu
           name="ljos-${GITHUB_REF_NAME}-${{ matrix.target }}"

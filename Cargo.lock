@@ -2588,21 +2588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ljos-mcp"
-version = "0.17.0"
-dependencies = [
- "anyhow",
- "ljos",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "which",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
