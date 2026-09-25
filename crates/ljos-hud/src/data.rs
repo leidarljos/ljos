@@ -602,9 +602,12 @@ mod tests {
             "island": []
         });
         let formatted = ljos_cli::format_island(&weak);
-        assert!(formatted.starts_with("weak island:"));
+        let weak_line = formatted
+            .lines()
+            .find(|line| line.starts_with("weak island:"))
+            .expect("format_island names a weak island");
         let notices = island_notices_of(&weak);
-        assert_eq!(notices, vec![formatted.lines().next().unwrap().to_string()]);
+        assert_eq!(notices, vec![weak_line.to_string()]);
         let dense_down = serde_json::json!({
             "weak": false,
             "dense": false,
