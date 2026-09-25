@@ -1,11 +1,13 @@
 # ljos
 
-One seat over five habitats and argv law. Each habitat keeps its own crate.
+What does this seat do next? One seat over five habitats and argv law. Each habitat keeps its own crate.
 
 ```
 cargo binstall ljos packset
-ljos remember "the default fuse is CombMNZ"
-ljos search fuse
+ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+07be8829... lesson due 2026-09-26T23:27:31.528Z
+ljos search lexical default
+1.0000 3/3 lesson 07be8829... today The lexical default is BM25+. It beat BM25 by two points on turns.
 ```
 
 That installs `ljos` and `ljos-mcp`. `ljos remember` starts the writer when none is answering. `cargo install ljos packset` is the same without `cargo-binstall`.
@@ -63,7 +65,7 @@ ljos findings out/campaign.json --remember     # an eb-stack campaign's typed fi
 
 The seat is the program that connected. `ljos-mcp` names it after the client that initialised it, and `ljos` in a shell that runner opened finds the same name through the process tree or a shared session id, so a runner's tools and its verbs are one seat with nothing set. Claims are held per conversation; memory, ballots and trust accrue to the seat. `ljos seat` prints both names and where they came from. `ljos onboard` prints the one MCP entry any runner takes; `ljos protocol` prints the text an agent reads first.
 
-Nothing needs a variable set: the pack answers on `127.0.0.1:8761`, the seat's memory is the one workspace `seat` from any directory, and every claim carries the seat that wrote it.
+Nothing needs a variable set: `ljos remember` starts the writer when none is answering, the seat's memory is the one workspace `seat` from any directory, and every claim carries the seat that wrote it.
 
 ## The smoke test
 

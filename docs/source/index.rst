@@ -5,7 +5,7 @@
        <img class="vi-hero-mark" src="_static/mark.svg" width="64" height="64" alt="" />
        <div>
          <p class="vi-hero-name">ljos</p>
-         <p class="vi-hero-tag">One seat over five habitats and argv law. It owns none of them.</p>
+         <p class="vi-hero-tag">What does this seat do next?</p>
        </div>
      </div>
      <p class="vi-hero-tagline">Remember, agree, hand over: memory for a working seat that a person can read on disk.</p>
@@ -20,6 +20,7 @@
      </div>
    </div>
 
+One seat over five habitats and argv law. It owns none of them.
 A seat is one agent, or one person, working a tracker. Five habitats
 answer five questions for it: cards are what the human froze, the pack
 knows what the seat has learned, the deed store knows what the work
@@ -66,8 +67,11 @@ First minute
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+   07be8829... lesson due 2026-09-26T23:27:31.528Z
    $ ljos search lexical default
+   1.0000 3/3 lesson 07be8829... today The lexical default is BM25+. It beat BM25 by two points on turns.
    $ ljos due
+   0 due; 1 scheduled, next at 2026-09-26T23:27:31.528Z
 
 The :doc:`tutorial <getting-started>` runs all three loops on a scratch
 tracker in about ten minutes.
