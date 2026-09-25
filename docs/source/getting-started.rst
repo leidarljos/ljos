@@ -49,9 +49,9 @@ Three identities vote on one issue.
 .. code:: console
 
    $ id=$(vissue create -p demo "Ship the fuse change?" -q)
-   $ VISSUE_AGENT=alice ljos vote $id --for ship
-   $ VISSUE_AGENT=bob   ljos vote $id --for ship
-   $ VISSUE_AGENT=carol ljos vote $id --for hold
+   $ VISSUE_AGENT=alice ljos vote $id --for ship --used none
+   $ VISSUE_AGENT=bob   ljos vote $id --for ship --used none
+   $ VISSUE_AGENT=carol ljos vote $id --for hold --used none
    $ ljos consensus $id
    ... shares: hold 0.333, ship 0.667 ...
 
@@ -91,7 +91,7 @@ superseded, and travel in a handover. A person can also set one by hand:
    $ deedar create file --name "the fuse patch" --path patch.rs --agent alice
    id=deed-file-the-fuse-patch ...
    $ ljos deed $id --add deed-file-the-fuse-patch
-   $ ljos finish $id --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold
+   $ ljos finish $id --assignee alice --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold
    remembered ...
    fired the island for "Ship the fuse change?": 3 memories
    completed the session node for demo-... as done
