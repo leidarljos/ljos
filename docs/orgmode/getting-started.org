@@ -26,8 +26,10 @@ ok	deed store	size=0 root=...
 #+begin_src console
 $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
 $ ljos prefer "CombMNZ over RRF for fusing two ballots."
-$ ljos search which fusion
-9.1000	preference	3f9c...	CombMNZ over RRF for fusing two ballots.
+$ ljos search "which fusion"
+Score is how the scorers ranked this query. The fraction is how many of them named the hit.
+2.0000	1/3	lesson	...	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+1.0000	1/3	preference	...	today	CombMNZ over RRF for fusing two ballots.
 #+end_src
 
 A claim is two sentences at most, stored as written. The pack never mines a
@@ -52,7 +54,7 @@ $ VISSUE_AGENT=alice ljos vote $id --for ship --used none
 $ VISSUE_AGENT=bob   ljos vote $id --for ship --used none
 $ VISSUE_AGENT=carol ljos vote $id --for hold --used none
 $ ljos consensus $id
-... shares: hold 0.333, ship 0.667 ...
+... ship 0.667, hold 0.333 ...
 #+end_src
 
 Two settles print: the consensus crate's DeGroot or Friedkin-Johnsen
@@ -61,15 +63,19 @@ rows every voter weighs the same. Now suppose =hold= turned out right:
 
 #+begin_src console
 $ ljos learn $id --outcome hold
-alice weighs bob at 0.500
+alice weighs bob at 0.010
 alice weighs carol at 1.000
-...
+bob weighs alice at 0.010
+bob weighs carol at 1.000
+carol weighs alice at 0.010
+carol weighs bob at 0.010
 $ ljos consensus $id
-... shares: hold 0.429, ship 0.571 ...
+... ship 0.667, hold 0.333 ...
 #+end_src
 
-Every voter the outcome refuted shrank in every other voter's row. The rows
-are =trust= atoms in the pack, so they carry a validity window, can be
+Every voter the outcome refuted shrank in every other voter's row. The settle
+printed beside those rows on this tracker is still the equal-weight count.
+The rows are =trust= atoms in the pack, so they carry a validity window, can be
 superseded, and travel in a handover. A person can also set one by hand:
 =ljos trust alice carol 0.9 --why deed-...=.
 
@@ -108,9 +114,7 @@ and the outcome reweighs the voters as in step 2. Completing the session node do
 
 #+begin_src console
 $ ljos handover --out /tmp/bag --issue $id
-issues=1 deeds=1 files=6
-2 atoms to /tmp/bag/data/atoms/default.jsonl
-exported 1 deeds, 4 files
+issues=1 deeds=1 files=8
 /tmp/bag/manifest-sha256.txt.sig
 #+end_src
 
@@ -120,9 +124,9 @@ On the receiving seat, with its own stores:
 $ ljos receive /tmp/bag
 the payload matches the manifest ...
 1 deeds proven against a log of 1 entries ...
-8 atoms enclosed, 6 trust rows
+0 atoms enclosed, 0 trust rows
 $ ljos receive /tmp/bag --import
-8 atoms imported, 0 refused
+0 atoms imported, 0 refused
 #+end_src
 
 The receiver now knows what the sender learned, who the sender trusts, and
