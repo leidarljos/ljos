@@ -2324,7 +2324,8 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
 
 /// POST one persona. A persona of the same name already in the pack is
 /// superseded, so a rewrite moves the roster without leaving the old view
-/// live.
+/// live. Every persona is owed one unscoped inbound trust row; `--about`
+/// on a later trust row only adds weight, it does not replace that floor.
 pub fn write_persona(p: &Persona) -> Result<Value> {
     let client = pack()?;
     let workspace = client.workspace();
@@ -2343,9 +2344,51 @@ pub fn write_persona(p: &Persona) -> Result<Value> {
     if !previous.is_empty() {
         atom["supersedes"] = Value::Array(previous);
     }
-    client
+    let posted = client
         .post_atom(&atom)
-        .context("persona: POST /v1/atoms failed")
+        .context("persona: POST /v1/atoms failed")?;
+    ensure_unscoped_inbound(p)?;
+    Ok(posted)
+}
+
+/// The unscoped inbound row a persona is owed: the seat weighs it at 1,
+/// everywhere. None when the seat and the persona are the same name
+/// (a row cannot weigh itself).
+#[must_use]
+pub fn inbound_floor(p: &Persona, seat: &str) -> Option<Trust> {
+    let to = p.name.trim();
+    let from = seat.trim();
+    if to.is_empty() || from.is_empty() || from == to {
+        return None;
+    }
+    Some(Trust {
+        from: from.to_string(),
+        to: to.to_string(),
+        weight: 1.0,
+        about: Vec::new(),
+    })
+}
+
+/// Whether `name` already has the seat's unscoped inbound row in `rows`.
+/// A third-party unscoped row does not seat this persona.
+#[must_use]
+pub fn has_unscoped_inbound(rows: &[Trust], name: &str, seat: &str) -> bool {
+    let name = name.trim();
+    let seat = seat.trim();
+    rows.iter()
+        .any(|r| r.from == seat && r.to == name && r.about.is_empty() && r.weight > 0.0)
+}
+
+fn ensure_unscoped_inbound(p: &Persona) -> Result<()> {
+    let name = p.name.trim();
+    let seat = seat_name();
+    if has_unscoped_inbound(&trust_from_pack().unwrap_or_default(), name, &seat) {
+        return Ok(());
+    }
+    let Some(row) = inbound_floor(p, &seat) else {
+        return Ok(());
+    };
+    write_trust(&row, &[]).map(|_| ())
 }
 
 /// The live personas: the latest `persona` atom per name.
@@ -2398,6 +2441,574 @@ pub fn personas_from_pack() -> Result<Vec<Persona>> {
     Ok(personas_of(&atoms))
 }
 
+/// A recipe a sitting copies before personas enter. `models` are optional
+/// spawn hints; every panel still ends in `ljos vote --as` then
+/// `ljos consensus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playbook {
+    pub name: String,
+    pub body: String,
+    pub models: Vec<String>,
+}
+
+/// The closed set. Write, list, bind, and copy refuse any other name.
+pub const PLAYBOOK_NAMES: &[&str] = &["sit", "arena", "land", "company-panel", "overnight"];
+
+/// The five shipped recipes. Kind `playbook`, weighed not recalled.
+pub const SHIPPED_PLAYBOOK_NAMES: &[&str] = PLAYBOOK_NAMES;
+
+/// Five named principles, invocable mid-sitting, mapped onto existing law.
+pub const PRINCIPLES: &str = "\
+== principles
+split-fence: independent implementers, independent trees. A's fence stays: no second plugin, no poteto-mode, no Benny, musl CLI iced-free, `ljos vote --as` and DeGroot stay.
+prove-on-real-surface: measure on the host the users run. A cheaper substitute is not the result.
+open-sibling-first: a second implementer opens a sibling leftover, not a rewrite of the first tree.
+arena-then-compose: designs write scratch; the host writes a rubric on a compose child; personas vote the compose `--as`.
+one-step-delegate: a subagent is one playbook step. No resume across phases. A new task is a new sitting.
+";
+
+/// The scoring sheet a compose is voted on. Personas vote the compose, not
+/// accept-at-most-one on the designs.
+pub const RUBRIC: &str = "\
+== rubric
+1. Ledger intact. `ljos vote --as` and DeGroot stay. No schema_yes, no BARMA, no host for-loop of accepts.
+2. Playbook before panel. Sitting names one recipe and copies it before personas enter.
+3. Rubric in brief. `ljos brief` carries the playbook step, these principles, and this sheet.
+4. One-step delegate. Subagent = one playbook step. No resume across phases.
+5. Unscoped inbound trust. Every panel persona has one unscoped inbound row; `--about` only adds weight.
+6. No second plugin. Do not copy 47 skills, poteto-mode, Benny, or Cursor model files.
+7. Small surface. Prefer pack atoms and brief fields over a new crate. Musl CLI stays iced-free.
+8. Named principles. Five families, invocable mid-sitting, mapped onto existing law (split-fence, prove-on-real-surface, open-sibling-first, arena-then-compose, one-step-delegate).
+";
+
+const SIT_BODY: &str = "\
+A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
+
+1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, claim.
+2. Grade due claims (`ljos graded ID`).
+3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Lessons are `ljos remember` in two sentences.
+4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
+5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket unless finish status is done.
+";
+
+const ARENA_BODY: &str = "\
+Designs compete; the host writes a rubric; personas vote a compose, not the designs.
+
+1. Bind this recipe: `ljos sitting ISSUE --playbook arena` or `ljos playbook ISSUE arena`.
+2. Each design writes scratch (summary and body). Do not vote the design children as accept-at-most-one.
+3. The host writes a compose child and a rubric with named axes. Personas vote the compose `--as`.
+4. Spawn hints are optional model-family names on this atom. Each subagent still ends with `ljos vote ISSUE --for accept|reject --as NAME`. No graft. PASS on an axis is not GREEN.
+5. `ljos consensus ISSUE` settles under trust rows and DeGroot. `ljos vote --as` stays.
+";
+
+const LAND_BODY: &str = "\
+Land a chosen design on the real surface.
+
+1. Bind `land`. Sitting copies this body before recall.
+2. Prove on the real surface: the host the users run, the crate they install. A cheaper substitute is not the result.
+3. Keep A's fence: no 47 skills, no poteto-mode, no Benny, musl iced-free, `ljos vote --as` and DeGroot stay.
+4. One step per subagent. Open a sibling first when a second implementer is in flight.
+5. Close with finish. Do not ship a count as consensus.
+";
+
+const COMPANY_PANEL_BODY: &str = "\
+A panel of personas on one bound recipe.
+
+1. Bind `company-panel` before any persona enters. `ljos panel` refuses if none is bound.
+2. Every persona has one unscoped inbound trust row; `--about` only adds weight.
+3. `ljos brief NAME ISSUE` reprints this recipe in full, the five named principles, and the arena rubric.
+4. One subagent per persona, optional model-family spawn hints. Each casts `ljos vote ISSUE --for OPTION --as NAME`. Then `ljos consensus ISSUE`.
+5. Do not resume across phases. A new task is a new sitting.
+";
+
+const OVERNIGHT_BODY: &str = "\
+Drive work while unattended, still one sitting.
+
+1. Bind `overnight`. Name a checkable finish condition on the issue.
+2. One playbook step per subagent. No session-pickup, no resume across phases.
+3. Isolated worktree. Prove on the real surface before claiming done.
+4. Decision log is tracker notes and deeds, not a second ledger.
+5. `ljos finish` when the condition holds; otherwise `ljos release` and a new sitting.
+";
+
+/// The five shipped playbooks, bodies in full, model roles as spawn hints.
+#[must_use]
+pub fn shipped_playbooks() -> Vec<Playbook> {
+    vec![
+        Playbook {
+            name: "sit".into(),
+            body: SIT_BODY.trim().into(),
+            models: Vec::new(),
+        },
+        Playbook {
+            name: "arena".into(),
+            body: ARENA_BODY.trim().into(),
+            models: vec!["judgment".into(), "instruction".into(), "fast".into()],
+        },
+        Playbook {
+            name: "land".into(),
+            body: LAND_BODY.trim().into(),
+            models: Vec::new(),
+        },
+        Playbook {
+            name: "company-panel".into(),
+            body: COMPANY_PANEL_BODY.trim().into(),
+            models: vec!["judgment".into(), "instruction".into()],
+        },
+        Playbook {
+            name: "overnight".into(),
+            body: OVERNIGHT_BODY.trim().into(),
+            models: Vec::new(),
+        },
+    ]
+}
+
+/// Refuse a name that is not in [`PLAYBOOK_NAMES`].
+///
+/// # Errors
+///
+/// An unknown name.
+pub fn parse_playbook_name(name: &str) -> Result<&'static str> {
+    let n = name.trim();
+    if n.is_empty() {
+        bail!(
+            "playbook: a name is required ({})",
+            PLAYBOOK_NAMES.join(", ")
+        );
+    }
+    PLAYBOOK_NAMES
+        .iter()
+        .copied()
+        .find(|k| *k == n)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "playbook: unknown name {n:?}; the closed set is {}",
+                PLAYBOOK_NAMES.join(", ")
+            )
+        })
+}
+
+/// The `playbook` atom: kind `playbook`, the recipe as text.
+///
+/// # Errors
+///
+/// An unknown name or an empty body.
+pub fn playbook_atom(p: &Playbook, workspace: &str) -> Result<Value> {
+    let name = parse_playbook_name(&p.name)?;
+    let body = p.body.trim();
+    if body.is_empty() {
+        bail!("playbook: {name} needs a recipe body");
+    }
+    let mut atom = atom_body("playbook", body, workspace);
+    atom["name"] = Value::String(name.into());
+    if !p.models.is_empty() {
+        atom["models"] = Value::Array(
+            p.models
+                .iter()
+                .map(|m| m.trim())
+                .filter(|m| !m.is_empty())
+                .map(|m| Value::String(m.to_string()))
+                .collect(),
+        );
+    }
+    Ok(atom)
+}
+
+/// POST one playbook. A playbook of the same name already in the pack is
+/// superseded, so a rewrite moves the recipe without leaving the old body
+/// live.
+pub fn write_playbook(p: &Playbook) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = playbook_atom(p, &workspace)?;
+    let previous: Vec<Value> = client
+        .atoms_of_kind(&workspace, "playbook")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.get("name").and_then(Value::as_str) == Some(p.name.trim()))
+        .filter_map(|a| {
+            a.get("id")
+                .and_then(Value::as_str)
+                .map(|id| Value::String(id.to_string()))
+        })
+        .collect();
+    if !previous.is_empty() {
+        atom["supersedes"] = Value::Array(previous);
+    }
+    client
+        .post_atom(&atom)
+        .context("playbook: POST /v1/atoms failed")
+}
+
+/// The live playbooks: the latest `playbook` atom per name.
+pub fn playbooks_of(atoms: &[Value]) -> Vec<Playbook> {
+    let mut latest: std::collections::BTreeMap<String, (String, Playbook)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("playbook") {
+            continue;
+        }
+        let Some(name) = atom.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if parse_playbook_name(name).is_err() {
+            continue;
+        }
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let p = Playbook {
+            name: name.to_string(),
+            body: atom
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            models: atom
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+        };
+        match latest.get(name) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(name.to_string(), (ts, p));
+            }
+        }
+    }
+    latest.into_values().map(|(_, p)| p).collect()
+}
+
+fn ensure_shipped_playbooks() {
+    let have = pack()
+        .ok()
+        .and_then(|c| c.atoms_of_kind(&c.workspace(), "playbook").ok())
+        .map(|atoms| playbooks_of(&atoms))
+        .unwrap_or_default();
+    for p in shipped_playbooks() {
+        if have.iter().any(|h| h.name == p.name) {
+            continue;
+        }
+        let _ = write_playbook(&p);
+    }
+}
+
+/// The roster: pack atoms, with the five shipped filled in when missing.
+pub fn playbooks_from_pack() -> Result<Vec<Playbook>> {
+    ensure_shipped_playbooks();
+    let client = pack()?;
+    let atoms = client
+        .atoms_of_kind(&client.workspace(), "playbook")
+        .context("playbook: GET /v1/atoms?kind=playbook failed")?;
+    let mut got = playbooks_of(&atoms);
+    for p in shipped_playbooks() {
+        if !got.iter().any(|g| g.name == p.name) {
+            got.push(p);
+        }
+    }
+    got.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(got)
+}
+
+/// Pack latest for `name`, else the shipped seed. Unknown names are refused
+/// even when the pack holds them.
+///
+/// # Errors
+///
+/// An unknown name; the error lists the closed set.
+pub fn playbook_among(name: &str, pack: &[Playbook]) -> Result<Playbook> {
+    let name = parse_playbook_name(name)?;
+    if let Some(p) = pack.iter().find(|p| p.name == name) {
+        return Ok(p.clone());
+    }
+    shipped_playbooks()
+        .into_iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "playbook: unknown name {name:?}; the closed set is {}",
+                PLAYBOOK_NAMES.join(", ")
+            )
+        })
+}
+
+/// Look up one playbook by name: pack latest first, shipped seed only when
+/// the pack has no live atom of that name.
+///
+/// # Errors
+///
+/// Unknown name; the error lists the closed set.
+pub fn playbook_named(name: &str) -> Result<Playbook> {
+    let pack = playbooks_from_pack().unwrap_or_default();
+    playbook_among(name, &pack)
+}
+
+/// The recipe body a sitting copies, including optional spawn hints.
+#[must_use]
+pub fn format_playbook_copy(p: &Playbook) -> String {
+    let mut out = format!("{}\n{}\n", p.name, p.body.trim());
+    if !p.models.is_empty() {
+        out.push_str("spawn hints (optional): ");
+        out.push_str(&p.models.join(", "));
+        out.push_str("; each subagent still ends with `ljos vote --as` then `ljos consensus`.\n");
+    }
+    out
+}
+
+/// The roster, one playbook per line: name, spawn hints, first sentence.
+#[must_use]
+pub fn format_playbooks(playbooks: &[Playbook]) -> String {
+    if playbooks.is_empty() {
+        return "no playbooks; the shipped recipes are sit, arena, land, company-panel, overnight\n"
+            .to_string();
+    }
+    let width = playbooks.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    playbooks
+        .iter()
+        .map(|p| {
+            let first = p
+                .body
+                .split_once('.')
+                .map(|(s, _)| s.trim())
+                .unwrap_or(p.body.trim());
+            format!(
+                "{:width$}  {}  {}\n",
+                p.name,
+                if p.models.is_empty() {
+                    "no spawn hints".to_string()
+                } else {
+                    format!("hints {}", p.models.join(", "))
+                },
+                first
+            )
+        })
+        .collect()
+}
+
+/// A tracker logbook note that binds a playbook name to an issue. Latest
+/// such note wins; empty rest is the sitting-scoped drop finish/release write.
+pub const PLAYBOOK_NOTE_PREFIX: &str = "playbook:";
+
+fn playbook_key(issue: &str) -> String {
+    issue
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn playbook_bind_path(issue: &str) -> PathBuf {
+    runtime_dir().join(format!("playbook-{}", playbook_key(issue)))
+}
+
+fn cached_playbook(issue: &str) -> Option<String> {
+    let text = std::fs::read_to_string(playbook_bind_path(issue)).ok()?;
+    let name = text.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn write_playbook_cache(issue: &str, name: &str) -> Result<()> {
+    let path = playbook_bind_path(issue);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, format!("{name}\n"))
+        .with_context(|| format!("playbook: could not bind {name} on {issue}"))
+}
+
+/// The playbook name bound on an issue JSON: the latest logbook note that
+/// opens with [`PLAYBOOK_NOTE_PREFIX`]. Empty rest means this sitting dropped
+/// it; do not walk back to an earlier bind.
+#[must_use]
+pub fn playbook_name_from_issue(v: &Value) -> Option<String> {
+    let mut dated: Vec<(String, Option<String>)> = Vec::new();
+    for e in v["logbook"].as_array().into_iter().flatten() {
+        let Some(note) = e["note"].as_str() else {
+            continue;
+        };
+        let Some(rest) = note.trim().strip_prefix(PLAYBOOK_NOTE_PREFIX) else {
+            continue;
+        };
+        let name = rest.trim();
+        let live = if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        };
+        let ts = e["timestamp"].as_str().unwrap_or("").to_string();
+        dated.push((ts, live));
+    }
+    if dated.iter().any(|(ts, _)| !ts.is_empty()) {
+        dated
+            .into_iter()
+            .max_by_key(|(ts, _)| ts.clone())
+            .and_then(|(_, n)| n)
+    } else {
+        dated.into_iter().next().and_then(|(_, n)| n)
+    }
+}
+
+/// The playbook name bound on a tracker issue, if any.
+///
+/// # Errors
+///
+/// The tracker not answering.
+pub fn playbook_named_on(issue: &str) -> Result<Option<String>> {
+    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    Ok(playbook_name_from_issue(&v))
+}
+
+/// The playbook name this sitting holds, if one was bound. Tracker note is
+/// the bind that survives the process; the runtime cache is only when the
+/// tracker does not answer.
+#[must_use]
+pub fn bound_playbook(issue: &str) -> Option<String> {
+    match playbook_named_on(issue) {
+        Ok(name) => name,
+        Err(_) => cached_playbook(issue),
+    }
+}
+
+/// Drop the sticky name. Finish and release call this; a new task is a
+/// new sitting. Writes an empty `playbook:` note so the next sitting does
+/// not reprint the previous recipe, and unlinks the runtime cache.
+pub fn drop_playbook(issue: &str) {
+    if bound_playbook(issue).is_some() {
+        let _ = run_captured("vissue", &["note", issue, PLAYBOOK_NOTE_PREFIX]);
+    }
+    let _ = std::fs::remove_file(playbook_bind_path(issue));
+}
+
+/// Hold `name` on `issue` until finish or release. A different name while
+/// one is held is refused: mid-sitting turns re-read the same note.
+///
+/// # Errors
+///
+/// Empty issue or name, or a different recipe already bound.
+pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
+    let issue = issue.trim();
+    let name = name.trim();
+    if issue.is_empty() {
+        bail!("playbook: an issue is required");
+    }
+    if name.is_empty() {
+        bail!("playbook: a name is required");
+    }
+    let name = parse_playbook_name(name)?;
+    if let Some(have) = bound_playbook(issue) {
+        if have != name {
+            bail!(
+                "playbook: {issue} is bound to {have} until finish or release; \
+                 a new task is a new sitting"
+            );
+        }
+        let _ = write_playbook_cache(issue, name);
+        return Ok(());
+    }
+    let note = format!("{PLAYBOOK_NOTE_PREFIX} {name}");
+    match run_captured("vissue", &["note", issue, &note]) {
+        Ok(_) => {
+            let _ = write_playbook_cache(issue, name);
+            Ok(())
+        }
+        Err(_) => write_playbook_cache(issue, name),
+    }
+}
+
+/// Bind `name` to `issue` and return the full recipe body. This is the
+/// copy into the working set; sitting prints it before recall.
+pub fn copy_playbook(issue: &str, name: &str) -> Result<String> {
+    let p = playbook_named(name)?;
+    bind_playbook(issue, &p.name)?;
+    Ok(format_playbook_copy(&p))
+}
+
+/// A closed-set name the issue title names, else `sit`. Longer names win
+/// (`company-panel` before a stray `sit` token); `sitting` is not `sit`.
+#[must_use]
+pub fn playbook_from_title(title: &str) -> &'static str {
+    let tokens: Vec<String> = title
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut names: Vec<&'static str> = PLAYBOOK_NAMES.to_vec();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    for name in names {
+        if tokens.iter().any(|t| t == name) {
+            return name;
+        }
+    }
+    "sit"
+}
+
+/// Which playbook a sitting copies: an explicit name, else the name already
+/// bound on the issue (sticky until finish/release), else a closed-set
+/// token in the title, else `sit`.
+///
+/// # Errors
+///
+/// An unknown explicit name.
+pub fn resolve_sitting_playbook(issue: &str, title: &str, asked: Option<&str>) -> Result<String> {
+    if let Some(name) = asked.map(str::trim).filter(|n| !n.is_empty()) {
+        return Ok(playbook_named(name)?.name);
+    }
+    if let Some(name) = bound_playbook(issue) {
+        return Ok(name);
+    }
+    Ok(playbook_from_title(title).to_string())
+}
+
+/// The `== playbook` section of a sitting: bind when a name is given,
+/// else reprint the sticky body, else say none is bound.
+pub fn playbook_opening(issue: &str, name: Option<&str>) -> Result<String> {
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => copy_playbook(issue, n),
+        None => match bound_playbook(issue) {
+            Some(have) => {
+                let p = playbook_named(&have)?;
+                Ok(format_playbook_copy(&p))
+            }
+            None => Ok("none bound; `ljos sitting ISSUE --playbook NAME` or \
+                 `ljos playbook ISSUE NAME` names one. A panel is refused until then.\n"
+                .to_string()),
+        },
+    }
+}
+
+/// The three blocks a brief carries: playbook step (full body), named
+/// principles, arena rubric.
+#[must_use]
+pub fn brief_playbook_blocks(issue: &str) -> String {
+    let copy = match bound_playbook(issue) {
+        Some(name) => playbook_named(&name)
+            .map(|p| format_playbook_copy(&p))
+            .unwrap_or_else(|e| format!("{e}\n")),
+        None => {
+            "none bound; `ljos playbook ISSUE NAME` names one before personas enter.\n".to_string()
+        }
+    };
+    format!("== playbook\n{copy}\n{PRINCIPLES}\n{RUBRIC}")
+}
+
 /// The brief a subagent playing a persona starts from: the persona's view
 /// and domains, what the seat knows on those domains (preferences first),
 /// and the issue's working set. One text, so a panel member reads the
@@ -2420,7 +3031,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
         );
     };
     let mut out = format!(
-        "You are {}. {}\nYou hold your ballot at anchor {:.2}{}.\n",
+        "You are {}. {}\nYou hold your ballot at anchor {:.2}{}.\n\n{}",
         p.name,
         p.view,
         p.anchor,
@@ -2428,7 +3039,8 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
             String::new()
         } else {
             format!("; you speak to {}", p.entities.join(", "))
-        }
+        },
+        brief_playbook_blocks(issue)
     );
     let mut seen = std::collections::BTreeSet::new();
     let mut lines = Vec::new();
@@ -2585,6 +3197,12 @@ pub fn issue_words(issue: &str) -> Vec<String> {
 }
 
 pub fn panel(issue: &str, out: &Path) -> Result<String> {
+    if bound_playbook(issue).is_none() {
+        bail!(
+            "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
+             `ljos sitting {issue} --playbook NAME` names one before personas enter"
+        );
+    }
     let all = personas_from_pack()?;
     if all.is_empty() {
         bail!("panel: the pack holds no personas; `ljos persona NAME --anchor A --view ...` writes one");
@@ -4283,7 +4901,7 @@ pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
 }
 
 /// Kinds that are weighed, not recalled, and so never come up for review.
-const UNREVIEWED_KINDS: &[&str] = &["trust", "persona"];
+const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "playbook"];
 
 /// Whether an atom is a claim the review clock should hold at all.
 fn reviewable(a: &Value) -> bool {
@@ -5345,6 +5963,7 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     let actor = work_id(&occupancy_scope(assignee, node));
     let said = run_captured("claimdag", &["release", &id, "--actor", &actor])?;
     drop_hold(&actor);
+    drop_playbook(node);
     Ok(said.stdout)
 }
 
@@ -5699,7 +6318,7 @@ fn civil_of_days(days: i64) -> String {
 /// A required habitat down, or the claim refused (the refusal names what
 /// the assignee still holds).
 pub fn sitting(issue: &str, assignee: &str, cards_dir: &Path) -> Result<String> {
-    sitting_gated(issue, assignee, cards_dir, false)
+    sitting_gated(issue, assignee, cards_dir, false, None)
 }
 
 /// The blockers of an issue that are still open, as `id (STATE)`, read
@@ -5731,11 +6350,16 @@ pub fn open_blockers(issue: &str) -> Vec<String> {
 /// issue's blockers are open. Without it a blocked issue is refused before
 /// anything is claimed: the tracker's graph says what is workable, and a
 /// seat that sits on blocked work sits on nothing it can finish.
+/// `playbook` names the recipe copied into `== playbook` before recall;
+/// absent, a name already bound, else a closed-set token in the title,
+/// else `sit`. Sitting always binds one of the five before claim. Finish
+/// and release drop the sticky name.
 pub fn sitting_gated(
     issue: &str,
     assignee: &str,
     cards_dir: &Path,
     anyway: bool,
+    playbook: Option<&str>,
 ) -> Result<String> {
     let mut out = String::new();
     let rows = doctor_seat();
@@ -5772,6 +6396,9 @@ pub fn sitting_gated(
         }
         out.push_str("sitting anyway, as asked\n");
     }
+    let name = resolve_sitting_playbook(issue, &title, playbook)?;
+    out.push_str("== playbook\n");
+    out.push_str(&copy_playbook(issue, &name)?);
     out.push_str("== recall\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     // The last twelve dated events across the three stores; `ljos
@@ -5822,6 +6449,7 @@ pub fn complete(
     }
     let said = run_captured("claimdag", &args)?;
     drop_hold(&actor);
+    drop_playbook(node);
     Ok(said.stdout)
 }
 
@@ -7998,6 +8626,265 @@ mod tests {
         assert!(settle_flags_for(&["feature".to_string()]).is_empty());
     }
 
+    /// Playbooks are kind playbook, latest per name, unreviewed; sitting
+    /// copies the full body; a second name on a live sitting is refused;
+    /// the inbound floor is unscoped.
+    #[test]
+    fn playbooks_are_latest_per_name_and_stick_until_finish() {
+        let _g = env_guard();
+        let dir = std::env::temp_dir().join(format!("ljos-playbook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        }
+        let shipped = shipped_playbooks();
+        let names: Vec<&str> = shipped.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, SHIPPED_PLAYBOOK_NAMES);
+        for p in shipped_playbooks() {
+            assert!(!p.body.is_empty(), "{}", p.name);
+            assert!(
+                !p.body.contains("/poteto-mode") && !p.body.contains("poteto-agent"),
+                "{}",
+                p.name
+            );
+            let atom = playbook_atom(&p, "ws").unwrap();
+            assert_eq!(atom["kind"], "playbook");
+            assert_eq!(atom["name"], p.name);
+            assert_eq!(atom["text"], p.body);
+            assert!(!super::reviewable(&atom), "{}", p.name);
+        }
+        assert!(playbook_atom(
+            &Playbook {
+                name: "sit".into(),
+                body: "  ".into(),
+                models: vec![],
+            },
+            "ws"
+        )
+        .is_err());
+        let mut a = playbook_atom(
+            &Playbook {
+                name: "sit".into(),
+                body: "first body".into(),
+                models: vec![],
+            },
+            "ws",
+        )
+        .unwrap();
+        a["ts"] = Value::String("2026-01-01T00:00:00Z".into());
+        let mut later = a.clone();
+        later["text"] = Value::String("second body".into());
+        later["ts"] = Value::String("2026-02-01T00:00:00Z".into());
+        let got = playbooks_of(&[a, later]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].body, "second body");
+        let copy = copy_playbook("proj-1a2b", "sit").unwrap();
+        assert!(copy.starts_with("sit\n"), "{copy}");
+        assert!(copy.contains("Grade due claims"), "{copy}");
+        assert_eq!(bound_playbook("proj-1a2b").as_deref(), Some("sit"));
+        let err = bind_playbook("proj-1a2b", "arena").unwrap_err().to_string();
+        assert!(err.contains("bound to sit"), "{err}");
+        assert!(err.contains("new sitting"), "{err}");
+        let again = playbook_opening("proj-1a2b", None).unwrap();
+        assert!(again.contains("Grade due claims"), "{again}");
+        let blocks = brief_playbook_blocks("proj-1a2b");
+        assert!(blocks.contains("== playbook"), "{blocks}");
+        assert!(blocks.contains("Grade due claims"), "{blocks}");
+        assert!(blocks.contains("== principles"), "{blocks}");
+        assert!(blocks.contains("split-fence"), "{blocks}");
+        assert!(blocks.contains("== rubric"), "{blocks}");
+        assert!(blocks.contains("Ledger intact"), "{blocks}");
+        drop_playbook("proj-1a2b");
+        assert_eq!(bound_playbook("proj-1a2b"), None);
+        let none = playbook_opening("proj-1a2b", None).unwrap();
+        assert!(none.contains("none bound"), "{none}");
+        assert!(none.contains("panel is refused"), "{none}");
+        let err = panel("proj-1a2b", &dir.join("panel"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no playbook bound"), "{err}");
+        let p = Persona {
+            name: "reviewer".into(),
+            anchor: 0.2,
+            view: "Reads for what could break.".into(),
+            entities: vec!["docs".into()],
+        };
+        let floor = inbound_floor(&p, "seat").unwrap();
+        assert_eq!(floor.from, "seat");
+        assert_eq!(floor.to, "reviewer");
+        assert!((floor.weight - 1.0).abs() < 1e-9);
+        assert!(floor.about.is_empty());
+        assert!(inbound_floor(&p, "reviewer").is_none());
+        assert!(has_unscoped_inbound(
+            std::slice::from_ref(&floor),
+            "reviewer",
+            "seat"
+        ));
+        let scoped = Trust {
+            about: vec!["docs".into()],
+            ..floor
+        };
+        assert!(!has_unscoped_inbound(
+            std::slice::from_ref(&scoped),
+            "reviewer",
+            "seat"
+        ));
+        let other = Trust {
+            from: "other".into(),
+            to: "reviewer".into(),
+            weight: 1.0,
+            about: Vec::new(),
+        };
+        assert!(
+            !has_unscoped_inbound(std::slice::from_ref(&other), "reviewer", "seat"),
+            "a third-party unscoped row is not the seat floor"
+        );
+        let arena_pb = shipped_playbooks()
+            .into_iter()
+            .find(|p| p.name == "arena")
+            .unwrap();
+        let arena = format_playbook_copy(&arena_pb);
+        assert!(
+            arena.contains("spawn hints (optional): judgment, instruction, fast"),
+            "{arena}"
+        );
+        assert!(arena.contains("ljos vote --as"), "{arena}");
+        match before {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playbook_note_latest_wins_and_empty_rest_drops() {
+        let v = serde_json::json!({
+            "logbook": [
+                {"note": "playbook: land", "timestamp": "2026-09-21"},
+                {"note": "playbook: sit", "timestamp": "2026-09-20"},
+                {"note": "progress", "timestamp": "2026-09-19"}
+            ]
+        });
+        assert_eq!(playbook_name_from_issue(&v).as_deref(), Some("land"));
+        let empty = serde_json::json!({"logbook": []});
+        assert_eq!(playbook_name_from_issue(&empty), None);
+        let dropped = serde_json::json!({
+            "logbook": [
+                {"note": "playbook:", "timestamp": "2026-09-22T00:00:00Z"},
+                {"note": "playbook: sit", "timestamp": "2026-09-21T00:00:00Z"}
+            ]
+        });
+        assert_eq!(playbook_name_from_issue(&dropped), None);
+        let undated = serde_json::json!({
+            "logbook": [
+                {"note": "playbook:"},
+                {"note": "playbook: sit"}
+            ]
+        });
+        assert_eq!(
+            playbook_name_from_issue(&undated),
+            None,
+            "newest-first empty rest drops without walking back"
+        );
+    }
+
+    #[test]
+    fn playbook_from_title_matches_a_closed_name_else_sit() {
+        assert_eq!(playbook_from_title("Seat playbooks: routing"), "sit");
+        assert_eq!(playbook_from_title("x5jz compose: land B"), "land");
+        assert_eq!(
+            playbook_from_title("Run the company-panel overnight"),
+            "company-panel"
+        );
+        assert_eq!(playbook_from_title("sitting on a ticket"), "sit");
+        assert_eq!(playbook_from_title("arena then compose"), "arena");
+        assert_eq!(
+            playbook_from_title("Benny and poteto-mode"),
+            "sit",
+            "title-match binds only closed-set tokens"
+        );
+    }
+
+    #[test]
+    fn playbook_among_pack_latest_wins_and_unknown_names_are_refused() {
+        let rewritten = Playbook {
+            name: "sit".into(),
+            body: "rewritten sit body".into(),
+            models: vec![],
+        };
+        let got = playbook_among("sit", std::slice::from_ref(&rewritten)).unwrap();
+        assert_eq!(got.body, "rewritten sit body");
+        let seed = playbook_among("sit", &[]).unwrap();
+        assert!(
+            seed.body.contains("Grade due claims"),
+            "shipped seed when the pack has no live atom: {}",
+            seed.body
+        );
+        let err = playbook_among("Benny", &[]).unwrap_err().to_string();
+        assert!(err.contains("unknown"), "{err}");
+        let sneaky = Playbook {
+            name: "poteto-mode".into(),
+            body: "second roster".into(),
+            models: vec![],
+        };
+        let err = playbook_among("poteto-mode", std::slice::from_ref(&sneaky))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown"), "{err}");
+        assert!(playbook_atom(&sneaky, "ws").is_err());
+        assert!(parse_playbook_name("overnight").is_ok());
+        assert!(parse_playbook_name("company-panel").is_ok());
+        let listed = playbooks_of(&[serde_json::json!({
+            "kind": "playbook",
+            "name": "Benny",
+            "text": "no",
+            "ts": "2026-01-01T00:00:00Z"
+        })]);
+        assert!(listed.is_empty(), "{listed:?}");
+        let err = bind_playbook("proj-1a2b", "Benny").unwrap_err().to_string();
+        assert!(err.contains("unknown"), "{err}");
+    }
+
+    #[test]
+    fn sitting_resolves_asked_else_bound_else_title_else_sit() {
+        let _g = env_guard();
+        let dir =
+            std::env::temp_dir().join(format!("ljos-playbook-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        }
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "Seat playbooks", Some("arena")).unwrap(),
+            "arena"
+        );
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "x5jz compose: land B", None).unwrap(),
+            "land"
+        );
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "Ship the fuse change?", None).unwrap(),
+            "sit"
+        );
+        bind_playbook("proj-1a2b", "sit").unwrap();
+        assert_eq!(
+            resolve_sitting_playbook("proj-1a2b", "x5jz compose: land B", None).unwrap(),
+            "sit",
+            "sticky wins over title"
+        );
+        drop_playbook("proj-1a2b");
+        assert_eq!(bound_playbook("proj-1a2b"), None);
+        match before {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A claim that never entered the clock is due now; a scheduled one is
     /// not; trust rows never are; and the summary says whether the clock runs.
     #[test]
@@ -8010,6 +8897,7 @@ mod tests {
             serde_json::json!({"id": "d", "kind": "conclusion", "text": "past",
                 "due_at": "2020-01-01T00:00:00Z"}),
             serde_json::json!({"id": "t", "kind": "trust", "text": "x weighs y"}),
+            serde_json::json!({"id": "p", "kind": "playbook", "text": "sit recipe", "name": "sit"}),
         ];
         let now = "2026-01-01T00:00:00Z";
         let due: Vec<String> = super::due_of(&atoms, now)

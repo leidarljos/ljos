@@ -2,6 +2,35 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.17.0 (2026-09-21)
+
+- `ljos hud` opens the summonable icedtea pane (`ljos-hud`, a workspace
+  member): due, claims, trust canvas, island, and the deed rail. The
+  `ljos` crate does not link iced. Pane behavior is the 0.16.3 notes.
+- Five playbooks (`sit`, `arena`, `land`, `company-panel`, `overnight`) are
+  kind `playbook`, weighed not recalled. `ljos playbooks` lists them;
+  `ljos playbook ISSUE NAME` binds one and copies the full recipe body.
+  The name is a tracker `playbook:` note until finish or release; those
+  verbs write an empty `playbook:` sentinel so the next sitting does not
+  reprint it. A different name while one is held is refused. `ljos sitting
+  ISSUE --playbook NAME` (MCP `playbook`) prints `== playbook` with that
+  body before recall; absent a name, a closed-set token in the title else
+  `sit`, so a sitting always binds one of the five before claim. Pack
+  latest per name is the copy source; shipped bodies seed only when the
+  pack has no live atom of that name. Write, list, bind, and copy refuse
+  names outside the five.
+- The unscoped inbound floor a persona is owed is the seat's own row
+  (`from` is the seat). A third-party unscoped row does not skip it.
+- `ljos brief` carries three blocks: the bound playbook's full recipe,
+  five named principles (split-fence, prove-on-real-surface,
+  open-sibling-first, arena-then-compose, one-step-delegate), and the
+  arena rubric. `ljos panel` refuses until a playbook is bound.
+  Model names on a recipe are optional spawn hints; every panel still
+  ends in `ljos vote --as` then `ljos consensus`.
+- Writing a persona also writes one unscoped inbound trust row (the seat
+  weighs it at 1, everywhere). `--about` on a later trust row only adds
+  weight.
+
 ## 0.16.3 (2026-09-22)
 
 - `ljos hud` execs sibling `ljos-hud` (`LJOS_HUD_BIN`, same directory, then

@@ -4,8 +4,8 @@ Command line
 =============================================================================== ========================= ================================================================================================================================================================================================================================================================================================
 Verb                                                                            Habitat                   Does
 =============================================================================== ========================= ================================================================================================================================================================================================================================================================================================
-``sitting ISSUE [--assignee NAME] [--cards DIR]``                               all                       open a sitting: doctor, cards, due, island, recall, timeline, claim; stops at the first store down; the name defaults to ``LJOS_SEAT``
-``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--close]``   all                  close a sitting: remember, fire the island, complete, learn; ``--close`` closes the ticket when the work is accepted
+``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway]``   all                       open a sitting: doctor, cards, due, island, playbook, recall, timeline, claim; stops at the first store down; the name defaults to ``LJOS_SEAT``; ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``; tracker ``playbook:`` note until finish or release
+``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--close]``   all                  close a sitting: remember, fire the island, complete, learn; ``--close`` closes the ticket when the work is accepted |
 ``calibrate -p PROJECT [--rounds N]``                                           consensus, pack           trust rows from the project's voting history (Dawid-Skene accuracy)
 ``remember TEXT [--as PERSONA]``                                                pack                      one lesson, stored as written; as a persona, it carries that persona's entity and opens its next brief
 ``prefer TEXT``                                                                 pack                      one standing preference
@@ -19,9 +19,11 @@ Verb                                                                            
 ``due``                                                                         pack                      claims whose review is due, unreviewed ones first, then one line on the clock
 ``graded ID [--lapsed]``                                                        pack                      one review graded
 ``trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...``                    pack                      one trust row; scoped when ``--about`` is given
-``persona NAME --anchor A --view TEXT [--about DOMAIN]...``                     pack                      a voter with a view; ``A`` in [0, 1] is how far it moves off its ballot
-``brief NAME ISSUE``                                                            pack, tracker             what a subagent playing the persona starts from: view, what the seat knows on its domains, the working set
-``panel ISSUE [--out DIR]``                                                     pack, tracker             one brief per persona as ``DIR/<name>.md``, then the settle line; a panel for a runner without MCP
+``persona NAME --anchor A --view TEXT [--about DOMAIN]...``                     pack                      a voter with a view; writes one unscoped inbound trust row
+``playbook ISSUE NAME``                                                         pack                      bind a recipe to the issue and copy its full body; tracker ``playbook:`` note until finish or release
+``playbooks``                                                                   pack                      the closed set sit, arena, land, company-panel, overnight; pack latest per name, shipped seed when missing
+``brief NAME ISSUE``                                                            pack, tracker             view, bound playbook body, five principles, arena rubric, domains, working set
+``panel ISSUE [--out DIR]``                                                     pack, tracker             one brief per persona as ``DIR/<name>.md``; refused until a playbook is bound
 ``learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]`` tracker, pack             reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights; ``hedge`` shrinks refuted voters by ``B`` with ``S`` recovery
 ``evidence ACCESSION`` / ``current ACCESSION``                                  deed store                intact; still the tip
 ``deed ID [--add ACCESSION]``                                                   tracker                   cite a deed on a node, or list citations
@@ -49,11 +51,11 @@ to one actor; a 32-hex id passes through.
 Model Context Protocol (MCP) tools
 ==================================
 
-Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
+Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
 ``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_handover``, ``ljos_receive``. Readers: ``ljos_search`` (with ``as_of``), ``ljos_conflicts``,
 ``ljos_timeline``, ``ljos_due``, ``ljos_evidence``, ``ljos_current``, ``ljos_recall``,
-``ljos_consensus``, ``ljos_brief``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``. Resources:
+``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Every tool description opens with
 when to call it.

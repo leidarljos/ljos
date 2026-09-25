@@ -19,5 +19,5 @@ Who agrees, weighted?                         ljos-consensus `consensus <https:/
 May this argv run?                            ljos-policyd   `ljos-policyd <https://leidarljos.github.io/ljos-policyd/>`__
 ============================================= ============== =============================================================
 
-``ljos sitting`` opens: doctor, cards, due, island, recall, timeline, claim.
+``ljos sitting`` opens: doctor, cards, due, island, playbook, recall, timeline, claim.
 ``ljos finish`` closes the session node. Walk: `Sit <https://leidarljos.github.io/docs/sit/>`__ · `First write <https://leidarljos.github.io/docs/start/>`__.

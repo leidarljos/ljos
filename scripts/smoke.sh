@@ -48,6 +48,7 @@ learned=$(ljos learn "$id" --outcome hold 2>&1 || true)
 echo "$learned" | grep -q 'weighs' || { echo "$learned"; ljos seat; vissue vote "$id" 2>&1 | head -8; fail learn; }
 
 sit=$(ljos sitting "$id" --assignee you)
+echo "$sit" | grep -q '== playbook' || fail "sitting playbook section"
 echo "$sit" | grep -q 'gen=' || fail sitting
 gen=$(printf '%s\n' "$sit" | sed -n 's/.*gen=\([0-9][0-9]*\).*/\1/p' | tail -1)
 [ -n "$gen" ] || fail "sitting printed no gen"
@@ -84,6 +85,11 @@ ljos predict "$id2" --expect '{"ship":0.6,"hold":0.4}' --as reader >/dev/null
 ljos trust reader reviewer 0.9 --about docs >/dev/null
 ljos consensus "$id2" | grep -q '"predictors": 2' || fail "surprisingly popular"
 ljos brief reviewer "$id2" | grep -q 'You are reviewer' || fail brief
+if ljos panel "$id2" --out "$root/panel-unbound" >/dev/null 2>&1; then fail "panel unbound"; fi
+ljos playbook "$id2" sit | grep -q '^sit$' || fail playbook
+ljos brief reviewer "$id2" | grep -q 'split-fence' || fail "brief principles"
+ljos brief reviewer "$id2" | grep -q '== rubric' || fail "brief rubric"
+ljos panel "$id2" --out "$root/panel" | grep -q consensus || fail panel
 cal=$(ljos calibrate -p demo 2>&1 || true)
 echo "$cal" | grep -q weighs || { echo "$cal"; fail calibrate; }
 

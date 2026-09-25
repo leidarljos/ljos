@@ -268,6 +268,10 @@ unreviewed	conclusion	3f9c...	The lexical default is BM25+.
 1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
 == island: Ship the fuse change?
 1.000	seed	ab8c...	3 weeks ago	CombMNZ over RRF for fusing two ballots.
+== playbook
+sit
+A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
+...
 == recall
 ...
 == timeline
@@ -278,9 +282,13 @@ timeline of proj-1a2b: Ship the fuse change?
 gen=2
 #+end_src
 
-One verb, seven sections, in the protocol's order; it stops at the first
-store that does not answer and claims nothing. The =start_a_sitting=
-prompt gives the same order to a runner that prefers single tools. A claim
+One verb, in the protocol's order; it stops at the first store that does
+not answer and claims nothing. =--playbook NAME= copies a recipe
+(=sit=, =arena=, =land=, =company-panel=, =overnight=) into the
+playbook section before recall; absent a name, a closed-set token in the
+title else =sit=. The name is a tracker =playbook:= note until finish or
+release. =ljos panel= refuses until one is bound. The =start_a_sitting= prompt
+gives the same order to a runner that prefers single tools. A claim
 refused as busy names the issue you still hold; =ljos complete= finishes it
 and =ljos release= hands it back.
 

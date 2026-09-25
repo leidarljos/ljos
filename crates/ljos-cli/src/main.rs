@@ -4,13 +4,14 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
     age_of, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
-    consensus_steps_for, doctor, due_report, finish, format_bump_rows, format_consolidation,
-    format_doctor, format_findings, format_hits, format_hubs, format_island, format_personas,
-    format_readings, format_remembered, format_seat, format_steps, format_write_ack, graded, habit,
-    habits, handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
-    forecasts_from_json, island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, now_utc, on_path, onboard,
-    pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
-    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
+    consensus_steps_for, copy_playbook, doctor, due_report, finish, format_bump_rows,
+    format_consolidation, format_doctor, format_findings, format_hits, format_hubs, format_island,
+    format_personas, format_playbooks, format_readings, format_remembered, format_seat,
+    format_steps, format_write_ack, forecasts_from_json, graded, habit, habits, handover, healthy,
+    hold_hook_context, hook_call, hook_context, hook_output_ruled, island_entities, join,
+    learn_anchors, learn_and_write, learn_reading, learn_shared, now_utc, on_path, onboard, pack,
+    packset_consolidate, packset_forget, packset_hubs, packset_island_as, packset_search_as_of,
+    packset_write_as, panel, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
     policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
     remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
     session_end, sitting_gated, take_hook_context, tcb_check, timeline, topic_words,
@@ -163,6 +164,15 @@ enum Cmd {
     },
     /// The personas the pack holds: name, anchor, domains and view, one per line.
     Personas,
+    /// Bind a playbook to an issue and copy its recipe into the working set, before personas enter.
+    Playbook {
+        /// The tracker id of the issue.
+        issue: String,
+        /// The recipe name: sit, arena, land, company-panel, overnight.
+        name: String,
+    },
+    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight.
+    Playbooks,
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
         /// A tracker id, or a 32-hex claim-graph id.
@@ -351,7 +361,7 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, recall, timeline, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
@@ -364,6 +374,9 @@ enum Cmd {
         /// Sit even when the issue's blockers are open. Without it a blocked issue is refused before anything is claimed.
         #[arg(long)]
         anyway: bool,
+        /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
+        #[arg(long)]
+        playbook: Option<String>,
     },
     /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
     Finish {
@@ -539,6 +552,10 @@ fn main() -> Result<()> {
         }
         Cmd::Personas => {
             print!("{}", format_personas(&personas_from_pack()?));
+        }
+        Cmd::Playbook { issue, name } => print!("{}", copy_playbook(&issue, &name)?),
+        Cmd::Playbooks => {
+            print!("{}", format_playbooks(&playbooks_from_pack()?));
         }
         Cmd::Claim { node, assignee } => {
             print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)
@@ -830,13 +847,15 @@ fn main() -> Result<()> {
             assignee,
             cards: cards_dir,
             anyway,
+            playbook,
         } => print!(
             "{}",
             sitting_gated(
                 &issue,
                 &resolve_assignee(assignee.as_deref()),
                 &cards_dir,
-                anyway
+                anyway,
+                playbook.as_deref()
             )?
         ),
         Cmd::Finish {
