@@ -19,7 +19,7 @@ it is on =PATH= or =POLICYD_BIN=.
 * The contracts
 
 - Citing a deed names it; the bytes stay in deedar.
-- A finish with status done closes the ticket; a completed node alone leaves it. The claim graph is
+- A finish closes the sitting. The ticket closes only with =ljos finish ISSUE --close=, when the work is accepted. The claim graph is
   session state; the tracker decides when work is done.
 - Cards are read-only. The seat writes to the pack; a person writes the
   cards.

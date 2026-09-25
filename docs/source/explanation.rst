@@ -18,7 +18,7 @@ The contracts
 
 -  Citation is not a merge. Citing a deed names it; the bytes stay in the
    deed store.
--  Completing a session node does not close a ticket. The claim graph is
+-  Completing a session node does not close a ticket. ``ljos finish ISSUE --close`` does, when the work is accepted. The claim graph is
    session state; the tracker decides when work is done.
 -  Cards are read-only. The seat writes to the pack; a person writes the
    cards.
