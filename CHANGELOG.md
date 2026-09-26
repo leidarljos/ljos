@@ -12,7 +12,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   message enum boxes its snapshot so clippy `large_enum_variant` stays
   clean.
 
-- The tracker push after a claim or finish waits at most 15 seconds
+- The tracker push after a claim or finish waits at most 5 seconds
   (`LJOS_TRACKER_PUSH_WAIT`). A pre-push hook that publishes data first
   held every sitting for minutes; a push still running finishes in the
   background and the `tracker git:` line names its log.

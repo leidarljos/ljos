@@ -6915,12 +6915,12 @@ pub fn persist_tracker(issue: &str, verb: &str) -> String {
 }
 
 /// How long a sitting waits for the tracker push: `LJOS_TRACKER_PUSH_WAIT`
-/// seconds, else 15.
+/// seconds, else 5: agents wrap a finish in a timeout of about ten seconds.
 fn push_wait() -> std::time::Duration {
     let secs = std::env::var("LJOS_TRACKER_PUSH_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(15);
+        .unwrap_or(5);
     std::time::Duration::from_secs(secs)
 }
 
