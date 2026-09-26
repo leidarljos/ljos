@@ -4497,6 +4497,34 @@ fn crate_version_for(crate_name: &str, have: Option<&str>) -> Option<CrateVersio
     }
 }
 
+/// Evidence citations and forecast confidence are part of the ballot protocol.
+/// A version line alone does not establish that the tracker accepts them.
+fn check_vissue_ballot_protocol(path: &Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let said = Command::new("timeout")
+        .arg("2")
+        .arg(path)
+        .args(["vote", "--help"])
+        .stdin(Stdio::null())
+        .output()
+        .context("could not check vissue vote --help")?;
+    if !said.status.success() {
+        bail!("vissue vote --help failed ({})", said.status);
+    }
+    let help = String::from_utf8_lossy(&said.stdout);
+    let missing: Vec<_> = ["--used", "--confidence"]
+        .into_iter()
+        .filter(|flag| !help.split_whitespace().any(|word| word == *flag))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "incompatible ballot protocol: missing {}; install vissue-cli >= 0.16.2",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The seat's own rows: binaries, pack, host key, deed store, tracker,
 /// claim graph. What a sitting checks; the runner rows are onboarding.
 pub fn doctor_seat() -> Vec<Habitat> {
@@ -4505,7 +4533,11 @@ pub fn doctor_seat() -> Vec<Habitat> {
         let found = which::which(bin).ok();
         let have = found.as_ref().and_then(|_| bin_version(bin));
         let latest = crate_version_for(crate_name, have.as_deref());
-        let (state, ok) = match (found, have.as_deref(), latest.as_ref()) {
+        let ballot_protocol = found
+            .as_deref()
+            .filter(|_| *bin == "vissue")
+            .map(check_vissue_ballot_protocol);
+        let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
             (None, _, Some(cr)) => (
                 format!(
                     "not on PATH; cargo binstall {crate_name} (crates.io {})",
@@ -4520,6 +4552,15 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 (format!("{}  {ver}", path.display()), true)
             }
         };
+        if let Some(protocol) = ballot_protocol {
+            match protocol {
+                Ok(()) => state.push_str("; evidence ballots supported"),
+                Err(error) => {
+                    state.push_str(&format!("; {error:#}"));
+                    ok = false;
+                }
+            }
+        }
         out.push(Habitat {
             name: bin,
             state,
@@ -9712,6 +9753,58 @@ mod tests {
             healthy(&rows),
             "sitting must not refuse a stale but answering bin"
         );
+    }
+
+    #[test]
+    fn ballot_health_requires_both_evidence_and_confidence_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vissue");
+        for (help, missing) in [
+            ("--for OPTION --json", Some("--used, --confidence")),
+            ("--for OPTION --used DEEDS", Some("--confidence")),
+            ("--for OPTION --confidence P", Some("--used")),
+            ("--for OPTION --used DEEDS --confidence P", None),
+        ] {
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\n[ \"$*\" = 'vote --help' ] || exit 3\nprintf '%s\\n' '{help}'\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let result = super::check_vissue_ballot_protocol(&path);
+            if let Some(missing) = missing {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(&format!("missing {missing};")), "{error}");
+                let rows = vec![Habitat {
+                    name: "vissue",
+                    state: error,
+                    ok: false,
+                }];
+                assert!(!healthy(&rows));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn ballot_health_refuses_a_failed_help_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vissue");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\necho '--used DEEDS --confidence P'\nexit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = super::check_vissue_ballot_protocol(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("vote --help failed"), "{error}");
     }
 
     #[test]
