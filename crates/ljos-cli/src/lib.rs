@@ -4704,6 +4704,14 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 state: said.stdout.lines().next().unwrap_or("").to_string(),
                 ok: true,
             },
+            Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
+                let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
+                Habitat {
+                    name,
+                    state: format!("none yet; the first claim creates it at {dir}"),
+                    ok: true,
+                }
+            }
             Err(e) => Habitat {
                 name,
                 state: e.to_string().lines().next().unwrap_or("").to_string(),
@@ -4712,6 +4720,16 @@ pub fn doctor_seat() -> Vec<Habitat> {
         });
     }
     out
+}
+
+/// The directory claimdag would create, when its refusal says the seat has
+/// no work graph yet because nothing was ever claimed. A fresh host is not a
+/// fault: the sitting's first claim creates the graph.
+pub fn claim_graph_absent(said: &str) -> Option<String> {
+    let rest = said.split("no work graph at ").nth(1)?;
+    let (dir, why) = rest.split_once(": ")?;
+    why.starts_with("the directory does not exist")
+        .then(|| dir.trim().to_string())
 }
 
 /// Where the tracker root came from, in the order vissue decides it.
@@ -7822,6 +7840,25 @@ mod tests {
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A fresh host's missing claim graph is a first sitting, not a fault;
+    /// any other claimdag refusal still is.
+    #[test]
+    fn a_claim_graph_nobody_made_yet_is_not_a_fault() {
+        let fresh = "claimdag exited exit status: 1: no work graph at /h/claims: the directory does not exist, so nothing has been claimed on this seat. Set CLAIMDAG_DIR";
+        assert_eq!(
+            super::claim_graph_absent(fresh),
+            Some("/h/claims".to_string())
+        );
+        assert_eq!(
+            super::claim_graph_absent("claimdag exited exit status: 1: work.bin is corrupt"),
+            None
+        );
+        assert_eq!(
+            super::claim_graph_absent("no work graph at /h/claims: permission denied"),
+            None
+        );
     }
 
     /// The tracker row names the root and fails one other seats cannot see.

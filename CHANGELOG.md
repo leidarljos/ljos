@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- On a fresh host the doctor's claim graph row reads ok, `none yet; the
+  first claim creates it at DIR`, instead of a failing row in every
+  sitting header. Any other claimdag refusal still fails it.
+
 - The doctor's tracker row names the root vissue resolved, its prefix, and
   where the root came from (`ISSUE_ROOT`, `VISSUE_ROOT`, seat config or the
   working directory). A relative or missing root, or one with no prefix
