@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
+    age_of, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
     consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
     format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
     format_hubs, format_island, format_personas, format_playbooks, format_readings,
