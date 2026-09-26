@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The tracker push after a claim or finish waits at most 15 seconds
+  (`LJOS_TRACKER_PUSH_WAIT`). A pre-push hook that publishes data first
+  held every sitting for minutes; a push still running finishes in the
+  background and the `tracker git:` line names its log.
+
 - The doctor's host key row fails when the deed store's `layout` does not
   list the key (`deedar host`), instead of reading healthy while every new
   deed fails `evidence`.

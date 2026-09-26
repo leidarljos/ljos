@@ -6808,14 +6808,66 @@ pub fn persist_tracker(issue: &str, verb: &str) -> String {
     if mode == "commit" {
         return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
     }
-    match git(&["push", "-q"]) {
-        Ok(o) if o.status.success() => format!("tracker git: committed and pushed {message}\n"),
-        Ok(o) => format!(
-            "tracker git: committed {message}; push refused: {}\n",
-            first_line(&o.stderr)
-        ),
-        Err(e) => format!("tracker git: committed {message}; push failed: {e}\n"),
+    // A push can run a repository's pre-push hook that publishes data first
+    // and takes minutes. The sitting waits a bounded time; a push still going
+    // after that finishes on its own and writes its log where the line says.
+    let log = runtime_dir().join(format!("tracker-push-{}.log", std::process::id()));
+    let _ = std::fs::create_dir_all(runtime_dir());
+    let Ok(out) = std::fs::File::create(&log) else {
+        return format!("tracker git: committed {message}; push not started: no log file\n");
+    };
+    let err = out.try_clone();
+    let mut push = std::process::Command::new("git");
+    push.arg("-C")
+        .arg(dir)
+        .args(["push", "-q"])
+        .stdin(std::process::Stdio::null())
+        .stdout(out);
+    if let Ok(err) = err {
+        push.stderr(err);
     }
+    let mut child = match push.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
+    };
+    let wait = push_wait();
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let _ = std::fs::remove_file(&log);
+                return format!("tracker git: committed and pushed {message}\n");
+            }
+            Ok(Some(_)) => {
+                let said = std::fs::read(&log).unwrap_or_default();
+                return format!(
+                    "tracker git: committed {message}; push refused: {}\n",
+                    first_line(&said)
+                );
+            }
+            Ok(None) if started.elapsed() < wait => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Ok(None) => {
+                return format!(
+                    "tracker git: committed {message}; push still running after {}s, finishing in the background (log {})\n",
+                    wait.as_secs(),
+                    log.display()
+                );
+            }
+            Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
+        }
+    }
+}
+
+/// How long a sitting waits for the tracker push: `LJOS_TRACKER_PUSH_WAIT`
+/// seconds, else 15.
+fn push_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_TRACKER_PUSH_WAIT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(15);
+    std::time::Duration::from_secs(secs)
 }
 
 fn first_line(bytes: &[u8]) -> String {
@@ -8003,6 +8055,92 @@ mod tests {
         assert_eq!(x("~", "/home/s/"), Some("/home/s".into()));
         assert_eq!(x("/abs/vault", "/home/s"), None);
         assert_eq!(x("~other/vault", "/home/s"), None);
+    }
+
+    /// A slow pre-push hook does not hold the sitting: the push outlives the
+    /// wait and the line says so; a quick one reports the push.
+    #[test]
+    fn a_slow_tracker_push_finishes_in_the_background() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, remote, hooks) = (
+            dir.path().join("work"),
+            dir.path().join("remote.git"),
+            dir.path().join("hooks"),
+        );
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        std::fs::create_dir_all(&hooks).unwrap();
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(&root, &["init", "-q"]);
+        for (k, v) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", hooks.to_str().unwrap()),
+        ] {
+            git(&root, &["config", k, v]);
+        }
+        let hook = hooks.join("pre-push");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-c3d4\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("LJOS_TRACKER_GIT");
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let started = std::time::Instant::now();
+        let said = super::persist_tracker("probe-c3d4", "claimed");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{said}"
+        );
+        assert!(said.contains("still running after 1s"), "{said}");
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
+        let said = super::persist_tracker("probe-c3d4", "finished");
+        assert!(said.contains("committed and pushed"), "{said}");
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_PUSH_WAIT",
+            "XDG_RUNTIME_DIR",
+        ] {
+            std::env::remove_var(var);
+        }
     }
 
     /// A tracker write reaches git: the ticket's file alone is committed, a
