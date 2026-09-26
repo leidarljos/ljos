@@ -106,8 +106,16 @@ pub fn run(opts: HudLaunch) -> i32 {
 mod tests {
     use super::*;
 
+    /// The tests below set `LJOS_HUD_BIN`; cargo runs tests on threads and
+    /// one process has one environment, so they take turns.
+    fn hud_env() -> std::sync::MutexGuard<'static, ()> {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn missing_bin_is_127() {
+        let _env = hud_env();
         let _before = std::env::var_os(HUD_BIN_ENV);
         #[allow(unused_unsafe)]
         unsafe {
@@ -127,6 +135,7 @@ mod tests {
 
     #[test]
     fn hide_without_binary_is_zero() {
+        let _env = hud_env();
         let _before = std::env::var_os(HUD_BIN_ENV);
         #[allow(unused_unsafe)]
         unsafe {
@@ -157,6 +166,7 @@ mod tests {
 
     #[test]
     fn resolve_honors_override() {
+        let _env = hud_env();
         let _before = std::env::var_os(HUD_BIN_ENV);
         let path = PathBuf::from("/tmp/custom-ljos-hud");
         #[allow(unused_unsafe)]
