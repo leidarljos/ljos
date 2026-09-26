@@ -3096,7 +3096,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
             lines.push((h.kind == "preference", hit_line(&h, &now)));
         }
     }
-    lines.sort_by(|a, b| b.0.cmp(&a.0));
+    lines.sort_by_key(|row| std::cmp::Reverse(row.0));
     if !lines.is_empty() {
         out.push_str("\nWhat this seat knows on your domains:\n");
         for (_, l) in lines.iter().take(8) {
@@ -3795,17 +3795,20 @@ pub fn learn_reading(
     out
 }
 
+/// Trust rows, personas, and each voter's forecast calibration.
+pub type LearnedState = (
+    Vec<Trust>,
+    Vec<Persona>,
+    std::collections::BTreeMap<String, Calibration>,
+);
+
 pub fn learn_and_write(
     ballots: &[(String, String)],
     outcome: &str,
     beta: f64,
     about: &[String],
     forecasts: &[Forecast],
-) -> Result<(
-    Vec<Trust>,
-    Vec<Persona>,
-    std::collections::BTreeMap<String, Calibration>,
-)> {
+) -> Result<LearnedState> {
     let client = pack()?;
     let atoms = client
         .atoms_as_of(&client.workspace(), None)
@@ -6513,6 +6516,10 @@ pub fn complete(
     Ok(said.stdout)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The public finish signature preserves its independent command options"
+)]
 pub fn finish(
     issue: &str,
     status: &str,
@@ -7178,8 +7185,7 @@ fn error_line(evidence: &str, summary: &str) -> String {
             let l = lower(l);
             l.contains("error") || l.contains("fatal") || l.contains("failed")
         })
-        .filter(|l| !l.starts_with("srun:"))
-        .next_back()
+        .rfind(|l| !l.starts_with("srun:"))
         .map(str::to_string)
         .unwrap_or_else(|| summary.to_string())
 }
