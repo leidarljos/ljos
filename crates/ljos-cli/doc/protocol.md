@@ -227,6 +227,13 @@ same four steps are:
    right. Every voter it refuted shrinks in every other voter's row, and a
    persona it refuted holds its next ballot less firmly.
 
+When the tracker is a git checkout, `sitting` after its claim and `finish`
+at the end commit the ticket's `issues.org` (that file alone) and push it,
+and print a `tracker git:` line. A claim or a closure that stays in one
+working tree does not exist for any other host. `LJOS_TRACKER_GIT=commit`
+keeps it local; `=off` skips it. A refused push is reported, not raised:
+push the tracker yourself before you leave.
+
 `ljos handover --out DIR --issue ISSUE [--to user@host:path]` is a separate
 verb for when another seat takes over. The receiver runs `ljos receive DIR`,
 then `--import`.
@@ -263,6 +270,15 @@ under equal weights is a count; under calibrated rows it is not.
   from `deedar`, never free text.
 - `the pack writer did not answer`: the pack is down, not empty.
   `packset ensure`.
+- `no tracker ... relative root` or `root is not a directory` in `doctor`:
+  the tracker root is private to your working directory (often a
+  `VISSUE_ROOT` that kept a literal `~`). Anything filed there is invisible
+  to every other seat. Fix the root before filing.
+- `deedar: warning: this deed is signed by ed25519:...`: the host key is
+  not a signer the store's `layout` lists, and `evidence` will refuse the
+  deed. Add the printed `signer =` line to that file.
+- A refused `remember` names the sentence, its word count and the limit:
+  split it where it says.
 - `ljos due` prints `0 due; nothing scheduled`: the seat has remembered
   nothing, and the review loop has nothing to run on. Remember something.
   `0 due; N scheduled, next at T` is a clock that is running.
