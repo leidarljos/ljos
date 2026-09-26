@@ -4726,14 +4726,28 @@ pub fn doctor_seat() -> Vec<Habitat> {
     out.push(match host_key_path() {
         Some(path) => {
             let seed = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 32;
+            // A key the deed store does not list signs deeds that evidence
+            // refuses. deedar says so; one without the verb is not asked.
+            let unlisted = if seed {
+                run_captured("deedar", &["host"])
+                    .err()
+                    .map(|e| e.to_string())
+                    .filter(|e| e.contains("is not a signer"))
+            } else {
+                None
+            };
             Habitat {
                 name: "host key",
-                state: if seed {
-                    format!("{} (32-byte seed)", path.display())
-                } else {
-                    format!("{} is not a 32-byte seed", path.display())
+                state: match (&unlisted, seed) {
+                    (Some(why), _) => format!(
+                        "{} (32-byte seed); {}",
+                        path.display(),
+                        why.lines().next().unwrap_or("").trim()
+                    ),
+                    (None, true) => format!("{} (32-byte seed)", path.display()),
+                    (None, false) => format!("{} is not a 32-byte seed", path.display()),
                 },
-                ok: seed,
+                ok: seed && unlisted.is_none(),
             }
         }
         None => Habitat {

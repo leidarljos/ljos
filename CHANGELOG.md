@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The doctor's host key row fails when the deed store's `layout` does not
+  list the key (`deedar host`), instead of reading healthy while every new
+  deed fails `evidence`.
+
 - A seat record carries the conversation ids its writer held, and a shell
   refuses a record written under an id it shares with another
   conversation. Two conversations started from one terminal share the line
