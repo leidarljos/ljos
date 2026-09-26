@@ -1152,11 +1152,8 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
         );
     };
     let server = server_path()?;
-    let mut steps = vec![
-        pack_step(dry),
-        host_key_step(dry),
-        register_step(h, &server, dry),
-    ];
+    let dependencies = [pack_step(dry), host_key_step(dry)];
+    let mut steps = vec![register_step(h, &server, dry)];
     if let Some(file) = &h.hooks {
         steps.push(hook_step(&expand(file), &hook_events_of(h), dry));
     }
@@ -1168,6 +1165,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
             ok: false,
         }),
     }
+    steps.extend(dependencies);
     Ok(steps)
 }
 

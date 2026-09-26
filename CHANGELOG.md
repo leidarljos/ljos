@@ -4,6 +4,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Onboarding retains registration and skill result order while initializing
+  the pack and host key before configuring the client.
+
 - Forecast scoring accepts the decimal strings emitted by the tracker as
   well as JSON numbers. Invalid probabilities are reported instead of being
   silently treated as absent forecasts.
