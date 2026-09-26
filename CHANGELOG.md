@@ -4,6 +4,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- Forecast scoring accepts the decimal strings emitted by the tracker as
+  well as JSON numbers. Invalid probabilities are reported instead of being
+  silently treated as absent forecasts.
+
 - Doctor checks that the installed tracker accepts evidence citations and
   forecast confidence on ballots. An incompatible vote command fails the
   required tracker row, even when its version is listed in the registry.

@@ -3694,11 +3694,24 @@ pub fn forecasts_from_json(raw: &str) -> Result<Vec<Forecast>> {
         .map(|row| {
             let agent = row.get("agent").and_then(Value::as_str);
             let choice = row.get("choice").and_then(Value::as_str);
+            let confidence = match row.get("confidence") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let probability = value
+                        .as_f64()
+                        .or_else(|| value.as_str()?.parse::<f64>().ok())
+                        .context("ballots: confidence must be a probability in (0, 1]")?;
+                    if !probability.is_finite() || probability <= 0.0 || probability > 1.0 {
+                        bail!("ballots: confidence must be a probability in (0, 1]");
+                    }
+                    Some(probability)
+                }
+            };
             match (agent, choice) {
                 (Some(a), Some(c)) => Ok(Forecast {
                     agent: a.to_string(),
                     choice: c.to_string(),
-                    confidence: row.get("confidence").and_then(Value::as_f64),
+                    confidence,
                 }),
                 _ => bail!("ballots: a row without agent and choice"),
             }
@@ -9708,6 +9721,35 @@ mod tests {
             failed_module("== building and installing gettext/0.26...\n== FAILED"),
             Some("gettext-0.26".into())
         );
+    }
+
+    #[test]
+    fn tracker_decimal_confidence_remains_a_scored_forecast() {
+        let forecasts = super::forecasts_from_json(
+            r#"[{"agent":"alice","choice":"accept","confidence":"0.8"},
+                {"agent":"bob","choice":"reject","confidence":0.6},
+                {"agent":"carol","choice":"accept","confidence":null},
+                {"agent":"dana","choice":"accept"}]"#,
+        )
+        .unwrap();
+        assert_eq!(forecasts[0].confidence, Some(0.8));
+        assert_eq!(forecasts[1].confidence, Some(0.6));
+        assert_eq!(forecasts[2].confidence, None);
+        assert_eq!(forecasts[3].confidence, None);
+        let (score, count) = super::mean_brier(&forecasts, "accept").unwrap();
+        assert_eq!(count, 2);
+        assert!((score - 0.2).abs() < 1e-14);
+    }
+
+    #[test]
+    fn invalid_tracker_confidence_is_not_silently_unscored() {
+        for confidence in ["0", "-0.1", "1.1", "\"NaN\"", "\"oops\"", "true", "[]"] {
+            let raw = format!(
+                r#"[{{"agent":"alice","choice":"accept","confidence":{confidence}}}]"#
+            );
+            let error = super::forecasts_from_json(&raw).unwrap_err().to_string();
+            assert!(error.contains("probability in (0, 1]"), "{error}");
+        }
     }
 
     #[test]
