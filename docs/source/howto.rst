@@ -329,9 +329,12 @@ Check the seat
    ok  pack  http://127.0.0.1:8761 workspace git:github.com/leidarljos/ljos
    ok  host key  ~/.config/deedar/host.key (32-byte seed)
    ok  deed store  size=34 root=3d8e015509923724097e9f33d3a044fe0764f17bd5387769530ed5bfb6ada
-   ok  tracker  vissue 0.10.0
+   ok  tracker  vissue 0.16.2 root=/home/me/vault prefix=Software from VISSUE_ROOT=/home/me/vault
    ok  claim graph  a4a8fa1b8f05d259877be54da99f06bc  claimed  task  69f91712  gen=2  ljos-a6
 
-Exit 1 when the tracker, the deed store, or the pack does not answer. A
+Exit 1 when the tracker, the deed store, or the pack does not answer. The
+tracker row names the root vissue resolved and where it came from, and fails
+when that root is relative, missing, or holds no prefix directory: a ticket
+filed there is invisible to every other seat. A
 missing claim graph is reported and is not a failure: the first claim
 creates it.

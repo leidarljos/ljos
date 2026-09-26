@@ -4695,6 +4695,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
         ("claim graph", "claimdag", &["list"][..]),
     ] {
         out.push(match run_captured(bin, args) {
+            Ok(said) if name == "tracker" => {
+                let (state, ok) = tracker_state(&said.stdout, &root_source());
+                Habitat { name, state, ok }
+            }
             Ok(said) => Habitat {
                 name,
                 state: said.stdout.lines().next().unwrap_or("").to_string(),
@@ -4708,6 +4712,49 @@ pub fn doctor_seat() -> Vec<Habitat> {
         });
     }
     out
+}
+
+/// Where the tracker root came from, in the order vissue decides it.
+fn root_source() -> String {
+    for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            return format!("{var}={}", v.to_string_lossy());
+        }
+    }
+    "seat config or working directory".into()
+}
+
+/// The tracker row from `vissue identity`: version, the root and prefix it
+/// resolved, and where the root came from. A root that is relative, missing,
+/// or holds no prefix directory fails the row: tickets filed there are
+/// invisible to every other seat.
+pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
+    let version = identity.lines().next().unwrap_or("").trim();
+    let field = |key: &str| {
+        identity
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let (Some(root), Some(prefix)) = (field("root="), field("prefix=")) else {
+        return (format!("{version}; no root in vissue identity"), false);
+    };
+    let path = std::path::Path::new(root);
+    let problem = if !path.is_absolute() {
+        Some("relative root: tickets land under the working directory")
+    } else if !path.is_dir() {
+        Some("root is not a directory")
+    } else if !path.join(prefix).is_dir() {
+        Some("no prefix directory under the root")
+    } else {
+        None
+    };
+    let base = format!("{version} root={root} prefix={prefix} from {source}");
+    match problem {
+        Some(why) => (format!("{base}; {why}"), false),
+        None => (base, true),
+    }
 }
 
 /// Whether every required habitat answers.
@@ -7775,6 +7822,34 @@ mod tests {
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The tracker row names the root and fails one other seats cannot see.
+    #[test]
+    fn tracker_row_names_the_root_and_refuses_a_private_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Software")).unwrap();
+        let id = |root: &str| format!("vissue 0.16.2\nprotocol: 1\nroot={root}\nprefix=Software\n");
+        let root = dir.path().display().to_string();
+
+        let (state, ok) = super::tracker_state(&id(&root), "VISSUE_ROOT=x");
+        assert!(ok, "{state}");
+        assert!(state.contains(&format!("root={root}")), "{state}");
+        assert!(state.contains("from VISSUE_ROOT=x"), "{state}");
+
+        let (state, ok) = super::tracker_state(&id("~/Git/vault"), "VISSUE_ROOT=~/Git/vault");
+        assert!(!ok);
+        assert!(state.contains("relative root"), "{state}");
+
+        let missing = dir.path().join("gone").display().to_string();
+        assert!(!super::tracker_state(&id(&missing), "cwd").1);
+
+        std::fs::remove_dir(dir.path().join("Software")).unwrap();
+        let (state, ok) = super::tracker_state(&id(&root), "cwd");
+        assert!(!ok);
+        assert!(state.contains("no prefix directory"), "{state}");
+
+        assert!(!super::tracker_state("vissue 0.16.1\n", "cwd").1);
     }
 
     #[test]

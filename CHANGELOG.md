@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The doctor's tracker row names the root vissue resolved, its prefix, and
+  where the root came from (`ISSUE_ROOT`, `VISSUE_ROOT`, seat config or the
+  working directory). A relative or missing root, or one with no prefix
+  directory, fails the row.
+
 - Onboarding retains registration and skill result order while initializing
   the pack and host key before configuring the client.
 
