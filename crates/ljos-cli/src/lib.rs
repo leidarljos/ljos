@@ -2074,9 +2074,7 @@ fn ensure_writer() -> Result<()> {
         );
     }
     if !on_path("packset") {
-        bail!(
-            "no pack writer is answering, and packset is not on PATH. cargo binstall packset"
-        );
+        bail!("no pack writer is answering, and packset is not on PATH. cargo binstall packset");
     }
     run_captured("packset", &["ensure"]).context("packset ensure")?;
     Ok(())
@@ -3683,7 +3681,10 @@ pub fn mean_brier(rows: &[Forecast], outcome: &str) -> Option<(f64, usize)> {
     if scores.is_empty() {
         None
     } else {
-        Some((scores.iter().sum::<f64>() / scores.len() as f64, scores.len()))
+        Some((
+            scores.iter().sum::<f64>() / scores.len() as f64,
+            scores.len(),
+        ))
     }
 }
 
@@ -3814,7 +3815,9 @@ pub fn learn_and_write(
     let (rows, records) = learn_record(ballots, outcome, &records_from_atoms(&atoms), about)?;
     let mut calibration = calibration_from_atoms(&atoms);
     for forecast in forecasts {
-        let Some(p) = forecast.confidence else { continue };
+        let Some(p) = forecast.confidence else {
+            continue;
+        };
         let slot = calibration.entry(forecast.agent.clone()).or_default();
         *slot = observe(slot, &forecast.choice, outcome, p);
     }
@@ -4002,7 +4005,10 @@ pub fn calibration_from_atoms(atoms: &[Value]) -> std::collections::BTreeMap<Str
                 .get("forecast_sum_log")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0),
-            log_n: atom.get("forecast_log_n").and_then(Value::as_u64).unwrap_or(0) as u32,
+            log_n: atom
+                .get("forecast_log_n")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32,
             bins: bins_of(atom.get("forecast_bins")),
         };
         match latest.get(to) {
@@ -4021,7 +4027,9 @@ fn bins_of(value: Option<&Value>) -> std::collections::BTreeMap<u16, (u32, u32)>
         return out;
     };
     for (key, row) in obj {
-        let Ok(thou) = key.parse::<u16>() else { continue };
+        let Ok(thou) = key.parse::<u16>() else {
+            continue;
+        };
         let Some(pair) = row.as_array() else { continue };
         let count = pair.first().and_then(Value::as_u64).unwrap_or(0) as u32;
         let occurred = pair.get(1).and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -9363,13 +9371,7 @@ mod tests {
         let said = learn_reading(2, 0, &rows, "ship", &std::collections::BTreeMap::new());
         assert!(said.contains("Brier 0.040"), "{said}");
         assert!(said.contains("not a trust weight"), "{said}");
-        let silent = learn_reading(
-            2,
-            0,
-            &rows[1..],
-            "ship",
-            &std::collections::BTreeMap::new(),
-        );
+        let silent = learn_reading(2, 0, &rows[1..], "ship", &std::collections::BTreeMap::new());
         assert!(silent.contains("No stated probability"), "{silent}");
         assert!(log_score("ship", "ship", 0.8).unwrap() > 0.0);
         assert!(log_score("hold", "ship", 1.0).is_none());
@@ -9394,7 +9396,10 @@ mod tests {
             printed.contains("Seat island") && printed.contains("Not fired"),
             "{printed}"
         );
-        assert!(printed.contains("1.000\tseed\ta\ttoday\tone\n"), "{printed}");
+        assert!(
+            printed.contains("1.000\tseed\ta\ttoday\tone\n"),
+            "{printed}"
+        );
         assert!(printed.contains("0.250\t    \tb\t\ttwo\n"), "{printed}");
         assert!(format_island(&serde_json::json!({})).is_empty());
         let persona = serde_json::json!({
@@ -9744,9 +9749,8 @@ mod tests {
     #[test]
     fn invalid_tracker_confidence_is_not_silently_unscored() {
         for confidence in ["0", "-0.1", "1.1", "\"NaN\"", "\"oops\"", "true", "[]"] {
-            let raw = format!(
-                r#"[{{"agent":"alice","choice":"accept","confidence":{confidence}}}]"#
-            );
+            let raw =
+                format!(r#"[{{"agent":"alice","choice":"accept","confidence":{confidence}}}]"#);
             let error = super::forecasts_from_json(&raw).unwrap_err().to_string();
             assert!(error.contains("probability in (0, 1]"), "{error}");
         }

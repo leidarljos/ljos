@@ -1,21 +1,21 @@
 //! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
     age_of, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
-    consensus_steps_for, copy_playbook, doctor, due_report, finish, format_bump_rows,
-    format_consolidation, format_doctor, format_findings, format_hits, format_hubs, format_island,
-    format_personas, format_playbooks, format_readings, format_remembered, format_seat,
-    format_steps, format_write_ack, forecasts_from_json, graded, habit, habits, handover, healthy,
-    hold_hook_context, hook_call, hook_context, hook_output_ruled, island_entities, join,
-    learn_anchors, learn_and_write, learn_reading, learn_shared, now_utc, on_path, onboard, pack,
-    packset_consolidate, packset_forget, packset_hubs, packset_island_as, packset_search_as_of,
-    packset_write_as, panel, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
-    policy_with_memory, policyd_required, predictions_of, read_campaign, receive, release,
-    remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
-    session_end, sitting_gated, take_hook_context, tcb_check, timeline, topic_words,
-    tracker_show_json, trim_num, trust_from_pack, verdict_for, whoami, write_persona,
+    consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
+    format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
+    format_hubs, format_island, format_personas, format_playbooks, format_readings,
+    format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
+    handover, healthy, hold_hook_context, hook_call, hook_context, hook_output_ruled,
+    island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, now_utc,
+    on_path, onboard, pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
+    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
+    playbooks_from_pack, policy_with_memory, policyd_required, predictions_of, read_campaign,
+    receive, release, remember_findings, resolve_assignee, rows_about, rules_from_pack, run,
+    run_as, run_captured, session_end, sitting_gated, take_hook_context, tcb_check, timeline,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, verdict_for, whoami, write_persona,
     write_prediction, write_rule, write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE,
     LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
@@ -523,7 +523,14 @@ fn main() -> Result<()> {
                         "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-... or --used none"
                     );
                 }
-                let mut args = vec!["vote".to_string(), issue, "--for".into(), c, "--used".into(), used.to_string()];
+                let mut args = vec![
+                    "vote".to_string(),
+                    issue,
+                    "--for".into(),
+                    c,
+                    "--used".into(),
+                    used.to_string(),
+                ];
                 if let Some(p) = confidence {
                     args.push("--confidence".into());
                     args.push(format!("{p}"));
@@ -923,13 +930,7 @@ fn main() -> Result<()> {
             };
             println!(
                 "{}",
-                learn_reading(
-                    rows.len(),
-                    moved.len(),
-                    &forecasts,
-                    &outcome,
-                    &calibration
-                )
+                learn_reading(rows.len(), moved.len(), &forecasts, &outcome, &calibration)
             );
             for row in &rows {
                 println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);

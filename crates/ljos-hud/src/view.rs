@@ -468,9 +468,7 @@ fn paint(frame: &mut canvas::Frame, op: &PaintOp) {
             if *hollow {
                 frame.stroke(
                     &circle,
-                    Stroke::default()
-                        .with_width(1.5)
-                        .with_color(theme::TEXT),
+                    Stroke::default().with_width(1.5).with_color(theme::TEXT),
                 );
             } else {
                 frame.fill(&circle, theme::BLUE);

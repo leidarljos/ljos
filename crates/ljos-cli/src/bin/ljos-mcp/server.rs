@@ -13,8 +13,8 @@ use anyhow::Context as _;
 
 use ljos_cli::{
     age_of, announce_seat, ballots_from_json, brief, bump_plan, calibrate, cards, claim, complete,
-    conflicts, consensus_steps_for, copy_playbook, doctor, due_page, finish, format_change,
-    format_consolidation, forecasts_from_json, graded, habit, habits, handover, identity_or_seat,
+    conflicts, consensus_steps_for, copy_playbook, doctor, due_page, finish, forecasts_from_json,
+    format_change, format_consolidation, graded, habit, habits, handover, identity_or_seat,
     island_entities, issue_words, learn_and_write, learn_reading, now_utc, on_path, other_seat,
     pack, packset_consolidate, packset_forget, packset_island_as, packset_search_as_of,
     packset_write_as, panel_steps, parse_every, personas_from_pack, personas_speaking_to,
