@@ -30,8 +30,8 @@ pub enum Message {
     Tick,
     /// Compare `work.bin` and pack `last_write_ts`; load only on a change.
     Watch,
-    /// Off-thread habitat snapshot.
-    Snap(Snapshot),
+    /// Off-thread habitat snapshot. Boxed so the message enum stays small.
+    Snap(Box<Snapshot>),
     /// Kick an off-thread load.
     Refresh,
     Key(Key),
@@ -175,7 +175,7 @@ impl HudApp {
                 load_snap_with(if live.is_empty() { None } else { Some(live) })
             }
             Message::Snap(snap) => {
-                self.snap = snap;
+                self.snap = *snap;
                 self.watch = WatchStamp::read();
                 self.clamp_selected();
                 Task::none()
@@ -517,7 +517,7 @@ fn load_snap_with(cue: Option<String>) -> Task<Message> {
                 .await
                 .unwrap_or_else(|e| Snapshot::banner_only(format!("load: {e}")))
         },
-        Message::Snap,
+        |snap| Message::Snap(Box::new(snap)),
     )
 }
 
