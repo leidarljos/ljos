@@ -15,6 +15,7 @@ use rmcp::{transport::stdio, ServiceExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    ljos_cli::normalize_tracker_env();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());

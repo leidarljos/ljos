@@ -438,6 +438,7 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
     unsafe {

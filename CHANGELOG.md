@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos` and `ljos-mcp` expand a leading `~` in `ISSUE_ROOT` and
+  `VISSUE_ROOT` at start. The linked tracker crate took such a root as
+  relative to the working directory, so `ljos finish` could not find a
+  ticket `vissue` itself resolved.
+
 - `ljos sitting` after its claim and `ljos finish` at the end commit the
   ticket's tracker file (that file only) and push it, when the tracker is a
   git checkout. A closure that stayed in one working tree was lost to every

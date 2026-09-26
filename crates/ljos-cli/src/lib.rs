@@ -2007,6 +2007,34 @@ fn host_key_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// `raw` with a leading `~` or `~/` put against `home`; `None` when there is
+/// nothing to expand.
+pub fn expand_leading_tilde(raw: &str, home: &str) -> Option<String> {
+    let home = home.trim_end_matches('/');
+    if raw == "~" {
+        return Some(home.to_string());
+    }
+    raw.strip_prefix("~/").map(|rest| format!("{home}/{rest}"))
+}
+
+/// Expand a leading `~` in `ISSUE_ROOT` and `VISSUE_ROOT` once, at start.
+/// environment.d and MCP `env` blocks pass `~/...` through unexpanded; a
+/// tracker crate that predates the fix then resolves it against the working
+/// directory, and every child `vissue` inherits the same relative root.
+pub fn normalize_tracker_env() {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        return;
+    };
+    let home = home.to_string_lossy().to_string();
+    for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        if let Ok(raw) = std::env::var(var) {
+            if let Some(expanded) = expand_leading_tilde(&raw, &home) {
+                std::env::set_var(var, expanded);
+            }
+        }
+    }
+}
+
 /// Printed on stderr. `ljos-policyd` is the TCB when it exists.
 pub const POLICY_TCB: &str =
     "argv law. ljos-policyd is the TCB when present. Reloading a pack is not a check.";
@@ -7924,6 +7952,16 @@ mod tests {
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A root that kept its tilde is the home one.
+    #[test]
+    fn a_tilde_tracker_root_expands_against_home() {
+        use super::expand_leading_tilde as x;
+        assert_eq!(x("~/vault", "/home/s"), Some("/home/s/vault".into()));
+        assert_eq!(x("~", "/home/s/"), Some("/home/s".into()));
+        assert_eq!(x("/abs/vault", "/home/s"), None);
+        assert_eq!(x("~other/vault", "/home/s"), None);
     }
 
     /// A tracker write reaches git: the ticket's file alone is committed, a
