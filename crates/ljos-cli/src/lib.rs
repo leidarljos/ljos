@@ -5983,6 +5983,19 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
     })
 }
 
+/// Refusal when another conversation holds the node: names that holder
+/// and still says `held by another`, so a concurrent sitting can match it.
+#[must_use]
+pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
+    format!(
+        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
+        hold.assignee,
+        hold.seat,
+        hold.since,
+        hold.assignee
+    )
+}
+
 fn holder_of(get_output: &str) -> Option<String> {
     get_output
         .split_whitespace()
@@ -6002,11 +6015,51 @@ fn holder_of(get_output: &str) -> Option<String> {
 ///
 /// The tracker refusing the name. The claim graph already holds the node
 /// by then, so the message names the verb that frees it.
+fn tracker_claim_needs_force(text: &str) -> bool {
+    text.contains("pass --force") || text.contains("claimed by")
+}
+
+fn stamp_tracker_claim(node: &str, assignee: &str, force: bool) -> Result<Said> {
+    if force {
+        run_captured_as("vissue", &["claim", node, "--force"], Some(assignee))
+    } else {
+        run_captured_as("vissue", &["claim", node], Some(assignee))
+    }
+}
+
 fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
     if run_captured("vissue", &["show", node, "--json"]).is_err() {
         return Ok(None);
     }
-    run_captured_as("vissue", &["claim", node], Some(assignee))
+    let claimed = match stamp_tracker_claim(node, assignee, false) {
+        Ok(said) => Ok(said),
+        Err(e) => {
+            let text = e.to_string();
+            // A new sitting on work the tracker already closed: reopen the
+            // heading to STARTED, then stamp occupancy. The claim graph
+            // already took the node.
+            let after_reopen = if text.contains("already DONE")
+                || text.contains("already CANCELLED")
+            {
+                run_captured("vissue", &["update", node, "-s", "STARTED"]).with_context(|| {
+                    format!(
+                        "claim: the claim graph took {node} but the tracker would not reopen {node} to STARTED under {assignee}"
+                    )
+                })?;
+                stamp_tracker_claim(node, assignee, false)
+            } else {
+                Err(e)
+            };
+            match after_reopen {
+                Ok(said) => Ok(said),
+                Err(e2) if tracker_claim_needs_force(&e2.to_string()) => {
+                    stamp_tracker_claim(node, assignee, true)
+                }
+                Err(e2) => Err(e2),
+            }
+        }
+    };
+    claimed
         .map(|_| Some(format!("tracker: {node} STARTED under {assignee}")))
         .with_context(|| {
             format!(
@@ -6099,16 +6152,17 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             )
                         }
                         Some(h) => bail!(
-                            "claim: {node} is held by {} (seat {}, {}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
-                            h.assignee,
-                            h.seat,
-                            if hold_alive(&h) {
-                                "still running"
-                            } else {
-                                "its runner is gone"
-                            },
-                            h.since,
-                            h.assignee
+                            "{}",
+                            held_by_another_message(
+                                node,
+                                assignee,
+                                &h,
+                                if hold_alive(&h) {
+                                    "still running"
+                                } else {
+                                    "its runner is gone"
+                                }
+                            )
                         ),
                         None => bail!(
                             "claim: {node} is held by another conversation, not by {assignee} (this one; `ljos seat` says where the name came from), and no record on this host names it. That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; a conversation that is gone is released with `ljos release {node} --assignee NAME` under the name it held"
@@ -6695,7 +6749,7 @@ pub fn finish(
     } else {
         let fired = island["island"].as_array().map_or(0, Vec::len);
         out.push_str(&format!(
-            "fired the seat's island for {title:?}: {fired} memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.\n"
+            "fired the island for {title:?}: {fired} memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.\n"
         ));
     }
     let terminal = ["done", "failed", "cancelled"];
@@ -8207,6 +8261,60 @@ mod tests {
         }
     }
 
+    /// A scratch tracker with no remote still reports the commit: the
+    /// default path pushes, and a refused push is a suffix, not silence.
+    #[test]
+    fn a_tracker_commit_with_no_remote_still_reports_the_commit() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::remove_var("LJOS_TRACKER_GIT");
+        let said = super::persist_tracker("probe-a1b2", "claimed");
+        assert!(
+            said.contains("tracker git: committed chore(issues): probe-a1b2 claimed"),
+            "{said}"
+        );
+        assert!(
+            said.contains("push refused") || said.contains("not pushed"),
+            "a missing remote must still name the commit: {said}"
+        );
+        assert_eq!(
+            run(&["log", "-1", "--format=%s"]).trim(),
+            "chore(issues): probe-a1b2 claimed"
+        );
+        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+            std::env::remove_var(var);
+        }
+    }
+
     /// A fresh host's missing claim graph is a first sitting, not a fault;
     /// any other claimdag refusal still is.
     #[test]
@@ -8302,6 +8410,62 @@ mod tests {
         assert_eq!(b, "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
+        }
+    }
+
+    #[test]
+    fn a_named_holder_refusal_still_says_held_by_another() {
+        let hold = Hold {
+            assignee: "acme".into(),
+            seat: "acme".into(),
+            pid: 1,
+            comm: "ljos".into(),
+            since: "2026-01-01T00:00:00.000Z".into(),
+        };
+        let said = super::held_by_another_message("demo-aaaa", "brio", &hold, "still running");
+        assert!(said.contains("held by another"), "{said}");
+        assert!(said.contains("acme"), "{said}");
+        assert!(said.contains("not by brio"), "{said}");
+    }
+
+    /// Two seats on one ticket: LJOS_SEAT plus a distinct session id each.
+    #[test]
+    fn two_seats_with_distinct_session_ids_are_distinct_holders() {
+        let _g = env_guard();
+        let dir = std::env::temp_dir().join(format!("ljos-rt-two-seat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_keys: Vec<String> = std::env::vars()
+            .map(|(k, _)| k)
+            .filter(|k| k.ends_with("_SESSION_ID"))
+            .collect();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+            std::env::remove_var("VISSUE_AGENT");
+            for k in &session_keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("LJOS_SEAT", "acme");
+            std::env::set_var("ACME_SESSION_ID", "acme-sess-aaaaaa");
+        }
+        let a_seat = seat_name();
+        let a_holder = resolve_assignee(None);
+        unsafe {
+            std::env::remove_var("ACME_SESSION_ID");
+            std::env::set_var("LJOS_SEAT", "brio");
+            std::env::set_var("BRIO_SESSION_ID", "brio-sess-bbbbbb");
+        }
+        let b_seat = seat_name();
+        let b_holder = resolve_assignee(None);
+        assert_eq!(a_seat, "acme");
+        assert_eq!(b_seat, "brio");
+        assert_eq!(a_holder, "acme-sess-aaaaaa");
+        assert_eq!(b_holder, "brio-sess-bbbbbb");
+        assert_ne!(a_holder, b_holder);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("BRIO_SESSION_ID");
+            std::env::remove_var("ACME_SESSION_ID");
+            std::env::remove_var("XDG_RUNTIME_DIR");
         }
     }
 
@@ -10601,6 +10765,38 @@ mod tests {
         assert!(
             !calls.contains("claim"),
             "asked to claim a non-issue: {calls}"
+        );
+    }
+
+    #[test]
+    fn a_closed_tracker_heading_is_reopened_when_the_graph_takes_it() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let script = format!(
+            "#!/bin/sh\necho \"$* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log}'\ncase \"$1\" in\n  show) echo '{{}}'; exit 0 ;;\n  update) echo updated; exit 0 ;;\n  claim)\n    echo \"$*\" | grep -q -- '--force' && {{ echo claimed; exit 0; }}\n    if grep -q '^update ' '{log}'; then echo 'vissue: proj-1a2b is claimed by you since [2026-01-01]; pass --force to take it over' >&2; exit 1; fi\n    echo 'vissue: proj-1a2b is already DONE; cannot claim' >&2\n    exit 1\n    ;;\nesac\nexit 1\n",
+            log = log.display()
+        );
+        let path = dir.path().join("vissue");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let said = with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice")).unwrap();
+        assert_eq!(
+            said.as_deref(),
+            Some("tracker: proj-1a2b STARTED under alice")
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("update proj-1a2b -s STARTED"),
+            "reopen the heading: {calls}"
+        );
+        assert!(
+            calls.contains("claim proj-1a2b --force VISSUE_AGENT=alice"),
+            "{calls}"
         );
     }
 
