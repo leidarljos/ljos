@@ -133,7 +133,12 @@ The receiver now knows what the sender learned, who the sender trusts, and
 which deeds the work produced, and checked all of it before importing. The
 handover is signed when =~/.config/deedar/host.key= exists, a 32-byte seed;
 the last line is that signature beside the manifest. The receiver accepts
-the key in its store's =layout=.
+the key in its store's =layout=. Two seats on one ticket do this in
+sequence, each named by =LJOS_SEAT= and a distinct =*_SESSION_ID=: A sits,
+cites a deed, hands over; B imports; A releases; B sits, both vote,
+consensus, and finish closes. =scripts/smoke.sh= walks that handoff on
+scratch stores. The herd is the other check: eight sittings at once on
+one contended ticket.
 
 * 5. Hand the protocol to an agent
 

@@ -4,6 +4,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `scripts/smoke.sh` walks two seats handing one scratch ticket in
+  sequence: A sits, cites a deed, hands over; B imports; A releases; B
+  sits; both vote; consensus; finish closes; the tracker git line reports
+  the commit. Distinct from the herd's concurrent contention. A second
+  sitting on a closed ticket reopens the tracker heading. The HUD
+  message enum boxes its snapshot so clippy `large_enum_variant` stays
+  clean.
+
 - The tracker push after a claim or finish waits at most 15 seconds
   (`LJOS_TRACKER_PUSH_WAIT`). A pre-push hook that publishes data first
   held every sitting for minutes; a push still running finishes in the

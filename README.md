@@ -71,7 +71,7 @@ Nothing needs a variable set: `ljos remember` starts the writer when none is ans
 
 ## The smoke test
 
-`scripts/smoke.sh` runs every loop on scratch stores: memory, agreement, learning, a sitting and its finish, a rewrite that closes its earlier claim, habits, an as-of read, a signed handover received and then refused after one byte is altered, a rule through the hook and through `policy`, then `scripts/herd.sh` (eight sittings, one contended ticket, eight finishes, one island fire). `scripts/terra/` holds the Slurm scripts that build, smoke and herd the seat on the build host, as run.
+`scripts/smoke.sh` runs every loop on scratch stores: memory, agreement, learning, a sitting and its finish, a rewrite that closes its earlier claim, habits, an as-of read, a signed handover received and then refused after one byte is altered, a rule through the hook and through `policy`, then two seats (distinct `LJOS_SEAT` and `*_SESSION_ID` each) handing one ticket in sequence (A sits, cites a deed, hands over; B imports; A releases; B sits, both vote, consensus, finish closes, tracker git reports the commit), then `scripts/herd.sh` (eight sittings, one contended ticket, eight finishes, one island fire). `scripts/terra/` holds the Slurm scripts that build, smoke and herd the seat on the build host, as run.
 
 ## MCP
 

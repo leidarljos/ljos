@@ -247,7 +247,11 @@ Sign what you hand over
    $ ljos doctor | grep 'host key'
    ok  host key    /home/you/.config/deedar/host.key (32-byte seed)
 
-``handover`` then signs the manifest and the log head. A receiver adds
+``handover`` then signs the manifest and the log head. Two seats share
+one ticket by this walk, in sequence: A sits and hands over, B imports
+and sits after A releases, both vote, consensus, finish closes.
+``scripts/smoke.sh`` runs it on scratch stores; ``scripts/herd.sh`` is
+the concurrent contention check. A receiver adds
 ``signer = ed25519:<hex>`` to their deed store's ``layout`` and ``receive``
 reports ``(accepted)``.
 
