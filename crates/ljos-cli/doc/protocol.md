@@ -232,7 +232,9 @@ at the end commit the ticket's `issues.org` (that file alone) and push it,
 and print a `tracker git:` line. A claim or a closure that stays in one
 working tree does not exist for any other host. `LJOS_TRACKER_GIT=commit`
 keeps it local; `=off` skips it. A refused push is reported, not raised:
-push the tracker yourself before you leave.
+push the tracker yourself before you leave. `ljos doctor` names how many
+commits origin lacks, and fails the tracker row when that count sits
+through the push wait; a leftover refused-push log is named on the row.
 
 `ljos handover --out DIR --issue ISSUE [--to user@host:path]` is a separate
 verb for when another seat takes over. The receiver runs `ljos receive DIR`,
@@ -274,6 +276,10 @@ under equal weights is a count; under calibrated rows it is not.
   the tracker root is private to your working directory (often a
   `VISSUE_ROOT` that kept a literal `~`). Anything filed there is invisible
   to every other seat. Fix the root before filing.
+- `no tracker ... N unpushed` in `doctor`: the tracker checkout holds
+  commits origin does not. Closures on this host are invisible everywhere
+  else. Push the tracker. A leftover `tracker-push-*.log` names the last
+  refusal when the push was refused.
 - `deedar: warning: this deed is signed by ed25519:...`: the host key is
   not a signer the store's `layout` lists, and `evidence` will refuse the
   deed. Add the printed `signer =` line to that file.

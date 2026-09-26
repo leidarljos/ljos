@@ -339,6 +339,8 @@ Check the seat
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names the root vissue resolved and where it came from, and fails
 when that root is relative, missing, or holds no prefix directory: a ticket
-filed there is invisible to every other seat. A
+filed there is invisible to every other seat. It also names how many commits
+the checkout holds that origin does not, and fails when that count sits
+through the push wait; a leftover refused-push log is named on the row. A
 missing claim graph is reported and is not a failure: the first claim
 creates it.

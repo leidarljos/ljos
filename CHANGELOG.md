@@ -4,6 +4,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- The doctor's tracker row names how many commits the checkout holds that
+  origin does not. A count that has sat through the push wait fails the
+  row; a leftover `tracker-push-*.log` from a refused push is named on it.
+  A live background push, or commits younger than the wait, stay healthy.
+
 - `scripts/smoke.sh` walks two seats handing one scratch ticket in
   sequence: A sits, cites a deed, hands over; B imports; A releases; B
   sits; both vote; consensus; finish closes; the tracker git line reports

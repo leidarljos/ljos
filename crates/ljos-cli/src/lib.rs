@@ -4814,7 +4814,8 @@ fn root_source() -> String {
 /// The tracker row from `vissue identity`: version, the root and prefix it
 /// resolved, and where the root came from. A root that is relative, missing,
 /// or holds no prefix directory fails the row: tickets filed there are
-/// invisible to every other seat.
+/// invisible to every other seat. When the root is a git checkout with an
+/// upstream, the row also names how many commits origin lacks.
 pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let version = identity.lines().next().unwrap_or("").trim();
     let field = |key: &str| {
@@ -4840,8 +4841,144 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let base = format!("{version} root={root} prefix={prefix} from {source}");
     match problem {
         Some(why) => (format!("{base}; {why}"), false),
-        None => (base, true),
+        None => match tracker_git_drift(path) {
+            Some((extra, git_ok)) => (format!("{base}; {extra}"), git_ok),
+            None => (base, true),
+        },
     }
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+}
+
+fn git_ok_stdout(dir: &Path, args: &[&str]) -> Option<String> {
+    let o = git_in(dir, args)?;
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).to_string())
+}
+
+/// Upstream of the tracker checkout: the configured `@{upstream}`, else
+/// `origin/HEAD`. Absent when the root is not a git checkout, or has no
+/// remote the doctor can count against.
+fn tracker_upstream(root: &Path) -> Option<String> {
+    let inside = git_ok_stdout(root, &["rev-parse", "--is-inside-work-tree"])?;
+    if inside.trim() != "true" {
+        return None;
+    }
+    if let Some(up) = git_ok_stdout(
+        root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) {
+        let up = up.trim().to_string();
+        if !up.is_empty() {
+            return Some(up);
+        }
+    }
+    git_ok_stdout(root, &["rev-parse", "--verify", "origin/HEAD"]).map(|_| "origin/HEAD".into())
+}
+
+/// Whether a leftover `tracker-push-<pid>.log` still has that pid running.
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: kill with signal 0 only probes existence; it does not deliver.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Newest leftover tracker-push log whose process has exited, and whether
+/// any log's process is still running. persist_tracker removes the log on
+/// a foreground success and leaves it on a refusal or a background push.
+fn tracker_push_logs() -> (bool, Option<(std::time::SystemTime, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return (false, None);
+    };
+    let mut running = false;
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for ent in entries.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name
+            .strip_prefix("tracker-push-")
+            .and_then(|s| s.strip_suffix(".log"))
+        else {
+            continue;
+        };
+        let Ok(pid) = rest.parse::<u32>() else {
+            continue;
+        };
+        if pid_alive(pid) {
+            running = true;
+            continue;
+        }
+        let mtime = ent
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let path = ent.path();
+        if newest.as_ref().is_none_or(|(t, _)| mtime >= *t) {
+            newest = Some((mtime, path));
+        }
+    }
+    (running, newest)
+}
+
+fn last_push_refusal() -> Option<String> {
+    let path = tracker_push_logs().1?.1;
+    let said = std::fs::read(path).ok()?;
+    let line = first_line(&said);
+    (!line.is_empty()).then_some(line)
+}
+
+/// Commits the tracker checkout holds that origin does not. The count is
+/// always named. A live background push, or commits younger than the push
+/// wait, stay healthy: the sitting already waited that long. Older drift
+/// fails the row, and a leftover refused-push log names the reason.
+pub fn tracker_git_drift(root: &Path) -> Option<(String, bool)> {
+    let up = tracker_upstream(root)?;
+    let range = format!("{up}..HEAD");
+    let count: u64 = git_ok_stdout(root, &["rev-list", "--count", &range])?
+        .trim()
+        .parse()
+        .ok()?;
+    if count == 0 {
+        return Some(("0 unpushed".into(), true));
+    }
+    let (running, _) = tracker_push_logs();
+    let oldest = git_ok_stdout(root, &["log", "--format=%ct", "--reverse", &range])
+        .and_then(|s| {
+            s.lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+        })
+        .and_then(|s| s.parse::<u64>().ok());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let stuck = oldest.is_some_and(|t| now.saturating_sub(t) >= push_wait().as_secs());
+    let unpushed = if count == 1 {
+        "1 unpushed".to_string()
+    } else {
+        format!("{count} unpushed")
+    };
+    if running {
+        return Some((format!("{unpushed}; push still running"), true));
+    }
+    if let Some(why) = last_push_refusal() {
+        return Some((format!("{unpushed}; last push refused: {why}"), false));
+    }
+    Some((unpushed, !stuck))
 }
 
 /// Whether every required habitat answers.
@@ -8360,6 +8497,165 @@ mod tests {
         assert!(state.contains("no prefix directory"), "{state}");
 
         assert!(!super::tracker_state("vissue 0.16.1\n", "cwd").1);
+    }
+
+    fn git_scratch(root: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+    }
+
+    /// The tracker row names how many commits origin lacks, and fails when
+    /// they have sat through the push wait or the last push was refused.
+    #[test]
+    fn tracker_row_fails_when_origin_never_got_the_commits() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
+        std::fs::create_dir_all(root.join("Software")).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git_scratch(&root);
+        std::fs::write(root.join("Software/.keep"), "").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+
+        let id = |r: &str| format!("vissue 0.16.2\nprotocol: 1\nroot={r}\nprefix=Software\n");
+        let root_s = root.display().to_string();
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "5");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+
+        let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
+        assert!(ok, "{state}");
+        assert!(state.contains("0 unpushed"), "{state}");
+
+        std::fs::write(root.join("Software/.keep"), "local\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "ahead"]);
+        let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
+        assert!(ok, "a commit younger than the wait stays healthy: {state}");
+        assert!(state.contains("1 unpushed"), "{state}");
+
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
+        let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
+        assert!(!ok, "{state}");
+        assert!(state.contains("1 unpushed"), "{state}");
+
+        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        let _ = dead.wait();
+        let logs = dir.path().join("ljos");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join(format!("tracker-push-{dead_pid}.log")),
+            "remote: pre-push hook declined\nerror: failed to push some refs\n",
+        )
+        .unwrap();
+        let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
+        assert!(!ok, "{state}");
+        assert!(state.contains("1 unpushed"), "{state}");
+        assert!(
+            state.contains("last push refused: remote: pre-push hook declined"),
+            "{state}"
+        );
+
+        for var in ["LJOS_TRACKER_PUSH_WAIT", "XDG_RUNTIME_DIR"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn tracker_row_stays_healthy_while_a_background_push_runs() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
+        std::fs::create_dir_all(root.join("Software")).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git_scratch(&root);
+        std::fs::write(root.join("Software/.keep"), "").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(root.join("Software/.keep"), "local\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "ahead"]);
+
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("8")
+            .spawn()
+            .unwrap();
+        let pid = sleeper.id();
+        let logs = dir.path().join("ljos");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join(format!("tracker-push-{pid}.log")), "").unwrap();
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
+        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        let id = format!(
+            "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
+            root.display()
+        );
+        let (state, ok) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        assert!(ok, "{state}");
+        assert!(state.contains("1 unpushed; push still running"), "{state}");
+        for var in ["LJOS_TRACKER_PUSH_WAIT", "XDG_RUNTIME_DIR"] {
+            std::env::remove_var(var);
+        }
     }
 
     #[test]
