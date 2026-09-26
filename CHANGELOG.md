@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A seat record carries the conversation ids its writer held, and a shell
+  refuses a record written under an id it shares with another
+  conversation. Two conversations started from one terminal share the line
+  editor's session id, and a shell could take the other conversation's
+  holder and then fail to finish its own claim.
+
 - `ljos` and `ljos-mcp` expand a leading `~` in `ISSUE_ROOT` and
   `VISSUE_ROOT` at start. The linked tracker crate took such a root as
   relative to the working directory, so `ljos finish` could not find a

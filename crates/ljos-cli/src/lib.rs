@@ -452,17 +452,44 @@ fn session_record_path(id: &str) -> PathBuf {
     runtime_dir().join(format!("session-{}", session_tag(id)))
 }
 
+/// A record is the seat, the holder, and the conversation ids its writer
+/// carried. A shell's line editor stamps one id into every conversation
+/// started from that terminal; the ids line is how a reader tells its own
+/// conversation's record from another's filed under the same shared id.
 fn write_record(path: &Path, seat: &Seat) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, format!("{}\n{}\n", seat.seat, seat.holder));
+    let ids: Vec<String> = stamped_sessions().into_iter().map(|(_, id)| id).collect();
+    let _ = std::fs::write(
+        path,
+        format!("{}\n{}\nids\t{}\n", seat.seat, seat.holder, ids.join("\t")),
+    );
 }
 
 fn read_record(path: &Path, source: String) -> Option<Seat> {
     let text = std::fs::read_to_string(path).ok()?;
+    let mine: Vec<String> = stamped_sessions().into_iter().map(|(_, id)| id).collect();
+    record_for(&text, &mine, source)
+}
+
+/// The seat in a record's text, unless its writer carried a conversation id
+/// this process does not: that record is another conversation's, filed
+/// under an id both happen to share. A record without an ids line predates
+/// the check and is taken as it stands.
+fn record_for(text: &str, mine: &[String], source: String) -> Option<Seat> {
     let mut lines = text.lines();
     let (seat, holder) = (lines.next()?, lines.next()?);
+    if let Some(ids) = lines.next().and_then(|l| l.strip_prefix("ids")) {
+        let foreign = ids
+            .split('\t')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .any(|id| !mine.iter().any(|m| m == id));
+        if foreign {
+            return None;
+        }
+    }
     Some(Seat {
         seat: seat.to_string(),
         holder: holder.to_string(),
@@ -8275,6 +8302,28 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 10);
         assert_eq!(a, session_tag(" 01a09b25-ffe9-7972-881a-3cee2ea6efd6 "));
+    }
+
+    /// Two conversations started from one terminal share the line editor's
+    /// id; each finds its own server's record, never the other's.
+    #[test]
+    fn a_record_from_another_conversation_is_not_this_ones() {
+        let ble = "1000000000.000001/4242".to_string();
+        let me = "01a09b25-ffe9-7972-881a-000000000001".to_string();
+        let other = "01a09b25-ffe9-7972-881a-000000000002".to_string();
+        let mine = vec![ble.clone(), me.clone()];
+        let theirs = format!("acme-cli\nsess-other\nids\t{ble}\t{other}\n");
+        assert!(super::record_for(&theirs, &mine, "t".into()).is_none());
+        let ours = format!("acme-cli\nsess-mine\nids\t{ble}\t{me}\n");
+        assert_eq!(
+            super::record_for(&ours, &mine, "t".into()).unwrap().holder,
+            "sess-mine"
+        );
+        // A shell that adds an id of its own still finds its server's record.
+        let shell = vec![ble.clone(), me.clone(), "9f9f9f9f-extra".into()];
+        assert!(super::record_for(&ours, &shell, "t".into()).is_some());
+        // A record from before the ids line is taken as it stands.
+        assert!(super::record_for("acme-cli\nsess-old\n", &mine, "t".into()).is_some());
     }
 
     #[test]
