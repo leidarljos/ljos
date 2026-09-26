@@ -6535,6 +6535,7 @@ pub fn sitting_gated(
     out.push_str(&timeline(issue, SITTING_TIMELINE)?);
     out.push_str("== claim\n");
     out.push_str(&claim(issue, assignee)?);
+    out.push_str(&persist_tracker(issue, "claimed"));
     Ok(out)
 }
 
@@ -6671,7 +6672,90 @@ pub fn finish(
             "the ticket {issue} keeps its state; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
         ));
     }
+    out.push_str(&persist_tracker(issue, "finished"));
     Ok(out)
+}
+
+/// Commit the tracker file that holds `issue` and push it, when the tracker
+/// is a git checkout. A write that stays in one working tree is lost to
+/// every other host and to a rebuilt one; closures made on one laptop and
+/// never committed were how tickets came back open. Only that file is
+/// committed (`--only`), so another seat's staged work is left alone. Never
+/// an error: the verb already happened, and the line says what did not.
+/// `LJOS_TRACKER_GIT=off` skips it; `=commit` commits without pushing.
+pub fn persist_tracker(issue: &str, verb: &str) -> String {
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    if matches!(mode.as_str(), "off" | "0" | "false") {
+        return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
+    }
+    let path = match vissue_core::Layout::resolve(None, None)
+        .and_then(vissue_core::Router::load)
+        .and_then(|router| router.find_by_id(issue))
+    {
+        Ok(hit) => hit.path,
+        Err(e) => return format!("tracker git: could not find {issue}: {e}\n"),
+    };
+    let Some(dir) = path.parent() else {
+        return format!("tracker git: {} has no directory\n", path.display());
+    };
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    let file = path.to_string_lossy().to_string();
+    match git(&["rev-parse", "--is-inside-work-tree"]) {
+        Ok(o) if o.status.success() => {}
+        _ => return "tracker git: the tracker is not a git checkout\n".into(),
+    }
+    match git(&["status", "--porcelain", "--", &file]) {
+        Ok(o) if o.status.success() && o.stdout.is_empty() => {
+            return "tracker git: nothing to commit\n".into();
+        }
+        Ok(o) if o.status.success() => {}
+        Ok(o) => return format!("tracker git: {}\n", first_line(&o.stderr)),
+        Err(e) => return format!("tracker git: {e}\n"),
+    }
+    let message = format!("chore(issues): {issue} {verb}");
+    let committed = git(&["add", "--", &file])
+        .and_then(|_| git(&["commit", "-q", "--only", "-m", &message, "--", &file]));
+    match committed {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            return format!(
+                "tracker git: commit refused: {}\n",
+                first_line(if o.stderr.is_empty() {
+                    &o.stdout
+                } else {
+                    &o.stderr
+                })
+            );
+        }
+        Err(e) => return format!("tracker git: {e}\n"),
+    }
+    if mode == "commit" {
+        return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
+    }
+    match git(&["push", "-q"]) {
+        Ok(o) if o.status.success() => format!("tracker git: committed and pushed {message}\n"),
+        Ok(o) => format!(
+            "tracker git: committed {message}; push refused: {}\n",
+            first_line(&o.stderr)
+        ),
+        Err(e) => format!("tracker git: committed {message}; push failed: {e}\n"),
+    }
+}
+
+fn first_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// The weight a voter of estimated accuracy `p` earns: the log odds
@@ -7840,6 +7924,70 @@ mod tests {
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A tracker write reaches git: the ticket's file alone is committed, a
+    /// clean file is left alone, and the switch turns it off.
+    #[test]
+    fn a_tracker_write_is_committed_alone() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        std::fs::write(root.join("other.org"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        assert!(super::persist_tracker("probe-a1b2", "claimed").contains("nothing to commit"));
+
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        std::fs::write(root.join("other.org"), "two\n").unwrap();
+        run(&["add", "other.org"]);
+        let said = super::persist_tracker("probe-a1b2", "claimed");
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 claimed"),
+            "{said}"
+        );
+        assert_eq!(
+            run(&["log", "-1", "--format=%s"]).trim(),
+            "chore(issues): probe-a1b2 claimed"
+        );
+        // Another seat's staged file is not swept into the commit.
+        assert_eq!(
+            run(&["diff", "--cached", "--name-only"]).trim(),
+            "other.org"
+        );
+
+        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        assert!(super::persist_tracker("probe-a1b2", "finished").contains("off"));
+        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+            std::env::remove_var(var);
+        }
     }
 
     /// A fresh host's missing claim graph is a first sitting, not a fault;

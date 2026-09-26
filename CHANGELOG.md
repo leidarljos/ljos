@@ -4,6 +4,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos sitting` after its claim and `ljos finish` at the end commit the
+  ticket's tracker file (that file only) and push it, when the tracker is a
+  git checkout. A closure that stayed in one working tree was lost to every
+  other host. `LJOS_TRACKER_GIT=commit` commits without pushing; `=off`
+  skips it. A refused push is reported and does not fail the verb.
+
 - On a fresh host the doctor's claim graph row reads ok, `none yet; the
   first claim creates it at DIR`, instead of a failing row in every
   sitting header. Any other claimdag refusal still fails it.
