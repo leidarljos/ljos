@@ -249,16 +249,47 @@ impl Store {
     /// [`Store::approve`] for a request this conversation raised: an id
     /// from another conversation's request, quoted into this one, grants
     /// nothing.
-    fn approve_in(&mut self, id: &str, session: &str) -> Result<String> {
-        let ours = self
-            .requests
-            .iter()
-            .any(|request| request.id == id && request.scope.session == session);
+    fn approve_in(&mut self, id: &str, sessions: &[String]) -> Result<String> {
+        let ours = self.requests.iter().any(|request| {
+            request.id == id
+                && sessions
+                    .iter()
+                    .any(|session| same_conversation(&request.scope.session, session))
+        });
         if !ours {
             bail!("approval {id} was not asked in this conversation");
         }
         self.approve(id)
     }
+}
+
+/// Two spellings of one conversation. A runner sends `session_id` on a tool
+/// call and `sessionId` on the prompt, or nests the id in a path. A short
+/// name from another conversation does not match.
+fn same_conversation(stored: &str, given: &str) -> bool {
+    if stored == given {
+        return true;
+    }
+    let (short, long) = if stored.len() <= given.len() {
+        (stored, given)
+    } else {
+        (given, stored)
+    };
+    short.len() >= 32 && long.contains(short)
+}
+
+fn stamped_session_ids() -> Vec<String> {
+    std::env::vars()
+        .filter(|(key, value)| {
+            (key.ends_with("_SESSION_ID")
+                || key.ends_with("_THREAD_ID")
+                || key.ends_with("_CONVERSATION_ID"))
+                && key != "XDG_SESSION_ID"
+                && key != "BLE_SESSION_ID"
+                && value.trim().len() >= 8
+        })
+        .map(|(_, value)| value.trim().to_string())
+        .collect()
 }
 
 /// The ids a person's prompt approves: `approve ID` with the 32 hex
@@ -286,12 +317,21 @@ fn approved_ids(prompt: &str) -> Vec<String> {
 /// the prompt approves nothing; otherwise one line per id, granted or why
 /// not.
 pub fn approve_from_prompt(prompt: &str, session: Option<&str>) -> Option<String> {
-    approve_from_prompt_at(prompt, session, &root(), now())
+    let mut sessions = Vec::new();
+    if let Some(session) = session.map(str::trim).filter(|s| !s.is_empty()) {
+        sessions.push(session.to_string());
+    }
+    for id in stamped_session_ids() {
+        if !sessions.iter().any(|have| have == &id) {
+            sessions.push(id);
+        }
+    }
+    approve_from_prompt_at(prompt, &sessions, &root(), now())
 }
 
 fn approve_from_prompt_at(
     prompt: &str,
-    session: Option<&str>,
+    sessions: &[String],
     root: &Path,
     now: Result<u64>,
 ) -> Option<String> {
@@ -302,16 +342,16 @@ fn approve_from_prompt_at(
     let mut said = String::new();
     for id in ids {
         let line = (|| {
-            let session = session
-                .filter(|s| !s.is_empty())
-                .context("approval needs a conversation id")?;
+            if sessions.iter().all(|session| session.is_empty()) {
+                anyhow::bail!("approval needs a conversation id");
+            }
             Store::open(
                 root,
                 now.as_ref()
                     .map_err(|e| anyhow::anyhow!("{e:#}"))
                     .copied()?,
             )?
-            .approve_in(&id, session)
+            .approve_in(&id, sessions)
         })();
         match line {
             Ok(text) => said.push_str(&format!("The person approved in this chat. {text}")),
@@ -470,6 +510,10 @@ mod tests {
         }
     }
 
+    fn one(id: &str) -> Vec<String> {
+        vec![id.to_string()]
+    }
+
     fn input(cwd: &Path) -> String {
         serde_json::json!({"hook_event_name":"PreToolUse", "turn_id":"turn-1",
             "session_id":"conversation-1", "cwd":cwd, "tool_name":"Bash",
@@ -519,11 +563,11 @@ mod tests {
         let input = input(temp.path());
         let id = request_id(&output(&input, &ask(), &root, 100));
         assert!(
-            approve_from_prompt_at("carry on", Some("conversation-1"), &root, Ok(101)).is_none()
+            approve_from_prompt_at("carry on", &one("conversation-1"), &root, Ok(101)).is_none()
         );
         let elsewhere = approve_from_prompt_at(
             &format!("approve {id}"),
-            Some("conversation-2"),
+            &one("conversation-2"),
             &root,
             Ok(101),
         )
@@ -539,7 +583,7 @@ mod tests {
         );
         let said = approve_from_prompt_at(
             &format!("Approve `{id}`, then retry."),
-            Some("conversation-1"),
+            &one("conversation-1"),
             &root,
             Ok(103),
         )
@@ -550,6 +594,27 @@ mod tests {
             "the retry runs once"
         );
         assert_ne!(request_id(&output(&input, &ask(), &root, 105)), id);
+    }
+
+    #[test]
+    fn a_longer_spelling_of_the_same_conversation_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let cwd = temp.path();
+        let session = "01a10b08-49eb-73e3-9a01-87e9d1f6ae2e";
+        let body = serde_json::json!({"hook_event_name":"PreToolUse", "turn_id":"turn-1",
+            "session_id": session, "cwd": cwd, "tool_name":"Bash",
+            "tool_input":{"command":"git push origin main"}})
+        .to_string();
+        let id = request_id(&output(&body, &ask(), &root, 100));
+        let said = approve_from_prompt_at(
+            &format!("approve {id}"),
+            &one(&format!("/tmp/work/{session}/prompt")),
+            &root,
+            Ok(101),
+        )
+        .unwrap();
+        assert!(said.contains("Approved once"), "{said}");
     }
 
     #[test]

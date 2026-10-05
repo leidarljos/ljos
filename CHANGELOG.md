@@ -14,6 +14,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.26.0 (2026-10-09)
 
+- `approve ID` in the chat grants the request when the prompt names the same conversation under a longer session string. A different conversation still grants nothing.
 - A tracker that keeps one file per issue is read and committed as that file. `ljos` follows vissue 0.20: when `issues/.ledger` is present, a sitting finds the issue there, and the tracker commit names `issues/<id>.org` rather than the project board.
 - An ask a runner cannot show as its own prompt is granted by the client's consent form (`ljos_request_approval`), by replying `approve ID` in the same conversation, or by `ljos approve ID` in a terminal.
 - Persona panes open through `[[tool]]` adapters declared in harnesses.toml beside the runners; herdr and tmux ship as shapes, and `ljos doctor` has a `panes` row. Half the herdr calls the seat made had gone stale against herdr 0.9. Every pane fell back to tmux without a warning. The pane resumes a runner that exits non-zero, at most three times a minute. `examples/runtime-panel` has the vote that picked them.
