@@ -5815,6 +5815,18 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
     }
 }
 
+/// How long a pack listing may take. A hook is killed at 10s and the kill
+/// drops a deny, so the listing fails at 2s and the local gate still runs.
+/// Outside a hook the listing may take 30s.
+#[must_use]
+pub fn atoms_timeout() -> std::time::Duration {
+    if std::env::var_os("LJOS_IN_HOOK").is_some() {
+        std::time::Duration::from_secs(2)
+    } else {
+        std::time::Duration::from_secs(30)
+    }
+}
+
 /// The pack's live atoms without their dense vectors. Every reader here
 /// wants texts, kinds, review clocks, trust or rules; the vectors are nine
 /// tenths of the listing, and parsing them grew one ljos-mcp from 10 to
@@ -5826,7 +5838,12 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
 /// The pack not answering, or an answer that is not atoms.
 pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
     let url = format!("{}/v1/atoms", client.base());
-    let deadline = std::time::Instant::now() + pack_timeout();
+    // A runner kills PreToolUse at 10s and then ignores the hook, which
+    // drops a deny. Inside a hook the listing stops at 2s so the local
+    // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
+    // still bounds it. A writer that answers busy is asked again until
+    // that deadline.
+    let deadline = std::time::Instant::now() + pack_timeout().min(atoms_timeout());
     let mut wait = BUSY_WAIT;
     let mut tries = 0;
     let answered = loop {
@@ -16244,6 +16261,10 @@ mod tests {
             session: Some("twin".into()),
             shape: HookShape::CamelCase,
         };
+        assert_eq!(atoms_timeout(), std::time::Duration::from_secs(30));
+        std::env::set_var("LJOS_IN_HOOK", "1");
+        assert_eq!(atoms_timeout(), std::time::Duration::from_secs(2));
+        std::env::remove_var("LJOS_IN_HOOK");
         assert!(
             !hook_already_running(&call("fix the ci")),
             "the first answers"

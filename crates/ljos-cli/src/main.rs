@@ -1026,7 +1026,9 @@ fn main() -> Result<()> {
             // So those events answer inside a deadline, whatever the pack
             // does, and a call a second registration of the same hook makes
             // at the same moment is answered once. A tool gate is exempt
-            // from both: its verdict must not be lost to a clock.
+            // from both: its verdict must not be lost to a clock. Exiting
+            // at the deadline writes no deny, and the runner then allows
+            // the command.
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
                 if ljos_cli::hook_already_running(&call) {
                     return Ok(());
