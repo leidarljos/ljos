@@ -3256,22 +3256,16 @@ pub fn prompt_hook_stdout(
 }
 
 /// Stdout for a tool-result hook, and the ids to mark now that the note
-/// was delivered. A camel-case runner takes the note on the first tool
-/// result. `Stop` additionalContext would start another round, so the
-/// hold is cleared here and `Stop` finds nothing. Any other runner takes
-/// it the same way. A turn with no tool leaves the hold for `Stop`.
+/// was delivered. A runner that holds the prompt note takes whatever note
+/// is held. The file goes with that take, so a later tool in the same turn
+/// finds nothing and `Stop` has nothing to say. Skipping a new hold because
+/// an earlier note was echoed leaves that hold for `Stop`, and `Stop`
+/// additionalContext starts another round. A turn with no tool leaves
+/// the hold for `Stop`.
 #[must_use]
 pub fn post_hook_stdout(shape: HookShape, session: Option<&str>) -> (String, Vec<String>) {
     if shape.holds_prompt_note() {
-        let key = "hold-echoed".to_string();
-        if seen_ids(session).contains(&key) {
-            return (String::new(), Vec::new());
-        }
-        let (text, ids) = take_hook_note(session);
-        if !text.is_empty() {
-            mark_seen(session, &[key]);
-        }
-        (text, ids)
+        take_hook_note(session)
     } else {
         (take_hook_context(session), Vec::new())
     }
@@ -16807,6 +16801,16 @@ mod tests {
         assert!(
             stop_hook_stdout(Some(&session), false).0.is_empty(),
             "a delivered tool result leaves Stop nothing to say"
+        );
+        // A later prompt holds a new note. The next tool result delivers
+        // it. Stop additionalContext would start another round.
+        hold_hook_note(Some(&session), "next prompt", &["m3".to_string()]);
+        let (next, next_ids) = post_hook_stdout(HookShape::CamelCase, Some(&session));
+        assert_eq!(next, "next prompt");
+        assert_eq!(next_ids, ["m3"]);
+        assert!(
+            stop_hook_stdout(Some(&session), false).0.is_empty(),
+            "a later prompt's note is not left for Stop"
         );
         let quiet = format!("quiet-{}", std::process::id());
         hold_hook_note(Some(&quiet), "no tool", &["m2".to_string()]);

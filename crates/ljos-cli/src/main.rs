@@ -1153,9 +1153,9 @@ fn main() -> Result<()> {
             let mut seen_later: Vec<String> = Vec::new();
             let mut ack_nudge = false;
             // Search on the prompt. A camel-case runner discards that
-            // stdout, so the note is held and emitted on the first tool
-            // result. Stop additionalContext would start another round, so
-            // Stop speaks only when no tool ran. PreToolUse / argv only decide.
+            // stdout, so each held note goes out on the next tool result.
+            // Stop additionalContext starts another round, so Stop speaks
+            // only when no tool ran. PreToolUse / argv only decide.
             let context = match call.event.as_str() {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
