@@ -3261,7 +3261,8 @@ pub fn prompt_hook_stdout(
 /// finds nothing and `Stop` has nothing to say. Skipping a new hold because
 /// an earlier note was echoed leaves that hold for `Stop`, and `Stop`
 /// additionalContext starts another round. A turn with no tool leaves
-/// the hold for `Stop`.
+/// the hold until `Stop` takes it. A camel-case runner does not print
+/// that take.
 #[must_use]
 pub fn post_hook_stdout(shape: HookShape, session: Option<&str>) -> (String, Vec<String>) {
     if shape.holds_prompt_note() {
@@ -3280,6 +3281,18 @@ pub fn stop_hook_stdout(session: Option<&str>, stop_active: bool) -> (String, Ve
         return (String::new(), Vec::new());
     }
     take_hook_note(session)
+}
+
+/// What `Stop` prints. A camel-case runner treats `additionalContext`
+/// as another round, so a held note is not a reason to continue. An
+/// audit block is a separate answer and does not come through here.
+#[must_use]
+pub fn stop_context_for_runner(shape: HookShape, note: String) -> String {
+    if shape == HookShape::CamelCase {
+        String::new()
+    } else {
+        note
+    }
 }
 
 pub fn mark_seen(session: Option<&str>, ids: &[String]) {
@@ -16817,6 +16830,11 @@ mod tests {
         let (delivered, ids) = stop_hook_stdout(Some(&quiet), false);
         assert_eq!(delivered, "no tool");
         assert_eq!(ids, ["m2"]);
+        assert_eq!(
+            stop_context_for_runner(HookShape::CamelCase, delivered.clone()),
+            ""
+        );
+        assert_eq!(stop_context_for_runner(HookShape::Asks, delivered), "no tool");
         assert!(stop_hook_stdout(Some(&quiet), true).0.is_empty());
         let argv = hook_call("rm -rf build");
         assert_eq!(argv.event, "argv");

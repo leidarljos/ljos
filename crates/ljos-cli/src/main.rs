@@ -1154,8 +1154,8 @@ fn main() -> Result<()> {
             let mut ack_nudge = false;
             // Search on the prompt. A camel-case runner discards that
             // stdout, so each held note goes out on the next tool result.
-            // Stop additionalContext starts another round, so Stop speaks
-            // only when no tool ran. PreToolUse / argv only decide.
+            // Stop additionalContext starts another round, so that runner
+            // does not print a held note on Stop. PreToolUse / argv only decide.
             let context = match call.event.as_str() {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
@@ -1191,13 +1191,16 @@ fn main() -> Result<()> {
                     }
                     ctx
                 }
-                // A turn with no tool never fired PostToolUse. Stop is the
-                // only channel left, and its feedback does start another
-                // round. A turn that already delivered on PostToolUse
-                // finds an empty hold and ends.
+                // A turn with no tool never fired PostToolUse. Taking the
+                // hold here keeps it off the next turn. A camel-case runner
+                // does not print it: Stop additionalContext starts another
+                // round. The audit block above is the hold that still speaks.
                 "Stop" => {
                     let (ctx, ids) = stop_hook_stdout(call.session.as_deref(), stop_active);
-                    seen_later.extend(ids);
+                    let ctx = ljos_cli::stop_context_for_runner(call.shape, ctx);
+                    if call.shape != ljos_cli::HookShape::CamelCase {
+                        seen_later.extend(ids);
+                    }
                     ctx
                 }
                 // The pack is searched on a failed tool's command and its
