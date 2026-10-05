@@ -13241,14 +13241,46 @@ pub fn persist_tracker(issue: &str, verb: &str) -> String {
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
     }
-    let path = match vissue_core::Layout::resolve(None, None)
-        .and_then(vissue_core::Router::load)
-        .and_then(|router| router.find_by_id(issue))
-    {
-        Ok(hit) => hit.path,
+    let path = match tracker_issue_path(issue) {
+        Ok(path) => path,
         Err(e) => return format!("tracker git: could not find {issue}: {e}\n"),
     };
     persist_tracker_file(&path, issue, verb)
+}
+
+/// The file that holds `issue`. A ledger fold names `issues/<id>.org`.
+/// A single board names `issues.org`. `show_json` prints `path:start-end`.
+fn tracker_issue_path(issue: &str) -> Result<PathBuf, String> {
+    let layout = vissue_core::Layout::resolve(None, None).map_err(|e| e.to_string())?;
+    let hit = vissue_core::Router::load(layout)
+        .map_err(|e| e.to_string())?
+        .find_by_id(issue)
+        .map_err(|e| e.to_string())?;
+    if let Ok(card) = vissue_core::agent::show_json(&hit.layout, issue) {
+        if let Some(path) = card
+            .get("file")
+            .and_then(|value| value.as_str())
+            .and_then(path_before_line_range)
+        {
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+    Ok(hit.path)
+}
+
+/// `show_json` writes the range as `{path}:{start}-{end}`.
+fn path_before_line_range(file: &str) -> Option<PathBuf> {
+    let (path, span) = file.rsplit_once(':')?;
+    let (start, end) = span.split_once('-')?;
+    if path.is_empty()
+        || !start.bytes().all(|byte| byte.is_ascii_digit())
+        || !end.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 /// [`persist_tracker`] for a file already known: an issue filed into a
@@ -14803,6 +14835,94 @@ mod tests {
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
         std::env::set_var("LJOS_TRACKER_GIT", "off");
         assert!(super::persist_tracker("probe-a1b2", "finished").contains("off"));
+        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// An issue that exists only in the per-issue ledger is visible, and the
+    /// tracker commit names that file. The project board does not contain it.
+    #[test]
+    fn a_ledger_issue_is_read_and_committed() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(project.join("issues")).unwrap();
+        let board = project.join("issues.org");
+        std::fs::write(
+            &board,
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("issues/.ledger"), "1\nabc\n").unwrap();
+        let ledger = "\
+#+TITLE: probe issues
+#+VISSUE: 1
+#+TODO: TODO STARTED | DONE
+
+#+VISSUE_LEDGER:
+#+VISSUE_LINES: 6 9
+* TODO [#C] Ledger only
+:PROPERTIES:
+:ID:         probe-1ed6
+:END:
+#+VISSUE_LEDGER_LOG:
+";
+        let issue_file = project.join("issues/probe-1ed6.org");
+        std::fs::write(&issue_file, ledger).unwrap();
+        run(&[
+            "add",
+            "Software/probe/issues.org",
+            "Software/probe/issues/.ledger",
+        ]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+
+        let shown = super::tracker_show_json("probe-1ed6").expect("ledger issue is visible");
+        assert_eq!(shown["title"], "Ledger only");
+        let file = shown["file"].as_str().unwrap();
+        assert!(
+            file.contains("issues/probe-1ed6.org"),
+            "file range names the ledger file, got {file}"
+        );
+        assert!(super::tracker_show_json("probe-absent").is_err());
+
+        let said = super::persist_tracker("probe-1ed6", "claimed");
+        assert!(
+            said.contains("committed chore(issues): probe-1ed6 claimed"),
+            "{said}"
+        );
+        let committed = run(&["show", "--name-only", "--format=", "HEAD"]);
+        assert!(
+            committed.contains("Software/probe/issues/probe-1ed6.org"),
+            "{committed}"
+        );
+        assert!(
+            !committed.contains("issues.org"),
+            "the board was not the commit: {committed}"
+        );
         for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
             std::env::remove_var(var);
         }
