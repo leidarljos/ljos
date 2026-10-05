@@ -1290,7 +1290,7 @@ fn main() -> Result<()> {
                         };
                     }
                     if !call.shape.holds_prompt_note() {
-                        seen_later.extend(ids);
+                        seen_later.extend(ids.clone());
                     }
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
