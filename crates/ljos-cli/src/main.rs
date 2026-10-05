@@ -1066,8 +1066,9 @@ fn main() -> Result<()> {
                         decision,
                         stop_active,
                     ) {
-                        ljos_cli::mark_seen(call.session.as_deref(), &[key]);
                         println!("{}", ljos_cli::block_output(call.shape, &reason));
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        ljos_cli::mark_seen(call.session.as_deref(), &[key]);
                         return Ok(());
                     }
                 }
@@ -1146,6 +1147,11 @@ fn main() -> Result<()> {
                 )
             };
             let verdict = tcb_rule.as_ref().or(gated.as_ref());
+            // Ids are marked after stdout is flushed. A runner that kills
+            // the hook before it reads the answer must see the same note
+            // on the next call.
+            let mut seen_later: Vec<String> = Vec::new();
+            let mut ack_nudge = false;
             // Search on the prompt. A camel-case runner discards that
             // stdout, so the note is held and emitted on the first tool
             // result. Stop additionalContext would start another round, so
@@ -1158,8 +1164,9 @@ fn main() -> Result<()> {
                 }
                 "PostToolUse" => {
                     let (mut ctx, ids) = post_hook_stdout(call.shape, call.session.as_deref());
-                    mark_seen(call.session.as_deref(), &ids);
+                    seen_later.extend(ids);
                     if let Some(nudge) = ljos_cli::work_nudge(&call, subagent.is_some()) {
+                        ack_nudge = true;
                         ctx = if ctx.is_empty() {
                             nudge
                         } else {
@@ -1172,7 +1179,7 @@ fn main() -> Result<()> {
                             if let Some(issue) = ljos_cli::held_issue() {
                                 let decision = ljos_cli::tracker_show_json(&issue)
                                     .is_ok_and(|v| ljos_cli::is_decision(&v));
-                                ljos_cli::mark_seen(call.session.as_deref(), &[key]);
+                                seen_later.push(key);
                                 let brief = ljos_cli::subagent_brief(kind, &issue, decision);
                                 ctx = if ctx.is_empty() {
                                     brief
@@ -1190,7 +1197,7 @@ fn main() -> Result<()> {
                 // finds an empty hold and ends.
                 "Stop" => {
                     let (ctx, ids) = stop_hook_stdout(call.session.as_deref(), stop_active);
-                    mark_seen(call.session.as_deref(), &ids);
+                    seen_later.extend(ids);
                     ctx
                 }
                 // The pack is searched on a failed tool's command and its
@@ -1199,7 +1206,7 @@ fn main() -> Result<()> {
                 "PostToolUseFailure" => {
                     let error = ljos_cli::tool_error(&input);
                     let (ctx, ids) = ljos_cli::failure_note(&call, &error, 3);
-                    mark_seen(call.session.as_deref(), &ids);
+                    seen_later.extend(ids);
                     ctx
                 }
                 // Compaction drops what the seat handed the conversation:
@@ -1226,7 +1233,7 @@ fn main() -> Result<()> {
                             let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
                         }
                         let (ctx, ids) = ljos_cli::take_hook_note(call.session.as_deref());
-                        mark_seen(call.session.as_deref(), &ids);
+                        seen_later.extend(ids);
                         ctx
                     } else {
                         String::new()
@@ -1283,7 +1290,7 @@ fn main() -> Result<()> {
                         };
                     }
                     if !call.shape.holds_prompt_note() {
-                        mark_seen(call.session.as_deref(), &ids);
+                        seen_later.extend(ids);
                     }
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
@@ -1292,6 +1299,13 @@ fn main() -> Result<()> {
                 "{}",
                 ljos_cli::approval::hook_output(&input, &call, &context, verdict)
             );
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            if !seen_later.is_empty() {
+                mark_seen(call.session.as_deref(), &seen_later);
+            }
+            if ack_nudge {
+                ljos_cli::work_nudge_delivered(call.session.as_deref());
+            }
         }
         Cmd::Consensus { id } => {
             // Rows scoped to a domain apply when the issue is about it; the

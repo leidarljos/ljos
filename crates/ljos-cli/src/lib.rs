@@ -4643,11 +4643,11 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
         let _ = std::fs::write(&path, count.to_string());
         return None;
     }
-    // The open-issue line is the first result. Keeping 1 leaves the calls
-    // after it inside the stretch, so the line does not repeat on each one.
-    let stored = if held.is_none() && count == 1 { 1 } else { 0 };
-    let _ = std::fs::create_dir_all(runtime_dir());
-    let _ = std::fs::write(&path, stored.to_string());
+    // The count stays until the caller has printed the reminder. A hook
+    // killed after this return and before that print must say it again.
+    // work_nudge_delivered stores 1 for the first result with no issue, so
+    // the calls after it stay inside the stretch, and 0 when a full stretch
+    // was said.
     Some(match held {
         Some(issue) => format!(
             "{count} tool calls on {issue} since the seat last heard from this conversation. \
@@ -4661,6 +4661,35 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
              Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
         ),
     })
+}
+
+/// The reminder was printed. The next stretch starts at zero.
+pub fn work_nudge_delivered(session: Option<&str>) {
+    let Some(session) = session else {
+        return;
+    };
+    let safe: String = session
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if safe.is_empty() {
+        return;
+    }
+    let path = runtime_dir().join(format!("work-{safe}"));
+    let count = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
+    // The open-issue line is the first result. Keeping 1 leaves the calls
+    // after it inside the stretch, so the line does not repeat on each one.
+    let stored = if held_issue().is_none() && count == 1 {
+        1
+    } else {
+        0
+    };
+    let _ = std::fs::create_dir_all(runtime_dir());
+    let _ = std::fs::write(&path, stored.to_string());
 }
 
 /// With `$XDG_RUNTIME_DIR/ljos/hook-trace` present, one line per hook call
@@ -16209,6 +16238,11 @@ mod tests {
             said.contains("holds no issue") && said.contains("ljos sitting"),
             "{said}"
         );
+        assert!(
+            work_nudge(&call("cargo test", "PostToolUse"), false).is_some(),
+            "undelivered reminder stays due"
+        );
+        work_nudge_delivered(Some("work-test"));
         for _ in 2..WORK_NUDGE_EVERY {
             assert!(
                 work_nudge(&call("cargo test", "PostToolUse"), false).is_none(),
@@ -16218,12 +16252,22 @@ mod tests {
         let again = work_nudge(&call("cargo test", "PostToolUse"), false)
             .expect("the end of the stretch says so again");
         assert!(again.contains("ljos sitting"), "{again}");
+        assert!(
+            work_nudge(&call("cargo test", "PostToolUse"), false).is_some(),
+            "an undelivered stretch stays due"
+        );
+        work_nudge_delivered(Some("work-test"));
         let fresh = work_nudge(&call("cargo test", "PostToolUse"), false)
             .expect("a new stretch opens on the next result");
         assert!(fresh.contains("ljos sitting"), "{fresh}");
         assert!(
             fresh.contains("ljos file") && fresh.contains("subagents"),
             "{fresh}"
+        );
+        work_nudge_delivered(Some("work-test"));
+        assert!(
+            work_nudge(&call("cargo test", "PostToolUse"), false).is_none(),
+            "count starts over once the reminder was printed"
         );
         assert!(work_nudge(&call("ljos remember x", "PreToolUse"), false).is_none());
         assert!(
