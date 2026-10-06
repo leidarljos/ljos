@@ -3745,7 +3745,8 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
         ),
         None => format!(
             "This conversation holds no issue. Work goes on an issue: \
-             `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it."
+             `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
+             Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
         ),
     })
 }
@@ -3859,7 +3860,8 @@ pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
     };
     format!(
         "You are a subagent ({kind}) working under {issue}, which your parent holds. Do not open a sitting \
-         on it. {judge} A lesson that will hold next time is `ljos remember \"...\" --as ROLE`; a \
+         on it. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` even when the task \
+         does not name {issue}. {judge} A lesson that will hold next time is `ljos remember \"...\" --as ROLE`; a \
          finding is `ljos note {issue} \"...\"`. ROLE is a persona from `ljos personas` when one fits \
          your task, else `{kind}`."
     )
@@ -14612,11 +14614,26 @@ mod tests {
         let fresh = work_nudge(&call("cargo test", "PostToolUse"), false)
             .expect("a new stretch opens on the next result");
         assert!(fresh.contains("ljos sitting"), "{fresh}");
+        assert!(
+            fresh.contains("ljos file") && fresh.contains("subagents"),
+            "{fresh}"
+        );
         assert!(work_nudge(&call("ljos remember x", "PreToolUse"), false).is_none());
         assert!(
             work_nudge(&call("rg foo", "PostToolUse"), true).is_none(),
             "a subagent has its brief"
         );
+        let task = "parse the fixture";
+        assert!(!task.contains("acme-12ab"));
+        let brief = subagent_brief("general-purpose", "acme-12ab", false);
+        println!("{brief}");
+        println!("{said}");
+        assert!(brief.contains("acme-12ab"), "{brief}");
+        assert!(
+            brief.contains("ljos vote") || brief.contains("ljos note"),
+            "{brief}"
+        );
+        assert!(!brief.contains("Do not vote") && !brief.contains("Do not note"), "{brief}");
         assert!(touches_seat("use_tool ljos__ljos_sitting"));
         assert!(!touches_seat("cargo build --release"));
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
