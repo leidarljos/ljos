@@ -8994,14 +8994,60 @@ pub fn records_from_atoms(atoms: &[Value]) -> std::collections::BTreeMap<String,
     latest.into_iter().map(|(k, (_, r))| (k, r)).collect()
 }
 
+/// Each voter's accuracy from its record, shrunk toward the panel's pooled
+/// accuracy by empirical Bayes (Efron and Morris,
+/// doi:10.1080/01621459.1975.10479864). The prior's strength is what the
+/// spread between the records leaves once binomial noise is taken out, the
+/// noise from the pooled variance with `N / (N - 1)`. When nothing is left,
+/// as on a panel's first outcome, every voter gets the pooled accuracy and
+/// the panel weighs everyone alike; a long record keeps the differences it
+/// shows. Measured in the consensus crate's `correlation_history`: plug-in
+/// log odds of a short record lose to a count by up to six and a half
+/// points, these by at most two.
+#[must_use]
+pub fn shrunk_accuracy(records: &[(String, Standing)]) -> Vec<(String, f64)> {
+    let (hits, seen) = records.iter().fold((0.0, 0.0), |(h, n), (_, (hit, miss))| {
+        (h + hit, n + hit + miss)
+    });
+    let pooled = if seen > 0.0 { hits / seen } else { 0.5 };
+    let read: Vec<(f64, f64)> = records
+        .iter()
+        .filter(|(_, (h, m))| h + m > 0.0)
+        .map(|(_, (h, m))| (h / (h + m), h + m))
+        .collect();
+    let strength = if read.len() >= 2 && seen > 1.0 {
+        let k = read.len() as f64;
+        let mean = read.iter().map(|r| r.0).sum::<f64>() / k;
+        let spread = read.iter().map(|r| (r.0 - mean).powi(2)).sum::<f64>() / (k - 1.0);
+        let pq = pooled * (1.0 - pooled) * seen / (seen - 1.0);
+        let noise = pq * read.iter().map(|r| 1.0 / r.1).sum::<f64>() / k;
+        let between = spread - noise;
+        // A first outcome leaves exactly none, which rounds to about 1e-17.
+        (between > 1e-12).then(|| (pq / between - 1.0).max(0.0))
+    } else {
+        None
+    };
+    records
+        .iter()
+        .map(|(who, (h, m))| {
+            let p = match strength {
+                Some(s) if h + m + s > 0.0 => (h + s * pooled) / (h + m + s),
+                _ => pooled,
+            };
+            (who.clone(), p)
+        })
+        .collect()
+}
+
 /// Learn from an outcome by the record: each voter's hits and misses so
-/// far, this outcome added, give its accuracy with one of each smoothed
-/// in, and the rows are the log odds of that scaled to the best voter at
-/// one ([`calibration_weights`]). Measured against multiplicative
-/// shrinking (Hedge) on voters of known accuracy, the record reaches the
-/// batch calibration and the shrink does not: a voter is weighed by what
-/// it got right, not by how many times it has been punished. Rows are
-/// complete over the voters and scoped to `about`.
+/// far, this outcome added, give its accuracy shrunk toward the panel's
+/// ([`shrunk_accuracy`]), and the rows are the log odds of that scaled to
+/// the best voter at one ([`calibration_weights`]). Measured against
+/// multiplicative shrinking (Hedge) on voters of known accuracy, the record
+/// reaches the batch calibration and the shrink does not: a voter is
+/// weighed by what it got right, not by how many times it has been
+/// punished. One outcome cannot tell voters apart, so the first leaves them
+/// alike. Rows are complete over the voters and scoped to `about`.
 ///
 /// # Errors
 ///
@@ -9031,14 +9077,16 @@ pub fn learn_record(
             r.1 += 1.0;
         }
     }
-    let accuracy: Vec<(String, f64)> = agents
+    let standing: Vec<(String, Standing)> = agents
         .iter()
         .map(|a| {
-            let (h, m) = next.get(*a).copied().unwrap_or((0.0, 0.0));
-            ((*a).to_string(), (h + 1.0) / (h + m + 2.0))
+            (
+                (*a).to_string(),
+                next.get(*a).copied().unwrap_or((0.0, 0.0)),
+            )
         })
         .collect();
-    let weights = calibration_weights(&accuracy);
+    let weights = calibration_weights(&shrunk_accuracy(&standing));
     let mut out = Vec::new();
     for from in &agents {
         for (to, weight) in &weights {
@@ -15285,6 +15333,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Exact values from Python's fractions: pooled 7/10, strength 397/23.
+    #[test]
+    fn shrinking_weighs_a_first_outcome_alike_and_keeps_a_record_apart() {
+        let first = shrunk_accuracy(&[
+            ("a".to_string(), (1.0, 0.0)),
+            ("b".to_string(), (1.0, 0.0)),
+            ("c".to_string(), (0.0, 1.0)),
+        ]);
+        assert!(
+            first.iter().all(|(_, p)| (p - 2.0 / 3.0).abs() < 1e-12),
+            "{first:?}"
+        );
+        let ten = shrunk_accuracy(&[
+            ("a".to_string(), (8.0, 2.0)),
+            ("b".to_string(), (5.0, 5.0)),
+            ("c".to_string(), (6.0, 4.0)),
+            ("d".to_string(), (9.0, 1.0)),
+        ]);
+        let exact = [4619.0, 3929.0, 4159.0, 4849.0].map(|n| n / 6270.0);
+        for ((who, p), want) in ten.iter().zip(exact) {
+            assert!((p - want).abs() < 1e-12, "{who}: {p} against {want}");
+        }
+        let long = shrunk_accuracy(&[
+            ("a".to_string(), (90.0, 10.0)),
+            ("b".to_string(), (60.0, 40.0)),
+        ]);
+        assert!(long[0].1 > 0.85 && long[1].1 < 0.65, "{long:?}");
+        let none = shrunk_accuracy(&[("a".to_string(), (0.0, 0.0)), ("b".to_string(), (0.0, 0.0))]);
+        assert!(
+            none.iter().all(|(_, p)| (p - 0.5).abs() < 1e-12),
+            "{none:?}"
+        );
+    }
+
     #[test]
     fn the_record_weighs_a_voter_by_what_it_got_right() {
         let ballots = vec![
@@ -15298,13 +15380,14 @@ mod tests {
         assert_eq!(records["c"], (0.0, 1.0));
         let w = |to: &str| rows.iter().find(|r| r.to == to).unwrap().weight;
         assert_eq!(w("a"), 1.0, "a right voter stands at one");
-        assert!(w("c") < w("a"), "a wrong voter stands lower");
+        assert_eq!(w("c"), w("a"), "one outcome cannot tell the voters apart");
         assert_eq!(rows.len(), 6, "complete over the voters");
-        // The record accumulates: a second outcome against c lowers it further.
+        // The record accumulates: a second outcome against c sets it apart.
         let (rows2, records2) = learn_record(&ballots, "ship", &records, &[]).unwrap();
         assert_eq!(records2["c"], (0.0, 2.0));
         let w2 = |to: &str| rows2.iter().find(|r| r.to == to).unwrap().weight;
-        assert!(w2("c") <= w("c"));
+        assert_eq!(w2("a"), 1.0);
+        assert!(w2("c") < w2("a"), "two misses beside two hits stand lower");
         assert!(learn_record(&ballots, "  ", &records, &[]).is_err());
         // Records are read back off trust atoms, latest first.
         let atoms = vec![
