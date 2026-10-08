@@ -6,9 +6,10 @@
 # touches the seat that runs it. Needs the seat binaries on PATH and a
 # pack writer it may start.
 set -euo pipefail
-# grep -q stops reading at its first match. A verb that prints a later line,
-# such as the tracker commit after a claim, then dies of SIGPIPE, and under
-# pipefail the check fails though the line was there. Read everything.
+# grep -q stops reading at its first match, so a verb that prints a later
+# line, such as the tracker commit after a claim, dies of SIGPIPE. Under
+# pipefail the check then fails even when the line was there, so this
+# grep reads everything.
 grep() {
   case "${1-}" in
     -q) shift; command grep "$@" >/dev/null ;;
@@ -17,7 +18,9 @@ grep() {
   esac
 }
 here=$(cd "$(dirname "$0")" && pwd)
-# A seat the caller names would cast every scripted voter's ballot as itself.
+# A seat the caller names would cast every scripted voter's ballot as
+# itself. A pane tool the caller names is dropped too, so the scratch
+# seat picks from whatever tools answer here.
 unset LJOS_SEAT LJOS_PANE_TOOL
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
@@ -104,7 +107,7 @@ ljos trust reader reviewer 0.9 --about docs >/dev/null
 ljos consensus "$id2" | grep -q '"predictors": 2' || fail "surprisingly popular"
 ljos brief reviewer "$id2" | grep -q 'You are reviewer' || fail brief
 ljos brief reviewer "$id2" | grep -q "ljos vote $id2 --for" || fail "brief names the issue in its ballot line"
-ljos brief reviewer "$id2" | grep -q 'until your ballot is cast' || fail "brief seals the ballot"
+ljos brief reviewer "$id2" | grep -q 'until your ballot is cast' || fail "brief says to cast before reading a tally"
 ljos brief reviewer "$id2" | grep -q 'reviewer voted' && fail "a brief carries another's ballot"
 if ljos panel "$id2" --out "$root/panel-unbound" >/dev/null 2>&1; then fail "panel unbound"; fi
 ljos playbook "$id2" sit | grep -q '^sit$' || fail playbook
@@ -114,9 +117,10 @@ ljos panel "$id2" --out "$root/panel" | grep -q consensus || fail panel
 cal=$(ljos calibrate -p demo 2>&1 || true)
 echo "$cal" | grep -q weighs || { echo "$cal"; fail calibrate; }
 
-# Named outcomes: alice and bob always vote alike, carol and dave err on
-# their own. Beside the issue that closed on hold, five more name an
-# outcome, and the settle counts the pair as one voice.
+# Named outcomes: alice and bob always vote alike, dave errs on his own,
+# and carol errs once alone and once with them. Five more issues name an
+# outcome beside the one that closed on hold; the settle counts the pair
+# as one voice.
 for pattern in "a a a b" "a a b a" "b b a a" "a a a a" "b b b a"; do
   set -- $pattern
   x=$(vissue create -p demo "Named outcome $*" -q | tail -1)

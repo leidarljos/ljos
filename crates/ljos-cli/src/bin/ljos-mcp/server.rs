@@ -1394,7 +1394,8 @@ impl LjosServer {
         )
         .map_err(refused)?;
         let mut out = Vec::new();
-        // As the CLI: voters the named outcomes show erring together count once.
+        // The CLI does the same: the named outcomes show which voters
+        // err together, and those voters are discounted.
         if let Some((discount, line)) = settle_discount(&atoms) {
             with_discount(&mut steps, &discount);
             out.push(Said {

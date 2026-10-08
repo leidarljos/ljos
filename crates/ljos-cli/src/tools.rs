@@ -1,13 +1,14 @@
-//! The tools a runner lives in: a terminal multiplexer or an agent runtime
-//! that opens a pane the person can watch, hands the runner a line, and
-//! says whether the pane is still there.
+//! The tools a runner lives in: terminal multiplexers and agent runtimes. A
+//! tool opens a pane the person can watch and hands the runner a line, and
+//! its `alive` verb says whether the pane is still there.
 //!
 //! `[[tool]]` tables in harnesses.toml declare them beside the runners.
 //! herdr and tmux ship as shapes ([`SHIPPED_TOOLS`]); a table of the same
-//! name replaces a shipped one. Every verb is an argv with `{placeholders}`,
-//! so a tool the seat has never heard of is one table rather than a release.
-//! A tool that refuses says what it said: a shape gone stale against its
-//! tool is a loud failure, not a quiet fall to the next one.
+//! name replaces a shipped one. Every verb is an argv with
+//! `{placeholders}`, so a tool the seat has never heard of is one table. A
+//! tool that refuses is named with its own words and the next one is
+//! tried, so a shape gone stale against its tool shows in what `hand`
+//! returns.
 
 use std::collections::BTreeMap;
 
@@ -20,8 +21,9 @@ pub struct Tool {
     /// Exits 0 when the tool can open a pane on this machine now.
     #[serde(default)]
     pub detect: Vec<String>,
-    /// Ways to open the persona's pane in `{home}`, tried in order until one
-    /// exits 0. The pane runs `{script}` unless `run` is set.
+    /// Ways to open the persona's pane, tried in order until one exits 0.
+    /// The pane runs `{script}`, which changes to `{home}` first, or, when
+    /// `run` is set, starts as a shell that `run` types the script into.
     #[serde(default)]
     pub open: Vec<Vec<String>>,
     /// Where `open`'s JSON output names the new pane, as a JSON pointer.
@@ -34,12 +36,13 @@ pub struct Tool {
     /// Starts the pane script again in a pane whose runner exited.
     #[serde(default)]
     pub respawn: Vec<String>,
-    /// Hands the runner one line through the tool's agent interface; each
-    /// argv runs in order.
+    /// Hands the runner one line, through the tool's agent interface where
+    /// it has one and as typed keys where it does not; each argv runs in
+    /// order.
     #[serde(default)]
     pub prompt: Vec<Vec<String>>,
-    /// Types the line raw when `prompt` is refused, as for a runner the
-    /// tool does not recognise as an agent.
+    /// Types the line raw when `prompt` is refused or absent, as for a
+    /// runner the tool does not recognise as an agent.
     #[serde(default)]
     pub type_line: Vec<Vec<String>>,
     /// Exits 0 while the pane is there.
@@ -58,7 +61,8 @@ pub struct Tool {
 pub const SHIPPED_TOOLS: &str = r#"
 [[tool]]
 name = "herdr"
-# `status server` exits 0 with no server; a socket call does not.
+# `herdr status server` exits 0 even with no server running;
+# `workspace list` needs the socket, so it fails without one.
 detect = ["herdr", "workspace", "list"]
 # One workspace a persona, opened in its home as its seat; the root pane is
 # a shell, and the pane script is typed into it.
@@ -69,8 +73,9 @@ respawn = ["herdr", "pane", "run", "{pane}", "sh {script_q}"]
 prompt = [["herdr", "agent", "prompt", "{pane}", "{line}"]]
 type_line = [["herdr", "pane", "send-text", "{pane}", "{line}"], ["herdr", "pane", "send-keys", "{pane}", "enter"]]
 alive = ["herdr", "pane", "get", "{pane}"]
-# agent_not_found until herdr recognises the runner; a runner it never
-# recognises is typed to raw once this budget is spent.
+# `herdr agent wait` answers agent_not_found until herdr recognises the
+# runner. A runner it never recognises gets the line typed raw once
+# `ready_s` runs out.
 ready = ["herdr", "agent", "wait", "{pane}", "--until", "idle", "--until", "done", "--timeout", "5000"]
 ready_s = 20
 
@@ -159,7 +164,7 @@ pub struct Ran {
 ///
 /// # Errors
 ///
-/// The program is missing, or it exited non-zero.
+/// The verb is empty, the program will not start, or it exited non-zero.
 pub fn run(tool: &str, argv: &[String]) -> Result<Ran> {
     let Some((bin, rest)) = argv.split_first() else {
         bail!("{tool}: an empty verb");
@@ -229,7 +234,8 @@ pub fn available(declared: &[Tool], only: Option<&str>) -> Vec<Tool> {
 ///
 /// # Errors
 ///
-/// Every `open` refused, or `run` did.
+/// There is no `open` verb, every `open` refused, the pane pointer found no
+/// pane, or `run` refused.
 pub fn open(tool: &Tool, vars: &Vars) -> Result<String> {
     let mut refusals = Vec::new();
     for argv in &tool.open {
@@ -262,12 +268,13 @@ pub fn open(tool: &Tool, vars: &Vars) -> Result<String> {
     bail!("{}", refusals.join("; "))
 }
 
-/// Hand the runner one line: `prompt`, and `type_line` when the tool's
-/// agent interface refuses it.
+/// Hand the runner one line: `prompt`, and `type_line` when `prompt` is
+/// refused or absent.
 ///
 /// # Errors
 ///
-/// Both ways refused.
+/// `prompt` refused and there is no `type_line`, `type_line` refused, or
+/// the tool has neither.
 pub fn send(tool: &Tool, vars: &Vars) -> Result<()> {
     let steps = |list: &[Vec<String>]| -> Result<()> {
         for argv in list {
@@ -289,8 +296,9 @@ pub fn send(tool: &Tool, vars: &Vars) -> Result<()> {
     }
 }
 
-/// Wait until a fresh runner takes input: `ready` retried each second up
-/// to `ready_s`, or a plain sleep of `ready_s` for a tool with no `ready`.
+/// Wait until a fresh runner takes input: `ready` retried each second until
+/// `ready_s` runs out, or a plain sleep of `ready_s` for a tool with no
+/// `ready`.
 pub fn wait_ready(tool: &Tool, vars: &Vars) {
     let budget = std::time::Duration::from_secs(tool.ready_s.unwrap_or(0));
     if tool.ready.is_empty() {

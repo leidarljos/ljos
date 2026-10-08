@@ -94,7 +94,7 @@ pub struct Harness {
     #[serde(default)]
     pub hooks_named: Option<String>,
     /// `cursor` for a hooks file in Cursor's flat shape (`version` 1, one
-    /// entry an event), written by [`cursor_hook_step`].
+    /// entry an event), written by `cursor_hook_step`.
     #[serde(default)]
     pub hooks_format: Option<String>,
     /// The events the memory hook fires on. Empty means [`HOOK_EVENTS`],
@@ -131,17 +131,18 @@ pub struct Harness {
     /// so a persona's next hand-off continues its conversation.
     #[serde(default)]
     pub resume: Vec<String>,
-    /// Where the runner loads agent definitions from. `onboard` and `ljos
-    /// agents` write each persona there as `ljos-<name>.md`
+    /// Where the runner loads agent definitions from. `onboard` and
+    /// `ljos agents` write each persona there as `ljos-<name>.md`
     /// ([`persona_agent`]): a subagent the runner spawns by name to cast
     /// that persona's ballot.
     #[serde(default)]
     pub agents: Option<String>,
     /// How the runner answers one prompt and exits, for a decision panel's
-    /// members: `{prompt_file}` is the member's task file, `{prompt}` its
-    /// text, `{cwd}` where the panel opened and `{persona}` the persona. A
-    /// panel opens its members on the seat's own runner when that runner
-    /// has one ([`panel_member_argv`]).
+    /// members. `{prompt_file}` is the member's task file and `{prompt}`
+    /// its text. `{cwd}` is where the panel opened, and `{persona}` the
+    /// persona. A panel opens its members on the runner
+    /// `LJOS_PANEL_RUNNER` names, else on the seat's own runner when that
+    /// runner has one ([`panel_member_argv`]).
     #[serde(default)]
     pub headless: Vec<String>,
 }
@@ -150,12 +151,12 @@ pub struct Harness {
 /// runner redraws it every few hundred milliseconds while a turn runs.
 const STATUSLINE_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The seat's line for a runner's status bar (Grok Build's
-/// `[ui.status_line]`, Claude Code's `statusLine`): the seat, the issue
-/// this conversation holds, and how many claims are due for review.
-/// `input` is the runner's status JSON; only its `session_id` is read, to
-/// keep one cached line a session. A pack that does not answer within 300
-/// ms is said to be down rather than waited on.
+/// The seat's line for a runner's status bar, Grok Build's
+/// `[ui.status_line]` or Claude Code's `statusLine`. It shows the seat,
+/// the issue this conversation holds, and how many claims are due for
+/// review. `input` is the runner's status JSON. Only its `session_id` is
+/// read, to keep one cached line a session. A pack that does not answer
+/// within 300 ms shows as `pack down`.
 #[must_use]
 pub fn statusline(input: &str) -> String {
     let session: String = serde_json::from_str::<Value>(input.trim())
@@ -203,9 +204,10 @@ pub fn statusline(input: &str) -> String {
     line
 }
 
-/// Rewrite the agent definitions of every runner that already has an
-/// agents directory, after a persona changed. A runner whose directory
-/// does not exist yet is left to `onboard` or `ljos agents`.
+/// Rewrite the agent definitions after a persona changed, in every agents
+/// directory harnesses.toml names and the disk has. A directory the file
+/// does not name, such as the Grok one a first `onboard` fills from the
+/// shipped shape, is left to `onboard` or `ljos agents`.
 pub fn refresh_agents() {
     let Ok(all) = harnesses_from(&harnesses_path()) else {
         return;
@@ -223,17 +225,18 @@ pub fn refresh_agents() {
     }
 }
 
-/// The line in an agent definition that says `ljos agents` wrote it, so it
-/// may rewrite or remove it.
+/// The line in an agent definition that says `ljos agents` wrote it. Only
+/// a file that carries it is removed once its persona leaves the pack.
 const AGENT_MARK: &str =
     "# ljos agents writes this file from the pack; change the persona, not the file.";
 
 /// A persona as a runner's agent definition: Markdown under YAML front
 /// matter, the shape Claude Code and Grok Build both read. A runner spawns
-/// it by name (in Grok, `spawn_subagent` with `subagent_type` `ljos-NAME`)
-/// to have the persona brief itself, cast one ballot before reading the
-/// others, note why, and stop. Grok reads `capabilityMode: execute`: read
-/// and run commands, edit nothing. Returns the file name and the text.
+/// it by name; in Grok that is `spawn_subagent` with `subagent_type`
+/// `ljos-NAME`. The persona briefs itself, casts one ballot before reading
+/// the others, notes why, and stops. Grok reads `capabilityMode: execute`:
+/// it reads and runs commands and has no edit tool. Returns the file name
+/// and the text.
 #[must_use]
 pub fn persona_agent(p: &Persona) -> (String, String) {
     let slug: String = p
@@ -277,7 +280,8 @@ pub fn persona_agent(p: &Persona) -> (String, String) {
 }
 
 /// Write each persona as an agent definition in `dir`, and remove the ones
-/// this verb wrote for personas the pack no longer holds.
+/// this verb wrote for personas the pack no longer holds. A pack with no
+/// personas leaves the directory as it is.
 fn agents_step(dir: &Path, personas: &[Persona], dry: bool) -> Step {
     let what = "agents".to_string();
     if personas.is_empty() {
@@ -362,7 +366,8 @@ fn agents_step(dir: &Path, personas: &[Persona], dry: bool) -> Step {
 ///
 /// # Errors
 ///
-/// The runners file is unreadable, or the pack does not answer.
+/// The runners file is unreadable, no runner in it names an agents
+/// directory, or the pack does not answer.
 pub fn export_agents(harness: Option<&str>, dry: bool) -> Result<Vec<Step>> {
     let mut all = harnesses_from(&harnesses_path())?;
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
@@ -612,22 +617,24 @@ skills = "~/.grok/skills"
 # A persona reasoning through this runner resumes the latest session of
 # its home directory with this argv.
 resume = ["grok", "--continue"]
-# Each persona as a Grok agent definition, spawned by name; and the argv a
-# decision panel's member runs headless.
+# Grok spawns a persona by name from its definition in the agents
+# directory, and a decision panel's member runs headless with this argv.
 agents = "~/.grok/agents"
 headless = ["grok", "--prompt-file", "{prompt_file}", "--yolo", "--max-turns", "6", "--effort", "low", "--disallowed-tools", "Agent", "--cwd", "{cwd}"]
 
-# The tools a persona's runner lives in. herdr (its agent API, when its
-# server answers) and tmux ship as shapes; `ljos doctor` names the one that
-# opens panes, and LJOS_PANE_TOOL picks one. A table here replaces the
-# shipped shape of its name, or adds a tool. Each verb is an argv; {name},
-# {label}, {session}, {home}, {script}, {script_q}, {pane} and {line} are
-# filled. `open` lists ways to open the pane, the first that exits 0 wins;
-# `pane_pointer` reads the pane off open's JSON; `run` types the pane
-# script into a pane that starts as a shell; `respawn` restarts it in a
-# pane whose runner exited; `prompt` hands a line, `type_line` types it raw
-# when prompt is refused; `alive` exits 0 while the pane is there; `ready`
-# exits 0 once the runner takes input, retried for `ready_s` seconds.
+# The tools a persona's runner lives in. Two ship as shapes: herdr, through
+# its agent API when its server answers, and tmux. `ljos doctor` names the
+# one that opens panes, and LJOS_PANE_TOOL narrows the choice to one. A
+# table here replaces the shipped shape of its name, or adds a tool. Verbs
+# are argvs with {name}, {label}, {session}, {home}, {script}, {script_q},
+# {pane} and {line} filled. `detect` exits 0 when the tool can be used;
+# `open` lists ways to open the pane, and the first that exits 0 wins;
+# `pane_pointer` reads the pane off open's JSON. `run` types the pane script
+# into a pane that starts as a shell, and `respawn` restarts it in a pane
+# whose runner exited. `prompt` hands a line, and `type_line` types it raw
+# when prompt is refused or absent. `alive` exits 0 while the pane is there;
+# `ready` exits 0 once the runner takes input, tried each second until
+# `ready_s` seconds run out.
 #
 # [[tool]]
 # name = "tmux"
@@ -1346,8 +1353,9 @@ fn version_like(s: &str) -> bool {
     t.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
-/// Script stems that name an entry point, not a program: a runner shipped
-/// as `dist/index.js` or `cli.py` is the directory above.
+/// Script stems that name an entry point, not a program. A runner shipped
+/// as `pkg/dist/index.js` takes its name from the nearest directory above
+/// that is not a place ([`PLACES`]), here `pkg`.
 const ENTRY_STEMS: &[&str] = &["index", "main", "cli", "server", "entry", "run", "start"];
 
 /// A program's name from how it was started: the last path component of
@@ -2404,10 +2412,10 @@ fn hook_installed(file: &Path, events: &[String]) -> bool {
 }
 
 /// The events the seat's hook takes in Cursor's hooks file, each with its
-/// timeout in seconds: the gate before a shell command, the prompt (held,
-/// since Cursor does not hand a prompt hook's context to the model), the
-/// tool results that deliver it, a failure, a compaction, the stop and the
-/// end of the session.
+/// timeout in seconds. They are the gate before a shell command, the
+/// prompt, the tool results that deliver its note, a failure, a
+/// compaction, the stop, and the end of the session. A prompt's note is
+/// held, since Cursor does not hand a prompt hook's context to the model.
 pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
     ("beforeShellExecution", 10),
     ("beforeSubmitPrompt", 20),
@@ -2418,13 +2426,13 @@ pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
     ("sessionEnd", 5),
 ];
 
-/// Merge the seat's hook into Cursor's hooks file, `{"version": 1, "hooks":
-/// {"<event>": [{"command": ..., "timeout": ...}]}}`: flat entries, not
-/// Claude's matcher groups. Cursor also runs the hooks in
-/// `~/.claude/settings.json` by default, and the seat answers either in
-/// Cursor's shape (it reads `cursor_version` off the payload), so when that
-/// file already carries the seat's hook nothing is written here: two
-/// copies would answer every event twice.
+/// Merge the seat's hook into Cursor's hooks file,
+/// `{"version": 1, "hooks": {"<event>": [{"command": ..., "timeout": ...}]}}`.
+/// Its entries are flat, not Claude's matcher groups. Cursor also runs the
+/// hooks in `~/.claude/settings.json`, and the seat answers both in Cursor's
+/// shape: it reads `cursor_version` off the payload. Where that file carries
+/// the seat's hook, nothing is written here. Two copies would answer every
+/// event twice.
 fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     let what = "hook".to_string();
     let claude_has_seat = std::fs::read_to_string(claude_settings)
@@ -2619,12 +2627,12 @@ pub enum HookShape {
     /// Cursor's `beforeShellExecution`: snake_case stdin carrying
     /// `cursor_version`, the command at the top level. It answers
     /// `permission` (`allow`, `deny` or `ask`, which Cursor asks) with
-    /// `user_message` and `agent_message`, and blocks on an answer that is
-    /// not JSON.
+    /// `user_message` and `agent_message`. Cursor blocks the command when
+    /// the answer is not JSON.
     CursorShell,
     /// Every other Cursor event. Context reaches the model as
-    /// `additional_context` on `postToolUse`, `postToolUseFailure` and
-    /// `sessionStart` only, and a `stop` is held with `followup_message`;
+    /// `additional_context` only on `postToolUse`, `postToolUseFailure`
+    /// and `sessionStart`. A `stop` is held with `followup_message`.
     /// `preToolUse` takes `permission` but does not enforce an `ask`.
     Cursor,
 }
@@ -2963,11 +2971,12 @@ fn is_atom_id(s: &str) -> bool {
 }
 
 /// A conversation about to be compacted keeps the issue it holds and loses
-/// what the seat handed it. The memories injected so far fire together, as
-/// at a session's end, and leave the seen list, so a prompt after the
-/// compaction can be handed them again; the nudges stay seen. When the
-/// conversation holds an issue, the next delivery opens with it
-/// ([`compaction_note`]). Returns how many fired.
+/// what the seat handed it. Every injected memory leaves the seen list, as
+/// does the mark that the held note was echoed, while the other named keys
+/// stay seen, the nudges and panel marks among them. When two or more
+/// memories were injected, up to eight of them fire together, as at a
+/// session's end. When the conversation holds an issue, the next delivery
+/// opens with it ([`compaction_note`]). Returns how many fired.
 pub fn rearm_after_compaction(session: Option<&str>) -> usize {
     let Some(session) = session else {
         return 0;
@@ -3025,8 +3034,9 @@ pub fn compaction_note() -> Option<String> {
     ))
 }
 
-/// The error a failed tool reported: Grok's `error`, or the error a
-/// runner's `tool_response` carries.
+/// The error a failed tool reported. The first field set wins, in this
+/// order: Grok's `error`, Cursor's `error_message`, `tool_response.error`,
+/// `toolResult.error` and `tool_response.stderr`.
 #[must_use]
 pub fn tool_error(input: &str) -> String {
     let v: Value = serde_json::from_str(input.trim()).unwrap_or_default();
@@ -3045,13 +3055,13 @@ pub fn tool_error(input: &str) -> String {
     .to_string()
 }
 
-/// What this seat knows that bears on a tool that just failed: the pack
-/// searched on the command and the error it gave, kept to hits two scorers
-/// agree on, near the best score, that share [`FAILURE_SHARED_WORDS`]
-/// content words with the cue, stand as rules or reviewed lessons as a
-/// prompt's do, and were not handed over earlier in the session. A failure is
-/// when a lesson pays, and it is cued by what went wrong; asking only on
-/// failure costs nothing on the calls that worked.
+/// What this seat knows that bears on a tool that just failed. The pack is
+/// searched on the command and the error it gave. Where two or more
+/// scorers ran, two must name a hit (`agreed`), and it must score 0.6 of
+/// the best or more ([`HOOK_SCORE_FLOOR`]). It must share at least
+/// [`FAILURE_SHARED_WORDS`] content words with the cue and be a preference
+/// or a claim tagged standing (`is_refresher`). One handed over earlier in
+/// the session is left out, and calls that worked are not searched.
 #[must_use]
 pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
     let error: String = error.chars().take(400).collect();
@@ -3347,9 +3357,10 @@ fn shared_cue_words(text: &str, cue: &str) -> usize {
         .count()
 }
 
-/// The content words a lesson must share with a failed command and its
-/// error. A failure cue is long and noisy, so one word in common (`build`
-/// in an npm error and in "Grok Build") is a coincidence, not a match.
+/// How many content words a lesson must share with a failed command and
+/// its error. A failure cue is long and noisy, so one word in common
+/// (`build` in an npm error and in "Grok Build") is a coincidence, not a
+/// match.
 pub const FAILURE_SHARED_WORDS: usize = 2;
 
 #[cfg(test)]
@@ -3521,10 +3532,11 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         // prompt Jev was not asked about gets the lexical search.
         let rerank = !jev::enabled();
         // The cross-encoder only reorders the fused top twenty, and every
-        // filter below but the score floor reads fields it leaves alone, so
-        // when none of those twenty could pass them no order of them can:
-        // the prompt gets nothing either way, and the second stage, a few
-        // hundred milliseconds a prompt, is not run.
+        // filter below but the score floor reads fields it leaves alone.
+        // Reordering cannot change which of the twenty pass those
+        // filters. When none does, no memory reaches the prompt either
+        // way, and the second stage, a few hundred milliseconds a prompt,
+        // is not run.
         if rerank {
             if let Ok(pool) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
                 packset_search_opts(cue, RERANK_POOL, false)
@@ -3959,10 +3971,11 @@ fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The argv of one headless panel member: the `headless` template of the
-/// runner the panel names (`LJOS_PANEL_RUNNER`), else of the seat's own
-/// runner, so a panel opened under Claude Code runs Claude; else Grok's
-/// flags. `LJOS_MEMBER_BIN` names the stand-in used in tests.
+/// The argv of one headless panel member, from the `headless` template of
+/// the runner the panel names (`LJOS_PANEL_RUNNER`) or else of the seat's
+/// own runner. A panel opened under Claude Code runs Claude; a runner with
+/// no template runs `grok` with its own flags. `LJOS_MEMBER_BIN` names the
+/// stand-in used in tests.
 #[must_use]
 pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -> Vec<String> {
     let stand_in = std::env::var("LJOS_MEMBER_BIN").ok();
@@ -4698,8 +4711,9 @@ pub fn hook_already_running(call: &HookCall) -> bool {
 /// longer than that.
 pub const HOOK_RERANK_BUDGET_MS: u64 = 2500;
 
-/// The head of the fused ranking packset's cross-encoder reorders
-/// (`RERANK_DEPTH`); its first stage returns this many when asked to rerank.
+/// How many fused hits packset's cross-encoder reorders (its
+/// `RERANK_DEPTH`). Its first stage returns this many when asked to
+/// rerank.
 const RERANK_POOL: u32 = 20;
 
 /// Run `f` with the pack client's request timeout set to `ms`, then put
@@ -5117,12 +5131,12 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
 }
 
 /// An answer in Cursor's hook contract. A gate always answers, because
-/// Cursor blocks a permission hook whose answer is not JSON: `allow`, or
-/// the verdict with its reason to the person (`user_message`) and to the
-/// agent (`agent_message`); an `ask` where Cursor does not enforce one is a
-/// deny that says so. Context goes where Cursor hands it to the model:
-/// `additional_context` after a tool result, a failed one, or at session
-/// start; a held stop is a `followup_message`.
+/// Cursor blocks the command when a permission hook's answer is not JSON.
+/// It answers `allow`, or the verdict with its reason to the person
+/// (`user_message`) and to the agent (`agent_message`). An `ask` where
+/// Cursor does not enforce one is a deny that says so. Context goes where
+/// Cursor hands it to the model: `additional_context` after a tool result,
+/// a failed one, or at session start. A held stop is a `followup_message`.
 fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
@@ -8320,8 +8334,9 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
             continue;
         }
         // Consent given in the chat is what the person submits; keys an
-        // agent types into a pane would forge it. Every multiplexer verb
-        // that writes into another pane's input counts.
+        // agent types into a pane would forge it. Each multiplexer below
+        // writes into another pane's input with these verbs; xdotool,
+        // wtype and ydotool type into whatever window has focus.
         let has = |verbs: &[&str]| words.iter().any(|w| verbs.contains(&w.as_str()));
         let input_flag = words
             .iter()
@@ -8973,8 +8988,8 @@ pub fn learn_and_write(
     Ok((rows, moved, calibration))
 }
 
-/// POST the option `issue` closed on. Read beside the issue's ballots, it
-/// says which voters were right, which [`settle_discount`] needs.
+/// POST the option `issue` closed on. The issue's ballots and its outcome
+/// say which voters were right, and [`settle_discount`] needs that.
 pub fn write_outcome(issue: &str, choice: &str) -> Result<Value> {
     let (issue, choice) = (issue.trim(), choice.trim());
     if issue.is_empty() || choice.is_empty() {
@@ -8990,7 +9005,8 @@ pub fn write_outcome(issue: &str, choice: &str) -> Result<Value> {
         .context("outcome: POST /v1/atoms failed")
 }
 
-/// The sentence an outcome is stored under, clipped to the pack's cap.
+/// The sentence an outcome is stored under, clipped to 80 characters of
+/// issue and 200 of choice, inside the pack's text cap.
 #[must_use]
 pub fn outcome_text(issue: &str, choice: &str) -> String {
     let issue: String = issue.chars().take(80).collect();
@@ -9029,8 +9045,8 @@ pub fn outcomes_of(atoms: &[Value]) -> std::collections::BTreeMap<String, String
 }
 
 /// Named outcomes a pair must share before `ljos-consensus correlation`
-/// reads its correlation (its `--min-shared` default). Below it no discount
-/// can move, so the reading is not asked for.
+/// reads its correlation (its `--min-shared` default). Below it no
+/// discount can move, so the reading is not asked for.
 pub const MIN_NAMED_OUTCOMES: usize = 5;
 
 /// The correlation reading over the issues whose outcome is named: each
@@ -9180,14 +9196,15 @@ pub fn records_from_atoms(atoms: &[Value]) -> std::collections::BTreeMap<String,
 
 /// Each voter's accuracy from its record, shrunk toward the panel's pooled
 /// accuracy by empirical Bayes (Efron and Morris,
-/// doi:10.1080/01621459.1975.10479864). The prior's strength is what the
-/// spread between the records leaves once binomial noise is taken out, the
-/// noise from the pooled variance with `N / (N - 1)`. When nothing is left,
-/// as on a panel's first outcome, every voter gets the pooled accuracy and
-/// the panel weighs everyone alike; a long record keeps the differences it
-/// shows. Measured in the consensus crate's `correlation_history`: plug-in
-/// log odds of a short record lose to a count by up to six and a half
-/// points, these by at most two.
+/// doi:10.1080/01621459.1975.10479864). The prior weakens as the records
+/// spread beyond binomial noise. The noise is the pooled variance times
+/// `N / (N - 1)`, divided by each record's length and averaged, where `N`
+/// counts the ballots the records hold. When the records differ no more
+/// than noise would make them, as on a panel's first outcome, every voter
+/// gets the pooled accuracy. A long record keeps the differences it shows.
+/// The consensus crate's `correlation_history` example measures the gain:
+/// plug-in log odds trail a count by 6.4 points on seven similar voters at
+/// three outcomes, and shrunk ones by 1.2.
 #[must_use]
 pub fn shrunk_accuracy(records: &[(String, Standing)]) -> Vec<(String, f64)> {
     let (hits, seen) = records.iter().fold((0.0, 0.0), |(h, n), (_, (hit, miss))| {
@@ -9206,7 +9223,9 @@ pub fn shrunk_accuracy(records: &[(String, Standing)]) -> Vec<(String, f64)> {
         let pq = pooled * (1.0 - pooled) * seen / (seen - 1.0);
         let noise = pq * read.iter().map(|r| 1.0 / r.1).sum::<f64>() / k;
         let between = spread - noise;
-        // A first outcome leaves exactly none, which rounds to about 1e-17.
+        // On a first outcome the spread is all noise, so `between` is zero
+        // in exact arithmetic. Computed, it lands within about 1e-16 of
+        // zero, which is what the 1e-12 floor is for.
         (between > 1e-12).then(|| (pq / between - 1.0).max(0.0))
     } else {
         None
@@ -9227,11 +9246,11 @@ pub fn shrunk_accuracy(records: &[(String, Standing)]) -> Vec<(String, f64)> {
 /// far, this outcome added, give its accuracy shrunk toward the panel's
 /// ([`shrunk_accuracy`]), and the rows are the log odds of that scaled to
 /// the best voter at one ([`calibration_weights`]). Measured against
-/// multiplicative shrinking (Hedge) on voters of known accuracy, the record
-/// reaches the batch calibration and the shrink does not: a voter is
-/// weighed by what it got right, not by how many times it has been
-/// punished. One outcome cannot tell voters apart, so the first leaves them
-/// alike. Rows are complete over the voters and scoped to `about`.
+/// Hedge's multiplicative update on voters of known accuracy, the record
+/// reaches the batch calibration and Hedge does not: a voter is weighed by
+/// what it got right, not by how many times it has been punished. One
+/// outcome cannot tell voters apart, so the first leaves them alike. Rows
+/// are complete over the voters and scoped to `about`.
 ///
 /// # Errors
 ///
@@ -15517,7 +15536,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Exact values from Python's fractions: pooled 7/10, strength 397/23.
+    /// A first outcome leaves the voters alike; a long record keeps them
+    /// apart. The ten-outcome records match Python's fractions: pooled
+    /// 7/10, strength 397/23.
     #[test]
     fn shrinking_weighs_a_first_outcome_alike_and_keeps_a_record_apart() {
         let first = shrunk_accuracy(&[
@@ -18330,10 +18351,10 @@ mod tests {
         assert_eq!(inbox.len(), 2, "each task keeps its own file");
     }
 
-    /// The same hand-off through a running herdr server: a workspace in the
-    /// persona's home, the pane script typed into its shell, the line typed
-    /// raw because herdr does not know the stand-in runner as an agent, and
-    /// the second task to the same pane.
+    /// The same hand-off through a running herdr server. It opens a
+    /// workspace in the persona's home and types the pane script into its
+    /// shell. The line is typed raw, because herdr does not know the
+    /// stand-in runner as an agent. A second task goes to the same pane.
     #[test]
     fn a_persona_session_opens_in_herdr_when_its_server_answers() {
         let _g = env_guard();
@@ -18538,10 +18559,8 @@ mod tests {
         }
     }
 
-    /// Cursor is read off its payload whichever file registered the hook,
-    /// and answered in its contract: a gate always answers, an ask Cursor
-    /// cannot enforce is a deny, context rides `additional_context`, a held
-    /// stop is a `followup_message`.
+    /// Cursor is read off its payload, whichever file registered the hook,
+    /// and answered in its contract ([`cursor_output`]).
     #[test]
     fn cursor_is_read_off_its_payload_and_answered_in_its_contract() {
         let shell = hook_call(
@@ -18628,10 +18647,12 @@ mod tests {
         );
     }
 
-    /// A persona becomes an agent definition a runner spawns by name: front
-    /// matter Grok and Claude Code read, a body that briefs, seals the
-    /// ballot and stops; written once, rewritten only when it changes, and
-    /// removed with its persona while a file the seat did not write stays.
+    /// A persona becomes an agent definition a runner spawns by name. Grok
+    /// and Claude Code read its front matter; its body tells the persona
+    /// to brief itself, cast one ballot before it reads the others, note
+    /// why and stop. A file is rewritten only when it changes and removed
+    /// with its persona, and a file without the seat's mark is never
+    /// removed.
     #[test]
     fn a_persona_is_an_agent_a_runner_spawns_by_name() {
         let p = Persona {
@@ -18729,8 +18750,7 @@ mod tests {
         assert_eq!(stand_in[0], "stand-in");
     }
 
-    /// The status line is cached a session, so a runner redrawing it every
-    /// few hundred milliseconds does not ask the stores each time.
+    /// A second draw within [`STATUSLINE_TTL`] reuses the session's line.
     #[test]
     fn a_status_line_is_cached_for_its_session() {
         let _g = env_guard();
@@ -18754,8 +18774,9 @@ mod tests {
         assert_eq!(line, "ljos cached · seat-x · 2 due");
     }
 
-    /// A failed tool and a compaction reach the seat under every runner's
-    /// spelling, and the error is read where each runner puts it.
+    /// A failed tool and a compaction reach the seat under snake, Pascal
+    /// and camel case, and the error is read from Grok's `error` and a
+    /// runner's `tool_response.error`.
     #[test]
     fn a_failure_and_a_compaction_are_named_and_read() {
         for raw in [

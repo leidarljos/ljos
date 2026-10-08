@@ -12,12 +12,12 @@
 //! since a long text typed into a runner's prompt submits at its first
 //! line break.
 //!
-//! The pane opens in the first tool that answers ([`crate::tools`]): herdr
-//! through its agent API, else tmux, else a `[[tool]]` the file declares. A
-//! tool that refuses is named in what `hand` returns. The pane script
-//! supervises its runner as an OTP supervisor does a transient child: a
-//! runner that exits non-zero is resumed, at most [`RESTARTS`] times in
-//! [`RESTART_WINDOW_S`] seconds, and a runner that exits 0 is done.
+//! The pane opens in the first tool that answers ([`crate::tools`]): a
+//! `[[tool]]` the file declares, else herdr through its agent API, else
+//! tmux. A tool that refuses is named in what `hand` returns. The pane
+//! script resumes a runner that exits non-zero, [`RESTARTS`] times in
+//! [`RESTART_WINDOW_S`] seconds before it gives up; a runner that exits 0
+//! is done.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::tools::{self, Tool, Vars};
 
-/// The tmux session persona windows open in, and the herdr label prefix.
+/// The tmux session persona windows open in. A herdr workspace is
+/// labelled `persona-NAME` instead.
 pub const PERSONA_SESSION: &str = "ljos-personas";
 
 /// How many times a pane resumes a runner that failed, within
@@ -95,10 +96,10 @@ pub fn home(name: &str) -> PathBuf {
 }
 
 /// The script a persona's pane runs: the runner as the seat named after
-/// the persona, in its home, resumed with `again` when it fails (a
-/// transient restart, bounded by [`RESTARTS`] in [`RESTART_WINDOW_S`]),
-/// then a shell left open for the person. While a runner is up, the
-/// script's pid is in `.runner.pid`.
+/// the persona, in its home, then a shell left open for the person. A
+/// runner that fails is resumed with `again`, [`RESTARTS`] times in
+/// [`RESTART_WINDOW_S`] seconds before the pane gives up. The script's
+/// pid is in `.runner.pid` while a runner is up.
 #[must_use]
 pub fn pane_script(name: &str, argv: &[String], again: &[String], home: &Path) -> String {
     let words = |a: &[String]| {
@@ -236,8 +237,9 @@ pub fn live_pane(name: &str) -> Option<String> {
 ///
 /// # Errors
 ///
-/// An unknown runner, no tool that opens a pane, or the line not reaching
-/// the pane.
+/// An unknown runner, an unwritable inbox, pane script or `.pane`
+/// record, no tool that opens a pane, a refused `respawn`, or the line
+/// not reaching the pane.
 pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
     let home = home(name);
     let inbox = home.join("inbox");

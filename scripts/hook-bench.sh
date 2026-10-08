@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Prompt-hook latency on the seat this shell points at: each prompt three
-# times, each under a fresh session (a repeated session id hits the hook's
-# duplicate check and skips the search), with every answer kept so two
-# builds can be compared byte for byte.
+# Prompt-hook latency on the seat this shell points at. Each prompt runs
+# three times, each under a fresh session, since a repeated session id hits
+# the hook's duplicate check and skips the search. Every answer is kept, so
+# two builds can be compared byte for byte.
 #
 #   scripts/hook-bench.sh OUT_DIR [PROMPT_FILE]
-#   cmp -r BEFORE_DIR AFTER_DIR   # minus times.txt: the answers
+#   diff -r -x times.txt BEFORE_DIR AFTER_DIR   # the answers, byte for byte
 #
-# PROMPT_FILE holds one prompt a line; absent, eight that mix prompts a
-# young pack holds nothing standing on with two that name a toolchain rule
-# (`ljos prefer "Run cargo test with rustc 1.88 or newer; rustc 1.83 lacks
-# edition2024."` makes those two inject it).
+# PROMPT_FILE holds one prompt a line; the default is eight prompts. Most
+# name nothing a young pack holds, and two name a toolchain rule. Those two
+# inject the rule once the pack holds it:
+#
+#   ljos prefer "Run cargo test with rustc 1.88 or newer; rustc 1.83 lacks edition2024."
 set -u
 out=${1:?usage: hook-bench.sh OUT_DIR [PROMPT_FILE]}
 mkdir -p "$out"

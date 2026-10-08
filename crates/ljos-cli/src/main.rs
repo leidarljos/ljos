@@ -275,12 +275,14 @@ enum Cmd {
     },
     /// The personas the pack holds: name, anchor, domains and view, one per line.
     Personas,
-    /// Write every persona as an agent definition in each runner's agents directory: a subagent the runner spawns by name to cast that persona's sealed ballot.
+    /// Write every persona as an agent definition in each runner's agents
+    /// directory. A runner spawns it by name, as a subagent that casts
+    /// that persona's ballot before it reads the others.
     Agents {
-        /// One runner from harnesses.toml; every runner with an agents directory when absent.
+        /// One runner, from harnesses.toml or the shipped shapes; every runner in harnesses.toml with an agents directory when absent.
         #[arg(long)]
         harness: Option<String>,
-        /// Say what would be written and removed.
+        /// Report what would be written and removed, and change nothing.
         #[arg(long)]
         dry_run: bool,
     },
@@ -1165,17 +1167,18 @@ fn main() -> Result<()> {
                     mark_seen(call.session.as_deref(), &ids);
                     ctx
                 }
-                // A tool that failed is when a lesson pays: the pack is
-                // searched on the command and its error, and what bears on
-                // the failure goes back with the result.
+                // The pack is searched on a failed tool's command and its
+                // error. What bears on the failure goes back with the
+                // result.
                 "PostToolUseFailure" => {
                     let error = ljos_cli::tool_error(&input);
                     let (ctx, ids) = ljos_cli::failure_note(&call, &error, 3);
                     mark_seen(call.session.as_deref(), &ids);
                     ctx
                 }
-                // Compaction drops what the seat handed the conversation:
-                // its memories fire and leave the seen list, and the held
+                // Compaction drops what the seat handed the conversation.
+                // Its memories leave the seen list, and up to eight fire
+                // together when two or more were handed over. The held
                 // issue is said again on the next delivery.
                 "PreCompact" => {
                     let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
@@ -1285,7 +1288,8 @@ fn main() -> Result<()> {
                 &personas,
                 &tags,
             )?;
-            // Voters the named outcomes show erring together count once.
+            // The named outcomes show which voters err together, and
+            // those voters are discounted.
             if let Some((discount, line)) = settle_discount(&atoms) {
                 with_discount(&mut steps, &discount);
                 println!("{line}");
