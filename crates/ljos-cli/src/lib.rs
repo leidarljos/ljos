@@ -14179,11 +14179,20 @@ mod tests {
     fn an_entry_script_is_named_by_the_directory_that_ships_it() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            name_from_argv(&argv(&["/exec-daemon/node", "/exec-daemon/index.js", "serve"])).as_deref(),
+            name_from_argv(&argv(&[
+                "/exec-daemon/node",
+                "/exec-daemon/index.js",
+                "serve"
+            ]))
+            .as_deref(),
             Some("exec-daemon")
         );
         assert_eq!(
-            name_from_argv(&argv(&["node", "/usr/lib/node_modules/opencode-ai/dist/index.js"])).as_deref(),
+            name_from_argv(&argv(&[
+                "node",
+                "/usr/lib/node_modules/opencode-ai/dist/index.js"
+            ]))
+            .as_deref(),
             Some("opencode-ai")
         );
         assert_eq!(
@@ -14194,7 +14203,10 @@ mod tests {
             name_from_argv(&argv(&["/home/u/.local/share/claude/versions/2.1.266"])).as_deref(),
             Some("claude")
         );
-        assert_eq!(name_from_argv(&argv(&["node", "index.js"])).as_deref(), Some("index"));
+        assert_eq!(
+            name_from_argv(&argv(&["node", "index.js"])).as_deref(),
+            Some("index")
+        );
     }
 
     #[test]
@@ -17300,11 +17312,16 @@ mod tests {
         .is_some());
         assert!(seat_guard(&format!("zellij action write-chars 'approve {id}'")).is_some());
         assert!(seat_guard(&format!("wezterm cli send-text 'approve {id}'")).is_some());
-        assert!(seat_guard(&format!("kitty @ send-text --match title:grok 'approve {id}'")).is_some());
+        assert!(seat_guard(&format!(
+            "kitty @ send-text --match title:grok 'approve {id}'"
+        ))
+        .is_some());
         assert!(seat_guard(&format!("screen -S seat -X stuff 'approve {id}'")).is_some());
         assert!(seat_guard(&format!("wtype 'approve {id}'")).is_some());
         assert!(seat_guard("tmux send-keys -t seat 'cargo test' Enter").is_none());
-        assert!(seat_guard("herdr agent prompt reviewer 'Review the current diff' --wait").is_none());
+        assert!(
+            seat_guard("herdr agent prompt reviewer 'Review the current diff' --wait").is_none()
+        );
         assert!(seat_guard(&format!("vissue note x \"asked to approve {id}\"")).is_none());
     }
 
