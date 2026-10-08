@@ -19,9 +19,10 @@ use ljos_cli::{
     packset_consolidate, packset_forget, packset_island_as, packset_search_as_of, packset_write_as,
     panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
     predictions_of, read_campaign, receive, release, remember_findings, resolve_assignee,
-    rows_about, run_captured, runner_pid, search_reading, seat_name, sitting_gated, timeline,
-    topic_words, tracker_show_json, trust_from_pack, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    rows_about, run_captured, runner_pid, search_reading, seat_name, settle_discount,
+    sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack, with_discount,
+    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES,
+    LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1378,7 +1379,12 @@ impl LjosServer {
             .collect();
         let trust = rows_about(&trust_from_pack().unwrap_or_default(), &topic);
         let personas = personas_from_pack().unwrap_or_default();
-        let steps = consensus_steps_for(
+        let atoms = pack()
+            .and_then(|c| {
+                ljos_cli::atoms_lean(&c, &c.workspace()).context("consensus: GET /v1/atoms failed")
+            })
+            .unwrap_or_default();
+        let mut steps = consensus_steps_for(
             &args.issue,
             on_path("ljos-consensus"),
             on_path("vissue"),
@@ -1388,6 +1394,14 @@ impl LjosServer {
         )
         .map_err(refused)?;
         let mut out = Vec::new();
+        // As the CLI: voters the named outcomes show erring together count once.
+        if let Some((discount, line)) = settle_discount(&atoms) {
+            with_discount(&mut steps, &discount);
+            out.push(Said {
+                text: line,
+                aside: None,
+            });
+        }
         for step in steps {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
             out.push(habitat(step.bin, &args)?.0);
@@ -1395,12 +1409,7 @@ impl LjosServer {
         // Beside the settle, as the CLI: the surprisingly popular answer
         // when two or more voters forecast, and the voters' standing when
         // trust rows exist.
-        let predictions = pack()
-            .and_then(|c| {
-                ljos_cli::atoms_lean(&c, &c.workspace()).context("consensus: GET /v1/atoms failed")
-            })
-            .map(|atoms| predictions_of(&atoms, &args.issue))
-            .unwrap_or_default();
+        let predictions = predictions_of(&atoms, &args.issue);
         for step in panel_steps(&args.issue, on_path("ljos-consensus"), &trust, &predictions) {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
             out.push(habitat(step.bin, &args)?.0);
@@ -1543,6 +1552,7 @@ impl LjosServer {
         // keeps its standing elsewhere; a refuted persona listens more.
         let about = island_entities(&args.issue).unwrap_or_default();
         let (rows, moved, calibration) = learn_and_write(
+            &args.issue,
             &ballots,
             &args.outcome,
             args.beta.unwrap_or(LEARN_BETA),

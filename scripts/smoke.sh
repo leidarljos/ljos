@@ -114,6 +114,22 @@ ljos panel "$id2" --out "$root/panel" | grep -q consensus || fail panel
 cal=$(ljos calibrate -p demo 2>&1 || true)
 echo "$cal" | grep -q weighs || { echo "$cal"; fail calibrate; }
 
+# Named outcomes: alice and bob always vote alike, carol and dave err on
+# their own. Beside the issue that closed on hold, five more name an
+# outcome, and the settle counts the pair as one voice.
+for pattern in "a a a b" "a a b a" "b b a a" "a a a a" "b b b a"; do
+  set -- $pattern
+  x=$(vissue create -p demo "Named outcome $*" -q | tail -1)
+  VISSUE_AGENT=alice ljos vote "$x" --for "$1" --used none >/dev/null
+  VISSUE_AGENT=bob ljos vote "$x" --for "$2" --used none >/dev/null
+  VISSUE_AGENT=carol ljos vote "$x" --for "$3" --used none >/dev/null
+  VISSUE_AGENT=dave ljos vote "$x" --for "$4" --used none >/dev/null
+  ljos learn "$x" --outcome a >/dev/null || fail "learn on $x"
+done
+named=$(ljos consensus "$x")
+echo "$named" | grep -q 'correlation over 6 named outcomes' || { echo "$named" | head -5; fail "named outcomes"; }
+echo "$named" | grep -q 'alice 0.50, bob 0.50)' || fail "the clones count once"
+
 # A failed command brings back what the seat knows about that failure, and
 # an unrelated one brings back nothing.
 ljos prefer "Run cargo test with rustc 1.88 or newer; rustc 1.83 lacks edition2024." >/dev/null

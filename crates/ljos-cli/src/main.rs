@@ -14,10 +14,10 @@ use ljos_cli::{
     parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout,
     predictions_of, prompt_hook_stdout, read_campaign, receive, release, remember_findings,
     resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
-    sitting_gated, stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num,
-    trust_from_pack, verdict_for, whoami, withdraw_prediction, write_persona, write_prediction,
-    write_rule, write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words, tracker_show_json,
+    trim_num, trust_from_pack, verdict_for, whoami, with_discount, withdraw_prediction,
+    write_outcome, write_persona, write_prediction, write_rule, write_trust, Persona, Reading,
+    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -1271,26 +1271,32 @@ fn main() -> Result<()> {
             let (topic, tags) = issue_topic_and_tags(&id);
             let trust = rows_about(&pack_trust_or_none(), &topic);
             let personas = personas_from_pack().unwrap_or_default();
-            for step in consensus_steps_for(
+            let atoms = pack()
+                .and_then(|c| {
+                    ljos_cli::atoms_lean(&c, &c.workspace())
+                        .context("consensus: GET /v1/atoms failed")
+                })
+                .unwrap_or_default();
+            let mut steps = consensus_steps_for(
                 &id,
                 on_path("ljos-consensus"),
                 on_path("vissue"),
                 &trust,
                 &personas,
                 &tags,
-            )? {
+            )?;
+            // Voters the named outcomes show erring together count once.
+            if let Some((discount, line)) = settle_discount(&atoms) {
+                with_discount(&mut steps, &discount);
+                println!("{line}");
+            }
+            for step in steps {
                 run(step.bin, &step.args)?;
             }
             // Beside the settle: the surprisingly popular answer when two
             // or more voters forecast, and the voters' standing when rows
             // exist.
-            let predictions = pack()
-                .and_then(|c| {
-                    ljos_cli::atoms_lean(&c, &c.workspace())
-                        .context("consensus: GET /v1/atoms failed")
-                })
-                .map(|atoms| predictions_of(&atoms, &id))
-                .unwrap_or_default();
+            let predictions = predictions_of(&atoms, &id);
             for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
                 run(step.bin, &step.args)?;
             }
@@ -1524,9 +1530,10 @@ fn main() -> Result<()> {
                 for p in &moved {
                     write_persona(p)?;
                 }
+                write_outcome(&id, &outcome)?;
                 (rows, moved, std::collections::BTreeMap::new())
             } else {
-                learn_and_write(&ballots, &outcome, beta, &about, &forecasts)?
+                learn_and_write(&id, &ballots, &outcome, beta, &about, &forecasts)?
             };
             println!(
                 "{}",

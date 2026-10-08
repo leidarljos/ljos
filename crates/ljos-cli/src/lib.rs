@@ -8852,7 +8852,7 @@ pub fn learn_reading(
     calibration: &std::collections::BTreeMap<String, Calibration>,
 ) -> String {
     let mut out = format!(
-        "Learned. {rows} trust rows rewritten. A voter the outcome refuted shrinks; a vindicated one keeps its weight. {moved} persona anchors moved. This is not a new settle; the next ljos consensus uses these rows."
+        "Learned. {rows} trust rows rewritten. {moved} persona anchors moved. The outcome is kept: once {MIN_NAMED_OUTCOMES} issues have one, ljos consensus counts voters who err together once. This is not a new settle; the next ljos consensus uses these rows."
     );
     match mean_brier(forecasts, outcome) {
         Some((mean, n)) => {
@@ -8924,7 +8924,10 @@ pub type LearnedState = (
     std::collections::BTreeMap<String, Calibration>,
 );
 
+/// Learn from `issue`'s `outcome` by the record and write what it moved:
+/// the trust rows, the personas, and the outcome itself.
 pub fn learn_and_write(
+    issue: &str,
     ballots: &[(String, String)],
     outcome: &str,
     beta: f64,
@@ -8956,7 +8959,178 @@ pub fn learn_and_write(
     for p in &moved {
         write_persona(p)?;
     }
+    write_outcome(issue, outcome)?;
     Ok((rows, moved, calibration))
+}
+
+/// POST the option `issue` closed on. Read beside the issue's ballots, it
+/// says which voters were right, which [`settle_discount`] needs.
+pub fn write_outcome(issue: &str, choice: &str) -> Result<Value> {
+    let (issue, choice) = (issue.trim(), choice.trim());
+    if issue.is_empty() || choice.is_empty() {
+        bail!("outcome: an issue and a choice are required");
+    }
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = atom_body("outcome", &outcome_text(issue, choice), &workspace);
+    atom["issue"] = Value::String(issue.into());
+    atom["choice"] = Value::String(choice.into());
+    client
+        .post_atom(&atom)
+        .context("outcome: POST /v1/atoms failed")
+}
+
+/// The sentence an outcome is stored under, clipped to the pack's cap.
+#[must_use]
+pub fn outcome_text(issue: &str, choice: &str) -> String {
+    let issue: String = issue.chars().take(80).collect();
+    let choice: String = choice.chars().take(200).collect();
+    format!("{issue} closed on {choice}.")
+}
+
+/// The latest outcome per issue among the pack's atoms.
+#[must_use]
+pub fn outcomes_of(atoms: &[Value]) -> std::collections::BTreeMap<String, String> {
+    let mut latest: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("outcome") {
+            continue;
+        }
+        let (Some(issue), Some(choice)) = (
+            atom.get("issue").and_then(Value::as_str),
+            atom.get("choice").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let ts = atom
+            .get("ts")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match latest.get(issue) {
+            Some((seen, _)) if *seen > ts => {}
+            _ => {
+                latest.insert(issue.to_string(), (ts, choice.to_string()));
+            }
+        }
+    }
+    latest.into_iter().map(|(k, (_, c))| (k, c)).collect()
+}
+
+/// Named outcomes a pair must share before `ljos-consensus correlation`
+/// reads its correlation (its `--min-shared` default). Below it no discount
+/// can move, so the reading is not asked for.
+pub const MIN_NAMED_OUTCOMES: usize = 5;
+
+/// The correlation reading over the issues whose outcome is named: each
+/// issue's ballots beside the option it closed on. None below
+/// [`MIN_NAMED_OUTCOMES`].
+#[must_use]
+pub fn correlation_step(named: &[(Vec<(String, String)>, String)]) -> Option<ConsensusStep> {
+    if named.len() < MIN_NAMED_OUTCOMES {
+        return None;
+    }
+    let items: Vec<Value> = named
+        .iter()
+        .map(|(ballots, _)| {
+            Value::Array(
+                ballots
+                    .iter()
+                    .map(|(agent, choice)| serde_json::json!({"agent": agent, "choice": choice}))
+                    .collect(),
+            )
+        })
+        .collect();
+    let truths: Vec<&str> = named.iter().map(|(_, o)| o.as_str()).collect();
+    Some(ConsensusStep {
+        bin: "ljos-consensus",
+        args: vec![
+            "correlation".into(),
+            "--items".into(),
+            Value::Array(items).to_string(),
+            "--truths".into(),
+            serde_json::json!(truths).to_string(),
+        ],
+    })
+}
+
+/// The discount a correlation reading asks the settle for, and the line
+/// that says so. None when no pair passed the gate, so every voter keeps
+/// its whole weight.
+#[must_use]
+pub fn discount_from(reading: &Value) -> Option<(std::collections::BTreeMap<String, f64>, String)> {
+    let discount: std::collections::BTreeMap<String, f64> = reading
+        .get("discount")?
+        .as_object()?
+        .iter()
+        .filter_map(|(k, v)| v.as_f64().map(|d| (k.clone(), d)))
+        .collect();
+    if discount.values().all(|d| *d >= 1.0 - 1e-9) {
+        return None;
+    }
+    let named = reading.get("named").and_then(Value::as_u64).unwrap_or(0);
+    let voices = reading
+        .get("independent_voters")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let shared: Vec<String> = discount
+        .iter()
+        .filter(|(_, d)| **d < 1.0 - 1e-9)
+        .map(|(who, d)| format!("{who} {d:.2}"))
+        .collect();
+    Some((
+        discount.clone(),
+        format!(
+            "correlation over {named} named outcomes: {} voters hold {voices:.2} independent voices; the settle counts correlated voices once ({})",
+            discount.len(),
+            shared.join(", ")
+        ),
+    ))
+}
+
+/// The discount on the model crate's settle; the tracker's settle has none.
+pub fn with_discount(
+    steps: &mut [ConsensusStep],
+    discount: &std::collections::BTreeMap<String, f64>,
+) {
+    let json = serde_json::to_string(discount).unwrap_or_default();
+    for step in steps.iter_mut().filter(|s| {
+        s.bin == "ljos-consensus" && s.args.first().map(String::as_str) == Some("settle")
+    }) {
+        step.args.push("--discount-of".into());
+        step.args.push(json.clone());
+    }
+}
+
+/// The correlation discount for the next settle, read off the issues the
+/// pack names an outcome for, with each one's ballots from the tracker.
+/// None below [`MIN_NAMED_OUTCOMES`], when the model crate is absent, or
+/// when no pair of voters is shown to err together.
+#[must_use]
+pub fn settle_discount(
+    atoms: &[Value],
+) -> Option<(std::collections::BTreeMap<String, f64>, String)> {
+    let outcomes = outcomes_of(atoms);
+    if outcomes.len() < MIN_NAMED_OUTCOMES || !on_path("ljos-consensus") {
+        return None;
+    }
+    let named: Vec<(Vec<(String, String)>, String)> = outcomes
+        .into_iter()
+        .filter_map(|(issue, choice)| {
+            let said = run_captured("vissue", &["vote", &issue, "--json"]).ok()?;
+            let ballots: Vec<(String, String)> = forecasts_from_json(&said.stdout)
+                .ok()?
+                .into_iter()
+                .map(|f| (f.agent, f.choice))
+                .collect();
+            (ballots.len() >= 2).then_some((ballots, choice))
+        })
+        .collect();
+    let step = correlation_step(&named)?;
+    let said = run_captured(step.bin, &step.args).ok()?;
+    let reading: Value = serde_json::from_str(&said.stdout).ok()?;
+    discount_from(&reading)
 }
 
 /// A voter's record: how often the outcome agreed with its ballot, and
@@ -10723,7 +10897,7 @@ pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
 /// Kinds the review clock never holds and the hook never injects: trust
 /// and persona rows are weighed, playbooks are copied, and a prediction is a
 /// forecast on one ballot, with nothing in it to recall.
-const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "playbook", "prediction"];
+const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "playbook", "prediction", "outcome"];
 
 /// Whether an atom is a claim the review clock should hold at all.
 fn reviewable(a: &Value) -> bool {
@@ -12705,7 +12879,7 @@ pub fn finish(
                 .collect();
             let about = island_entities(issue).unwrap_or_default();
             let (rows, moved, calibration) =
-                learn_and_write(&ballots, option, beta, &about, &forecasts)?;
+                learn_and_write(issue, &ballots, option, beta, &about, &forecasts)?;
             out.push_str(&learn_reading(
                 rows.len(),
                 moved.len(),
@@ -15365,6 +15539,60 @@ mod tests {
             none.iter().all(|(_, p)| (p - 0.5).abs() < 1e-12),
             "{none:?}"
         );
+    }
+
+    #[test]
+    fn an_outcome_is_the_latest_per_issue_and_reaches_only_the_model_settle() {
+        let atoms = vec![
+            serde_json::json!({"kind": "outcome", "issue": "p-1", "choice": "hold", "ts": "2026-10-01T00:00:00Z"}),
+            serde_json::json!({"kind": "outcome", "issue": "p-1", "choice": "ship", "ts": "2026-10-02T00:00:00Z"}),
+            serde_json::json!({"kind": "outcome", "issue": "p-2", "choice": "hold", "ts": "2026-10-01T00:00:00Z"}),
+            serde_json::json!({"kind": "prediction", "issue": "p-3", "choice": "ship"}),
+        ];
+        let named = outcomes_of(&atoms);
+        assert_eq!(named.len(), 2);
+        assert_eq!(named["p-1"], "ship");
+        assert_eq!(outcome_text("p-1", "ship"), "p-1 closed on ship.");
+
+        let ballots = vec![
+            ("a".to_string(), "ship".to_string()),
+            ("b".to_string(), "hold".to_string()),
+        ];
+        let items: Vec<_> = (0..MIN_NAMED_OUTCOMES)
+            .map(|_| (ballots.clone(), "ship".to_string()))
+            .collect();
+        assert!(
+            correlation_step(&items[1..]).is_none(),
+            "below the floor nothing is asked"
+        );
+        let step = correlation_step(&items).unwrap();
+        assert_eq!(step.args[0], "correlation");
+        let sent: Value = serde_json::from_str(&step.args[2]).unwrap();
+        assert_eq!(sent[0][1]["choice"], "hold");
+        let truths: Vec<String> = serde_json::from_str(&step.args[4]).unwrap();
+        assert_eq!(truths.len(), MIN_NAMED_OUTCOMES);
+
+        let whole = serde_json::json!({"discount": {"a": 1.0, "b": 1.0}, "named": 6, "independent_voters": 2.0});
+        assert!(discount_from(&whole).is_none(), "no pair passed the gate");
+        let shared = serde_json::json!({"discount": {"a": 0.5, "b": 0.5, "c": 1.0}, "named": 6, "independent_voters": 2.0});
+        let (discount, line) = discount_from(&shared).unwrap();
+        assert_eq!(discount["a"], 0.5);
+        assert!(
+            line.contains("6 named outcomes") && line.contains("a 0.50, b 0.50"),
+            "{line}"
+        );
+
+        let mut steps = consensus_steps_anchored("p-9", true, true, &[], &[]).unwrap();
+        with_discount(&mut steps, &discount);
+        let model = steps.iter().find(|s| s.bin == "ljos-consensus").unwrap();
+        let at = model
+            .args
+            .iter()
+            .position(|a| a == "--discount-of")
+            .unwrap();
+        assert_eq!(model.args[at + 1], r#"{"a":0.5,"b":0.5,"c":1.0}"#);
+        let tracker = steps.iter().find(|s| s.bin == "vissue").unwrap();
+        assert!(!tracker.args.iter().any(|a| a == "--discount-of"));
     }
 
     #[test]
