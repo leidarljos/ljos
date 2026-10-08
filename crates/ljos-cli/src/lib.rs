@@ -3316,6 +3316,27 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         // A machine that turned Jev on keeps the cross-encoder unloaded; a
         // prompt Jev was not asked about gets the lexical search.
         let rerank = !jev::enabled();
+        // The cross-encoder only reorders the fused top twenty, and every
+        // filter below but the score floor reads fields it leaves alone, so
+        // when none of those twenty could pass them no order of them can:
+        // the prompt gets nothing either way, and the second stage, a few
+        // hundred milliseconds a prompt, is not run.
+        if rerank {
+            if let Ok(pool) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+                packset_search_opts(cue, RERANK_POOL, false)
+            }) {
+                let could = |h: &Hit| {
+                    !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                        && agreed(h)
+                        && names_the_cue(&h.text, cue)
+                        && is_refresher(h)
+                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+                };
+                if !pool.iter().any(could) {
+                    return (nudge, pending);
+                }
+            }
+        }
         let reranked = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
             packset_search_opts(cue, 10, rerank)
         });
@@ -4472,6 +4493,10 @@ pub fn hook_already_running(call: &HookCall) -> bool {
 /// hook off at 10 to 20 s, and a loaded host has made the rerank alone take
 /// longer than that.
 pub const HOOK_RERANK_BUDGET_MS: u64 = 2500;
+
+/// The head of the fused ranking packset's cross-encoder reorders
+/// (`RERANK_DEPTH`); its first stage returns this many when asked to rerank.
+const RERANK_POOL: u32 = 20;
 
 /// Run `f` with the pack client's request timeout set to `ms`, then put
 /// back whatever it was.
