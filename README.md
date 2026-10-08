@@ -216,7 +216,7 @@ Nothing needs a variable set: `ljos remember` starts the writer when none is ans
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
 ```
 
-Unanimous green (two implementers, two reviewers, `ljos consensus` is GREEN) lives in [`examples/unanimous-green/`](examples/unanimous-green/).
+Unanimous green (two implementers, two reviewers, `ljos consensus` is GREEN) lives in [`examples/unanimous-green/`](examples/unanimous-green/). A five-persona panel that chose this seat's tool adapters over a Go rewrite and OTP supervision, with each sealed ballot, its reasoning and every reading of the settle, lives in [`examples/runtime-panel/`](examples/runtime-panel/).
 
 ## Documentation
 

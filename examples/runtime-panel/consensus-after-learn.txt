@@ -1,0 +1,78 @@
+{
+  "options": [
+    "status-quo",
+    "tool-adapters"
+  ],
+  "shares": [
+    0.1820743845292576,
+    0.8179256154707425
+  ],
+  "rounds": 18,
+  "settled": true,
+  "residual": 4.343534421025198e-10,
+  "engine": "degroot-fj",
+  "polarization": 0.7355191150109477,
+  "disagreement": 1.0675609453778288,
+  "agents": [
+    "integrator",
+    "maintainer",
+    "newcomer",
+    "perfengineer",
+    "reliability"
+  ],
+  "influence": [
+    0.2152435830277632,
+    0.3443897328444212,
+    0.040460974332111044,
+    0.14161341016238865,
+    0.25829229963331585
+  ],
+  "effective_voters": 3.9472575567947783,
+  "margin": 0.6358512309414849,
+  "tie": false
+}
+seat-tvpg: 5 ballots over 2 options, trust configured
+  count
+    tool-adapters            3 (maintainer, integrator, reliability)
+    status-quo               2 (newcomer, perfengineer)
+  anchored after 23 round(s)
+    integrator               tool-adapters 0.998 susceptibility 0.50
+    maintainer               tool-adapters 0.999 susceptibility 0.20
+    newcomer                 tool-adapters 0.664 susceptibility 0.80
+    perfengineer             status-quo 0.824 susceptibility 0.30
+    reliability              tool-adapters 0.998 susceptibility 0.40
+  spread 0.823: what the group keeps disagreeing about after listening
+  mean of those positions
+    tool-adapters            0.767
+    status-quo               0.233
+{
+  "options": [
+    "status-quo",
+    "tool-adapters"
+  ],
+  "actual": [
+    0.4,
+    0.6
+  ],
+  "predicted": [
+    0.308,
+    0.49800000000000005
+  ],
+  "surprise": [
+    0.09200000000000003,
+    0.10199999999999992
+  ],
+  "answer": "tool-adapters",
+  "predictors": 5
+}
+{
+  "alpha": 0.15,
+  "standing": {
+    "cursor": 0.024999999999999998,
+    "integrator": 0.30288849726865297,
+    "maintainer": 0.30288849726865297,
+    "newcomer": 0.033167254097020746,
+    "perfengineer": 0.033167254097020746,
+    "reliability": 0.3028884972686529
+  }
+}
