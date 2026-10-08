@@ -286,12 +286,12 @@ OpenAI-compatible endpoint. It is a ``[[harness]]`` in
 ``~/.config/ljos/harnesses.toml``. Its
 ``start`` and ``resume`` argv say how it opens a session and how it resumes
 the latest one in a directory, for example ``resume = ["grok",
-"--continue"]``. It starts in a pane the person can watch and talk in, in
-the first tool that answers: a herdr workspace when herdr's server is up,
-else a window of the tmux session ``ljos-personas``, or a ``[[tool]]`` the
-runners file declares (see *Open persona panes in another tool*). A
-runner that exits non-zero is resumed in its pane, at most three times a
-minute. It works in the persona's home, ``$XDG_STATE_HOME/ljos/personas/NAME``, as the
+"--continue"]``. It starts in a pane the person can watch and talk in: a
+herdr workspace when herdr's server is up, else a window of the tmux
+session ``ljos-personas``. A ``[[tool]]`` the runners file declares is tried
+before either (see *Open persona panes in another tool*). A runner that
+exits non-zero is resumed in its pane, at most three times a minute. It
+works in the persona's home, ``$XDG_STATE_HOME/ljos/personas/NAME``, as the
 seat named after the persona. Its memories, ballots and trust rows are
 therefore the persona's. It reads the issue and the pack, writes its
 reasoning with ``ljos note``, and casts ``ljos vote --as NAME``. Each
@@ -324,14 +324,15 @@ Open persona panes in another tool
    $ ljos doctor | grep panes
    ok  panes   herdr opens persona panes; tmux also here
 
-herdr opens one workspace a persona in its home, as its seat, types the
-pane script into the root pane, and hands the runner each task through
-``herdr agent prompt``, or as raw keys when herdr does not know the runner
-as an agent. tmux opens a window in the session ``ljos-personas``.
-``LJOS_PANE_TOOL=tmux`` picks one. Any other tool is a table in
-``~/.config/ljos/harnesses.toml``, each verb an argv; one named like a
-shipped shape replaces it. A sketch for a terminal multiplexer with a
-command line:
+herdr opens one workspace a persona, in the persona's home and as its
+seat, and types the pane script into the root pane. It hands the runner
+each task through ``herdr agent prompt``, or as typed keys when herdr does
+not know the runner as an agent. tmux gives each persona a window in the
+session ``ljos-personas``. ``LJOS_PANE_TOOL`` narrows the choice to the one it
+names. Any other tool is a ``[[tool]]`` table in
+``~/.config/ljos/harnesses.toml``, with each verb but ``pane_pointer`` an argv
+or a list of argvs. A table named like a shipped shape replaces it. A
+terminal multiplexer with a command line takes a table like this:
 
 .. code:: toml
 
@@ -360,11 +361,11 @@ Wire the seat into Cursor
 Cursor's agent and its ``agent`` command line take the server from
 ``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. Cursor
 does not hand a prompt hook's context to the model, so the memories a
-prompt activates arrive with the first tool result, as on Grok Build. A
-shell command gets an ``ask`` rule's question as Cursor's own permission
-prompt. On a machine where ``ljos onboard --harness claude`` already ran,
-Cursor runs those hooks itself, so no Cursor hooks file is written and
-the seat answers them in Cursor's shape.
+prompt activates arrive with the first tool result instead, as on Grok
+Build. A shell command gets an ``ask`` rule's question as Cursor's own
+permission prompt. Cursor runs the Claude hooks itself where
+``ljos onboard --harness claude`` already ran: no Cursor hooks file is
+written, and the seat answers them in Cursor's shape.
 
 Spawn a persona as a subagent of Grok Build or Claude Code
 ==========================================================
@@ -374,17 +375,16 @@ Spawn a persona as a subagent of Grok Build or Claude Code
    $ ljos agents --harness grok
    ok  agents grok wrote 5 and removed 0 agent definitions in /home/me/.grok/agents
 
-Each persona is now ``~/.grok/agents/ljos-NAME.md``, and Grok's main
-agent can spawn it by name (``spawn_subagent`` with ``subagent_type``
-``ljos-reviewer``) on a decision: it reads ``ljos brief``, casts one ballot
-before reading the others, notes why and stops, in ``capabilityMode:
-execute``, which runs commands and edits nothing. Claude Code reads the
-same files from ``~/.claude/agents``. ``onboard`` writes them for a runner
-whose table names ``agents``, and a persona written later refreshes the
-directories that exist.
-
-A panel the seat opens by itself runs its members on the seat's own
-runner through the table's ``headless`` argv, or on ``LJOS_PANEL_RUNNER``'s.
+Every persona becomes ``~/.grok/agents/ljos-NAME.md``, and Grok's main agent
+can spawn it by name on a decision with ``spawn_subagent`` and
+``subagent_type`` ``ljos-reviewer``. The persona reads ``ljos brief``, casts one
+ballot before reading the others, notes why, and stops. Grok runs it in
+``capabilityMode: execute``, with commands and no edit tool. Claude Code
+reads the same definitions from ``~/.claude/agents``, and Cursor's copies go
+to ``~/.cursor/agents``; both ignore that mode, and the body tells the
+persona not to edit. ``onboard`` writes the definitions for a runner whose
+table names ``agents``, and a persona written later refreshes each such
+directory that exists.
 
 Show the seat in the status bar
 ===============================
@@ -404,8 +404,8 @@ In ``~/.claude/settings.json``:
    {"statusLine": {"type": "command", "command": "ljos statusline"}}
 
 The row reads ``ljos grok · surf-ab12 · 3 due``: the seat, the issue the
-conversation holds, the claims due for review. The line is cached fifteen
-seconds a session, and a pack that does not answer in 300 ms shows as
+conversation holds, the claims due for review. A session's line is cached
+for fifteen seconds. A pack that does not answer in 300 ms shows as
 ``pack down``.
 
 Put the judgments to a local model or a harness

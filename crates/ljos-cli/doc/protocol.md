@@ -160,9 +160,10 @@ Every piece of work has an issue before it has a claim.
   actual share most exceeds its forecast, and shows each voter's standing.
   When the world says which option was right, `ljos finish ISSUE
   --outcome OPTION` (or `ljos learn`) writes every voter's record of
-  outcomes, shrunk toward the panel's, as its weight, so the next settle
-  weighs a voter by what it got right, and keeps the outcome: once five
-  issues have one, the settle counts voters who err together once.
+  outcomes as its weight, so the next settle weighs a voter by what it
+  got right. A record's accuracy is first shrunk toward the panel's
+  pooled accuracy, and the outcome is kept: once five issues have one, the
+  settle discounts voters who err together.
 - When the work has shown that a kind of command must never run, or must
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks at the point of action and
@@ -296,9 +297,9 @@ same four steps are:
    does, when the work is accepted.
    Nor does `finish`: `--close` on it does, for the same acceptance.
 4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
-   right. Each voter's record takes the outcome, and a record that sets a
-   voter apart from the panel moves its weight; one outcome does not. A
-   persona it refuted holds its next ballot less firmly.
+   right. Every voter's record takes the outcome; the record moves a
+   voter's weight once it sets the voter apart from the panel, which a first
+   outcome cannot. A persona it refuted holds its next ballot less firmly.
 
 When the tracker is a git checkout, `sitting` after its claim and `finish`
 at the end commit the ticket's `issues.org` (that file alone) and push it,

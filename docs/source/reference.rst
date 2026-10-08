@@ -52,7 +52,7 @@ Command line
 |                                                                                                                                           |                           | before reading the others, notes why and stops; definitions whose persona left the pack are removed                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``statusline``                                                                                                                            | pack                      | one line for a runner's status bar (Grok's ``[ui.status_line]``, Claude Code's ``statusLine``): the seat, the issue this conversation holds, the claims due; reads the runner's status |
-|                                                                                                                                           |                           | JSON on stdin, cached fifteen seconds a session                                                                                                                                        |
+|                                                                                                                                           |                           | JSON on stdin; each session's line is cached for fifteen seconds                                                                                                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``ask NAME TEXT``                                                                                                                         | persona session           | hands the persona a question or a task in its own pane, opening it (and resuming its session) when it is closed                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -68,8 +68,8 @@ Command line
 | ``panel ISSUE [--out DIR] [--jev]``                                                                                                       | pack, tracker             | one brief per persona whose domains the issue speaks to as ``DIR/<name>.md``, then the settle line; refused until a playbook is bound. ``--jev`` asks Jev for every ballot first and   |
 |                                                                                                                                           |                           | casts them only when every seat is sure and all agree; otherwise it writes the briefs                                                                                                  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]``                                                           | tracker, pack             | reweigh voters by what turned out right: by default each voter's record of hits and misses, shrunk toward the panel's, as log-odds weights; ``hedge`` shrinks refuted voters by ``B``  |
-|                                                                                                                                           |                           | with ``S`` recovery; either way the outcome is kept                                                                                                                                    |
+| ``learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]``                                                           | tracker, pack             | reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights, its accuracy shrunk toward the panel's pooled accuracy; ``hedge``      |
+|                                                                                                                                           |                           | shrinks refuted voters by ``B`` with ``S`` recovery; either way the outcome is kept                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``evidence ACCESSION`` / ``current ACCESSION``                                                                                            | deed store                | intact; still the tip                                                                                                                                                                  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -94,7 +94,7 @@ Command line
 |                                                                                                                                           |                           | on each command it runs (split on ``&&``, ``\vert\vert``, ``;``, ``\vert`` outside quotes, with ``NAME=value``, ``sudo``, ``env``, ``time``, ``nohup`` taken off)                      |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``consensus ID``                                                                                                                          | consensus, tracker        | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged ``broad`` runs bounded confidence; once five issues have an outcome, voters shown   |
-|                                                                                                                                           |                           | to err together count once                                                                                                                                                             |
+|                                                                                                                                           |                           | to err together are discounted                                                                                                                                                         |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``claim ID [--assignee NAME]``                                                                                                            | claim graph               | a session node for a tracker id; a busy refusal names what the name still holds; a node this name holds is a sitting resumed                                                           |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -109,8 +109,8 @@ Command line
 | ``policy ARGV...``                                                                                                                        | policy, pack              | the line as it would run, the TCB verdict if ``ljos-policyd`` answered, then a matching pack rule, then what the pack knows that bears on it                                           |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``hook [--limit N]``                                                                                                                      | policy, pack              | hook JSON or argv on stdin; on ``PreToolUse`` the TCB and pack rules, a deny is ``permissionDecision``; on a prompt the hits scoring at least 0.6 of the best that two scorers named,  |
-|                                                                                                                                           |                           | preferences first then lessons oldest first, each with its age, five at most, each once per runner session; on a failed tool, up to three that share two words with the command and    |
-|                                                                                                                                           |                           | its error                                                                                                                                                                              |
+|                                                                                                                                           |                           | preferences first then lessons oldest first, each with its age, five at most, each once per runner session; on a failed tool, up to three that share at least two content words with   |
+|                                                                                                                                           |                           | the command and its error                                                                                                                                                              |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]``                                                                  | tracker                   | one child issue per module the bundle's lock builds, under ``I``, blocked by the modules built before it along the SBOM's edges; ids are a hash of module and generation, so a rerun   |
 |                                                                                                                                           |                           | holds what exists and adds what is missing; ``--dry-run`` prints the rows                                                                                                              |
@@ -180,66 +180,77 @@ Variable                                                    Read by
 A runner's table may also name ``start`` and ``resume``, the argv that open
 a session in a persona's home and resume the latest one there; a
 persona whose ``--runner`` is that table's name reasons in that session
-(``ljos ask``, ``vote --jev``). The pane script resumes a runner that exits
-non-zero, at most three times a minute, and leaves one that exits 0.
-``agents`` names the directory the runner reads agent definitions from
-(``~/.grok/agents``, ``~/.claude/agents``, ``~/.cursor/agents``).
-``hooks_format = "cursor"`` writes ``hooks`` in Cursor's flat shape
-(``version`` 1, one ``{command, timeout}`` entry an event) on
-``beforeShellExecution``, ``beforeSubmitPrompt``, ``postToolUse``,
-``postToolUseFailure``, ``preCompact``, ``stop`` and ``sessionEnd``, and writes
-nothing where ``~/.claude/settings.json`` already carries the seat's hook,
-since Cursor runs that file's hooks too. The hook reads a Cursor call off
-``cursor_version`` in its stdin and answers in Cursor's fields:
-``permission`` with ``user_message`` and ``agent_message`` at the gate (an
-allow is written out, since Cursor blocks on an answer that is not JSON;
-an ask on ``preToolUse``, where Cursor does not enforce one, is a deny),
-``additional_context`` after a tool result, and ``followup_message`` to hold
-a stop. ``headless`` is the argv a decision
-panel's member runs, with ``{prompt_file}``, ``{prompt}``, ``{cwd}`` and
-``{persona}`` filled.
-
-``[[tool]]`` tables in the same file declare the tools a runner lives in.
-herdr and tmux ship as shapes; a table of the same name replaces one. Each
-verb is an argv with ``{name}``, ``{label}``, ``{session}``, ``{home}``, ``{script}``,
-``{script_q}``, ``{pane}`` and ``{line}`` filled: ``detect`` exits 0 when the tool
-answers; ``open`` lists ways to open the persona's pane, the first that exits
-0 wins; ``pane_pointer`` reads the pane off ``open``'s JSON; ``run`` types the
-pane script into a pane that starts as a shell; ``respawn`` restarts it in a
-pane whose runner exited; ``prompt`` hands the runner a line and ``type_line``
-types it raw when ``prompt`` is refused; ``alive`` exits 0 while the pane is
-there; ``ready`` exits 0 once the runner takes input, retried for ``ready_s``
-seconds. A refusal carries the tool's own words. ``hooks_named`` names the key a hooks file of
+(``ljos ask``, ``vote --jev``). ``hooks_named`` names the key a hooks file of
 named hooks takes the seat's hooks under, each command told its event
 with ``ljos hook --event``.
 
+The pane script resumes a runner that exits non-zero, at most three times
+a minute, and leaves one that exits 0. ``agents`` names the directory the
+runner reads agent definitions from: ``~/.grok/agents``, ``~/.claude/agents``
+or ``~/.cursor/agents``. ``headless`` is the argv a decision panel's member
+runs, with ``{prompt_file}``, ``{prompt}``, ``{cwd}`` and ``{persona}`` filled.
+
+``hooks_format = "cursor"`` writes ``hooks`` in Cursor's flat shape: ``version``
+1, and one ``{command, timeout}`` entry an event. The seat registers the
+gate, the prompt, both tool results, compaction, stop and session end
+there. It writes nothing where ``~/.claude/settings.json`` already carries
+the seat's hook, since Cursor runs that file's hooks too.
+
+The hook reads a Cursor call off ``cursor_version`` in its stdin and answers
+in Cursor's fields: ``permission`` at the gate, with ``user_message`` and
+``agent_message``. It still answers ``allow`` when there is no verdict, since
+Cursor blocks the command when a gate's answer is not JSON. An ask on
+``preToolUse``, which Cursor does not enforce, becomes a deny. A tool result
+gets ``additional_context``, and a held stop ``followup_message``.
+
+``[[tool]]`` tables in the same file declare the tools a runner lives in.
+Two ship as shapes, herdr and tmux. A table of the same name replaces one.
+Every verb but ``pane_pointer`` is an argv or a list of argvs, with
+``{name}``, ``{label}``, ``{session}``, ``{home}``, ``{script}``, ``{script_q}``,
+``{pane}`` and ``{line}`` filled. A refusal carries the tool's own words.
+
+================ ====================================================================
+Verb             What it does
+================ ====================================================================
+``detect``       exits 0 when the tool answers
+``open``         ways to open the persona's pane; the first that exits 0 wins
+``pane_pointer`` a JSON pointer to the pane id in ``open``'s output
+``run``          types the pane script into a pane that starts as a shell
+``respawn``      restarts the script in a pane whose runner exited
+``prompt``       hands the runner a line
+``type_line``    types the line raw when ``prompt`` is refused or absent
+``alive``        exits 0 while the pane is there
+``ready``        exits 0 once the runner takes input, retried for ``ready_s`` seconds
+================ ====================================================================
+
 A runner's table in ``harnesses.toml`` may name ``hooks``, a JSON settings
-file of the shape ``{"hooks": {"<Event>": [{"matcher": "...", "hooks":
-[{"type": "command", "command": "..."}]}]}}``. ``onboard`` merges
-``ljos hook`` into it on the prompt and session-end events (matcher ``*``) by
-default, or on the events the table's ``hook_events`` lists (``PreToolUse``
-takes the matcher ``Bash``), once each, and drops it from events no longer
-listed. On ``SessionEnd`` the hook fires the memories it injected during the
-session together and clears the session's record. The hook reads the runner's JSON on stdin
+file of the shape
+``{"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}``.
+``onboard`` merges ``ljos hook`` into it on the prompt and session-end events
+(matcher ``*``) by default, or on the events the table's ``hook_events`` lists
+(``PreToolUse`` takes the matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit``),
+once each, and drops it from events no longer listed. On ``SessionEnd`` the
+hook fires the memories it injected during the session together and clears
+the session's record. The hook reads the runner's JSON on stdin
 (``hook_event_name``, ``tool_input.command``, ``prompt``) and answers
 ``{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}``,
 or nothing when the pack holds nothing on the cue. On ``PreToolUse`` a TCB
 or pack deny is ``permissionDecision`` ``deny`` and blocks. Plain text on
 stdin is an argv line and answered in plain lines.
 
-====================== =====================================================================================================================================================================================================
+====================== ==========================================================================================================================================================================================================================
 Event                  The hook does
-====================== =====================================================================================================================================================================================================
+====================== ==========================================================================================================================================================================================================================
 ``UserPromptSubmit``   answers with the memories the prompt activates, preferences first, each once per runner session; with Jev on, asks which claims bear on the prompt and whether it corrects the agent or puts a choice
 ``SessionEnd``         fires the memories injected during the session together and clears the session's record
 ``PostToolUse``        emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok delivers this event)
-``PostToolUseFailure`` searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share two content words with the cue, each once per session
-``PreCompact``         fires the memories injected so far, drops them from the session's record so a later prompt can bring them back, and holds a note naming the issue the conversation still holds for the next delivery
+``PostToolUseFailure`` searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once per session
+``PreCompact``         fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and holds a note naming the issue the conversation still holds for the next delivery
 ``SessionStart``       after a compaction (``source`` ``compact``), on a runner that takes its context, answers with that note
-``PreToolUse``         applies the TCB and pack rules to the command (matcher ``Bash``); a deny blocks
+``PreToolUse``         applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit``); a deny blocks
 ``Stop``               speaks only when the turn ran no tool; with no issue held, holds one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript
 ``SubagentStop``       names the issue the subagent's conversation holds and asks for the ballot on a decision; with Jev on, audits the turn once
-====================== =====================================================================================================================================================================================================
+====================== ==========================================================================================================================================================================================================================
 
 Push gate
 =========
@@ -319,33 +330,35 @@ The learning rules
 ==================
 
 ``learn`` adds the outcome to each voter's record of hits and misses. A
-voter's accuracy is its record shrunk toward the panel's pooled accuracy by
-empirical Bayes (Efron and Morris, doi:10.1080/01621459.1975.10479864): the
-prior's strength is what the spread between the records leaves once
-binomial noise is taken out, so the first outcome leaves every voter alike
-and a long record keeps the differences it shows. The weight every other
-voter gives a voter is the log odds of that accuracy (Nitzan and Paroush,
-doi:10.2307/2526438), scaled so the best stands at one and floored at
-0.01. Rows are written complete, so the settle sees the whole graph, and
-each carries its voter's record. ``learn`` also writes an ``outcome`` atom:
-the issue and the option it closed on.
+voter's accuracy is read off its record and shrunk toward the panel's
+pooled accuracy by empirical Bayes (Efron and Morris,
+doi:10.1080/01621459.1975.10479864). The prior weakens as the records
+spread beyond binomial noise; the first outcome leaves every voter alike,
+and a long record keeps the differences it shows.
+
+The weight every other voter gives a voter is the log odds of that
+accuracy, Nitzan and Paroush's weight (doi:10.2307/2526438). The best
+voter weighs one and none weighs less than 0.01. A panel with nobody above
+chance weighs every voter 0.01. Rows are written complete, so the settle
+sees the whole graph, and each carries its voter's record. ``learn`` also
+writes an ``outcome`` atom, the issue and the option it closed on.
 
 ``--rule hedge`` runs the multiplicative weights rule of Hedge
-(doi:10.1006/jcss.1997.1504) instead: every voter whose ballot the outcome
+(doi:10.1006/jcss.1997.1504) instead. Every voter whose ballot the outcome
 refuted shrinks in every other voter's row by ``beta`` (default 0.5),
 floored at 0.01. A vindicated voter keeps its weight, and a missing row
 starts at 1.
 
-Once five issues have an outcome, ``consensus`` reads each one's ballots
-beside the option it closed on and asks ``ljos-consensus correlation`` how
-far the voters share their mistakes. A pair counts only when its
-correlation passes the one-sided test of independence at five percent, and
-each voter's inbound weight in the settle is multiplied by ``1 / (1 + the
-sum of its counted correlations)`` (``settle --discount-of``), so a cluster
-that errs together counts about once. A line before the settle names the
-outcomes read, the independent voices the panel holds, and each voter
-discounted; with no pair counted, nothing is passed and nothing is
-printed.
+``consensus`` reads each issue's ballots beside the option it closed on once
+five issues have an outcome. It asks ``ljos-consensus correlation`` how far
+the voters share their mistakes. A pair counts only when its correlation
+passes the one-sided test of independence at five percent. A voter's
+inbound weight in the settle is multiplied by
+``1 / (1 + the sum of its counted correlations)`` (``settle --discount-of``).
+Exact clones count as one voice under it if their record holds a hit and a
+miss, and a looser cluster as more than one. A line before the settle
+names the outcomes read, the independent voices the panel holds and each
+voter discounted. Nothing is passed or printed when no pair counts.
 
 A row carries the domains it is scoped to. An unscoped row applies to
 every issue; a scoped row applies when one of its domains is a word of the
@@ -368,10 +381,11 @@ ballot and pulls the rest toward it (Acemoglu, Como, Fagnani and Ozdaglar,
 doi:10.1287/moor.1120.0570), at 1 it is a plain voter.
 
 Without an outcome, ``calibrate`` estimates each voter's accuracy from the
-project's issues with two or more ballots by expectation maximisation over
-the items' hidden answers (Dawid and Skene, doi:10.2307/2346806), then
-writes the log odds of each accuracy, scaled so the best stands at one and
-floored at 0.01, as the weight every other voter gives that voter.
+project's issues with two or more ballots, by expectation maximisation
+over the items' hidden answers (Dawid and Skene, doi:10.2307/2346806). It
+then writes the log odds of each accuracy as the weight every other voter
+gives that voter. The most reliable voter stands at one, and no weight
+falls below 0.01.
 
 Crates
 ======

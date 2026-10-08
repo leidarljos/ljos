@@ -1,7 +1,7 @@
 # ljos
 
-Memory, a work tracker and a shell-command gate for coding agents: Claude Code,
-Codex, Grok Build, Cursor, Antigravity's `agy`, opencode, omp and hermes.
+Memory, a work tracker and a shell gate for coding agents: Claude Code, Codex,
+Grok Build, Cursor, Antigravity's `agy`, opencode, omp and hermes.
 
 An agent forgets what it learned when the session ends, and it runs whatever
 command it decides on. ljos keeps the lessons in a local store and hands the
@@ -20,10 +20,10 @@ ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags
 ljos rule '*--force*' --verdict deny --why "Never force push."
 ```
 
-`--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`, `opencode`,
-`omp` or `hermes`. Start a new session and ask for something the preference bears
-on, such as tagging a release. Before the model reads the prompt, the hook
-adds:
+`--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
+`opencode`, `omp` or `hermes`. Start a new session and ask for something the
+preference bears on, such as tagging a release. Before the model reads the
+prompt, the hook adds:
 
 ```
 What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):
@@ -216,7 +216,9 @@ Nothing needs a variable set: `ljos remember` starts the writer when none is ans
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
 ```
 
-Unanimous green (two implementers, two reviewers, `ljos consensus` is GREEN) lives in [`examples/unanimous-green/`](examples/unanimous-green/). A five-persona panel that chose this seat's tool adapters over a Go rewrite and OTP supervision, with each sealed ballot, its reasoning and every reading of the settle, lives in [`examples/runtime-panel/`](examples/runtime-panel/).
+Unanimous green (two implementers, two reviewers, `ljos consensus` is GREEN) lives in [`examples/unanimous-green/`](examples/unanimous-green/).
+
+A five-persona panel chose this seat's tool adapters. Its ballots, what each persona measured and both readings of the settle, before and after `learn`, are in [`examples/runtime-panel/`](examples/runtime-panel/).
 
 ## Documentation
 

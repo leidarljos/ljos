@@ -1,17 +1,15 @@
 # Runtime panel
 
-Five personas settled one design question on a scratch seat: rewrite the
-seat in Go for goroutines, give it an Erlang/OTP-style supervision model,
-build a declarative integration system for the tools runners live in
-(herdr, tmux), or fix the stale herdr calls in place. The panel chose tool
-adapters, and they are what `src/tools.rs` and `src/persona_session.rs`
-now hold.
+Five personas settled one design question on a scratch seat. The options
+were a Go rewrite, OTP-style supervision, adapters for the tools runners
+live in (herdr, tmux), or fixing the stale herdr calls in place
+(`status-quo`). The panel chose tool adapters, which now live in
+`crates/ljos-cli/src/tools.rs` and `persona_session.rs`.
 
-`issue.org` is the decision as the tracker kept it: the body, each
-persona's reasoning note and the votes drawer. `consensus.txt` is
-`ljos consensus seat-tvpg` before the outcome was known,
-`consensus-after-learn.txt` after `ljos learn seat-tvpg --outcome
-tool-adapters`.
+`consensus.txt` is `ljos consensus seat-tvpg` before the outcome was known.
+`consensus-after-learn.txt` is the same after `ljos learn seat-tvpg
+--outcome tool-adapters`, run under the record rule before `learn` shrank
+accuracies. One outcome leaves the voters alike now that `learn` shrinks.
 
 ## Seats
 
@@ -31,10 +29,10 @@ ljos panel seat-tvpg --out panel-runtime
 
 ## The ballots
 
-One subagent per brief, in parallel, each told to cast before reading
-another ballot (the brief carries none: recall prints neither the votes nor
-the logbook). Each measured from its own view and wrote its reasoning with
-`vissue note`.
+One subagent ran each brief, all in parallel. The brief told it to cast
+before reading another ballot and carried none: recall prints neither the
+votes nor the logbook. The personas measured from their own views and wrote
+their reasoning with `vissue note`.
 
 | Persona | Ballot | Confidence | What it measured |
 |---|---|---|---|
@@ -54,26 +52,27 @@ Nobody chose the Go rewrite or OTP supervision.
 | Friedkin-Johnsen settle, persona anchors | 0.679 | 0.321 |
 | the tracker's anchored mean | 0.670 | 0.330 |
 | surprisingly popular: actual less predicted | +0.102 | +0.092 |
-| after `learn`, earned self-trust | 0.818 | 0.182 |
+| after `learn` under the record rule, earned self-trust | 0.818 | 0.182 |
 
-After `learn` the settle weighs the ballots by social power: maintainer
-0.344, reliability 0.258, integrator 0.215, perfengineer 0.142, newcomer
-0.040, worth 3.95 equal voices.
+The weights after that `learn` are maintainer 0.344, reliability 0.258,
+integrator 0.215, perfengineer 0.142 and newcomer 0.040. They are worth 3.95
+equal voices.
 
 ## What the panel found besides its answer
 
-- The pack closed four of five persona inbound rows and four of five
-  forecasts as rewrites of one another (`a weighs b at 1.000.` and `a weighs
-  c at 1.000.` share five of seven words), so the surprisingly popular
-  reading never ran. packset now keeps claims with different `from`, `to`,
-  `about`, `agent`, `issue` or `name` apart; with it all 25 trust rows the
-  outcome wrote stay live.
-- `herdr status server` exits 0 with no server running, and every herdr
-  verb the seat used exited 2 under herdr 0.9. The shipped herdr shape
-  detects with a socket call and drives `workspace create`, `pane run` and
-  `agent prompt`.
-- The pane-typing guard now refuses every multiplexer verb that can type an
-  approval into another runner's prompt.
-- Persona panes now resume a runner that fails, at most three times a
-  minute, as an OTP supervisor restarts a transient child, without a new
+- The pack closed four of five persona inbound rows, and four of five
+  forecasts, as rewrites of one another. `a weighs b at 1.000.` and
+  `a weighs c at 1.000.` share five of their seven tokens. The surprisingly
+  popular reading needs two forecasts, so it never ran. packset now keeps
+  claims with a different `from`, `to`, `about`, `agent`, `issue`, or `name`
+  apart. The readings above ran after that fix; the 20 trust rows the
+  outcome wrote stay live beside the five persona inbound rows.
+- `herdr status server` exits 0 with no server running. Three of the six
+  herdr verbs the seat used exited 2 under herdr 0.9, `agent start` among
+  them. The shipped herdr shape detects with a socket call and drives
+  `workspace create`, `pane run` and `agent prompt`.
+- The pane-typing guard missed herdr's `agent prompt`. It now refuses an
+  approval typed that way too, or pasted through tmux or screen.
+- Persona panes resume a runner that exits non-zero, at most three times a
+  minute, as an OTP supervisor restarts a transient child. There is no new
   daemon to install.
