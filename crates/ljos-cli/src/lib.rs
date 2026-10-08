@@ -3196,7 +3196,9 @@ pub fn decision_hold() -> String {
 pub fn decision_member_task(brief: &str, persona: &str, issue: &str) -> String {
     format!(
         "{brief}\n\nYou are {persona}. Cast exactly one ballot on {issue} and stop. \
-         Read the issue, then `ljos vote {issue} --for OPTION --expect OPTION --as {persona} \
+         The brief above holds the issue; decide from it before you see another voice, so do \
+         not run `vissue show`, `vissue vote` or `ljos consensus` on {issue} first. \
+         Then `ljos vote {issue} --for OPTION --expect OPTION --as {persona} \
          --confidence 0.7 --used none`. OPTION is one of the issue's options. \
          Do not open a sitting, edit files, push, or ssh."
     )
@@ -5994,16 +5996,18 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     out.push_str("\nThe work:\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     out.push_str(&format!(
-        "\nWalk the island as yourself before the ballot: `ljos island` on the work with `--as {}`. \
+        "\nWalk the island as yourself before the ballot: `ljos island` on the work with `--as {name}`. \
          The number on a row is spread along your links, not a rank of what is true. \
          Pass `--fire` only after you have used that island. Fire rewrites your weights, not the seat's, and the next walk of the same cue follows them. \
-         End with one ballot: `ljos vote {{issue}} --for OPTION --expect OPTION --confidence P --used deed-... --as {}`. \
+         Decide before you see another voice: do not read `vissue vote {issue}`, `vissue show {issue}` or `ljos consensus {issue}` until your ballot is cast. \
+         A ballot that follows the ones before it adds a voice and no evidence. \
+         End with one ballot: `ljos vote {issue} --for OPTION --expect OPTION --confidence P --used deed-... --as {name}`. \
          --expect is what you think the others will pick, or a JSON object of option to share; the surprisingly popular reading needs that forecast on the same command. \
          P is the probability you give that your own choice is the outcome. \
          --used none records that the ballot drew on no deed. \
-         The line it prints is a count. `ljos consensus {{issue}}` is the settle. \
-         A lesson of your own goes in with `ljos remember --as {} \"...\"`.\n",
-        p.name, p.name, p.name
+         The line it prints is a count. `ljos consensus {issue}` is the settle. \
+         A lesson of your own goes in with `ljos remember --as {name} \"...\"`.\n",
+        name = p.name,
     ));
     Ok(out)
 }
@@ -16174,6 +16178,10 @@ mod tests {
         let task = decision_member_task("brief", "operator", "ljos-ig07");
         assert!(task.contains("ljos vote ljos-ig07"));
         assert!(task.contains("Do not open a sitting"));
+        assert!(
+            task.contains("not run `vissue show`"),
+            "a member casts before it reads the others' ballots"
+        );
         unsafe { std::env::set_var("LJOS_PANEL_CHILD", "1") };
         let child = start_decision_panel(
             "so what do we think? is this the right answer?",

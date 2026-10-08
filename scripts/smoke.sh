@@ -101,6 +101,9 @@ ljos predict "$id2" --expect '{"ship":0.6,"hold":0.4}' --as reader >/dev/null
 ljos trust reader reviewer 0.9 --about docs >/dev/null
 ljos consensus "$id2" | grep -q '"predictors": 2' || fail "surprisingly popular"
 ljos brief reviewer "$id2" | grep -q 'You are reviewer' || fail brief
+ljos brief reviewer "$id2" | grep -q "ljos vote $id2 --for" || fail "brief names the issue in its ballot line"
+ljos brief reviewer "$id2" | grep -q 'until your ballot is cast' || fail "brief seals the ballot"
+ljos brief reviewer "$id2" | grep -q 'reviewer voted' && fail "a brief carries another's ballot"
 if ljos panel "$id2" --out "$root/panel-unbound" >/dev/null 2>&1; then fail "panel unbound"; fi
 ljos playbook "$id2" sit | grep -q '^sit$' || fail playbook
 ljos brief reviewer "$id2" | grep -q 'split-fence' || fail "brief principles"
