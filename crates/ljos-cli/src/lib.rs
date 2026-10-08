@@ -13320,9 +13320,18 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
 mod tests {
     /// The tests that set or read the process environment take this lock:
     /// cargo runs tests on threads, and one process has one environment.
+    /// The runner session the test process inherited is dropped first, so a
+    /// test that sets one session id sees that one alone.
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        ENV.lock().unwrap_or_else(|e| e.into_inner())
+        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        for (k, v) in std::env::vars() {
+            if super::runner_session_var(&k, &v) {
+                // SAFETY: under the lock every environment-reading test takes.
+                unsafe { std::env::remove_var(&k) };
+            }
+        }
+        guard
     }
 
     /// A root that kept its tilde is the home one.

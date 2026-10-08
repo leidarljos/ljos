@@ -6,6 +6,16 @@
 # touches the seat that runs it. Needs the seat binaries on PATH and a
 # pack writer it may start.
 set -euo pipefail
+# grep -q stops reading at its first match. A verb that prints a later line,
+# such as the tracker commit after a claim, then dies of SIGPIPE, and under
+# pipefail the check fails though the line was there. Read everything.
+grep() {
+  case "${1-}" in
+    -q) shift; command grep "$@" >/dev/null ;;
+    -q?*) local flags="-${1#-q}"; shift; command grep "$flags" "$@" >/dev/null ;;
+    *) command grep "$@" ;;
+  esac
+}
 here=$(cd "$(dirname "$0")" && pwd)
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
@@ -128,7 +138,7 @@ echo "smoke: every loop ran"
 # Two seats, one ticket, sequential handoff on these scratch stores.
 # Distinct from the herd, which contends for one ticket in parallel.
 echo "smoke: two-seat sequential walk"
-for k in $(env | sed -n 's/^\([A-Za-z0-9_]*_SESSION_ID\)=.*/\1/p'); do
+for k in $(env | sed -n 's/^\([A-Za-z0-9_]*_\(SESSION\|THREAD\|CONVERSATION\)_ID\)=.*/\1/p'); do
   unset "$k"
 done
 export LJOS_TRACKER_GIT=commit
