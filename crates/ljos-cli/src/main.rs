@@ -1142,9 +1142,47 @@ fn main() -> Result<()> {
                     mark_seen(call.session.as_deref(), &ids);
                     ctx
                 }
+                // A tool that failed is when a lesson pays: the pack is
+                // searched on the command and its error, and what bears on
+                // the failure goes back with the result.
+                "PostToolUseFailure" => {
+                    let error = ljos_cli::tool_error(&input);
+                    let (ctx, ids) = ljos_cli::failure_note(&call, &error, 3);
+                    mark_seen(call.session.as_deref(), &ids);
+                    ctx
+                }
+                // Compaction drops what the seat handed the conversation:
+                // its memories fire and leave the seen list, and the held
+                // issue is said again on the next delivery.
+                "PreCompact" => {
+                    let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
+                    String::new()
+                }
+                // A session started from a compaction hears what it holds,
+                // where the runner takes SessionStart context.
+                "SessionStart" => {
+                    let compacted = serde_json::from_str::<serde_json::Value>(input.trim())
+                        .ok()
+                        .and_then(|v| {
+                            v.get("source")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == "compact")
+                        })
+                        .unwrap_or(false);
+                    if compacted && call.shape != ljos_cli::HookShape::CamelCase {
+                        if ljos_cli::peek_hook_context(call.session.as_deref()).is_empty() {
+                            let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
+                        }
+                        let (ctx, ids) = ljos_cli::take_hook_note(call.session.as_deref());
+                        mark_seen(call.session.as_deref(), &ids);
+                        ctx
+                    } else {
+                        String::new()
+                    }
+                }
                 // A turn ending is not a session ending, and has nothing
                 // to say either.
-                "SessionStart" | "TurnEnd" => String::new(),
+                "TurnEnd" => String::new(),
                 _ => {
                     // The person's prompt is the chat's consent channel; the
                     // grant goes first, ahead of the hook's deadline.

@@ -1776,6 +1776,10 @@ fn normalize_hook_event(raw: &str) -> &str {
         "on_session_end" => "TurnEnd",
         "pre_tool_use" | "PreToolUse" => "PreToolUse",
         "post_tool_use" | "PostToolUse" => "PostToolUse",
+        "post_tool_use_failure" | "PostToolUseFailure" | "postToolUseFailure" => {
+            "PostToolUseFailure"
+        }
+        "pre_compact" | "PreCompact" | "preCompact" => "PreCompact",
         "user_prompt_submit" | "UserPromptSubmit" => "UserPromptSubmit",
         "session_end" | "SessionEnd" => "SessionEnd",
         "session_start" | "SessionStart" => "SessionStart",
@@ -1798,7 +1802,9 @@ fn hook_events_of(h: &Harness) -> Vec<String> {
         return [
             "UserPromptSubmit",
             "PostToolUse",
+            "PostToolUseFailure",
             "PreToolUse",
+            "PreCompact",
             "Stop",
             "SessionEnd",
             "SubagentStop",
@@ -2456,6 +2462,144 @@ pub fn session_end(session: Option<&str>) -> usize {
     fired
 }
 
+/// A pack atom's id: 32 hex digits. The seen list also keeps named keys
+/// (`due-nudge`, `panel-open:...`), which are not memories.
+fn is_atom_id(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// A conversation about to be compacted keeps the issue it holds and loses
+/// what the seat handed it. The memories injected so far fire together, as
+/// at a session's end, and leave the seen list, so a prompt after the
+/// compaction can be handed them again; the nudges stay seen. When the
+/// conversation holds an issue, the next delivery opens with it
+/// ([`compaction_note`]). Returns how many fired.
+pub fn rearm_after_compaction(session: Option<&str>) -> usize {
+    let Some(session) = session else {
+        return 0;
+    };
+    let (ids, path) = injected_ids(session);
+    let memories: Vec<String> = ids.into_iter().filter(|id| is_atom_id(id)).collect();
+    let fired = if memories.len() >= 2 {
+        let top: Vec<String> = memories.into_iter().take(8).collect();
+        pack()
+            .ok()
+            .and_then(|c| c.fire(&c.workspace(), &top).ok())
+            .map_or(0, |_| top.len())
+    } else {
+        0
+    };
+    if let Some(p) = path {
+        let kept: Vec<String> = std::fs::read_to_string(&p)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !is_atom_id(l) && *l != "hold-echoed")
+            .map(str::to_string)
+            .collect();
+        let _ = std::fs::write(
+            &p,
+            kept.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        );
+    }
+    if let Some(note) = compaction_note() {
+        let (held, held_ids) = take_hook_note(Some(session));
+        let text = if held.is_empty() {
+            note
+        } else {
+            format!("{note}\n{held}")
+        };
+        hold_hook_note(Some(session), &text, &held_ids);
+    }
+    fired
+}
+
+/// What a compacted conversation needs to go on: the issue it holds, and
+/// where its working set, its history and the protocol are.
+#[must_use]
+pub fn compaction_note() -> Option<String> {
+    let issue = held_issue()?;
+    let title = issue_title(&issue).unwrap_or_default();
+    let named = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" ({title})")
+    };
+    Some(format!(
+        "The conversation was compacted. It still holds {issue}{named}: `ljos recall {issue}` is the \
+         working set, `ljos timeline {issue}` what happened so far, `ljos protocol` the seat's protocol."
+    ))
+}
+
+/// The error a failed tool reported: Grok's `error`, or the error a
+/// runner's `tool_response` carries.
+#[must_use]
+pub fn tool_error(input: &str) -> String {
+    let v: Value = serde_json::from_str(input.trim()).unwrap_or_default();
+    [
+        "/error",
+        "/tool_response/error",
+        "/toolResult/error",
+        "/tool_response/stderr",
+    ]
+    .iter()
+    .filter_map(|p| v.pointer(p).and_then(Value::as_str))
+    .map(str::trim)
+    .find(|s| !s.is_empty())
+    .unwrap_or("")
+    .to_string()
+}
+
+/// What this seat knows that bears on a tool that just failed: the pack
+/// searched on the command and the error it gave, kept to hits two scorers
+/// agree on, near the best score, that share [`FAILURE_SHARED_WORDS`]
+/// content words with the cue, stand as rules or reviewed lessons as a
+/// prompt's do, and were not handed over earlier in the session. A failure is
+/// when a lesson pays, and it is cued by what went wrong; asking only on
+/// failure costs nothing on the calls that worked.
+#[must_use]
+pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
+    let error: String = error.chars().take(400).collect();
+    let cue = format!("{} {error}", call.cue.trim()).trim().to_string();
+    if cue.len() < 3 {
+        return (String::new(), Vec::new());
+    }
+    let Ok(hits) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+        packset_search_opts(&cue, 10, false)
+    })
+    .or_else(|_| packset_search(&cue)) else {
+        return (String::new(), Vec::new());
+    };
+    let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
+    if top <= 0.0 {
+        return (String::new(), Vec::new());
+    }
+    let seen = seen_ids(call.session.as_deref());
+    let rows: Vec<&Hit> = hits
+        .iter()
+        .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
+        .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
+        .filter(|h| agreed(h))
+        .filter(|h| shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS)
+        .filter(|h| is_refresher(h))
+        .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+        .take(limit)
+        .collect();
+    if rows.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let now = now_utc();
+    let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
+    let ids = rows.iter().filter_map(|h| h.id.clone()).collect();
+    (
+        format!(
+            "What this seat knows that bears on this failure (from the pack, each with its age; `ljos search` for more):\n{}",
+            lines.join("\n")
+        ),
+        ids,
+    )
+}
+
 /// Where a prompt's pack note waits. One runner discards prompt-hook
 /// stdout and reads `Stop` feedback, so the note stays here until then.
 fn hook_hold_path(session: Option<&str>) -> Option<PathBuf> {
@@ -2696,13 +2840,22 @@ fn cue_content_words(text: &str) -> Vec<String> {
 /// Whether a lesson names something the cue names.
 /// A high search score on a vague sentence is not that.
 fn names_the_cue(text: &str, cue: &str) -> bool {
-    let want = cue_content_words(cue);
-    if want.is_empty() {
-        return false;
-    }
-    let have = cue_content_words(text);
-    want.iter().any(|w| have.binary_search(w).is_ok())
+    shared_cue_words(text, cue) > 0
 }
+
+/// How many content words a lesson and a cue share.
+fn shared_cue_words(text: &str, cue: &str) -> usize {
+    let want = cue_content_words(cue);
+    let have = cue_content_words(text);
+    want.iter()
+        .filter(|w| have.binary_search(w).is_ok())
+        .count()
+}
+
+/// The content words a lesson must share with a failed command and its
+/// error. A failure cue is long and noisy, so one word in common (`build`
+/// in an npm error and in "Grok Build") is a coincidence, not a match.
+pub const FAILURE_SHARED_WORDS: usize = 2;
 
 #[cfg(test)]
 /// A claim about one numbered pull request is a snapshot of that review.
@@ -17453,6 +17606,76 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    /// A failed tool and a compaction reach the seat under every runner's
+    /// spelling, and the error is read where each runner puts it.
+    #[test]
+    fn a_failure_and_a_compaction_are_named_and_read() {
+        for raw in [
+            "post_tool_use_failure",
+            "PostToolUseFailure",
+            "postToolUseFailure",
+        ] {
+            assert_eq!(normalize_hook_event(raw), "PostToolUseFailure");
+        }
+        for raw in ["pre_compact", "PreCompact", "preCompact"] {
+            assert_eq!(normalize_hook_event(raw), "PreCompact");
+        }
+        let grok = r#"{"hookEventName":"post_tool_use_failure","toolInput":{"command":"cargo test"},"error":"feature `edition2024` is required"}"#;
+        assert_eq!(tool_error(grok), "feature `edition2024` is required");
+        let snake =
+            r#"{"hook_event_name":"PostToolUseFailure","tool_response":{"error":" exit 101 "}}"#;
+        assert_eq!(tool_error(snake), "exit 101");
+        assert_eq!(tool_error(r#"{"hook_event_name":"PostToolUse"}"#), "");
+        let call = hook_call(grok);
+        assert_eq!(call.event, "PostToolUseFailure");
+        assert_eq!(call.cue, "cargo test");
+        let (said, ids) = failure_note(
+            &hook_call(r#"{"hookEventName":"post_tool_use_failure"}"#),
+            "",
+            3,
+        );
+        assert!(said.is_empty() && ids.is_empty(), "nothing to search on");
+    }
+
+    /// A compaction forgets which memories the conversation was handed, so
+    /// they can come back, and keeps the nudges it already gave.
+    #[test]
+    fn a_compaction_forgets_the_memories_and_keeps_the_nudges() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("XDG_RUNTIME_DIR");
+        // Safety: the environment lock is held for the whole test.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let session = "compact-test-1";
+        mark_seen(
+            Some(session),
+            &[
+                "8f60631a551e60cf1818c21a2b1c3945".to_string(),
+                "due-nudge".to_string(),
+                "panel-open:which answer".to_string(),
+                "hold-echoed".to_string(),
+            ],
+        );
+        rearm_after_compaction(Some(session));
+        let seen = seen_ids(Some(session));
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+        assert!(
+            !seen.contains("8f60631a551e60cf1818c21a2b1c3945"),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.contains("hold-echoed"),
+            "the next tool result may speak again"
+        );
+        assert!(seen.contains("due-nudge") && seen.contains("panel-open:which answer"));
+        assert!(is_atom_id("8f60631a551e60cf1818c21a2b1c3945") && !is_atom_id("due-nudge"));
     }
 
     #[test]

@@ -114,6 +114,14 @@ ljos panel "$id2" --out "$root/panel" | grep -q consensus || fail panel
 cal=$(ljos calibrate -p demo 2>&1 || true)
 echo "$cal" | grep -q weighs || { echo "$cal"; fail calibrate; }
 
+# A failed command brings back what the seat knows about that failure, and
+# an unrelated one brings back nothing.
+ljos prefer "Run cargo test with rustc 1.88 or newer; rustc 1.83 lacks edition2024." >/dev/null
+failed='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-fail","toolInput":{"command":"cargo test"},"error":"feature edition2024 is required, rustc 1.83"}'
+printf '%s' "$failed" | ljos hook | grep -q 'bears on this failure' || fail "failure recall"
+other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolInput":{"command":"npm run build"},"error":"Module not found: react-dom"}'
+[ -z "$(printf '%s' "$other" | ljos hook)" ] || fail "an unrelated failure recalled a memory"
+
 ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
 echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"
 # A tool call must not search the pack. The inject script exits empty.
