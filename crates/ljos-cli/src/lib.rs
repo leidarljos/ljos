@@ -1034,6 +1034,10 @@ fn version_like(s: &str) -> bool {
     t.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Script stems that name an entry point, not a program: a runner shipped
+/// as `dist/index.js` or `cli.py` is the directory above.
+const ENTRY_STEMS: &[&str] = &["index", "main", "cli", "server", "entry", "run", "start"];
+
 /// A program's name from how it was started: the last path component of
 /// what ran that is neither a version (`2.1.266`) nor a place (`bin`,
 /// `versions`); for an interpreter, the script it was handed. Falls back
@@ -1046,6 +1050,11 @@ fn program_name(pid: u32, comm: &str) -> String {
         .filter(|a| !a.is_empty())
         .map(|a| String::from_utf8_lossy(a).into_owned())
         .collect();
+    name_from_argv(&args).unwrap_or_else(|| comm.to_string())
+}
+
+/// [`program_name`] from an argv already split.
+fn name_from_argv(args: &[String]) -> Option<String> {
     let mut candidates: Vec<&str> = Vec::new();
     if let Some(first) = args.first() {
         let base = Path::new(first)
@@ -1065,23 +1074,26 @@ fn program_name(pid: u32, comm: &str) -> String {
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
         while let Some(last) = parts.pop() {
-            let name = last.rsplit_once('.').map_or(last, |(stem, ext)| {
+            let (name, script) = last.rsplit_once('.').map_or((last, false), |(stem, ext)| {
                 if ["js", "mjs", "cjs", "py", "rb", "pl", "jar", "exe"].contains(&ext) {
-                    stem
+                    (stem, ext != "exe")
                 } else {
-                    last
+                    (last, false)
                 }
             });
             if name.is_empty() || version_like(name) || PLACES.contains(&name) || name == "/" {
                 continue;
             }
+            if script && ENTRY_STEMS.contains(&name) && !parts.is_empty() {
+                continue;
+            }
             if name.starts_with('.') || name.contains(std::path::MAIN_SEPARATOR) {
                 continue;
             }
-            return name.to_string();
+            return Some(name.to_string());
         }
     }
-    comm.to_string()
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -14152,6 +14164,28 @@ mod tests {
         // directory is the version; the program is the directory above.
         let me = program_name(std::process::id(), "comm");
         assert!(!me.is_empty() && !version_like(&me), "{me}");
+    }
+
+    #[test]
+    fn an_entry_script_is_named_by_the_directory_that_ships_it() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            name_from_argv(&argv(&["/exec-daemon/node", "/exec-daemon/index.js", "serve"])).as_deref(),
+            Some("exec-daemon")
+        );
+        assert_eq!(
+            name_from_argv(&argv(&["node", "/usr/lib/node_modules/opencode-ai/dist/index.js"])).as_deref(),
+            Some("opencode-ai")
+        );
+        assert_eq!(
+            name_from_argv(&argv(&["python3", "/opt/hermes/cli.py", "--tui"])).as_deref(),
+            Some("hermes")
+        );
+        assert_eq!(
+            name_from_argv(&argv(&["/home/u/.local/share/claude/versions/2.1.266"])).as_deref(),
+            Some("claude")
+        );
+        assert_eq!(name_from_argv(&argv(&["node", "index.js"])).as_deref(), Some("index"));
     }
 
     #[test]
