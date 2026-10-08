@@ -8323,8 +8323,11 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
         // agent types into a pane would forge it. Every multiplexer verb
         // that writes into another pane's input counts.
         let has = |verbs: &[&str]| words.iter().any(|w| verbs.contains(&w.as_str()));
+        let input_flag = words
+            .iter()
+            .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('I'));
         let types_keys = match first {
-            "tmux" => has(&["send-keys", "send"]),
+            "tmux" => has(&["send-keys", "send"]) || (has(&["pipe-pane", "pipep"]) && input_flag),
             "herdr" => has(&["send", "send-keys", "send-text", "prompt", "run"]),
             "zellij" => has(&["write-chars", "write"]),
             "wezterm" | "kitty" | "kitten" => has(&["send-text"]),
@@ -8332,9 +8335,16 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
             "xdotool" | "wtype" | "ydotool" => true,
             _ => false,
         };
-        // A live terminal session reads what it types from stdin, so the
-        // approval sits in another segment of the line.
-        let streams_keys = first == "herdr" && has(&["control"]);
+        // Some verbs type what another command produced: herdr's terminal
+        // session control reads stdin, and tmux and screen paste a filled
+        // buffer. An approval can then sit in another segment of the
+        // line.
+        let streams_keys = match first {
+            "herdr" => has(&["control"]),
+            "tmux" => has(&["paste-buffer", "pasteb"]),
+            "screen" => has(&["paste"]),
+            _ => false,
+        };
         if (types_keys
             && words
                 .iter()
@@ -18833,8 +18843,23 @@ mod tests {
         ))
         .is_some());
         assert!(seat_guard(&format!("screen -S seat -X stuff 'approve {id}'")).is_some());
+        assert!(seat_guard(&format!(
+            "screen -S seat -X register p 'approve {id}'; screen -S seat -X paste p"
+        ))
+        .is_some());
+        assert!(seat_guard(&format!(
+            "tmux set-buffer 'approve {id}' && tmux paste-buffer -t seat"
+        ))
+        .is_some());
+        assert!(seat_guard(&format!("tmux setb 'approve {id}' \\; pasteb -t seat")).is_some());
+        assert!(seat_guard(&format!("tmux pipe-pane -I -t seat \"echo approve {id}\"")).is_some());
         assert!(seat_guard(&format!("wtype 'approve {id}'")).is_some());
         assert!(seat_guard("tmux send-keys -t seat 'cargo test' Enter").is_none());
+        assert!(seat_guard("tmux paste-buffer -t seat").is_none());
+        assert!(seat_guard(&format!(
+            "tmux pipe-pane -t seat 'grep approve {id} >> log'"
+        ))
+        .is_none());
         assert!(
             seat_guard("herdr agent prompt reviewer 'Review the current diff' --wait").is_none()
         );
