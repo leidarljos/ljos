@@ -1253,7 +1253,7 @@ fn main() -> Result<()> {
                             format!("{granted}\n{ctx}")
                         };
                     }
-                    if call.shape != ljos_cli::HookShape::CamelCase {
+                    if !call.shape.holds_prompt_note() {
                         mark_seen(call.session.as_deref(), &ids);
                     }
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)

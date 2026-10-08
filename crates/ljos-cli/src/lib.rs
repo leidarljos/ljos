@@ -93,6 +93,10 @@ pub struct Harness {
     /// `--event`, since that runner's payload does not name it.
     #[serde(default)]
     pub hooks_named: Option<String>,
+    /// `cursor` for a hooks file in Cursor's flat shape (`version` 1, one
+    /// entry an event), written by [`cursor_hook_step`].
+    #[serde(default)]
+    pub hooks_format: Option<String>,
     /// The events the memory hook fires on. Empty means [`HOOK_EVENTS`],
     /// the prompt event alone: a panel of this seat's personas settled on
     /// prompts over tool calls, because a turn issues many shell commands
@@ -583,6 +587,21 @@ hooks = "~/.gemini/config/hooks.json"
 hooks_named = "ljos"
 start = ["agy"]
 resume = ["agy", "--continue"]
+
+[[harness]]
+name = "cursor"
+# Cursor's agent and its `agent` CLI read servers from mcp.json and hooks
+# from a flat hooks.json of their own. Cursor also runs the hooks in
+# ~/.claude/settings.json, so where the claude shape is onboarded the seat
+# writes no second copy, and answers in Cursor's shape either way.
+config_json = "~/.cursor/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.cursor/skills"
+agents = "~/.cursor/agents"
+hooks = "~/.cursor/hooks.json"
+hooks_format = "cursor"
+resume = ["agent", "--continue"]
 
 [[harness]]
 name = "grok"
@@ -1964,9 +1983,12 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
-        steps.push(match &h.hooks_named {
-            Some(name) => named_hook_step(&expand(file), name, dry),
-            None => hook_step(&expand(file), &hook_events_of(h), dry),
+        steps.push(match (&h.hooks_named, h.hooks_format.as_deref()) {
+            (Some(name), _) => named_hook_step(&expand(file), name, dry),
+            (None, Some("cursor")) => {
+                cursor_hook_step(&expand(file), &expand("~/.claude/settings.json"), dry)
+            }
+            (None, _) => hook_step(&expand(file), &hook_events_of(h), dry),
         });
     }
     if let Some(dest) = &h.plugin {
@@ -2071,6 +2093,11 @@ fn normalize_hook_event(raw: &str) -> &str {
             "PostToolUseFailure"
         }
         "pre_compact" | "PreCompact" | "preCompact" => "PreCompact",
+        "beforeShellExecution" | "preToolUse" => "PreToolUse",
+        "beforeSubmitPrompt" => "UserPromptSubmit",
+        "postToolUse" => "PostToolUse",
+        "sessionStart" => "SessionStart",
+        "sessionEnd" => "SessionEnd",
         "user_prompt_submit" | "UserPromptSubmit" => "UserPromptSubmit",
         "session_end" | "SessionEnd" => "SessionEnd",
         "session_start" | "SessionStart" => "SessionStart",
@@ -2366,13 +2393,155 @@ fn hook_installed(file: &Path, events: &[String]) -> bool {
             .into_iter()
             .flatten()
             .any(|g| {
-                g["hooks"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(is_seat_hook)
+                is_seat_hook(g)
+                    || g["hooks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(is_seat_hook)
             })
     })
+}
+
+/// The events the seat's hook takes in Cursor's hooks file, each with its
+/// timeout in seconds: the gate before a shell command, the prompt (held,
+/// since Cursor does not hand a prompt hook's context to the model), the
+/// tool results that deliver it, a failure, a compaction, the stop and the
+/// end of the session.
+pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
+    ("beforeShellExecution", 10),
+    ("beforeSubmitPrompt", 20),
+    ("postToolUse", 10),
+    ("postToolUseFailure", 10),
+    ("preCompact", 5),
+    ("stop", 15),
+    ("sessionEnd", 5),
+];
+
+/// Merge the seat's hook into Cursor's hooks file, `{"version": 1, "hooks":
+/// {"<event>": [{"command": ..., "timeout": ...}]}}`: flat entries, not
+/// Claude's matcher groups. Cursor also runs the hooks in
+/// `~/.claude/settings.json` by default, and the seat answers either in
+/// Cursor's shape (it reads `cursor_version` off the payload), so when that
+/// file already carries the seat's hook nothing is written here: two
+/// copies would answer every event twice.
+fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
+    let what = "hook".to_string();
+    let claude_has_seat = std::fs::read_to_string(claude_settings)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| {
+            v["hooks"].as_object().is_some_and(|events| {
+                events
+                    .values()
+                    .flat_map(|g| g.as_array().into_iter().flatten())
+                    .any(|g| {
+                        g["hooks"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(is_seat_hook)
+                    })
+            })
+        });
+    if claude_has_seat {
+        return Step {
+            what,
+            detail: format!(
+                "Cursor runs the seat's hooks from {}; none written to {}",
+                claude_settings.display(),
+                file.display()
+            ),
+            ok: true,
+        };
+    }
+    let mut root: Value = match std::fs::read_to_string(file) {
+        Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Step {
+                    what,
+                    detail: format!("{}: not JSON: {e}", file.display()),
+                    ok: false,
+                }
+            }
+        },
+        _ => serde_json::json!({}),
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return Step {
+            what,
+            detail: format!("{}: not a JSON object", file.display()),
+            ok: false,
+        };
+    };
+    obj.entry("version").or_insert(serde_json::json!(1));
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    let Some(hooks) = hooks.as_object_mut() else {
+        return Step {
+            what,
+            detail: format!("{}: hooks is not an object", file.display()),
+            ok: false,
+        };
+    };
+    let command = hook_command();
+    let mut added = Vec::new();
+    for (event, timeout) in CURSOR_HOOK_EVENTS {
+        let entries = hooks
+            .entry((*event).to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(entries) = entries.as_array_mut() else {
+            continue;
+        };
+        if entries.iter().any(is_seat_hook) {
+            continue;
+        }
+        entries.push(serde_json::json!({"command": command, "timeout": timeout}));
+        added.push(*event);
+    }
+    if added.is_empty() {
+        return Step {
+            what,
+            detail: format!("{} carries the seat's hook", file.display()),
+            ok: true,
+        };
+    }
+    if dry {
+        return Step {
+            what,
+            detail: format!(
+                "would add the seat's hook on {} in {}",
+                added.join(", "),
+                file.display()
+            ),
+            ok: true,
+        };
+    }
+    let written = file
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::write(
+                file,
+                serde_json::to_string_pretty(&root).unwrap_or_default() + "\n",
+            )
+        });
+    match written {
+        Ok(()) => Step {
+            what,
+            detail: format!(
+                "added the seat's hook on {} in {}",
+                added.join(", "),
+                file.display()
+            ),
+            ok: true,
+        },
+        Err(e) => Step {
+            what,
+            detail: format!("{}: {e}", file.display()),
+            ok: false,
+        },
+    }
 }
 
 /// The directory the tool executes in, including an explicit tool override.
@@ -2447,13 +2616,40 @@ pub enum HookShape {
     /// `allow`, `deny` or `ask`, which the runner asks; context goes in as
     /// `injectSteps`; a `Stop` is held with `decision: continue`.
     Steps,
+    /// Cursor's `beforeShellExecution`: snake_case stdin carrying
+    /// `cursor_version`, the command at the top level. It answers
+    /// `permission` (`allow`, `deny` or `ask`, which Cursor asks) with
+    /// `user_message` and `agent_message`, and blocks on an answer that is
+    /// not JSON.
+    CursorShell,
+    /// Every other Cursor event. Context reaches the model as
+    /// `additional_context` on `postToolUse`, `postToolUseFailure` and
+    /// `sessionStart` only, and a `stop` is held with `followup_message`;
+    /// `preToolUse` takes `permission` but does not enforce an `ask`.
+    Cursor,
 }
 
 impl HookShape {
     /// Whether the runner can stop and ask the person on a verdict.
     #[must_use]
     pub fn asks(self) -> bool {
-        matches!(self, Self::Asks | Self::Steps | Self::CamelCase)
+        matches!(
+            self,
+            Self::Asks | Self::Steps | Self::CamelCase | Self::CursorShell
+        )
+    }
+
+    /// Whether the runner discards a prompt hook's context, so the note is
+    /// held and delivered on the first tool result instead.
+    #[must_use]
+    pub fn holds_prompt_note(self) -> bool {
+        matches!(self, Self::CamelCase | Self::Cursor | Self::CursorShell)
+    }
+
+    /// Cursor, on either of its event shapes.
+    #[must_use]
+    pub fn is_cursor(self) -> bool {
+        matches!(self, Self::Cursor | Self::CursorShell)
     }
 }
 
@@ -2623,7 +2819,13 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         return steps_call(&v, event);
     }
     let raw_event = v["hook_event_name"].as_str().unwrap_or("");
-    let shape = if v.get("hookEventName").is_some() || v.get("toolInput").is_some() {
+    let shape = if v.get("cursor_version").is_some() {
+        if raw_event == "beforeShellExecution" {
+            HookShape::CursorShell
+        } else {
+            HookShape::Cursor
+        }
+    } else if v.get("hookEventName").is_some() || v.get("toolInput").is_some() {
         HookShape::CamelCase
     } else if raw_event.starts_with("pre_")
         || raw_event.starts_with("post_")
@@ -2643,6 +2845,7 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
     let session = v["session_id"]
         .as_str()
         .or_else(|| v["sessionId"].as_str())
+        .or_else(|| v["conversation_id"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let raw = v["hook_event_name"]
@@ -2654,7 +2857,7 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         p.to_string()
     } else if let Some(p) = v["extra"]["user_message"].as_str() {
         p.to_string()
-    } else if let Some(c) = input["command"].as_str() {
+    } else if let Some(c) = input["command"].as_str().or_else(|| v["command"].as_str()) {
         c.to_string()
     } else if let Some(path) = input["file_path"]
         .as_str()
@@ -2829,6 +3032,7 @@ pub fn tool_error(input: &str) -> String {
     let v: Value = serde_json::from_str(input.trim()).unwrap_or_default();
     [
         "/error",
+        "/error_message",
         "/tool_response/error",
         "/toolResult/error",
         "/tool_response/stderr",
@@ -2986,7 +3190,7 @@ pub fn prompt_hook_stdout(
     text: &str,
     ids: &[String],
 ) -> String {
-    if shape == HookShape::CamelCase {
+    if shape.holds_prompt_note() {
         hold_hook_note(session, text, ids);
         String::new()
     } else {
@@ -3001,7 +3205,7 @@ pub fn prompt_hook_stdout(
 /// it the same way. A turn with no tool leaves the hold for `Stop`.
 #[must_use]
 pub fn post_hook_stdout(shape: HookShape, session: Option<&str>) -> (String, Vec<String>) {
-    if shape == HookShape::CamelCase {
+    if shape.holds_prompt_note() {
         let key = "hold-echoed".to_string();
         if seen_ids(session).contains(&key) {
             return (String::new(), Vec::new());
@@ -3439,7 +3643,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
 #[must_use]
 pub fn hook_context(call: &HookCall, limit: usize) -> String {
     let (text, ids) = hook_note(call, limit);
-    if call.shape != HookShape::CamelCase {
+    if !call.shape.holds_prompt_note() {
         mark_seen(call.session.as_deref(), &ids);
     }
     text
@@ -4802,6 +5006,9 @@ fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Strin
 /// the runner's words for it.
 #[must_use]
 pub fn block_output(shape: HookShape, reason: &str) -> String {
+    if shape.is_cursor() {
+        return serde_json::json!({ "followup_message": reason }).to_string();
+    }
     let decision = if shape == HookShape::Steps {
         "continue"
     } else {
@@ -4825,6 +5032,9 @@ pub fn hook_output(call: &HookCall, context: &str) -> String {
 pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     if call.shape == HookShape::Steps {
         return steps_output(call, context, verdict);
+    }
+    if call.shape.is_cursor() {
+        return cursor_output(call, context, verdict);
     }
     if context.is_empty() && verdict.is_none() {
         return String::new();
@@ -4904,6 +5114,54 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
     }
     top.insert("hookSpecificOutput".into(), specific);
     Value::Object(top).to_string() + "\n"
+}
+
+/// An answer in Cursor's hook contract. A gate always answers, because
+/// Cursor blocks a permission hook whose answer is not JSON: `allow`, or
+/// the verdict with its reason to the person (`user_message`) and to the
+/// agent (`agent_message`); an `ask` where Cursor does not enforce one is a
+/// deny that says so. Context goes where Cursor hands it to the model:
+/// `additional_context` after a tool result, a failed one, or at session
+/// start; a held stop is a `followup_message`.
+fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
+    let mut out = serde_json::Map::new();
+    match call.event.as_str() {
+        "PreToolUse" => {
+            let (permission, reason) = match verdict {
+                Some(r) if r.verdict == "ask" && !call.shape.asks() => (
+                    "deny",
+                    format!(
+                        "ask the person before running this: {} (seat rule `{}`). This hook cannot \
+                         ask here, so retrying returns this same refusal: stop, tell the person the \
+                         exact command, and leave it for them to run.",
+                        r.reason, r.pattern
+                    ),
+                ),
+                Some(r) => (
+                    r.verdict.as_str(),
+                    format!("{} (seat rule `{}`)", r.reason, r.pattern),
+                ),
+                None => ("allow", String::new()),
+            };
+            out.insert("permission".into(), Value::String(permission.into()));
+            if !reason.is_empty() {
+                out.insert("user_message".into(), Value::String(reason.clone()));
+                out.insert("agent_message".into(), Value::String(reason));
+            }
+        }
+        "PostToolUse" | "PostToolUseFailure" | "SessionStart" if !context.is_empty() => {
+            out.insert("additional_context".into(), Value::String(context.into()));
+        }
+        "Stop" | "SubagentStop" if !context.is_empty() => {
+            out.insert("followup_message".into(), Value::String(context.into()));
+        }
+        _ => {}
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        Value::Object(out).to_string() + "\n"
+    }
 }
 
 pub fn format_steps(steps: &[Step]) -> String {
@@ -16878,8 +17136,8 @@ mod tests {
     fn onboarding_a_config_file_runner_writes_once() {
         let _g = env_guard();
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
-        // Three shapes, then the seven runners this seat has carried.
-        assert_eq!(all.harness.len(), 10);
+        // Three shapes, then the eight runners this seat has carried.
+        assert_eq!(all.harness.len(), 11);
         assert!(all.harness[3..].iter().all(|h| h.register.len()
             + usize::from(h.config.is_some())
             + usize::from(h.config_json.is_some())
@@ -17360,6 +17618,7 @@ mod tests {
             skills: None,
             hooks: None,
             hooks_named: None,
+            hooks_format: None,
             hook_events: Vec::new(),
             plugin: None,
             plugin_template: None,
@@ -17956,6 +18215,96 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    /// Cursor is read off its payload whichever file registered the hook,
+    /// and answered in its contract: a gate always answers, an ask Cursor
+    /// cannot enforce is a deny, context rides `additional_context`, a held
+    /// stop is a `followup_message`.
+    #[test]
+    fn cursor_is_read_off_its_payload_and_answered_in_its_contract() {
+        let shell = hook_call(
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeShellExecution","command":"git status","cwd":"/w"}"#,
+        );
+        assert_eq!(shell.shape, HookShape::CursorShell);
+        assert_eq!(shell.event, "PreToolUse");
+        assert_eq!(shell.cue, "git status");
+        assert_eq!(shell.session.as_deref(), Some("c-1"));
+        assert_eq!(
+            hook_output_ruled(&shell, "", None),
+            "{\"permission\":\"allow\"}\n"
+        );
+        let ask = Rule {
+            pattern: "git push*".into(),
+            verdict: "ask".into(),
+            reason: "A push needs consent.".into(),
+        };
+        assert!(hook_output_ruled(&shell, "", Some(&ask)).contains("\"permission\":\"ask\""));
+        let tool = hook_call(
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"git push"}}"#,
+        );
+        assert_eq!(tool.shape, HookShape::Cursor);
+        let said = hook_output_ruled(&tool, "", Some(&ask));
+        assert!(
+            said.contains("\"permission\":\"deny\"") && said.contains("cannot ask here"),
+            "{said}"
+        );
+        let prompt = hook_call(
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeSubmitPrompt","prompt":"tag a release"}"#,
+        );
+        assert_eq!(prompt.event, "UserPromptSubmit");
+        assert!(prompt.shape.holds_prompt_note());
+        let post = hook_call(
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"postToolUse","tool_name":"Shell","tool_input":{"command":"ls"}}"#,
+        );
+        assert_eq!(
+            hook_output_ruled(&post, "a note", None),
+            "{\"additional_context\":\"a note\"}\n"
+        );
+        let failed = r#"{"cursor_version":"2.4.0","hook_event_name":"postToolUseFailure","error_message":"exit 2"}"#;
+        assert_eq!(hook_call(failed).event, "PostToolUseFailure");
+        assert_eq!(tool_error(failed), "exit 2");
+        assert_eq!(
+            block_output(HookShape::Cursor, "run the tests"),
+            "{\"followup_message\":\"run the tests\"}"
+        );
+    }
+
+    /// Cursor's hooks file is written flat, once, and not at all where
+    /// Cursor already runs the seat's hooks from Claude's settings.
+    #[test]
+    fn cursor_hooks_are_written_flat_and_never_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cursor/hooks.json");
+        let claude = dir.path().join("claude/settings.json");
+        let first = cursor_hook_step(&file, &claude, false);
+        assert!(
+            first.ok && first.detail.starts_with("added"),
+            "{}",
+            first.detail
+        );
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(doc["version"], 1);
+        for (event, timeout) in CURSOR_HOOK_EVENTS {
+            let entries = doc["hooks"][*event].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{event}");
+            assert!(is_seat_hook(&entries[0]) && entries[0]["timeout"] == *timeout);
+        }
+        let again = cursor_hook_step(&file, &claude, false);
+        assert!(again.detail.contains("carries"), "{}", again.detail);
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(
+            &claude,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/b/ljos hook"}]}]}}"#,
+        )
+        .unwrap();
+        let other = dir.path().join("cursor2/hooks.json");
+        let skipped = cursor_hook_step(&other, &claude, false);
+        assert!(
+            skipped.detail.contains("none written") && !other.exists(),
+            "{}",
+            skipped.detail
+        );
     }
 
     /// A persona becomes an agent definition a runner spawns by name: front
