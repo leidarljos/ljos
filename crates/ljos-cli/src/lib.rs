@@ -8862,7 +8862,7 @@ pub fn learn_reading(
     calibration: &std::collections::BTreeMap<String, Calibration>,
 ) -> String {
     let mut out = format!(
-        "Learned. {rows} trust rows rewritten. {moved} persona anchors moved. The outcome is kept: once {MIN_NAMED_OUTCOMES} issues have one, ljos consensus counts voters who err together once. This is not a new settle; the next ljos consensus uses these rows."
+        "Learned. {rows} trust rows rewritten. {moved} persona anchors moved. The outcome is kept: once {MIN_NAMED_OUTCOMES} issues have one, ljos consensus discounts voters who err together. This is not a new settle; the next ljos consensus uses these rows."
     );
     match mean_brier(forecasts, outcome) {
         Some((mean, n)) => {
@@ -9092,7 +9092,7 @@ pub fn discount_from(reading: &Value) -> Option<(std::collections::BTreeMap<Stri
     Some((
         discount.clone(),
         format!(
-            "correlation over {named} named outcomes: {} voters hold {voices:.2} independent voices; the settle counts correlated voices once ({})",
+            "correlation over {named} named outcomes: {} voters hold {voices:.2} independent voices; the settle discounts correlated voices ({})",
             discount.len(),
             shared.join(", ")
         ),
