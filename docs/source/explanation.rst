@@ -331,9 +331,18 @@ residual leaves open. A voter weighs its own ballot as the others weigh
 it, which makes the log-odds rows ``learn`` writes settle as the weighted
 vote they describe; one constant self-weight compressed them, and the
 difference shows where a weak crowd can outvote the voter worth hearing.
-Personas answered by one model share its mistakes, so the consensus
-crate's ``correlation`` reads who errs with whom from the project's
-history and counts a correlated cluster once. And a ballot follows its
+Personas answered by one model share its mistakes, so ``learn`` keeps the
+option each issue closed on, and once five issues have one, ``consensus``
+has the consensus crate's ``correlation`` read who errs with whom against
+those outcomes and counts a correlated cluster once. A pair counts only
+when its correlation passes a test of independence, so a short history
+does not discount a voter by noise. A short record misleads the weights
+the same way: log odds of five outcomes drop a good voter who started
+unlucky, and on a panel of similar voters lose to a plain count by six
+points. ``learn`` therefore shrinks each voter's record toward the panel's
+by empirical Bayes (Efron and Morris, doi:10.1080/01621459.1975.10479864)
+before weighing it, so the first outcome leaves the voters alike and a
+long record keeps the differences it shows. And a ballot follows its
 own reading, not the others': the brief carries none, and tells the
 persona to cast before it reads a tally, because a ballot cast after the
 others adds a voice and no evidence. The consensus crate's explanation

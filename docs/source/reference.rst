@@ -68,7 +68,8 @@ Command line
 | ``panel ISSUE [--out DIR] [--jev]``                                                                                                       | pack, tracker             | one brief per persona whose domains the issue speaks to as ``DIR/<name>.md``, then the settle line; refused until a playbook is bound. ``--jev`` asks Jev for every ballot first and   |
 |                                                                                                                                           |                           | casts them only when every seat is sure and all agree; otherwise it writes the briefs                                                                                                  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]``                                                           | tracker, pack             | reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights; ``hedge`` shrinks refuted voters by ``B`` with ``S`` recovery          |
+| ``learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]``                                                           | tracker, pack             | reweigh voters by what turned out right: by default each voter's record of hits and misses, shrunk toward the panel's, as log-odds weights; ``hedge`` shrinks refuted voters by ``B``  |
+|                                                                                                                                           |                           | with ``S`` recovery; either way the outcome is kept                                                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``evidence ACCESSION`` / ``current ACCESSION``                                                                                            | deed store                | intact; still the tip                                                                                                                                                                  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -92,7 +93,8 @@ Command line
 | ``rule PATTERN [--verdict deny\vert ask] --why TEXT``                                                                                     | pack                      | argv law the hook and ``policy`` enforce: a glob, or a regular expression (``re:`` or a ``\\b``, ``\\s`` or ``(a\vert b)`` in it) anchored at the start, tried on the whole line and   |
 |                                                                                                                                           |                           | on each command it runs (split on ``&&``, ``\vert\vert``, ``;``, ``\vert`` outside quotes, with ``NAME=value``, ``sudo``, ``env``, ``time``, ``nohup`` taken off)                      |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``consensus ID``                                                                                                                          | consensus, tracker        | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged ``broad`` runs bounded confidence                                                   |
+| ``consensus ID``                                                                                                                          | consensus, tracker        | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged ``broad`` runs bounded confidence; once five issues have an outcome, voters shown   |
+|                                                                                                                                           |                           | to err together count once                                                                                                                                                             |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``claim ID [--assignee NAME]``                                                                                                            | claim graph               | a session node for a tracker id; a busy refusal names what the name still holds; a node this name holds is a sitting resumed                                                           |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -316,11 +318,34 @@ Path                                   Holds
 The learning rules
 ==================
 
-After an outcome, every voter whose ballot it refuted shrinks in every
-other voter's row by ``beta`` (default 0.5), floored at 0.01. A vindicated
-voter keeps its weight, and a missing row starts at 1. Rows are written
-complete, so the settle sees the whole graph. The update is the
-multiplicative weights rule of Hedge (doi:10.1006/jcss.1997.1504).
+``learn`` adds the outcome to each voter's record of hits and misses. A
+voter's accuracy is its record shrunk toward the panel's pooled accuracy by
+empirical Bayes (Efron and Morris, doi:10.1080/01621459.1975.10479864): the
+prior's strength is what the spread between the records leaves once
+binomial noise is taken out, so the first outcome leaves every voter alike
+and a long record keeps the differences it shows. The weight every other
+voter gives a voter is the log odds of that accuracy (Nitzan and Paroush,
+doi:10.2307/2526438), scaled so the best stands at one and floored at
+0.01. Rows are written complete, so the settle sees the whole graph, and
+each carries its voter's record. ``learn`` also writes an ``outcome`` atom:
+the issue and the option it closed on.
+
+``--rule hedge`` runs the multiplicative weights rule of Hedge
+(doi:10.1006/jcss.1997.1504) instead: every voter whose ballot the outcome
+refuted shrinks in every other voter's row by ``beta`` (default 0.5),
+floored at 0.01. A vindicated voter keeps its weight, and a missing row
+starts at 1.
+
+Once five issues have an outcome, ``consensus`` reads each one's ballots
+beside the option it closed on and asks ``ljos-consensus correlation`` how
+far the voters share their mistakes. A pair counts only when its
+correlation passes the one-sided test of independence at five percent, and
+each voter's inbound weight in the settle is multiplied by ``1 / (1 + the
+sum of its counted correlations)`` (``settle --discount-of``), so a cluster
+that errs together counts about once. A line before the settle names the
+outcomes read, the independent voices the panel holds, and each voter
+discounted; with no pair counted, nothing is passed and nothing is
+printed.
 
 A row carries the domains it is scoped to. An unscoped row applies to
 every issue; a scoped row applies when one of its domains is a word of the
@@ -345,9 +370,8 @@ doi:10.1287/moor.1120.0570), at 1 it is a plain voter.
 Without an outcome, ``calibrate`` estimates each voter's accuracy from the
 project's issues with two or more ballots by expectation maximisation over
 the items' hidden answers (Dawid and Skene, doi:10.2307/2346806), then
-writes each accuracy, floored at 0.01, as the weight every other voter
-gives that voter. That is the weight a linear opinion pool assigns a source
-believed that reliable (Genest and Zidek, doi:10.1214/ss/1177013825).
+writes the log odds of each accuracy, scaled so the best stands at one and
+floored at 0.01, as the weight every other voter gives that voter.
 
 Crates
 ======
