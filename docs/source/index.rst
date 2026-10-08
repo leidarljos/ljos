@@ -25,9 +25,10 @@ A seat is one agent, or one person, working a tracker. Five habitats
 answer five questions for it: cards are what the human froze, the pack
 knows what the seat has learned, the deed store knows what the work
 produced, the tracker knows what the work is and who agrees, and the
-claim graph knows what this session is handing out. Argv law is not a
-store: ``ljos policy`` prints the line, and ``ljos-policyd`` is the TCB
-when it is on ``PATH`` or ``POLICYD_BIN``. ``ljos`` is the one command and the one Model
+claim graph knows who is working on what right now. The judging of
+shell commands is not a store: ``ljos-policyd`` refuses the dangerous
+ones before they run, seat rules refuse more, and ``ljos policy --
+COMMAND`` prints the answer for one command. ``ljos`` is the one command and the one Model
 Context Protocol (MCP) server over those habitats. It adds three loops
 the habitats do not have alone: memory that is reviewed and forgotten
 on a clock, agreement that weighs voters by who turned out right, and
@@ -38,7 +39,8 @@ content-addressed store, a Cap'n Proto snapshot. No model is required to
 run any of it, and any model or agent runner that can call a command or an
 MCP tool can sit in the seat.
 
-|image1|
+.. image:: _static/seat.svg
+   :width: 100.0%
 
 Install
 =======
@@ -87,6 +89,3 @@ tracker in about ten minutes.
    reference
    explanation
    seat
-
-.. |image1| image:: _static/seat.svg
-   :width: 100.0%

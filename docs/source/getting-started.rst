@@ -6,9 +6,20 @@ second seat that checked it.
 0. Point the seat at scratch stores
 ===================================
 
+Install the binaries once:
+
 .. code:: console
 
-   $ mkdir -p /tmp/seat && cd /tmp/seat && git init -q
+   $ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-consensus
+
+They provide ``ljos``, ``ljos-mcp``, ``ljos-consensus``, ``packset``, ``packsetd``,
+``deedar``, ``claimdag`` and ``vissue``. ``VISSUE_ROOT`` must name an existing
+directory with a prefix directory inside it, and ``packset ensure`` starts the
+pack writer.
+
+.. code:: console
+
+   $ mkdir -p /tmp/seat/tracker/Issues && cd /tmp/seat && git init -q
    $ export VISSUE_ROOT=/tmp/seat/tracker DEEDAR_URL=file:///tmp/seat/deeds
    $ export CLAIMDAG_DIR=/tmp/seat/claims
    $ packsetd --port 18761 --home /tmp/seat-pack &
@@ -160,11 +171,12 @@ that connects, and ``ljos`` in a shell the runner opens finds the same name
 through the process tree, so nothing is set per runner. The agent's next
 sitting then runs in the order above. A runner that registers servers by
 a command of its own can be described once in
-``~/.config/ljos/harnesses.toml`` and onboarded with ``ljos onboard --harness NAME``; the :doc:`how-to <howto>` shows the file.
+``~/.config/ljos/harnesses.toml`` and onboarded with ``ljos onboard --harness
+NAME``; the :doc:`how-to <howto>` shows the file.
 
 Where next
 ==========
 
-- :doc:`How-to <howto>`: wire the server into an agent runner, sign handovers, read the cards.
-- :doc:`Reference <reference>`: every verb and tool.
-- :doc:`Explanation <explanation>`: the contracts, and the memory model with its sources.
+-  :doc:`How-to <howto>`: wire the server into an agent runner, sign handovers, read the cards.
+-  :doc:`Reference <reference>`: every verb and tool.
+-  :doc:`Explanation <explanation>`: the contracts, and the memory model with its sources.
