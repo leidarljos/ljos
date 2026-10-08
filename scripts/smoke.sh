@@ -138,6 +138,12 @@ printf '%s' "$failed" | ljos hook | grep -q 'bears on this failure' || fail "fai
 other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolInput":{"command":"npm run build"},"error":"Module not found: react-dom"}'
 [ -z "$(printf '%s' "$other" | ljos hook)" ] || fail "an unrelated failure recalled a memory"
 
+# The session that resumes from a Claude Code compaction hears the issue
+# the conversation still holds.
+echo '{"hook_event_name":"PreCompact","session_id":"smoke-compact","trigger":"auto"}' | ljos hook >/dev/null
+resumed=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-compact","source":"compact"}' | ljos hook)
+echo "$resumed" | grep -q '"additionalContext":"The conversation was compacted' || { echo "$resumed"; fail "compaction note at SessionStart"; }
+
 ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
 echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"
 # A tool call must not search the pack. The inject script exits empty.
