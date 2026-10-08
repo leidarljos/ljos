@@ -17,6 +17,8 @@ grep() {
   esac
 }
 here=$(cd "$(dirname "$0")" && pwd)
+# A seat the caller names would cast every scripted voter's ballot as itself.
+unset LJOS_SEAT LJOS_PANE_TOOL
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
 export VISSUE_ROOT="$root/tracker" DEEDAR_URL="file://$root/deeds" CLAIMDAG_DIR="$root/claims"
