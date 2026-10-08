@@ -60,7 +60,8 @@ from a config file, can be described once in
 ``--dry-run`` reports what would be written.
 
 The example carries the runners this seat has carried through one piece
-of work, each in the shape it takes the server: a runner with an ``mcp add`` of its own by that command; ``grok`` and a runner with a TOML config
+of work, each in the shape it takes the server: a runner with an ``mcp
+add`` of its own by that command; ``grok`` and a runner with a TOML config
 by a table appended to it; ``opencode`` and ``omp`` by a JSON pointer set in
 their MCP file; ``hermes`` by its ``mcp add`` with the tool question
 answered. Copy the tables for the runners on the machine into
@@ -118,11 +119,11 @@ Otherwise the hook stops the command and prints a request id. Calling
 ``ljos_request_approval`` with that id shows a consent form in a client
 that can display one. Otherwise the person replies ``approve REQUEST_ID``
 in the same conversation, where the prompt hook records the grant, or runs
-``ljos approve REQUEST_ID`` in a terminal of their own. The command refuses
-under an agent runner or without a terminal, a request from another
-conversation is not granted from this one, and the seat guard refuses
-typing an approval into a pane, so an agent cannot grant itself consent.
-Once the person has approved, the agent retries the original tool call.
+``ljos approve REQUEST_ID`` in a terminal of their own. The command refuses under an agent
+runner or without a terminal, a request from another conversation is not
+granted from this one, and the seat guard refuses typing an approval into
+a pane, so an agent cannot grant itself consent. Once the person has
+approved, the agent retries the original tool call.
 
 .. code:: console
 
@@ -156,8 +157,7 @@ or consumed; unavailable or invalid state keeps the command blocked.
 text, and emits it on ``PostToolUse``. The page :doc:`Grok Build <grok-build>`
 is the install.
 
-A
-policy daemon does the same with the argv:
+A policy daemon does the same with the argv:
 
 .. code:: console
 
@@ -177,6 +177,15 @@ and a choice put to the agent. Jev, TypeSafe's decision model, answers
 all three in one call. It stays off unless the machine turns it on,
 because the call sends the prompt and up to ten candidate claims off
 the machine.
+
+The same call asks two more questions, since a call costs its input
+tokens and each question adds about 70 of them to a median of 933. An
+``injection`` question asks whether quoted or pasted text addresses the
+agent with instructions the person did not write; at ``cue_at`` the hook
+adds a note telling the agent to treat that text as data. An ``effort``
+question scores the prompt from 0 (a lookup) to 3 (a design or a hard
+debug); it changes nothing in the hook and lands in
+``$XDG_STATE_HOME/ljos/jev-log.jsonl`` as the record a router is scored on.
 
 Keep the key in ``pass`` and write the setting:
 
@@ -227,9 +236,199 @@ cost, and the doctor row counts those answers as cached. A panel asked
 twice, a retried ballot and a repeated prompt with the same claims all
 hit it. ``cache_days = 0`` turns it off.
 
+Two or more judges can answer side by side. Each ``[judges.NAME]`` table
+names a judge. ``[route]`` says which judges answer each decision. Here a chat
+model on an OpenAI-compatible endpoint judges the prompt, Jev and that
+model pool their ballots, and the chat model reviews due claims:
+
+.. code:: toml
+
+   enabled = true
+   key_file = "~/.config/ljos/jev.key"     # the default judge: Jev
+
+   [judges.chat]
+   backend = "chat"
+   endpoint = "https://llm.example.org/v1"
+   model = "gpt-oss-120b"
+   key_env = "LLM_API_KEY"
+   budget_ms = 6000
+
+   [route]
+   prompt = ["chat"]
+   ballot = ["default", "chat"]
+   audit = ["chat"]
+   review = ["chat"]
+
+A decision with two or more judges is answered by their pool. A
+probability is the weighted mean of the judges' log-odds. Two judges at
+0.8 stay at 0.8, and judges at 0.9 and 0.1 meet at 0.5. A choice is
+the normalised weighted geometric mean of their distributions, and a
+score the weighted mean. ``weight`` in a judge's table moves its share. A
+question no judge answered is missing from the pool, so the caller falls
+back as it does on a partial reply. The log keeps every judge's answer
+beside the pool, so each judge can be scored once outcomes are known.
+
+These judges are fast and calibrated, and they do not reason. A
+decision they leave open goes to a persona that does: a persona with a
+runner thinks in a session of its own.
+
+.. code:: console
+
+   $ ljos persona buildengineer --anchor 0.25 --view "Runs production pipelines." --runner grok
+   $ ljos vote surf-ab12 --as buildengineer --jev
+   buildengineer: Jev leaned A at confidence 0.61, under the 0.80 cut; not cast.
+     buildengineer reasons in its own session in herdr pane w1:p2; then `ljos consensus surf-ab12`
+
+The runner is any agent harness the machine runs: Claude Code, Codex,
+Grok Build, omp, hermes or Antigravity's ``agy``, each on whatever model it
+is set to, from Claude Opus or GPT-5 to ``gpt-oss-120b`` on an
+OpenAI-compatible endpoint. It is a ``[[harness]]`` in
+``~/.config/ljos/harnesses.toml``. Its
+``start`` and ``resume`` argv say how it opens a session and how it resumes
+the latest one in a directory, for example ``resume = ["grok",
+"--continue"]``. It starts in a pane the person can watch and talk in, in
+the first tool that answers: a herdr workspace when herdr's server is up,
+else a window of the tmux session ``ljos-personas``, or a ``[[tool]]`` the
+runners file declares (see *Open persona panes in another tool*). A
+runner that exits non-zero is resumed in its pane, at most three times a
+minute. It works in the persona's home, ``$XDG_STATE_HOME/ljos/personas/NAME``, as the
+seat named after the persona. Its memories, ballots and trust rows are
+therefore the persona's. It reads the issue and the pack, writes its
+reasoning with ``ljos note``, and casts ``ljos vote --as NAME``. Each
+runner continues the latest session of the directory it starts in, so
+the next hand-off resumes the same conversation, and an open pane takes
+the next task in place. A task goes to the persona's inbox, and the pane
+is told the file in one line. ``ljos ask NAME "..."`` puts a question to
+the persona the same way. ``ljos panel --jev`` hands each unsure persona's
+brief to its own session when the panel splits. A persona with no runner
+gets a brief for a subagent, as before.
+
+``ljos due --judge`` puts the due page to the ``review`` judges. Each claim
+goes with the newer claims the pack keeps on the same subject. A claim
+the pool puts at 0.9 or more is graded recalled. One at 0.1 or less
+is printed as contradicted, for the agent to supersede or withdraw, and
+stays due. Everything between stays due. No judge lapses a claim,
+because a lapse says that a reader forgot it.
+
 The hook falls back to its local path on any of these: no file,
 ``enabled = false``, no key, an error, or no answer inside ``budget_ms``
 (2000).
+
+Open persona panes in another tool
+==================================
+
+``ljos doctor`` names the tool persona panes open in:
+
+.. code:: console
+
+   $ ljos doctor | grep panes
+   ok  panes   herdr opens persona panes; tmux also here
+
+herdr opens one workspace a persona in its home, as its seat, types the
+pane script into the root pane, and hands the runner each task through
+``herdr agent prompt``, or as raw keys when herdr does not know the runner
+as an agent. tmux opens a window in the session ``ljos-personas``.
+``LJOS_PANE_TOOL=tmux`` picks one. Any other tool is a table in
+``~/.config/ljos/harnesses.toml``, each verb an argv; one named like a
+shipped shape replaces it. A sketch for a terminal multiplexer with a
+command line:
+
+.. code:: toml
+
+   [[tool]]
+   name = "mytool"
+   detect = ["mytool", "--version"]
+   open = [["mytool", "new-pane", "--cwd", "{home}", "--name", "{label}", "--", "sh", "{script}"]]
+   prompt = [["mytool", "send", "--pane", "{label}", "{line}"], ["mytool", "send-key", "--pane", "{label}", "Enter"]]
+   alive = ["mytool", "has-pane", "{label}"]
+   ready_s = 8
+
+A tool that refuses says so in the line ``ljos ask`` prints, with the
+tool's own words, and the next tool is tried.
+
+Spawn a persona as a subagent of Grok Build or Claude Code
+==========================================================
+
+.. code:: console
+
+   $ ljos agents --harness grok
+   ok  agents grok wrote 5 and removed 0 agent definitions in /home/me/.grok/agents
+
+Each persona is now ``~/.grok/agents/ljos-NAME.md``, and Grok's main
+agent can spawn it by name (``spawn_subagent`` with ``subagent_type``
+``ljos-reviewer``) on a decision: it reads ``ljos brief``, casts one ballot
+before reading the others, notes why and stops, in ``capabilityMode:
+execute``, which runs commands and edits nothing. Claude Code reads the
+same files from ``~/.claude/agents``. ``onboard`` writes them for a runner
+whose table names ``agents``, and a persona written later refreshes the
+directories that exist.
+
+A panel the seat opens by itself runs its members on the seat's own
+runner through the table's ``headless`` argv, or on ``LJOS_PANEL_RUNNER``'s.
+
+Show the seat in the status bar
+===============================
+
+In ``~/.grok/config.toml``:
+
+.. code:: toml
+
+   [ui.status_line]
+   type = "command"
+   command = "ljos statusline"
+
+In ``~/.claude/settings.json``:
+
+.. code:: json
+
+   {"statusLine": {"type": "command", "command": "ljos statusline"}}
+
+The row reads ``ljos grok · surf-ab12 · 3 due``: the seat, the issue the
+conversation holds, the claims due for review. The line is cached fifteen
+seconds a session, and a pack that does not answer in 300 ms shows as
+``pack down``.
+
+Put the judgments to a local model or a harness
+===============================================
+
+The same four judgments go to any judge that answers in Jev's shape.
+``backend`` in ``jev.toml`` picks it; the parsers, the cache, the ledger and
+the doctor row are shared, and every fallback above still applies.
+
+A chat-completions endpoint, hosted or a local llama-server, takes one
+JSON-mode chat completion per judgment set. ``endpoint`` is the base URL
+and ``model`` the name the server knows. A local server needs no key;
+``usd_per_mtok_in = 0`` keeps the ledger honest for one that is free.
+
+.. code:: toml
+
+   enabled = true
+   backend = "chat"
+   endpoint = "http://127.0.0.1:8089/v1"
+   model = "Qwen2.5-7B-Instruct"
+   usd_per_mtok_in = 0
+   budget_ms = 6000
+
+A harness on the machine is the judge through ``command``: an argv that
+reads the request JSON on stdin (``state``, and ``questions``, each with a
+``type`` of ``noul`` or ``choice``, ``instructions`` and ``criteria``) and prints
+``{"answers": {...}}`` on stdout inside ``budget_ms``. A ``noul`` answer is
+``{"noul": p}`` or a bare number; a ``choice`` answer is ``{"choice": KEY,
+"confidence": p, "probabilities": {...}}``, and a bare key stands for a
+sure one. A question with no answer refuses the whole reply, so the hook
+takes its local path rather than half a judgment.
+
+.. code:: toml
+
+   enabled = true
+   backend = "command"
+   command = ["/path/to/judge.sh"]
+   budget_ms = 20000
+
+The hook budget bounds the prompt path, so a harness that takes seconds
+suits ballots and the stop audit more than the prompt hook; ``min_words``
+and ``min_candidates`` keep the prompt calls few. The log carries the
+``backend`` name, and ``ljos doctor`` prints it before the model.
 
 Give an agent the protocol without a runner
 ===========================================
@@ -270,7 +469,8 @@ One sitting on the ticket, one island per recipe before it is touched:
 
 Then the ladder, each rung its own artifact: ``eb-stack recipe check``,
 ``eb-stack package bump`` (the lock under ``out/locks`` is ``resolves``),
-``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the
+``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign
+run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the
 same verbs are ``eb_recipe_check``, ``eb_package_bump``, ``eb_recipe_lint``,
 ``eb_target_doctor``, ``eb_campaign_run``, ``eb_campaign_status``, beside
 ``ljos_sitting``, ``ljos_island``, ``ljos_remember`` and ``ljos_finish``.
@@ -418,14 +618,17 @@ Vote with personas
 
 Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor: the reviewer at 0.2 barely moves off ``hold``, the
-reader at 0.8 is nearly a plain voter. A trust row scoped with ``--about docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
+reader at 0.8 is nearly a plain voter. A trust row scoped with ``--about
+docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
 also what seats a persona: ``ljos panel ISSUE`` and the ``run_a_panel``
 prompt brief only the personas whose domains the issue's title or its
 island names, and every persona when none does.
 
-A persona keeps its own tree over the seat's facts. ``ljos remember --as NAME`` writes into the set ``persona-NAME``, where the duplicate and
+A persona keeps its own tree over the seat's facts. ``ljos remember --as
+NAME`` writes into the set ``persona-NAME``, where the duplicate and
 replacement rules run among its own conclusions and never against the
-seat's or another persona's; the seat still reads every set. ``ljos island CUE --as NAME`` walks the pack through that persona's link
+seat's or another persona's; the seat still reads every set. ``ljos
+island CUE --as NAME`` walks the pack through that persona's link
 weights, and with ``--fire`` tightens the paths it walked under its own
 name (``link_weights_by``), leaving the seat's weights as they were. Two
 personas that read the same island differently end up with different
@@ -452,7 +655,8 @@ reading get both. A note on the issue says the ballot came from Jev.
 
 Jev's confidence measures how spread out its probabilities are. Under
 ``escalate_below`` (0.8), ``vote --jev`` does not cast. It notes Jev's lean
-and names the brief to start a subagent from.
+and hands the ballot to the persona's own session when the persona has
+a runner, else names the brief to start a subagent from.
 
 A panel casts only when every seated persona is sure and all agree.
 Personas answered by one model are correlated voters, so their agreement
@@ -461,7 +665,8 @@ casts nothing and writes a brief per seat for subagents. The metered
 model then spends only on the contested questions. A ballot costs about
 2,000 input tokens, or $0.00008.
 
-Every Jev answer goes to ``$XDG_STATE_HOME/ljos/jev-log.jsonl``. ``ljos learn`` scores a cast ballot's confidence as it does any voter's.
+Every Jev answer goes to ``$XDG_STATE_HOME/ljos/jev-log.jsonl``. ``ljos
+learn`` scores a cast ballot's confidence as it does any voter's.
 
 Hold a done claim beside a red test
 ===================================
@@ -475,10 +680,10 @@ With Jev on, the ``Stop`` and ``SubagentStop`` hooks audit the turn once
 before the agent stops. The state holds four parts, bounded to a few
 thousand tokens:
 
-- the person's last request
-- the shell commands since it
-- the latest test output, or the last output when no test ran
-- the final message
+-  the person's last request
+-  the shell commands since it
+-  the latest test output, or the last output when no test ran
+-  the final message
 
 Jev answers three questions about it:
 
@@ -604,18 +809,18 @@ Check the seat
 .. code:: text
 
    $ ljos doctor
-   ok  vissue  ~/.local/bin/vissue
-   ok  deedar  ~/.local/bin/deedar
-   ok  claimdag  ~/.local/bin/claimdag
-   ok  packset  ~/.local/bin/packset
-   ok  packsetd  ~/.local/bin/packsetd
-   ok  ljos-consensus  ~/.local/bin/ljos-consensus
-   ok  ljos-mcp  ~/.local/bin/ljos-mcp
-   ok  pack  http://127.0.0.1:8761 workspace git:github.com/leidarljos/ljos
-   ok  host key  ~/.config/deedar/host.key (32-byte seed)
-   ok  deed store  size=34 root=3d8e015509923724097e9f33d3a044fe0764f17bd5387769530ed5bfb6ada
-   ok  tracker  vissue 0.10.0
-   ok  claim graph  a4a8fa1b8f05d259877be54da99f06bc  claimed  task  69f91712  gen=2  ljos-a6
+   ok  ljos    /path/to/ljos  0.18.0  crates.io (cached) 0.18.0
+   ok  vissue  /path/to/vissue  0.18.0  crates.io (cached) 0.18.0
+   ok  packsetd    /path/to/packsetd  0.11.0  crates.io (cached) 0.11.0
+   ok  seat    <runner>, holding as sess-<hash> (from this conversation's record)
+   ok  pack    http://127.0.0.1:PORT workspace seat
+   ok  memory  520 live of 20000
+   ok  host key    /path/to/host.key (32-byte seed)
+   ok  deed store  size=150 root=<hash> ed25519 <hash>
+   ok  tracker vissue 0.18.0 root=/path/to/tracker prefix=Issues; 0 unpushed
+   ok  claim graph <hash>  claimed  task  <hash>  gen=2  ISSUE
+   ok  runner mcp  <runner>: ljos registered
+   ok  jev on  jev-1.13.0  88 calls, 0 cached  $0.0035 of $4.00 this month
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names how many commits origin lacks, and fails when that count

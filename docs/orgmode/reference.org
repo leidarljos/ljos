@@ -24,6 +24,8 @@
 | =trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...= | pack | one trust row; scoped when =--about= is given |
 | =persona NAME --anchor A --view TEXT [--about DOMAIN]... [--runner RUNNER]= | pack | a voter with a view; =A= in [0, 1] is how far it moves off its ballot; writes one unscoped inbound trust row; =--runner= names a =[[harness]]= that reasons as the persona in a session it keeps |
 | =personas= | pack | the roster: name, anchor, domains, view, one per line |
+| =agents [--harness NAME] [--dry-run]= | pack, runner | every persona as an agent definition, =ljos-NAME.md=, in each runner's =agents= directory (or one runner's): a subagent the runner spawns by name that briefs, casts one ballot before reading the others, notes why and stops; definitions whose persona left the pack are removed |
+| =statusline= | pack | one line for a runner's status bar (Grok's =[ui.status_line]=, Claude Code's =statusLine=): the seat, the issue this conversation holds, the claims due; reads the runner's status JSON on stdin, cached fifteen seconds a session |
 | =ask NAME TEXT= | persona session | hands the persona a question or a task in its own pane, opening it (and resuming its session) when it is closed |
 | =upgrade [VERSION] [--dir DIR]= | release | installs a published release beside the running =ljos=: the archive the release workflow built for the tag, checked against the sha256 published beside it, each binary an executable that names the version; the old ones kept as =NAME.bak-pre-VERSION=. The only way an agent moves the seat's binaries, which the guard keeps it from writing |
 | =playbook ISSUE NAME= | pack | bind a recipe to the issue and copy its full body; the name is a tracker =playbook:= note until finish or release |
@@ -47,16 +49,16 @@
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =approve REQUEST_ID= | runtime | record explicit consent for one pending hook request; one matching attempt, fifteen-minute lifetime, deny rules still apply |
 | =policy ARGV...= | policy, pack | the line as it would run, the TCB verdict if =ljos-policyd= answered, then a matching pack rule, then what the pack knows that bears on it |
-| =hook [--limit N]= | policy, pack | hook JSON or argv on stdin; on =PreToolUse= the TCB and pack rules, a deny is =permissionDecision=; on a prompt the hits scoring at least 0.6 of the best that two scorers named, preferences first then lessons oldest first, each with its age, five at most, each once per runner session |
+| =hook [--limit N]= | policy, pack | hook JSON or argv on stdin; on =PreToolUse= the TCB and pack rules, a deny is =permissionDecision=; on a prompt the hits scoring at least 0.6 of the best that two scorers named, preferences first then lessons oldest first, each with its age, five at most, each once per runner session; on a failed tool, up to three that share two words with the command and its error |
 | =bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]= | tracker | one child issue per module the bundle's lock builds, under =I=, blocked by the modules built before it along the SBOM's edges; ids are a hash of module and generation, so a rerun holds what exists and adds what is missing; =--dry-run= prints the rows |
 | =findings STATE [--remember] [--all] [--issue I]= | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; =--remember= writes one lesson per finding a person or a seat resolved (recipe, step, error line, fix), under the recipe's name, its package and the class; =--all= takes the ones a later attempt superseded too; =--issue= cites the state file as a deed on the issue |
 | =sync [--key] [--import] [--export]= | tracker, pack | share the seat's memory across machines through the tracker repository: pull and take other machines' sealed logs, then write and push this machine's; =--key= prints this machine's age public key (made on first use) and stops; =--import= only pulls; =--export= only writes and pushes |
 | =handover --out DIR [--project P]... [--issue I]... [--to user@host:path]= | all | pack, seal, sign; =--to= copies the bag to another seat over ssh |
 | =receive DIR [--since BRIDGE] [--import]= | all | check, and import the atoms |
-| =doctor= | all | which habitats answer, who is sitting, and whether the runners named in the runners file are onboarded; with =jev.toml= present, a =jev= row with the month's calls, cached answers and spend |
+| =doctor= | all | which habitats answer, who is sitting, and whether the runners named in the runners file are onboarded; a =panes= row naming the tool that opens persona panes; with =jev.toml= present, a =jev= row with the month's calls, cached answers and spend |
 | =seat= | none | who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from |
 | =protocol= | none | print the sitting protocol |
-| =onboard [--harness NAME] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it and install the protocol as its skill |
+| =onboard [--harness NAME] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory |
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.
@@ -88,6 +90,8 @@ when to call it.
 | =LJOS_TRACKER_GIT= | =commit= commits the ticket's =issues.org= without pushing; =off= skips the commit and push; unset, commit and push |
 | =LJOS_TRACKER_PUSH_WAIT= | seconds the tracker push after a claim or finish waits; 5 when unset |
 | =XDG_CONFIG_HOME= | where =ljos/harnesses.toml= is read from; =~/.config= when unset |
+| =LJOS_PANE_TOOL= | the one =[[tool]]= persona panes open in; unset, the first of the file's tools and the shipped herdr and tmux shapes that answers |
+| =LJOS_PANEL_RUNNER= | the runner a decision panel's members run on, through its =headless= argv; unset, the seat's own runner, else Grok |
 | =XDG_STATE_HOME=, =XDG_CACHE_HOME=, =XDG_RUNTIME_DIR= | where the Jev state, cache and runtime key live (see Jev settings); =XDG_RUNTIME_DIR= also holds the hud socket and the seat records |
 
 =~/.config/ljos/env= is loaded for the keys above that the shell leaves unset.
@@ -95,7 +99,24 @@ when to call it.
 A runner's table may also name =start= and =resume=, the argv that open
 a session in a persona's home and resume the latest one there; a
 persona whose =--runner= is that table's name reasons in that session
-(=ljos ask=, =vote --jev=). =hooks_named= names the key a hooks file of
+(=ljos ask=, =vote --jev=). The pane script resumes a runner that exits
+non-zero, at most three times a minute, and leaves one that exits 0.
+=agents= names the directory the runner reads agent definitions from
+(=~/.grok/agents=, =~/.claude/agents=). =headless= is the argv a decision
+panel's member runs, with ={prompt_file}=, ={prompt}=, ={cwd}= and
+={persona}= filled.
+
+=[[tool]]= tables in the same file declare the tools a runner lives in.
+herdr and tmux ship as shapes; a table of the same name replaces one. Each
+verb is an argv with ={name}=, ={label}=, ={session}=, ={home}=, ={script}=,
+={script_q}=, ={pane}= and ={line}= filled: =detect= exits 0 when the tool
+answers; =open= lists ways to open the persona's pane, the first that exits
+0 wins; =pane_pointer= reads the pane off =open='s JSON; =run= types the
+pane script into a pane that starts as a shell; =respawn= restarts it in a
+pane whose runner exited; =prompt= hands the runner a line and =type_line=
+types it raw when =prompt= is refused; =alive= exits 0 while the pane is
+there; =ready= exits 0 once the runner takes input, retried for =ready_s=
+seconds. A refusal carries the tool's own words. =hooks_named= names the key a hooks file of
 named hooks takes the seat's hooks under, each command told its event
 with =ljos hook --event=.
 
@@ -118,6 +139,9 @@ stdin is an argv line and answered in plain lines.
 | =UserPromptSubmit= | answers with the memories the prompt activates, preferences first, each once per runner session; with Jev on, asks which claims bear on the prompt and whether it corrects the agent or puts a choice |
 | =SessionEnd= | fires the memories injected during the session together and clears the session's record |
 | =PostToolUse= | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok delivers this event) |
+| =PostToolUseFailure= | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share two content words with the cue, each once per session |
+| =PreCompact= | fires the memories injected so far, drops them from the session's record so a later prompt can bring them back, and holds a note naming the issue the conversation still holds for the next delivery |
+| =SessionStart= | after a compaction (=source= =compact=), on a runner that takes its context, answers with that note |
 | =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash=); a deny blocks |
 | =Stop= | speaks only when the turn ran no tool; with no issue held, holds one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript |
 | =SubagentStop= | names the issue the subagent's conversation holds and asks for the ballot on a decision; with Jev on, audits the turn once |

@@ -5,6 +5,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## Unreleased
 
 - An ask a runner cannot show as its own prompt is granted by the client's consent form (`ljos_request_approval`), by replying `approve ID` in the same conversation, or by `ljos approve ID` in a terminal.
+- Persona panes open through `[[tool]]` adapters declared in harnesses.toml beside the runners. herdr (its workspace and agent commands, detected by a socket call) and tmux ship as shapes; a refusal names the tool's own words. Every herdr call the seat made had gone stale against herdr 0.9 and fell to tmux unseen. The pane resumes a runner that fails, at most three times a minute, and `ljos doctor` has a `panes` row. A five-persona panel chose this over a Go rewrite and OTP supervision (`examples/runtime-panel`).
+- The pane-typing guard refuses every multiplexer verb that can type an approval into another runner's prompt: herdr `agent prompt`, `send-keys`, `send-text`, `pane run` and a `terminal session control` fed on stdin, zellij `write-chars`, wezterm and kitty `send-text`, screen `stuff`.
+- A failed tool, where the runner reports one (Grok Build's `PostToolUseFailure`), brings back up to three standing claims that share two words with the command and its error. A compaction fires the memories used so far, lets a later prompt bring them back, and names the issue the conversation still holds on the next delivery; Claude Code hears it at `SessionStart`.
+- `ljos agents` and `onboard` write each persona as an agent definition (`~/.grok/agents/ljos-NAME.md`, `~/.claude/agents`) that a runner spawns by name to brief, cast one sealed ballot and stop; Grok's own parser reads them. `ljos statusline` is a status-bar line for Grok and Claude Code. A panel's members run on the seat's own runner through the table's `headless` argv.
+- A brief tells a persona to cast before reading another ballot, and names the issue in its ballot line where it printed `{issue}`.
+- A runner started as an interpreter on an entry script (`node .../index.js`) sits as the directory that ships it, not as `index`.
+- The smoke and the unit tests keep a runner session the shell inherited (`*_THREAD_ID`, `*_CONVERSATION_ID`) and a named `LJOS_SEAT` out of their scripted seats, and the smoke's quiet greps read their whole input under pipefail.
 
 ## 0.25.5 (2026-10-06)
 

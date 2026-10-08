@@ -1,36 +1,89 @@
-Five habitats, one identifier
+What each store keeps
+=====================
+
+.. image:: _static/seat.svg
+   :width: 100.0%
+
+ljos keeps nothing of its own. Each kind of fact lives in one store, and
+ljos calls that store's command line to read or write it.
+
+====================== ======================================================== ============================================== ============================= ================================================== ===========================
+Store                  Keeps                                                    Lives                                          Lasts                         Written by                                         Look at it
+====================== ======================================================== ============================================== ============================= ================================================== ===========================
+tracker (vissue)       issues, notes, votes, the deeds an issue cites           org files in a git repository                  as long as the repository     ``ljos file``, ``note``, ``vote``, ``finish``      ``vissue show ISSUE``
+pack (packset)         memories: lessons, preferences, rules, personas, trust   the ``packsetd`` daemon's store                until superseded or forgotten ``ljos remember``, ``prefer``, ``rule``, ``learn`` ``ljos search WORDS``
+deed store (deedar)    signed records of what a piece of work produced          a content-addressed directory                  permanent                     ``deedar create``                                  ``ljos evidence ACCESSION``
+claim graph (claimdag) who is working on what right now, as a lease per sitting ``$XDG_RUNTIME_DIR/claimdag``, one per machine until reboot                  ``ljos sitting``, ``finish``, ``release``          ``claimdag list --all``
+consensus              the weighting that settles a vote                        computed from the tracker and the pack         nothing stored                ``ljos consensus``                                 ``ljos consensus ISSUE``
+====================== ======================================================== ============================================== ============================= ================================================== ===========================
+
+The claim graph shows itself least, by design. It answers a question
+that matters while work runs: is anyone already on this issue, here,
+now? ``ljos sitting`` takes the issue's node before it returns. A second
+sitting on the same issue from another conversation learns who has it.
+``ljos finish`` marks the node done. The store sits in the runtime
+directory, so a reboot clears it, and a lease never outlives its holder.
+``ljos doctor`` shows its row, ``ljos seat`` names this conversation's
+holder, and ``claimdag list`` shows every live claim.
+
+A deed accession is the one identifier the writable stores share. The
+tracker cites it on an issue and the pack cites it in a memory; the deed
+store answers for it.
+
+How a shell command is judged
 =============================
 
-|image1|
+Before an agent's shell command runs, the runner's hook hands it to
+``ljos hook``, which asks four layers, in the order below. No later layer can allow
+what an earlier one refused, so the first refusal wins.
 
-Each habitat answers one question and is the authority for it. Cards
-are read-only. A deed accession is the one identifier that crosses the
-writable habitats: the tracker cites it on a node, the pack cites it
-in a claim, the deed store answers for it. No habitat opens another's
-format. The seat composes them by passing accessions on pipes, and
-stays thin: its only state of its own is the mapping from tracker ids
-to claim-graph nodes. Argv law sits beside them. It is not a sixth
-store. ``ljos policy`` prints the line; ``ljos-policyd`` is the TCB when
-it is on ``PATH`` or ``POLICYD_BIN``.
+-  **The seat guard.** It refuses a command that writes the seat's own
+   files. Those are its binaries, its hook entries, ``~/.config/ljos`` and
+   the approvals store. An agent cannot rewrite the law it runs under.
+-  **ljos-policyd.** Each pipeline of the line goes to ``ljos-policyd`` as
+   one call, in shell words. It refuses privilege runners and a
+   download handed to a shell. It also refuses a recursive delete outside
+   ``/tmp``, a setuid ``chmod``, raw-disk writes and a force push. ``ljos doctor``'s ``policy``
+   row says whether it runs the table built into it or phronesis after
+   that table. Without the binary nothing is refused here, unless
+   ``POLICYD_REQUIRED`` is set to 1, which refuses everything instead.
+-  **Seat rules.** The rules written with ``ljos rule`` (a pattern, and a
+   verdict of deny or ask) live in the pack and are tried against each
+   command of the line. A quoted sentence or a heredoc body counts as data.
+-  **The push check.** A ``git push`` is free to a repository the account
+   owns alone and has never released; to any other it needs
+   ``LJOS_CITE`` set to the issue that records the decision behind it.
+
+An ``ask`` verdict is a question for the person. On Claude Code and Grok
+Build it is the runner's own permission prompt. On a runner without one,
+the hook prints a request id. The person calls ``ljos_request_approval``
+with that id so the client shows a consent form, replies ``approve ID`` in
+the same conversation, or runs ``ljos approve ID`` in a terminal. A runner's own
+settings come first: a command its settings deny is refused before any
+hook is asked.
+
+``ljos policy -- COMMAND`` prints the combined answer for one command
+without running it.
 
 The contracts
 =============
 
-- Citing a deed names it; the bytes stay in deedar.
-- A finish closes the sitting. The ticket closes only with ``ljos finish ISSUE --close``, when the work is accepted. The claim graph is
-  session state; the tracker decides when work is done.
-- Cards are read-only. The seat writes to the pack; a person writes the
-  cards.
-- The pack is written only by ``remember``, ``prefer``, ``trust``, ``learn``,
-  ``graded``, ``forget`` and an imported handover. Nothing is extracted from a
-  transcript.
-- A tool that fails is a habitat refusing or down, and says which. It is
-  never an empty answer.
+-  Citing a deed names it; the bytes stay in deedar.
+-  A finish closes the sitting. The ticket closes only with ``ljos finish ISSUE --close``, when the work is accepted. The claim graph is
+   session state; the tracker decides when work is done.
+-  Cards are read-only. The seat writes to the pack; a person writes the
+   cards.
+-  The pack is written only by ``remember``, ``prefer``, ``trust``, ``learn``,
+   ``graded``, ``forget`` and an imported handover. Nothing is extracted from a
+   transcript.
+-  A tool that fails is a habitat refusing or down, and says which. It is
+   never an empty answer.
 
 Memory that grows, is reviewed, decays, and is retracted
 ========================================================
 
-|image2|
+.. image:: _static/memory.svg
+   :width: 100.0%
 
 A claim enters the pack because the seat decided it was worth keeping, and
 enters a review clock at the same moment. The clock is the spaced-repetition
@@ -49,10 +102,31 @@ three paraphrases written later are not, retrievability ranks the kept
 claim first 0.947 of the time; lexical scoring lands at chance and a
 recency half-life at 0.270 (the packset site carries the table).
 
+When the seat speaks
+====================
+
+A memory helps only at the moment it bears on what the agent does. The
+hook speaks at four such moments and stays quiet between them. On a
+prompt it hands over what the prompt activates, the preferences and the
+reviewed lessons that two scorers named and that share a word with it.
+On a failed tool, where a runner reports one (Grok Build's
+``PostToolUseFailure``), it searches on the command and the error the tool
+gave and hands back at most three standing claims that share two words
+with them: a lesson is worth most when the mistake it records is being
+made, and asking only on failure costs nothing on the calls that work.
+Before a compaction, which drops what the seat handed the conversation,
+the memories used so far fire together as at a session's end, leave the
+session's record so a later prompt can bring them back, and the next
+delivery names the issue the conversation still holds and where its
+working set is. At a stop it audits the turn once. Each memory reaches a
+session once, so the agent's context carries a claim when it first
+matters and not on every command after.
+
 Islands
 =======
 
-|image3|
+.. image:: _static/island.svg
+   :width: 100.0%
 
 A task does not touch everything a seat knows. The pack links each claim to
 the claims it shares names with, pruned so a neighbourhood spreads over the
@@ -97,9 +171,11 @@ Every record in the seat is dated: an atom carries the writer's clock and,
 when it was retired, the window it was live in; a deed carries the time it
 was produced; the tracker's logbook carries the time of each note, state
 change and claim. The seat hands that to the reader as data rather than as
-stamps to subtract. Every recalled memory, in the hook, a brief, ``ljos search``, the island in ``ljos sitting``, carries its age in words (``today``,
+stamps to subtract. Every recalled memory, in the hook, a brief, ``ljos
+search``, the island in ``ljos sitting``, carries its age in words (``today``,
 ``3 weeks ago``), and the hook's lessons run oldest to newest behind the
-preferences, so a later lesson reads as a revision of an earlier one. ``ljos timeline ISSUE`` merges the three stores into one dated list with the gap
+preferences, so a later lesson reads as a revision of an earlier one. ``ljos
+timeline ISSUE`` merges the three stores into one dated list with the gap
 between consecutive lines, and ``ljos search --as-of TIME`` asks the pack as
 it stood at an earlier time.
 
@@ -163,6 +239,28 @@ not: ballots settled under trust rows that learn from outcomes, deeds
 that stand for what the work produced, a claim graph for who holds what,
 and a signed handover another seat can check.
 
+The systems of 2025 and 2026 move the model further into the loop.
+ReasoningBank (doi:10.48550/arXiv.2509.25140) distills reasoning
+strategies from the agent's own judged successes and failures and
+retrieves them on the next task. ACE (doi:10.48550/arXiv.2510.04618)
+keeps a playbook of itemised strategies that a reflector and a curator
+grow by small deltas, because rewriting a context whole erodes it.
+MemOS (doi:10.48550/arXiv.2507.03724) treats memory as a resource with
+provenance, versions and a lifecycle; MIRIX
+(doi:10.48550/arXiv.2507.07957) splits it into six typed stores, each
+with a managing agent; Memory-R1 (doi:10.48550/arXiv.2508.19828) trains
+the add, update and delete decisions with reinforcement learning. The
+runners grew memories of their own: Grok Build's keeps Markdown topics
+per workspace, captures observations after each turn and folds them in
+with a ``/dream`` pass. The seat reads as their ledger rather than their
+rival. ACE's itemised, incremental playbook is what a pack of one-claim
+atoms superseded by head already is; MemOS's provenance and versions are
+an atom's writer, deeds and live window; ReasoningBank's lessons from
+failure are ``finish --lesson``, and the hook now hands back what bears on
+a failed command when it fails. The difference stands where it stood: a
+claim enters the pack because someone said to keep it, and a runner's
+own memory can sit beside the seat's without either writing the other.
+
 What the others have that the seat does not: extraction. A model reading
 a transcript finds facts nobody said ``Remember`` to, and on a benchmark of
 chat logs that coverage is most of the score. The pack has a proposals
@@ -225,6 +323,23 @@ then the settle, then ``learn`` when the world answers. Chen et al.
 more voices on hard items; a weighted settle is the alternative this seat
 takes.
 
+The settle itself is now read as what it is: a weighted vote, with each
+voter's weight its social power, printed beside the shares as
+``influence`` with the number of equal voices it is worth
+(``effective_voters``), and a ``tie`` when the margin is inside what the
+residual leaves open. A voter weighs its own ballot as the others weigh
+it, which makes the log-odds rows ``learn`` writes settle as the weighted
+vote they describe; one constant self-weight compressed them, and the
+difference shows where a weak crowd can outvote the voter worth hearing.
+Personas answered by one model share its mistakes, so the consensus
+crate's ``correlation`` reads who errs with whom from the project's
+history and counts a correlated cluster once. And a ballot follows its
+own reading, not the others': the brief carries none, and tells the
+persona to cast before it reads a tally, because a ballot cast after the
+others adds a voice and no evidence. The consensus crate's explanation
+derives each of these with SymPy, proves the settle's convergence and
+stopping bound in Lean and certifies its arithmetic with Sollya.
+
 Judgment, and where a judge slots in
 ====================================
 
@@ -277,7 +392,8 @@ what a cut is set from once there are enough of them.
 Handover that can be checked
 ============================
 
-|image4|
+.. image:: _static/handover.svg
+   :width: 100.0%
 
 A handover is a BagIt bag with the tracker slice, the pack's atoms, and
 the deeds both cite, each deed with its inclusion receipt against the log
@@ -290,11 +406,12 @@ rows included. Learning travels with its evidence.
 Model and runner agnostic, human readable
 =========================================
 
-Nothing in the seat calls a model. The stores are files a person can read:
+The seat runs without a model unless ``jev.toml`` enables Jev, an opt-in call
+that judges a few questions. The stores are files a person can read:
 Org headings, one JSON object a line, a content-addressed directory, a
 Cap'n Proto snapshot. Any agent that can run a command or call a Model Context Protocol tool
 can work the seat, and a person can do the same from a shell or an editor.
-A read-only viewer over the habitats is the open work.
+``ljos hud`` is the read-only viewer over due claims, holds and trust.
 
 The seat does not know the runners. It knows one thing every runner
 does: it connects, and says its name. ``ljos-mcp`` takes that name at
@@ -307,6 +424,21 @@ and trust accrue to the seat across conversations; claims are held by
 the seat tagged with the conversation's process, so two conversations of
 one runner hold two tickets. ``LJOS_SEAT`` is the override, not the setup.
 
+The tools a runner lives in are declared the same way. A persona that
+reasons in a session of its own opens in the first tool that answers:
+herdr, through its workspace and agent commands, when its server is up,
+else tmux, else any ``[[tool]]`` table in the runners file. Each verb is an
+argv, so a tool the seat has not met is a table, not a release, and a
+tool that refuses is named with its own words rather than passed over in
+silence; the herdr calls the seat used to make had all gone stale against
+herdr's command line, and nobody saw it until a panel looked. The pane
+supervises its runner the way an OTP supervisor supervises a transient
+child: a crash is resumed a bounded number of times, a clean exit is
+left alone. A five-persona panel chose this over rewriting the seat in
+Go or hosting it on the BEAM (``examples/runtime-panel``): every process
+the seat starts is an operating-system process whatever language starts
+it, and the hook it runs most is gone in four milliseconds.
+
 The agent is told how, in one text. The protocol ``ljos protocol`` prints is
 the same text ``ljos onboard`` installs as a skill and the server serves at
 ``ljos://protocol``: which store answers which question, the order of verbs
@@ -314,12 +446,3 @@ in a sitting, and the refusals. An agent that misuses the seat has, in
 every case seen so far, not been handed that text: it asked the pack for
 a deed, claimed with a hex id, or read a failure as an empty answer. The
 tool descriptions open with when to call each one for the same reason.
-
-.. |image1| image:: _static/seat.svg
-   :width: 100.0%
-.. |image2| image:: _static/memory.svg
-   :width: 100.0%
-.. |image3| image:: _static/island.svg
-   :width: 100.0%
-.. |image4| image:: _static/handover.svg
-   :width: 100.0%

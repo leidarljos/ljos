@@ -30,18 +30,29 @@ server; a session restart is not required.
 Why these events
 ================
 
-- ``UserPromptSubmit`` searches and holds the text. Grok discards the stdout.
-- ``PostToolUse`` emits the held text once. With no issue held, the first result says to file and sit. Grok delivers that after the tool.
-- ``PreToolUse`` applies the TCB and pack rules. A deny blocks. A turn has many tool calls.
-- ``Stop`` holds one turn that used tools and never touched the seat, when the conversation holds no issue. Grok continues that turn once.
-- ``SessionEnd`` fires the injected memories. Grok ignores the stdout.
+====================== ===================================================================================================================== ===================================================
+Event                  What ``ljos hook`` does                                                                                               What Grok does with stdout
+====================== ===================================================================================================================== ===================================================
+``UserPromptSubmit``   searches, holds the text                                                                                              discarded
+``PostToolUse``        emits the held text once; with no issue held, the first result says to file and sit                                   delivered after the tool
+``PostToolUseFailure`` searches the pack on the failed command and its error; up to three standing claims that share two words with it       delivered with the failed result
+``PreToolUse``         TCB and pack rules; a deny blocks                                                                                     a turn has many tool calls
+``PreCompact``         fires the memories injected so far, lets a later prompt bring them back, holds the issue the conversation still holds ignored; the next ``PostToolUse`` delivers the note
+``Stop``               with no issue held, holds one turn that used tools and never touched the seat                                         ``decision`` ``block`` continues the turn once
+``SessionEnd``         fires injected memories                                                                                               ignored
+====================== ===================================================================================================================== ===================================================
+
+Which events carry ``additionalContext`` to the model is read off Grok's
+hook dispatcher (``xai-grok-hooks/src/dispatcher.rs``): ``PreToolUse``,
+``PostToolUse``, ``PostToolUseFailure``, ``Stop`` and ``SubagentStop`` do;
+``UserPromptSubmit`` and ``SessionStart`` discard an allowing hook's stdout.
 
 The frozen file is `crates/ljos-cli/assets/grok/ljos.json <../../crates/ljos-cli/assets/grok/ljos.json>`__.
 Its ``{ljos}`` is filled in at onboard. ``PreToolUse`` gets 10 seconds, the
 TCB check's budget; the others get Grok's default 5.
 
 Grok's stdin is camelCase (``hookEventName``, ``sessionId``, ``toolInput``), and
-``ljos hook`` reads it as the snake_case fields. A deny blocks on a top-level
+``ljos hook`` reads it as the snake\ :sub:`case` fields. A deny blocks on a top-level
 ``decision`` of ``deny`` beside ``hookSpecificOutput``. An ask rule is the same
 pair with ``ask``: Grok shows that as the in-chat permission prompt. A runner
 that cannot ask (stdin carrying ``turn_id``) still gets the ask rewritten to
@@ -60,6 +71,37 @@ Smoke
 An allow prints nothing unless a prompt has already held pack text.
 A TCB deny still blocks.
 
+Personas as Grok agents
+=======================
+
+Grok spawns a subagent by its agent definition, a Markdown file under
+YAML front matter in ``~/.grok/agents``. ``ljos onboard --harness grok`` and
+``ljos agents --harness grok`` write each persona there as
+``ljos-NAME.md``, with ``capabilityMode: execute`` (read and run commands,
+edit nothing) and a body that runs ``ljos brief NAME ISSUE``, casts one
+ballot before reading the others, notes why and stops. The main agent
+runs a panel as native subagents: one ``spawn_subagent`` a persona, each
+with ``subagent_type`` ``ljos-NAME`` and the issue id as its prompt, then
+``ljos consensus ISSUE``. The definitions parse with Grok's own
+``AgentDefinition::parse``.
+
+A panel the seat opens itself, on a prompt that asks which answer is
+right, starts its members with the table's ``headless`` argv: =grok
+–prompt-file … –yolo –max-turns 6 –effort low –disallowed-tools
+Agent=.
+
+Status line
+===========
+
+.. code:: toml
+
+   [ui.status_line]
+   type = "command"
+   command = "ljos statusline"
+
+The row shows the seat, the issue this conversation holds and the claims
+due, cached fifteen seconds a session.
+
 harnesses.toml
 ==============
 
@@ -71,4 +113,6 @@ harnesses.toml
    marker = "[mcp_servers.ljos]"
    skills = "~/.config/ljos/skills"
    hooks = "~/.grok/hooks/ljos.json"
-   hook_events = ["UserPromptSubmit", "PostToolUse", "PreToolUse", "SessionEnd"]
+   agents = "~/.grok/agents"
+   headless = ["grok", "--prompt-file", "{prompt_file}", "--yolo", "--max-turns", "6", "--effort", "low", "--disallowed-tools", "Agent", "--cwd", "{cwd}"]
+   resume = ["grok", "--continue"]
