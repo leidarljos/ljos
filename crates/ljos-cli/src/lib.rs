@@ -15,6 +15,7 @@ pub mod hud;
 pub mod jev;
 pub mod persona_session;
 pub mod sync;
+pub mod tools;
 pub mod upgrade;
 
 /// Working-core files this seat will print. Nothing else, and never write.
@@ -203,11 +204,14 @@ fn plugin_step(h: &Harness, dest: &Path, dry: bool) -> Step {
     }
 }
 
-/// The whole file: `[[harness]]` tables.
+/// The whole file: `[[harness]]` tables, and `[[tool]]` tables for the
+/// multiplexers and agent runtimes a runner lives in ([`tools`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Harnesses {
     #[serde(default)]
     pub harness: Vec<Harness>,
+    #[serde(default)]
+    pub tool: Vec<tools::Tool>,
 }
 
 /// An example of the file, with placeholder names. `ljos onboard --example`
@@ -327,6 +331,29 @@ skills = "~/.grok/skills"
 # A persona reasoning through this runner resumes the latest session of
 # its home directory with this argv.
 resume = ["grok", "--continue"]
+
+# The tools a persona's runner lives in. herdr (its agent API, when its
+# server answers) and tmux ship as shapes; `ljos doctor` names the one that
+# opens panes, and LJOS_PANE_TOOL picks one. A table here replaces the
+# shipped shape of its name, or adds a tool. Each verb is an argv; {name},
+# {label}, {session}, {home}, {script}, {script_q}, {pane} and {line} are
+# filled. `open` lists ways to open the pane, the first that exits 0 wins;
+# `pane_pointer` reads the pane off open's JSON; `run` types the pane
+# script into a pane that starts as a shell; `respawn` restarts it in a
+# pane whose runner exited; `prompt` hands a line, `type_line` types it raw
+# when prompt is refused; `alive` exits 0 while the pane is there; `ready`
+# exits 0 once the runner takes input, retried for `ready_s` seconds.
+#
+# [[tool]]
+# name = "tmux"
+# detect = ["tmux", "-V"]
+# open = [["tmux", "new-window", "-d", "-t", "{session}", "-n", "{name}", "sh", "{script}"],
+#         ["tmux", "new-session", "-d", "-s", "{session}", "-n", "{name}", "sh", "{script}"]]
+# respawn = ["tmux", "respawn-window", "-k", "-t", "{session}:{name}", "sh", "{script}"]
+# prompt = [["tmux", "send-keys", "-t", "{session}:{name}", "-l", "{line}"],
+#           ["tmux", "send-keys", "-t", "{session}:{name}", "Enter"]]
+# alive = ["tmux", "list-panes", "-t", "{session}:{name}"]
+# ready_s = 8
 "#;
 
 fn home() -> Result<PathBuf> {
@@ -1690,6 +1717,7 @@ fn adopt_shipped_shape(file: &Path, h: &Harness, dry: bool) -> Step {
     }
     let table = toml::to_string(&Harnesses {
         harness: vec![h.clone()],
+        tool: Vec::new(),
     })
     .unwrap_or_default();
     let mut text = std::fs::read_to_string(file).unwrap_or_default();
@@ -8807,7 +8835,22 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
     out.push(policy_row());
+    out.push(panes_row());
     out
+}
+
+/// Which tool would open a persona's pane: the first of the declared and
+/// shipped `[[tool]]` shapes that answers here, and the others that do.
+fn panes_row() -> Habitat {
+    let declared = harnesses_from(&harnesses_path())
+        .map(|all| all.tool)
+        .unwrap_or_default();
+    let (ok, state) = tools::doctor_state(&declared);
+    Habitat {
+        name: "panes",
+        state,
+        ok,
+    }
 }
 
 /// What judges the agents' shell commands: the policyd binary, its
@@ -9251,7 +9294,7 @@ pub(crate) fn tracker_upstream(root: &Path) -> Option<String> {
 }
 
 /// Whether a leftover `tracker-push-<pid>.log` still has that pid running.
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     // SAFETY: kill with signal 0 only probes existence; it does not deliver.
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
@@ -17121,9 +17164,11 @@ mod tests {
     #[test]
     fn a_persona_session_opens_once_and_takes_the_next_task_in_place() {
         let _g = env_guard();
-        if which::which("tmux").is_err() || which::which("herdr").is_ok() {
+        if which::which("tmux").is_err() {
             return;
         }
+        // Safety: the environment lock is held for the whole test.
+        unsafe { std::env::set_var("LJOS_PANE_TOOL", "tmux") };
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("cfg");
         std::fs::create_dir_all(cfg.join("ljos")).unwrap();
@@ -17169,6 +17214,7 @@ mod tests {
             ])
             .status();
         unsafe {
+            std::env::remove_var("LJOS_PANE_TOOL");
             match old_cfg {
                 Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
                 None => std::env::remove_var("XDG_CONFIG_HOME"),
@@ -17191,6 +17237,109 @@ mod tests {
         );
         assert_eq!(seen_second.lines().count(), 2, "{seen_second:?}");
         assert_eq!(inbox.len(), 2, "each task keeps its own file");
+    }
+
+    /// The same hand-off through a running herdr server: a workspace in the
+    /// persona's home, the pane script typed into its shell, the line typed
+    /// raw because herdr does not know the stand-in runner as an agent, and
+    /// the second task to the same pane.
+    #[test]
+    fn a_persona_session_opens_in_herdr_when_its_server_answers() {
+        let _g = env_guard();
+        if !tools::answers(&["herdr".to_string(), "workspace".into(), "list".into()]) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir_all(cfg.join("ljos")).unwrap();
+        // herdr keeps its socket under the config home this test moves.
+        let real_cfg = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".config")
+            });
+        std::os::unix::fs::symlink(real_cfg.join("herdr"), cfg.join("herdr")).unwrap();
+        let got = dir.path().join("got");
+        let mut herdr = tools::shipped()
+            .into_iter()
+            .find(|t| t.name == "herdr")
+            .unwrap();
+        herdr.ready_s = Some(1);
+        let file = Harnesses {
+            harness: vec![Harness {
+                name: "echoer".into(),
+                start: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!("while read l; do echo \"$l\" >> {}; done", got.display()),
+                ],
+                ..Harness::default()
+            }],
+            tool: vec![herdr],
+        };
+        std::fs::write(
+            cfg.join("ljos/harnesses.toml"),
+            toml::to_string(&file).unwrap(),
+        )
+        .unwrap();
+        let old_cfg = std::env::var_os("XDG_CONFIG_HOME");
+        let old_state = std::env::var_os("XDG_STATE_HOME");
+        // Safety: the environment lock is held for the whole test.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &cfg);
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            std::env::set_var("LJOS_PANE_TOOL", "herdr");
+        }
+        let name = format!("hp{}", std::process::id());
+        let lines = |n: usize| {
+            for _ in 0..40 {
+                let have = std::fs::read_to_string(&got).unwrap_or_default();
+                if have.lines().count() >= n {
+                    return have;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            std::fs::read_to_string(&got).unwrap_or_default()
+        };
+        let first = persona_session::hand(&name, "echoer", "first task");
+        let seen_first = lines(1);
+        let second = persona_session::hand(&name, "echoer", "second task");
+        let seen_second = lines(2);
+        let live = persona_session::live_pane(&name);
+        unsafe {
+            std::env::remove_var("LJOS_PANE_TOOL");
+            match old_cfg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match old_state {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+        let pane = first.expect("the first hand-off opens a herdr pane");
+        if let Some(ws) = pane.rsplit(' ').next().and_then(|p| p.split(':').next()) {
+            let _ = std::process::Command::new("herdr")
+                .args(["workspace", "close", ws])
+                .output();
+        }
+        assert!(pane.starts_with("herdr pane "), "{pane}");
+        assert!(
+            seen_first.contains("inbox"),
+            "the task line reached the runner: {seen_first:?}"
+        );
+        assert_eq!(
+            second.expect("the second hand-off"),
+            pane,
+            "the open pane takes it"
+        );
+        assert_eq!(seen_second.lines().count(), 2, "{seen_second:?}");
+        assert_eq!(
+            live.as_deref(),
+            Some(pane.as_str()),
+            "the runner is up in that pane"
+        );
     }
 
     #[test]

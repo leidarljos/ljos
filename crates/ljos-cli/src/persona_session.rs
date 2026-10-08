@@ -11,13 +11,29 @@
 //! to the persona's inbox and the pane is told one line naming the file,
 //! since a long text typed into a runner's prompt submits at its first
 //! line break.
+//!
+//! The pane opens in the first tool that answers ([`crate::tools`]): herdr
+//! through its agent API, else tmux, else a `[[tool]]` the file declares. A
+//! tool that refuses is named in what `hand` returns. The pane script
+//! supervises its runner as an OTP supervisor does a transient child: a
+//! runner that exits non-zero is resumed, at most [`RESTARTS`] times in
+//! [`RESTART_WINDOW_S`] seconds, and a runner that exits 0 is done.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-/// The tmux session persona windows open in when herdr is not running.
+use crate::tools::{self, Tool, Vars};
+
+/// The tmux session persona windows open in, and the herdr label prefix.
 pub const PERSONA_SESSION: &str = "ljos-personas";
+
+/// How many times a pane resumes a runner that failed, within
+/// [`RESTART_WINDOW_S`], before it leaves the pane to the person.
+pub const RESTARTS: u32 = 3;
+
+/// The window the restart count is kept over.
+pub const RESTART_WINDOW_S: u64 = 60;
 
 /// The argv that starts the runner named `runner` in a persona's home,
 /// from its `[[harness]]` table: `start` the first time (the runner's name
@@ -57,6 +73,13 @@ pub fn runner_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The `[[tool]]` tables this machine declares.
+fn declared_tools() -> Vec<Tool> {
+    crate::harnesses_from(&crate::harnesses_path())
+        .map(|all| all.tool)
+        .unwrap_or_default()
+}
+
 /// `$XDG_STATE_HOME/ljos/personas/NAME`: where the persona's runner works
 /// and keeps its session.
 #[must_use]
@@ -71,170 +94,150 @@ pub fn home(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// A word quoted for `sh`.
-fn sq(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
-}
-
 /// The script a persona's pane runs: the runner as the seat named after
-/// the persona, in its home, then a shell left open for the person.
+/// the persona, in its home, resumed with `again` when it fails (a
+/// transient restart, bounded by [`RESTARTS`] in [`RESTART_WINDOW_S`]),
+/// then a shell left open for the person. While a runner is up, the
+/// script's pid is in `.runner.pid`.
 #[must_use]
-pub fn pane_script(name: &str, argv: &[String], home: &Path) -> String {
-    let cmd: Vec<String> = argv.iter().map(|a| sq(a)).collect();
+pub fn pane_script(name: &str, argv: &[String], again: &[String], home: &Path) -> String {
+    let words = |a: &[String]| {
+        a.iter()
+            .map(|w| tools::sh_quote(w))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let again = if again.is_empty() { argv } else { again };
     format!(
-        "#!/bin/sh\nprintf '\\033]2;%s\\007' {n}\ncd {h} || exit 1\nLJOS_SEAT={n} {cmd}\n\
+        "#!/bin/sh\nprintf '\\033]2;%s\\007' {n}\ncd {h} || exit 1\necho $$ > .runner.pid\n\
+         LJOS_SEAT={n} {cmd}\ncode=$?\ntries=0\nsince=$(date +%s)\n\
+         while [ \"$code\" -ne 0 ]; do\n  now=$(date +%s)\n  \
+         if [ $((now - since)) -ge {window} ]; then since=$now; tries=0; fi\n  \
+         tries=$((tries + 1))\n  if [ \"$tries\" -gt {max} ]; then\n    \
+         echo \"persona {name}: the runner failed $tries times in {window}s; not restarting\"\n    break\n  fi\n  \
+         echo \"persona {name}: the runner exited $code; resuming, $tries of {max}\"\n  sleep 1\n  \
+         LJOS_SEAT={n} {again}\n  code=$?\ndone\nrm -f .runner.pid\n\
          echo \"persona {name}: the runner exited; this pane stays for reading\"\n\
          exec \"${{SHELL:-/bin/sh}}\" -i\n",
-        n = sq(name),
-        h = sq(&home.display().to_string()),
-        cmd = cmd.join(" "),
+        n = tools::sh_quote(name),
+        h = tools::sh_quote(&home.display().to_string()),
+        cmd = words(argv),
+        again = words(again),
+        window = RESTART_WINDOW_S,
+        max = RESTARTS,
     )
 }
 
-fn quiet(c: &mut std::process::Command) -> bool {
-    c.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|st| st.success())
+/// The placeholders a tool's verbs see for this persona.
+fn vars_for(name: &str, home: &Path, pane: &str) -> Vars {
+    let script = home.join("pane.sh").display().to_string();
+    Vars::default()
+        .with("name", name)
+        .with("label", format!("persona-{name}"))
+        .with("session", PERSONA_SESSION)
+        .with("home", home.display().to_string())
+        .with("script_q", tools::sh_quote(&script))
+        .with("script", script)
+        .with("pane", pane)
 }
 
-fn herdr_up() -> bool {
-    which::which("herdr").is_ok()
-        && quiet(std::process::Command::new("herdr").args(["status", "server"]))
+/// The tool and pane a persona's last pane opened in, from `.pane`.
+fn read_record(home: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(home.join(".pane")).ok()?;
+    let mut lines = text.lines();
+    let tool = lines.next()?.trim().to_string();
+    let pane = lines.next().unwrap_or("").trim().to_string();
+    (!tool.is_empty()).then_some((tool, pane))
 }
 
-fn herdr_name(name: &str) -> String {
-    format!("persona-{name}")
+fn write_record(home: &Path, tool: &str, pane: &str) -> Result<()> {
+    std::fs::write(home.join(".pane"), format!("{tool}\n{pane}\n"))
+        .with_context(|| format!("{}", home.join(".pane").display()))
 }
 
-/// Where a persona's pane is open now: herdr's agent or tmux's window.
+/// Whether the pane script's runner is up: `.runner.pid` names a live
+/// process.
+fn runner_up(home: &Path) -> bool {
+    std::fs::read_to_string(home.join(".runner.pid"))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .is_some_and(crate::pid_alive)
+}
+
+/// What a pane is called where the person looks for it.
+fn describe(tool: &str, pane: &str, name: &str) -> String {
+    match tool {
+        "tmux" => format!("tmux {PERSONA_SESSION}:{name}"),
+        _ if pane.is_empty() => format!("{tool} persona-{name}"),
+        _ => format!("{tool} pane {pane}"),
+    }
+}
+
+/// A persona's pane as it stands.
+enum Pane {
+    /// No pane, or one its tool no longer has.
+    Gone,
+    /// The pane is there and its runner has exited.
+    Idle(Tool, String),
+    /// The pane is there and its runner is up.
+    Live(Tool, String),
+}
+
+fn pane_state(name: &str, home: &Path, declared: &[Tool]) -> Pane {
+    let Some((tool_name, pane)) = read_record(home) else {
+        // A window opened before panes kept a record.
+        let legacy = std::process::Command::new("tmux")
+            .args(["list-windows", "-t", PERSONA_SESSION, "-F", "#W"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|w| w == name)
+            });
+        return match tools::ordered(declared)
+            .into_iter()
+            .find(|t| t.name == "tmux")
+        {
+            Some(tmux) if legacy => Pane::Live(tmux, String::new()),
+            _ => Pane::Gone,
+        };
+    };
+    let Some(tool) = tools::ordered(declared)
+        .into_iter()
+        .find(|t| t.name == tool_name)
+    else {
+        return Pane::Gone;
+    };
+    let vars = vars_for(name, home, &pane);
+    if !tools::answers(&tools::fill(&tool.alive, &vars)) {
+        return Pane::Gone;
+    }
+    if runner_up(home) {
+        Pane::Live(tool, pane)
+    } else {
+        Pane::Idle(tool, pane)
+    }
+}
+
+/// Where a persona's pane is open now, with its runner up.
 #[must_use]
 pub fn live_pane(name: &str) -> Option<String> {
-    if herdr_up()
-        && quiet(std::process::Command::new("herdr").args(["agent", "get", &herdr_name(name)]))
-    {
-        return Some(format!("herdr agent {}", herdr_name(name)));
-    }
-    let out = std::process::Command::new("tmux")
-        .args(["list-windows", "-t", PERSONA_SESSION, "-F", "#W"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .any(|w| w == name)
-        .then(|| format!("tmux {PERSONA_SESSION}:{name}"))
-}
-
-/// Open the persona's pane running `script`.
-fn open_pane(name: &str, home: &Path, script: &Path) -> Result<String> {
-    let script = script.display().to_string();
-    if herdr_up() {
-        let ok = quiet(
-            std::process::Command::new("herdr")
-                .args(["agent", "start", &herdr_name(name), "--no-focus", "--cwd"])
-                .arg(home)
-                .args(["--", "sh", &script]),
-        );
-        if ok {
-            return Ok(format!("herdr agent {}", herdr_name(name)));
-        }
-    }
-    if which::which("tmux").is_err() {
-        bail!("persona {name}: neither herdr nor tmux is here to open its pane in");
-    }
-    let tmux = |args: &[&str]| quiet(std::process::Command::new("tmux").args(args));
-    let ok = if tmux(&["has-session", "-t", PERSONA_SESSION]) {
-        tmux(&[
-            "new-window",
-            "-d",
-            "-t",
-            PERSONA_SESSION,
-            "-n",
-            name,
-            "sh",
-            &script,
-        ])
-    } else {
-        tmux(&[
-            "new-session",
-            "-d",
-            "-s",
-            PERSONA_SESSION,
-            "-n",
-            name,
-            "sh",
-            &script,
-        ])
-    };
-    if !ok {
-        bail!("persona {name}: tmux would not open its window");
-    }
-    Ok(format!("tmux {PERSONA_SESSION}:{name}"))
-}
-
-/// Type one line into the persona's pane and press enter.
-fn send_line(name: &str, pane: &str, line: &str) -> Result<()> {
-    let ok = if pane.starts_with("herdr") {
-        let target = herdr_name(name);
-        quiet(std::process::Command::new("herdr").args(["agent", "send", &target, line]))
-            && pane_enter_herdr(&target)
-    } else {
-        let target = format!("{PERSONA_SESSION}:{name}");
-        quiet(std::process::Command::new("tmux").args(["send-keys", "-t", &target, "-l", line]))
-            && quiet(std::process::Command::new("tmux").args(["send-keys", "-t", &target, "Enter"]))
-    };
-    if !ok {
-        bail!("persona {name}: the line did not reach {pane}");
-    }
-    Ok(())
-}
-
-/// Press enter in the pane herdr runs an agent in.
-fn pane_enter_herdr(target: &str) -> bool {
-    let Ok(out) = std::process::Command::new("herdr")
-        .args(["agent", "get", target])
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    let pane = v["result"]["agent"]["pane_id"]
-        .as_str()
-        .or_else(|| v["result"]["pane_id"].as_str())
-        .or_else(|| v["pane_id"].as_str());
-    pane.is_some_and(|p| {
-        quiet(std::process::Command::new("herdr").args(["pane", "send-keys", p, "Enter"]))
-    })
-}
-
-/// Wait until a fresh pane's runner can take a line: herdr says when its
-/// agent is idle; tmux gets a few seconds.
-fn wait_ready(name: &str, pane: &str) {
-    if pane.starts_with("herdr") {
-        let _ = quiet(std::process::Command::new("herdr").args([
-            "agent",
-            "wait",
-            &herdr_name(name),
-            "--status",
-            "idle",
-            "--timeout",
-            "60000",
-        ]));
-    } else {
-        std::thread::sleep(std::time::Duration::from_secs(8));
+    match pane_state(name, &home(name), &declared_tools()) {
+        Pane::Live(tool, pane) => Some(describe(&tool.name, &pane, name)),
+        _ => None,
     }
 }
 
 /// Hand `task` to the persona `name`, whose runner is `runner`: into its
-/// open pane, or a new pane that continues its session (or starts one).
-/// Returns where it runs.
+/// open pane, back into a pane whose runner exited, or a new pane that
+/// continues its session (or starts one). Returns where it runs, and any
+/// tool that refused on the way.
 ///
 /// # Errors
 ///
-/// An unknown runner, no pane system, or the line not reaching the pane.
+/// An unknown runner, no tool that opens a pane, or the line not reaching
+/// the pane.
 pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
     let home = home(name);
     let inbox = home.join("inbox");
@@ -250,24 +253,68 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
         "Read {} and do what it asks, through ljos; it is your next task as {name}.",
         file.display()
     );
-    if let Some(pane) = live_pane(name) {
-        send_line(name, &pane, &line)?;
-        return Ok(pane);
-    }
+    let declared = declared_tools();
     let started = home.join(".started");
-    let argv = runner_argv(runner, started.exists()).with_context(|| {
-        format!(
-            "persona {name}: runner {runner:?} is not a [[harness]] in {}",
-            crate::harnesses_path().display()
-        )
-    })?;
+    let argv_for = |resume: bool| {
+        runner_argv(runner, resume).with_context(|| {
+            format!(
+                "persona {name}: runner {runner:?} is not a [[harness]] in {}",
+                crate::harnesses_path().display()
+            )
+        })
+    };
     let script = home.join("pane.sh");
-    std::fs::write(&script, pane_script(name, &argv, &home))?;
-    let pane = open_pane(name, &home, &script)?;
-    let _ = std::fs::write(&started, crate::now_utc());
-    wait_ready(name, &pane);
-    send_line(name, &pane, &line)?;
-    Ok(pane)
+    match pane_state(name, &home, &declared) {
+        Pane::Live(tool, pane) => {
+            tools::send(&tool, &vars_for(name, &home, &pane).with("line", line))
+                .with_context(|| format!("persona {name}: the line did not reach its pane"))?;
+            return Ok(describe(&tool.name, &pane, name));
+        }
+        Pane::Idle(tool, pane) if !tool.respawn.is_empty() => {
+            let again = argv_for(true)?;
+            std::fs::write(&script, pane_script(name, &again, &again, &home))?;
+            let vars = vars_for(name, &home, &pane);
+            tools::run(&tool.name, &tools::fill(&tool.respawn, &vars))?;
+            tools::wait_ready(&tool, &vars);
+            tools::send(&tool, &vars.with("line", line))
+                .with_context(|| format!("persona {name}: the line did not reach its pane"))?;
+            return Ok(describe(&tool.name, &pane, name));
+        }
+        Pane::Idle(..) | Pane::Gone => {}
+    }
+    let argv = argv_for(started.exists())?;
+    let again = argv_for(true)?;
+    std::fs::write(&script, pane_script(name, &argv, &again, &home))?;
+    let only = std::env::var("LJOS_PANE_TOOL")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let here = tools::available(&declared, only.as_deref());
+    if here.is_empty() {
+        bail!("persona {name}: {}", tools::doctor_state(&declared).1);
+    }
+    let mut refused = Vec::new();
+    for tool in here {
+        let vars = vars_for(name, &home, "");
+        let pane = match tools::open(&tool, &vars) {
+            Ok(p) => p,
+            Err(e) => {
+                refused.push(format!("{e:#}"));
+                continue;
+            }
+        };
+        write_record(&home, &tool.name, &pane)?;
+        let _ = std::fs::write(&started, crate::now_utc());
+        let vars = vars_for(name, &home, &pane);
+        tools::wait_ready(&tool, &vars);
+        tools::send(&tool, &vars.with("line", line))
+            .with_context(|| format!("persona {name}: the line did not reach {}", tool.name))?;
+        let mut said = describe(&tool.name, &pane, name);
+        if !refused.is_empty() {
+            said.push_str(&format!("; before it, {}", refused.join("; ")));
+        }
+        return Ok(said);
+    }
+    bail!("persona {name}: every tool refused: {}", refused.join("; "))
 }
 
 #[cfg(test)]
@@ -299,10 +346,73 @@ mod tests {
         let s = pane_script(
             "buildengineer",
             &["grok".into(), "--continue".into()],
+            &["grok".into(), "--continue".into()],
             Path::new("/s/personas/buildengineer"),
         );
         assert!(s.contains("cd '/s/personas/buildengineer'"));
         assert!(s.contains("LJOS_SEAT='buildengineer' 'grok' '--continue'"));
         assert!(s.trim_end().ends_with("-i"));
+    }
+
+    /// A runner that fails is resumed until the restart budget runs out; one
+    /// that exits 0 is not run again; the pid file is gone either way.
+    #[test]
+    fn the_pane_resumes_a_failing_runner_a_bounded_number_of_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("runs");
+        let fail = vec![
+            "sh".to_string(),
+            "-c".into(),
+            format!("echo run >> {}; exit 3", count.display()),
+        ];
+        let script = pane_script("p", &fail, &fail, dir.path())
+            .replace("exec \"${SHELL:-/bin/sh}\" -i\n", "");
+        let script = script.replace("sleep 1\n", "");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        let runs = std::fs::read_to_string(&count).unwrap().lines().count();
+        assert_eq!(runs as u32, 1 + RESTARTS, "{said}");
+        assert!(said.contains("not restarting"), "{said}");
+        assert!(!dir.path().join(".runner.pid").exists());
+        let ok = vec![
+            "sh".to_string(),
+            "-c".into(),
+            format!("echo run >> {}.ok", count.display()),
+        ];
+        let script =
+            pane_script("p", &ok, &fail, dir.path()).replace("exec \"${SHELL:-/bin/sh}\" -i\n", "");
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        let runs = std::fs::read_to_string(format!("{}.ok", count.display()))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(runs, 1, "a runner that exits 0 is done");
+    }
+
+    #[test]
+    fn a_pane_record_round_trips_and_names_the_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        write_record(dir.path(), "herdr", "w1:p2").unwrap();
+        assert_eq!(
+            read_record(dir.path()),
+            Some(("herdr".to_string(), "w1:p2".to_string()))
+        );
+        assert_eq!(describe("herdr", "w1:p2", "rev"), "herdr pane w1:p2");
+        assert_eq!(describe("tmux", "", "rev"), "tmux ljos-personas:rev");
+        assert!(!runner_up(dir.path()), "no pid file, no runner");
+        std::fs::write(
+            dir.path().join(".runner.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(runner_up(dir.path()));
     }
 }
