@@ -395,6 +395,7 @@ mod tests {
             .lines()
             .count();
         assert_eq!(runs, 1, "a runner that exits 0 is done");
+        assert!(!dir.path().join(".runner.pid").exists());
     }
 
     #[test]
