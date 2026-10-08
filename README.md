@@ -1,7 +1,7 @@
 # ljos
 
 Memory, a work tracker and a shell-command gate for coding agents: Claude Code,
-Codex, Grok Build, Antigravity's `agy`, opencode, omp and hermes.
+Codex, Grok Build, Cursor, Antigravity's `agy`, opencode, omp and hermes.
 
 An agent forgets what it learned when the session ends, and it runs whatever
 command it decides on. ljos keeps the lessons in a local store and hands the
@@ -20,8 +20,8 @@ ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags
 ljos rule '*--force*' --verdict deny --why "Never force push."
 ```
 
-`--harness` takes `claude`, `codex`, `grok`, `antigravity`, `opencode`, `omp`
-or `hermes`. Start a new session and ask for something the preference bears
+`--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`, `opencode`,
+`omp` or `hermes`. Start a new session and ask for something the preference bears
 on, such as tagging a release. Before the model reads the prompt, the hook
 adds:
 

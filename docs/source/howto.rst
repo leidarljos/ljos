@@ -346,6 +346,26 @@ command line:
 A tool that refuses says so in the line ``ljos ask`` prints, with the
 tool's own words, and the next tool is tried.
 
+Wire the seat into Cursor
+=========================
+
+.. code:: console
+
+   $ ljos onboard --harness cursor
+   ok  cursor mcp  set /mcpServers/ljos in /home/me/.cursor/mcp.json
+   ok  hook    added the seat's hook on beforeShellExecution, beforeSubmitPrompt, postToolUse, postToolUseFailure, preCompact, stop, sessionEnd in /home/me/.cursor/hooks.json
+   ok  skill   wrote /home/me/.cursor/skills/ljos/SKILL.md
+   ok  agents  wrote 5 and removed 0 agent definitions in /home/me/.cursor/agents
+
+Cursor's agent and its ``agent`` command line take the server from
+``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. Cursor
+does not hand a prompt hook's context to the model, so the memories a
+prompt activates arrive with the first tool result, as on Grok Build. A
+shell command gets an ``ask`` rule's question as Cursor's own permission
+prompt. On a machine where ``ljos onboard --harness claude`` already ran,
+Cursor runs those hooks itself, so no Cursor hooks file is written and
+the seat answers them in Cursor's shape.
+
 Spawn a persona as a subagent of Grok Build or Claude Code
 ==========================================================
 

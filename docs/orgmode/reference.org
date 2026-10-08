@@ -102,7 +102,19 @@ persona whose =--runner= is that table's name reasons in that session
 (=ljos ask=, =vote --jev=). The pane script resumes a runner that exits
 non-zero, at most three times a minute, and leaves one that exits 0.
 =agents= names the directory the runner reads agent definitions from
-(=~/.grok/agents=, =~/.claude/agents=). =headless= is the argv a decision
+(=~/.grok/agents=, =~/.claude/agents=, =~/.cursor/agents=).
+=hooks_format = "cursor"= writes =hooks= in Cursor's flat shape
+(=version= 1, one ={command, timeout}= entry an event) on
+=beforeShellExecution=, =beforeSubmitPrompt=, =postToolUse=,
+=postToolUseFailure=, =preCompact=, =stop= and =sessionEnd=, and writes
+nothing where =~/.claude/settings.json= already carries the seat's hook,
+since Cursor runs that file's hooks too. The hook reads a Cursor call off
+=cursor_version= in its stdin and answers in Cursor's fields:
+=permission= with =user_message= and =agent_message= at the gate (an
+allow is written out, since Cursor blocks on an answer that is not JSON;
+an ask on =preToolUse=, where Cursor does not enforce one, is a deny),
+=additional_context= after a tool result, and =followup_message= to hold
+a stop. =headless= is the argv a decision
 panel's member runs, with ={prompt_file}=, ={prompt}=, ={cwd}= and
 ={persona}= filled.
 
