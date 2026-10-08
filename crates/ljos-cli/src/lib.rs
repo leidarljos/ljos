@@ -127,6 +127,266 @@ pub struct Harness {
     /// so a persona's next hand-off continues its conversation.
     #[serde(default)]
     pub resume: Vec<String>,
+    /// Where the runner loads agent definitions from. `onboard` and `ljos
+    /// agents` write each persona there as `ljos-<name>.md`
+    /// ([`persona_agent`]): a subagent the runner spawns by name to cast
+    /// that persona's ballot.
+    #[serde(default)]
+    pub agents: Option<String>,
+    /// How the runner answers one prompt and exits, for a decision panel's
+    /// members: `{prompt_file}` is the member's task file, `{prompt}` its
+    /// text, `{cwd}` where the panel opened and `{persona}` the persona. A
+    /// panel opens its members on the seat's own runner when that runner
+    /// has one ([`panel_member_argv`]).
+    #[serde(default)]
+    pub headless: Vec<String>,
+}
+
+/// How long a status line is reused before the stores are asked again: a
+/// runner redraws it every few hundred milliseconds while a turn runs.
+const STATUSLINE_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The seat's line for a runner's status bar (Grok Build's
+/// `[ui.status_line]`, Claude Code's `statusLine`): the seat, the issue
+/// this conversation holds, and how many claims are due for review.
+/// `input` is the runner's status JSON; only its `session_id` is read, to
+/// keep one cached line a session. A pack that does not answer within 300
+/// ms is said to be down rather than waited on.
+#[must_use]
+pub fn statusline(input: &str) -> String {
+    let session: String = serde_json::from_str::<Value>(input.trim())
+        .ok()
+        .and_then(|v| {
+            v.get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let cache = (!session.is_empty()).then(|| runtime_dir().join(format!("statusline-{session}")));
+    if let Some(path) = &cache {
+        let fresh = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < STATUSLINE_TTL);
+        if fresh {
+            if let Ok(line) = std::fs::read_to_string(path) {
+                return line;
+            }
+        }
+    }
+    let mut parts = vec![format!("ljos {}", whoami().seat)];
+    if let Some(issue) = held_issue() {
+        parts.push(issue);
+    }
+    let due = with_pack_timeout(300, || -> Result<usize> {
+        let client = pack()?;
+        let atoms = atoms_lean(&client, &client.workspace())?;
+        Ok(due_of(&atoms, &now_utc()).len())
+    });
+    parts.push(match due {
+        Ok(n) => format!("{n} due"),
+        Err(_) => "pack down".to_string(),
+    });
+    let line = parts.join(" · ");
+    if let Some(path) = cache {
+        let _ = std::fs::create_dir_all(runtime_dir());
+        let _ = std::fs::write(path, &line);
+    }
+    line
+}
+
+/// Rewrite the agent definitions of every runner that already has an
+/// agents directory, after a persona changed. A runner whose directory
+/// does not exist yet is left to `onboard` or `ljos agents`.
+pub fn refresh_agents() {
+    let Ok(all) = harnesses_from(&harnesses_path()) else {
+        return;
+    };
+    let personas = personas_from_pack().unwrap_or_default();
+    for dir in all
+        .harness
+        .iter()
+        .filter_map(|h| h.agents.as_ref())
+        .map(|d| expand(d))
+    {
+        if dir.is_dir() {
+            let _ = agents_step(&dir, &personas, false);
+        }
+    }
+}
+
+/// The line in an agent definition that says `ljos agents` wrote it, so it
+/// may rewrite or remove it.
+const AGENT_MARK: &str =
+    "# ljos agents writes this file from the pack; change the persona, not the file.";
+
+/// A persona as a runner's agent definition: Markdown under YAML front
+/// matter, the shape Claude Code and Grok Build both read. A runner spawns
+/// it by name (in Grok, `spawn_subagent` with `subagent_type` `ljos-NAME`)
+/// to have the persona brief itself, cast one ballot before reading the
+/// others, note why, and stop. Grok reads `capabilityMode: execute`: read
+/// and run commands, edit nothing. Returns the file name and the text.
+#[must_use]
+pub fn persona_agent(p: &Persona) -> (String, String) {
+    let slug: String = p
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let name = format!("ljos-{slug}");
+    let domains = if p.entities.is_empty() {
+        String::new()
+    } else {
+        format!("; you speak to {}", p.entities.join(", "))
+    };
+    let description = serde_json::to_string(&format!(
+        "{}, a persona of this machine's seat: {} Casts one ballot on a decision issue as itself.",
+        p.name,
+        p.view.trim()
+    ))
+    .unwrap_or_default();
+    let who = &p.name;
+    let text = format!(
+        "---\n{AGENT_MARK}\nname: {name}\ndescription: {description}\ncapabilityMode: execute\n---\n\
+         You are {who}, a persona of the leiðarljós seat on this machine. {view}\n\
+         You hold your ballot at anchor {anchor:.2}{domains}.\n\n\
+         You are handed a decision issue id. Then:\n\n\
+         1. Run `ljos brief {who} ISSUE` and read all of it: what you remembered yourself, what the seat knows on your domains, the playbook and the work.\n\
+         2. Decide as yourself before you see another voice: do not read `vissue vote ISSUE`, `vissue show ISSUE` or `ljos consensus ISSUE` until your ballot is cast.\n\
+         3. Cast one ballot: `ljos vote ISSUE --for OPTION --expect '{{\"OPTION\": SHARE}}' --confidence P --used none --as {who}`, with your forecast of the others' shares and the probability you give your own choice.\n\
+         4. Note why, in short sentences, with the evidence your ballot stands on: `vissue note ISSUE \"{who}: ...\"`.\n\n\
+         Do not edit files, push, or ssh. Stop after the note.\n",
+        view = p.view.trim(),
+        anchor = p.anchor,
+    );
+    (format!("{name}.md"), text)
+}
+
+/// Write each persona as an agent definition in `dir`, and remove the ones
+/// this verb wrote for personas the pack no longer holds.
+fn agents_step(dir: &Path, personas: &[Persona], dry: bool) -> Step {
+    let what = "agents".to_string();
+    if personas.is_empty() {
+        return Step {
+            what,
+            detail: format!("no personas in the pack, so none in {}", dir.display()),
+            ok: true,
+        };
+    }
+    let want: Vec<(String, String)> = personas.iter().map(persona_agent).collect();
+    let stale: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("ljos-") && n.ends_with(".md"))
+                })
+                .filter(|p| {
+                    !want
+                        .iter()
+                        .any(|(n, _)| p.file_name().and_then(|f| f.to_str()) == Some(n))
+                })
+                .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains(AGENT_MARK)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let changed: Vec<&(String, String)> = want
+        .iter()
+        .filter(|(n, t)| std::fs::read_to_string(dir.join(n)).ok().as_deref() != Some(t.as_str()))
+        .collect();
+    if changed.is_empty() && stale.is_empty() {
+        return Step {
+            what,
+            detail: format!("{} personas in {} are current", want.len(), dir.display()),
+            ok: true,
+        };
+    }
+    if dry {
+        return Step {
+            what,
+            detail: format!(
+                "would write {} and remove {} agent definitions in {}",
+                changed.len(),
+                stale.len(),
+                dir.display()
+            ),
+            ok: true,
+        };
+    }
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        for (n, t) in &changed {
+            std::fs::write(dir.join(n), t)?;
+        }
+        for p in &stale {
+            std::fs::remove_file(p)?;
+        }
+        Ok(())
+    });
+    match written {
+        Ok(()) => Step {
+            what,
+            detail: format!(
+                "wrote {} and removed {} agent definitions in {}",
+                changed.len(),
+                stale.len(),
+                dir.display()
+            ),
+            ok: true,
+        },
+        Err(e) => Step {
+            what,
+            detail: format!("{}: {e}", dir.display()),
+            ok: false,
+        },
+    }
+}
+
+/// `ljos agents`: every persona as an agent definition in each runner's
+/// `agents` directory, or in one runner's.
+///
+/// # Errors
+///
+/// The runners file is unreadable, or the pack does not answer.
+pub fn export_agents(harness: Option<&str>, dry: bool) -> Result<Vec<Step>> {
+    let mut all = harnesses_from(&harnesses_path())?;
+    let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
+    for h in shipped.harness {
+        if !all.harness.iter().any(|a| a.name == h.name) && harness == Some(h.name.as_str()) {
+            all.harness.push(h);
+        }
+    }
+    let personas = personas_from_pack()?;
+    let steps: Vec<Step> = all
+        .harness
+        .iter()
+        .filter(|h| harness.is_none_or(|n| h.name == n))
+        .filter_map(|h| h.agents.as_ref().map(|d| (h, d)))
+        .map(|(h, d)| {
+            let mut step = agents_step(&expand(d), &personas, dry);
+            step.what = format!("agents {}", h.name);
+            step
+        })
+        .collect();
+    if steps.is_empty() {
+        bail!(
+            "agents: no runner in {} names an agents directory{}",
+            harnesses_path().display(),
+            harness.map(|n| format!(" for {n}")).unwrap_or_default()
+        );
+    }
+    Ok(steps)
 }
 
 /// The plugins `ljos` carries for runners whose hooks are code, by name.
@@ -297,6 +557,8 @@ hooks = "~/.claude/settings.json"
 hook_events = ["UserPromptSubmit", "SessionEnd", "PostToolUse", "SubagentStop"]
 clients = ["claude-code"]
 resume = ["claude", "--continue"]
+agents = "~/.claude/agents"
+headless = ["claude", "-p", "{prompt}", "--max-turns", "6", "--allowedTools", "Bash(ljos:*)", "Bash(vissue:*)"]
 
 [[harness]]
 name = "codex"
@@ -331,6 +593,10 @@ skills = "~/.grok/skills"
 # A persona reasoning through this runner resumes the latest session of
 # its home directory with this argv.
 resume = ["grok", "--continue"]
+# Each persona as a Grok agent definition, spawned by name; and the argv a
+# decision panel's member runs headless.
+agents = "~/.grok/agents"
+headless = ["grok", "--prompt-file", "{prompt_file}", "--yolo", "--max-turns", "6", "--effort", "low", "--disallowed-tools", "Agent", "--cwd", "{cwd}"]
 
 # The tools a persona's runner lives in. herdr (its agent API, when its
 # server answers) and tmux ship as shapes; `ljos doctor` names the one that
@@ -1630,14 +1896,32 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
     }
     if harness == "grok" {
         let mut steps = vec![write_grok_hooks(dry)?];
-        if let Ok(all) = harnesses_from(file) {
-            if let Some(h) = all.harness.iter().find(|h| h.name == "grok") {
-                let server = server_path()?;
-                steps.push(register_step(h, &server, dry));
-                if let Some(dir) = &h.skills {
-                    steps.push(write_skill(&expand(dir), dry));
-                }
+        let declared = harnesses_from(file)
+            .ok()
+            .and_then(|all| all.harness.into_iter().find(|h| h.name == "grok"));
+        if let Some(h) = &declared {
+            let server = server_path()?;
+            steps.push(register_step(h, &server, dry));
+            if let Some(dir) = &h.skills {
+                steps.push(write_skill(&expand(dir), dry));
             }
+        }
+        // The personas go to Grok's agents directory even before the file
+        // names Grok: a definition is a file Grok reads, nothing it runs.
+        let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
+        let agents = declared.and_then(|h| h.agents).or_else(|| {
+            shipped
+                .harness
+                .into_iter()
+                .find(|h| h.name == "grok")
+                .and_then(|h| h.agents)
+        });
+        if let Some(dir) = agents {
+            steps.push(agents_step(
+                &expand(&dir),
+                &personas_from_pack().unwrap_or_default(),
+                dry,
+            ));
         }
         return Ok(steps);
     }
@@ -1695,6 +1979,13 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
             detail: "no skills directory in harnesses.toml; `ljos protocol` prints the text".into(),
             ok: false,
         }),
+    }
+    if let Some(dir) = &h.agents {
+        steps.push(agents_step(
+            &expand(dir),
+            &personas_from_pack().unwrap_or_default(),
+            dry,
+        ));
     }
     steps.extend(dependencies);
     Ok(steps)
@@ -3443,11 +3734,43 @@ fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The argv of one headless panel member. `LJOS_PANEL_BIN` names the
-/// stand-in used in tests; otherwise `grok`.
+/// The argv of one headless panel member: the `headless` template of the
+/// runner the panel names (`LJOS_PANEL_RUNNER`), else of the seat's own
+/// runner, so a panel opened under Claude Code runs Claude; else Grok's
+/// flags. `LJOS_MEMBER_BIN` names the stand-in used in tests.
 #[must_use]
-pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>) -> Vec<String> {
-    let bin = std::env::var("LJOS_MEMBER_BIN").unwrap_or_else(|_| "grok".into());
+pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -> Vec<String> {
+    let stand_in = std::env::var("LJOS_MEMBER_BIN").ok();
+    if stand_in.is_none() {
+        let runner = std::env::var("LJOS_PANEL_RUNNER")
+            .ok()
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| whoami().seat);
+        let template = harnesses_from(&harnesses_path())
+            .ok()
+            .and_then(|all| all.harness.into_iter().find(|h| h.name == runner))
+            .or_else(|| {
+                toml::from_str::<Harnesses>(HARNESSES_EXAMPLE)
+                    .ok()?
+                    .harness
+                    .into_iter()
+                    .find(|h| h.name == runner)
+            })
+            .map(|h| h.headless)
+            .filter(|t| !t.is_empty());
+        if let Some(template) = template {
+            let vars = tools::Vars::default()
+                .with("prompt_file", prompt_file.display().to_string())
+                .with(
+                    "prompt",
+                    std::fs::read_to_string(prompt_file).unwrap_or_default(),
+                )
+                .with("cwd", cwd.filter(|c| !c.is_empty()).unwrap_or("."))
+                .with("persona", persona);
+            return tools::fill(&template, &vars);
+        }
+    }
+    let bin = stand_in.unwrap_or_else(|| "grok".into());
     let mut args = vec![
         bin,
         "--prompt-file".into(),
@@ -3509,7 +3832,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         let task = decision_member_task(&brief, &persona, &issue);
         let task_file = briefs.join(format!("{persona}.prompt"));
         std::fs::write(&task_file, task)?;
-        let argv = panel_member_argv(&task_file, cwd);
+        let argv = panel_member_argv(&task_file, cwd, &persona);
         let member_log = briefs.join(format!("{persona}.log"));
         spawn_member(&argv, &member_log)?;
         n += 1;
@@ -17019,6 +17342,8 @@ mod tests {
             clients: Vec::new(),
             start: Vec::new(),
             resume: Vec::new(),
+            agents: None,
+            headless: Vec::new(),
         };
         assert_eq!(is_registered(&h, Path::new("/bin/ljos-mcp")), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
@@ -17606,6 +17931,132 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    /// A persona becomes an agent definition a runner spawns by name: front
+    /// matter Grok and Claude Code read, a body that briefs, seals the
+    /// ballot and stops; written once, rewritten only when it changes, and
+    /// removed with its persona while a file the seat did not write stays.
+    #[test]
+    fn a_persona_is_an_agent_a_runner_spawns_by_name() {
+        let p = Persona {
+            name: "reviewer".into(),
+            anchor: 0.2,
+            view: "Reads for what breaks in \"production\".".into(),
+            entities: vec!["docs".into()],
+            runner: None,
+        };
+        let (file, text) = persona_agent(&p);
+        assert_eq!(file, "ljos-reviewer.md");
+        let front: Vec<&str> = text.splitn(3, "---\n").collect();
+        assert_eq!(front[0], "", "{text}");
+        assert!(front[1].contains("name: ljos-reviewer\n"), "{text}");
+        assert!(front[1].contains("capabilityMode: execute\n"));
+        assert!(
+            front[1].contains(r#"\"production\""#),
+            "the view is quoted for YAML"
+        );
+        assert!(front[2].contains("ljos brief reviewer ISSUE"));
+        assert!(front[2].contains("until your ballot is cast"));
+        assert!(front[2].contains("--as reviewer"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("ljos-handwritten.md");
+        std::fs::write(&mine, "---\nname: ljos-handwritten\n---\nmine\n").unwrap();
+        let first = agents_step(dir.path(), std::slice::from_ref(&p), false);
+        assert!(
+            first.ok && first.detail.starts_with("wrote 1"),
+            "{}",
+            first.detail
+        );
+        let again = agents_step(dir.path(), std::slice::from_ref(&p), false);
+        assert!(again.detail.contains("current"), "{}", again.detail);
+        let other = Persona {
+            name: "reader".into(),
+            ..p.clone()
+        };
+        let swapped = agents_step(dir.path(), &[other], false);
+        assert!(swapped.detail.contains("removed 1"), "{}", swapped.detail);
+        assert!(!dir.path().join("ljos-reviewer.md").exists());
+        assert!(dir.path().join("ljos-reader.md").exists());
+        assert!(mine.exists(), "a file ljos did not write stays");
+    }
+
+    /// A panel's members run on the runner it names, through that runner's
+    /// headless argv; the test stand-in and the Grok default still answer.
+    #[test]
+    fn a_panel_member_runs_on_the_runner_named() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir_all(cfg.join("ljos")).unwrap();
+        std::fs::write(
+            cfg.join("ljos/harnesses.toml"),
+            "[[harness]]\nname = \"acme\"\nheadless = [\"acme\", \"-p\", \"{prompt}\", \"--as\", \"{persona}\", \"--in\", \"{cwd}\"]\n",
+        )
+        .unwrap();
+        let task = dir.path().join("reviewer.prompt");
+        std::fs::write(&task, "cast one ballot").unwrap();
+        let old = std::env::var_os("XDG_CONFIG_HOME");
+        // Safety: the environment lock is held for the whole test.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &cfg);
+            std::env::set_var("LJOS_PANEL_RUNNER", "acme");
+            std::env::remove_var("LJOS_MEMBER_BIN");
+        }
+        let named = panel_member_argv(&task, Some("/work"), "reviewer");
+        unsafe { std::env::set_var("LJOS_PANEL_RUNNER", "nobody") };
+        let fallback = panel_member_argv(&task, None, "reviewer");
+        unsafe { std::env::set_var("LJOS_MEMBER_BIN", "stand-in") };
+        let stand_in = panel_member_argv(&task, None, "reviewer");
+        unsafe {
+            std::env::remove_var("LJOS_PANEL_RUNNER");
+            std::env::remove_var("LJOS_MEMBER_BIN");
+            match old {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+        assert_eq!(
+            named,
+            [
+                "acme",
+                "-p",
+                "cast one ballot",
+                "--as",
+                "reviewer",
+                "--in",
+                "/work"
+            ]
+        );
+        assert_eq!(fallback[0], "grok");
+        assert!(fallback.contains(&"--prompt-file".to_string()));
+        assert_eq!(stand_in[0], "stand-in");
+    }
+
+    /// The status line is cached a session, so a runner redrawing it every
+    /// few hundred milliseconds does not ask the stores each time.
+    #[test]
+    fn a_status_line_is_cached_for_its_session() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("XDG_RUNTIME_DIR");
+        // Safety: the environment lock is held for the whole test.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        std::fs::create_dir_all(runtime_dir()).unwrap();
+        std::fs::write(
+            runtime_dir().join("statusline-st-1"),
+            "ljos cached · seat-x · 2 due",
+        )
+        .unwrap();
+        let line = statusline(r#"{"session_id":"st-1","workspace":{"current_dir":"/tmp"}}"#);
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+        assert_eq!(line, "ljos cached · seat-x · 2 due");
     }
 
     /// A failed tool and a compaction reach the seat under every runner's

@@ -275,6 +275,17 @@ enum Cmd {
     },
     /// The personas the pack holds: name, anchor, domains and view, one per line.
     Personas,
+    /// Write every persona as an agent definition in each runner's agents directory: a subagent the runner spawns by name to cast that persona's sealed ballot.
+    Agents {
+        /// One runner from harnesses.toml; every runner with an agents directory when absent.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Say what would be written and removed.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// One line for a runner's status bar (Grok's [ui.status_line], Claude Code's statusLine): the seat, the issue held, what is due. Reads the runner's status JSON on stdin.
+    Statusline,
     /// Bind a playbook to an issue and copy its recipe into the working set, before personas enter.
     Playbook {
         /// The tracker id of the issue.
@@ -884,6 +895,7 @@ fn main() -> Result<()> {
                 runner,
             })?;
             println!("{}", format_write_ack(&body));
+            ljos_cli::refresh_agents();
         }
         Cmd::Upgrade { version, dir } => {
             print!(
@@ -896,6 +908,17 @@ fn main() -> Result<()> {
         }
         Cmd::Personas => {
             print!("{}", format_personas(&personas_from_pack()?));
+        }
+        Cmd::Agents { harness, dry_run } => {
+            print!(
+                "{}",
+                ljos_cli::format_steps(&ljos_cli::export_agents(harness.as_deref(), dry_run)?)
+            );
+        }
+        Cmd::Statusline => {
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+            println!("{}", ljos_cli::statusline(&input));
         }
         Cmd::Playbook { issue, name } => {
             print!("{}", copy_playbook(&issue, &name)?);
