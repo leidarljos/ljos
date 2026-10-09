@@ -21,7 +21,9 @@ ljos rule '*--force*' --verdict deny --why "Never force push."
 ```
 
 `--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
-`opencode`, `omp` or `hermes`. Start a new session and ask for something the
+`opencode`, `omp`, `hermes`, `windsurf`, `zed`, `vscode`, `claude-desktop`,
+`gemini`, `amazonq` or `kiro`. Cursor's IDE and its `agent` CLI share
+`~/.cursor/mcp.json`. Start a new session and ask for something the
 preference bears on, such as tagging a release. Before the model reads the
 prompt, the hook adds:
 
@@ -185,7 +187,11 @@ ljos receive bag [--since bridge.txt] [--import]
 ljos doctor
 ljos protocol
 ljos onboard                                   # the one MCP server entry any runner takes
-ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity ship as shapes
+ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes
+ljos onboard --harness grokbot --skills ~/.grokbot/skills   # shell-only: skill and an env file, no MCP server and no hook
+source ~/.config/ljos/grokbot.env              # LJOS_SEAT=grokbot; the process tree is not this seat
+echo "$prompt" | ljos hook --prompt            # the prompt hook, from a shell
+ljos policy --fail-on-deny -- git push --force # exit 1 on a deny; without the flag the exit stays 0
 ljos findings out/campaign.json --remember     # an eb-stack campaign's typed findings, one lesson each under the module that failed
 ```
 
@@ -205,7 +211,7 @@ When opening a decision panel (`ljos panel`), persona subagents run with bounded
 
 ## Who is sitting
 
-The seat is the program that connected. `ljos-mcp` names it after the client that initialised it, and `ljos` in a shell that runner opened finds the same name through the process tree or a shared session id, so a runner's tools and its verbs are one seat with nothing set. Claims are held per conversation; memory, ballots and trust accrue to the seat. `ljos seat` prints both names and where they came from. `ljos onboard` prints the one MCP entry any runner takes; `ljos protocol` prints the text an agent reads first.
+The seat is the program that connected. `ljos-mcp` names it after the client that initialised it, and `ljos` in a shell that runner opened finds the same name through the process tree or a shared session id, so a runner's tools and its verbs are one seat with nothing set. A shell-only agent such as Grok Bot has no MCP client and no command hook, and the process tree is not its seat. `ljos onboard --harness grokbot` writes the skill and an env file; source the file and `LJOS_SEAT` is the name. `ljos hook --prompt` is the prompt hook. `ljos policy --fail-on-deny` exits 1 on a deny. Without the flag, `ljos hook` still exits 0. Claims are held per conversation; memory, ballots and trust accrue to the seat. `ljos seat` prints both names and where they came from. `ljos onboard` prints the one MCP entry any runner takes; `ljos protocol` prints the text an agent reads first.
 
 Nothing needs a variable set: `ljos remember` starts the writer when none is answering, the seat's memory is the one workspace `seat` from any directory, and every claim carries the seat that wrote it.
 

@@ -165,7 +165,9 @@ $ ljos onboard
 That entry goes into any runner, where it keeps its MCP servers. The
 =env= is empty on purpose: the server names the seat after the client
 that connects, and =ljos= in a shell the runner opens finds the same name
-through the process tree, so nothing is set per runner. The agent's next
+through the process tree, so nothing is set per runner. A shell-only
+agent has no such record. =ljos onboard --harness grokbot= writes an env
+file; source it and =LJOS_SEAT= is the seat. The agent's next
 sitting then runs in the order above. A runner that registers servers by
 a command of its own can be described once in
 =~/.config/ljos/harnesses.toml= and onboarded with =ljos onboard --harness

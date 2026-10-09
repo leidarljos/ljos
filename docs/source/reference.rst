@@ -211,9 +211,20 @@ in Cursor's fields: ``permission`` at the gate, with ``user_message`` and
 on a held stop. It still answers ``allow`` when there is no verdict, since
 Cursor blocks the command when a gate's answer is not JSON. An ask on
 ``preToolUse``, which Cursor does not enforce, becomes a deny.
+The IDE and the ``agent`` CLI read the same ``~/.cursor/mcp.json``.
+
+A table with ``shell = true`` registers no server and no hook.
+``ljos onboard --harness grokbot`` writes the skill and an env file beside
+``harnesses.toml``. Source that file. ``LJOS_SEAT`` is the runner's name,
+because a shell-only agent has no MCP client and the process tree is not
+its seat. ``--skills DIR`` is where the skill goes.
+``ljos hook --prompt`` reads stdin as the prompt.
+``ljos hook --fail-on-deny`` and ``ljos policy --fail-on-deny``
+exit 1 when the answer is a deny. Without the flag the
+exit stays 0.
 
 ``[[tool]]`` tables in the same file declare the tools a runner lives in.
-Two ship as shapes, herdr and tmux. A table of the same name replaces one.
+Two come as shapes, herdr and tmux. A table of the same name replaces one.
 Every verb but ``pane_pointer`` is an argv or a list of argvs, with
 ``{name}``, ``{label}``, ``{session}``, ``{home}``, ``{script}``, ``{script_q}``,
 ``{pane}`` and ``{line}`` filled. A refusal carries the tool's own words.

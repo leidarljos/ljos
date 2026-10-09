@@ -92,9 +92,10 @@ Deep harness integration
 ========================
 
 ``ljos onboard --harness NAME`` registers the MCP server, the hooks and the
-skill for one runner. ``NAME`` takes ``claude``, ``codex``, ``grok``,
-``antigravity``, ``opencode``, ``omp`` or ``hermes``. The contract is the
-same everywhere and the envelope differs:
+skill for one runner. ``NAME`` takes ``claude``, ``codex``, ``grok``, ``cursor``,
+``antigravity``, ``opencode``, ``omp``, ``hermes``, ``windsurf``, ``zed``,
+``vscode``, ``claude-desktop``, ``gemini``, ``amazonq``, ``kiro``, ``grokbot``
+or ``shell``. The contract is the same everywhere and the envelope differs:
 
 - Claude Code: ``UserPromptSubmit`` context, skills, ``ljos://protocol``;
   ``PreToolUse`` deny blocks; ask is the native permission prompt; the
@@ -118,6 +119,14 @@ same everywhere and the envelope differs:
   or ``ljos approve``.
 - hermes: MCP server list plus hooks; hook deny blocks; ``ljos approve``;
   nothing leaves the machine unless a remote judge is turned on.
+- Cursor: the IDE and the ``agent`` CLI share ``~/.cursor/mcp.json`` and
+  ``~/.cursor/hooks.json``; a prompt note arrives with the first tool
+  result; ``beforeShellExecution`` and ``preToolUse`` fail closed; an ask
+  on a shell command is Cursor's permission prompt.
+- Grok Bot: no MCP server and no hook file. ``ljos onboard --harness grokbot``
+  writes the skill and an env file to source, so ``LJOS_SEAT`` is the seat.
+  ``ljos hook --prompt`` is the prompt hook. ``ljos policy --fail-on-deny``
+  exits 1 on a deny. Without the flag the exit stays 0.
 
 Two rules hold on every runner. First, the seat guard refuses a command
 that writes the seat's own files (its binaries, its hook entries,

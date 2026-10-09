@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- A shell-only runner (`ljos onboard --harness grokbot`, or `shell`) writes the skill and an env file that sets `LJOS_SEAT`. It registers no MCP server and no hook. `ljos hook --prompt` reads stdin as the prompt. `ljos hook --fail-on-deny` and `ljos policy --fail-on-deny` exit 1 on a deny. Without the flag the exit stays 0.
+- Runners now include Windsurf, Zed, VS Code, Claude Desktop, the Gemini CLI, Amazon Q and Kiro. Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 - `ljos supervise` reads one harness exit and prints `restart`, `stop`, or `give-up`. Permanent restarts either way, transient only on a crash, temporary never. Three restarts inside the window give up. A restart prints `herdr agent start persona-NAME`. The command does not start the child.
 - `approve ID` in the chat grants the request when the prompt names the same conversation under a longer session string. A different conversation still grants nothing.
 - A hook's pack listing fails at 2s so the local gate can still refuse the command. The tool gate does not exit on a clock. An empty exit would allow it.

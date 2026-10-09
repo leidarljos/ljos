@@ -64,8 +64,10 @@ of work, each in the shape it takes the server: a runner with an ``mcp
 add`` of its own by that command; ``grok`` and a runner with a TOML config
 by a table appended to it; ``opencode`` and ``omp`` by a JSON pointer set in
 their MCP file; ``hermes`` by its ``mcp add`` with the tool question
-answered. Copy the tables for the runners on the machine into
-``harnesses.toml``, then one verb each:
+answered. The same verb takes ``cursor`` (the IDE and the ``agent`` CLI share
+``~/.cursor/mcp.json``), ``windsurf``, ``zed``, ``vscode``, ``claude-desktop``,
+``gemini``, ``amazonq`` and ``kiro``. Copy the tables for the runners on the
+machine into ``harnesses.toml``, then one verb each:
 
 .. code:: console
 
@@ -80,6 +82,28 @@ answered. Copy the tables for the runners on the machine into
 A runner with a hooks file (``hooks`` in its table) takes the memory hook
 too; for the others the skill and the ``ljos://protocol`` resource carry
 what the seat knows, and the sitting's island brings the memories in.
+
+Seat a shell-only agent
+=======================
+
+Grok Bot runs shell commands on a Linux box. It is not an MCP runner and
+it has no command hook, so the process tree is not its seat.
+
+.. code:: console
+
+   $ ljos onboard --harness grokbot --skills ~/.grokbot/skills
+   ok  skill   wrote /home/you/.grokbot/skills/ljos/SKILL.md
+   ok  env wrote /home/you/.config/ljos/grokbot.env; source /home/you/.config/ljos/grokbot.env
+   $ source ~/.config/ljos/grokbot.env
+   $ echo "$prompt" | ljos hook --prompt
+   $ ljos policy --fail-on-deny -- git push --force
+
+``--skills DIR`` writes the protocol there. ``ljos onboard --harness shell --skills DIR``
+is the same shape under the name ``shell``. The env file sets
+``LJOS_SEAT`` to the runner's name. Nothing is registered as an MCP server
+or a hook. ``--fail-on-deny`` exits 1 when the answer is a deny. Without
+the flag, ``ljos hook`` and ``ljos policy`` still exit 0, and a runner that
+reads the JSON is unchanged. An ``ask`` still exits 0; the text says ``ask``.
 
 Inject memory at the point of action
 ====================================
@@ -362,7 +386,7 @@ Wire the seat into Cursor
    ok  skill   wrote /home/me/.cursor/skills/ljos/SKILL.md
    ok  agents  wrote 5 and removed 0 agent definitions in /home/me/.cursor/agents
 
-Cursor's agent and its ``agent`` command line take the server from
+Cursor's IDE and its ``agent`` command line take the server from the same
 ``~/.cursor/mcp.json`` and the hooks from ``~/.cursor/hooks.json``. Cursor
 does not hand a prompt hook's context to the model, so the memories a
 prompt activates arrive with the first tool result instead, as on Grok

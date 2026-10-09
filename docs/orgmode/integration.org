@@ -69,9 +69,10 @@ integration; each harness registers the events its table names.
 * Deep harness integration
 
 =ljos onboard --harness NAME= registers the MCP server, the hooks and the
-skill for one runner. =NAME= takes =claude=, =codex=, =grok=,
-=antigravity=, =opencode=, =omp= or =hermes=. The contract is the same
-everywhere and the envelope differs:
+skill for one runner. =NAME= takes =claude=, =codex=, =grok=, =cursor=,
+=antigravity=, =opencode=, =omp=, =hermes=, =windsurf=, =zed=, =vscode=,
+=claude-desktop=, =gemini=, =amazonq=, =kiro=, =grokbot= or =shell=. The
+contract is the same everywhere and the envelope differs:
 
 | Runner | Memory injection | Shell gate | Ask | Notes |
 |---+---+---+---+---|
@@ -82,6 +83,8 @@ everywhere and the envelope differs:
 | opencode | =assets/opencode/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
 | omp | =assets/omp/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
 | hermes | MCP server list plus hooks | hook deny blocks | =ljos approve= | nothing leaves the machine unless a remote judge is turned on |
+| Cursor | prompt note on the first tool result; skill; =~/.cursor/agents= | =beforeShellExecution= and =preToolUse=, fail closed | Cursor's permission prompt on a shell command | the IDE and the =agent= CLI share =~/.cursor/mcp.json= and =~/.cursor/hooks.json= |
+| Grok Bot | the skill, then =ljos hook --prompt= | =ljos policy --fail-on-deny= exits 1 | the person runs the command | no MCP server and no hook file; source the env file =onboard= writes |
 
 Two rules hold on every runner. First, the seat guard refuses a command
 that writes the seat's own files (its binaries, its hook entries,
