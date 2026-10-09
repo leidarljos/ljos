@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## Unreleased
+
+- The status line's due count keeps its 300 ms bound: the lean listing ignored `PACKSET_TIMEOUT_MS` and waited up to thirty seconds on a writer that did not answer. A writer that answers busy is asked again up to three times, after 50, 150 and 450 ms, and the listing stops when its caller's timeout runs out.
+
 ## 0.26.1 (2026-10-09)
 
 - `ljos doctor` counts Cursor's hook as installed when `beforeShellExecution`, `preToolUse`, `beforeMCPExecution`, `beforeReadFile` and `postToolUseFailure` are in Cursor's file and Claude's settings carry the seat hook, or when Cursor's file carries every event. The reference page says the same.
