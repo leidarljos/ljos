@@ -86,6 +86,8 @@ tracker in about ten minutes.
    getting-started
    howto
    grok-build
+   integration
+   architecture
    reference
    explanation
    seat

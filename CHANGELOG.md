@@ -5,6 +5,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.27.0 (2026-10-09)
 
 - `ljos supervise` reads one harness exit and prints `restart`, `stop`, or `give-up`. Permanent restarts either way, transient only on a crash, temporary never. Three restarts inside the window give up. A restart prints `herdr agent start persona-NAME`. The command does not start the child.
+- `approve ID` in the chat grants the request when the prompt names the same conversation under a longer session string. A different conversation still grants nothing.
+- A hook's pack listing fails at 2s so the local gate can still refuse the command. The tool gate does not exit on a clock. An empty exit would allow it.
+- A tracker that keeps one file per issue is read and committed as that file. `ljos` follows vissue 0.20: when `issues/.ledger` is present, a sitting finds the issue there, and the tracker commit names `issues/<id>.org` rather than the project board.
+- A persona hand can carry an actor message (`cast`, `call`, `event`, or `exit`). The inbox file is still the markdown `hand` writes. Herdr is up when `herdr workspace list` exits 0.
+- `docs/orgmode/integration.org` places the seat among the memory systems it learns from and names the events each runner registers. `docs/orgmode/architecture.org` says how a persona pane, the actor message and `ljos supervise` fit together.
 - `ljos claim --next` claims the next ready node. `--role` and `--slack` are the affinity and the depth slack. The `claimdag` binary on `PATH` has to be one that serves `claim-next`.
 - A decision panel starts at most `LJOS_PANEL_CONCURRENCY` members at once. Unset, that is the machine's parallelism clamped to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
 - The status line's due count keeps its 300 ms bound: the lean listing ignored `PACKSET_TIMEOUT_MS` and waited up to thirty seconds on a writer that did not answer. A writer that answers busy is asked again up to three times, after 50, 150 and 450 ms, and the listing stops when its caller's timeout runs out.
@@ -15,9 +20,6 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.26.0 (2026-10-09)
 
-- `approve ID` in the chat grants the request when the prompt names the same conversation under a longer session string. A different conversation still grants nothing.
-- A hook's pack listing fails at 2s so the local gate can still refuse the command. The tool gate does not exit on a clock. An empty exit would allow it.
-- A tracker that keeps one file per issue is read and committed as that file. `ljos` follows vissue 0.20: when `issues/.ledger` is present, a sitting finds the issue there, and the tracker commit names `issues/<id>.org` rather than the project board.
 - An ask a runner cannot show as its own prompt is granted by the client's consent form (`ljos_request_approval`), by replying `approve ID` in the same conversation, or by `ljos approve ID` in a terminal.
 - Persona panes open through `[[tool]]` adapters declared in harnesses.toml beside the runners; herdr and tmux ship as shapes, and `ljos doctor` has a `panes` row. Half the herdr calls the seat made had gone stale against herdr 0.9. Every pane fell back to tmux without a warning. The pane resumes a runner that exits non-zero, at most three times a minute. `examples/runtime-panel` has the vote that picked them.
 - Among the multiplexers, the pane-typing guard knew only tmux's `send-keys` and herdr's old `send`. It now also refuses an approval sent through herdr's `agent prompt`, `send-keys`, `send-text`, `pane run` or a `terminal session control` fed on stdin. It knows tmux's `paste-buffer` and `pipe-pane -I` too, zellij's `write-chars`, wezterm's and kitty's `send-text`, and screen's `stuff` and `paste`.

@@ -18077,6 +18077,38 @@ mod tests {
         assert!(!text.contains("\"ljos hook\""), "{text}");
     }
 
+    #[test]
+    fn the_frozen_grok_hooks_match_the_declared_events() {
+        let shipped: super::Harnesses =
+            toml::from_str(super::HARNESSES_EXAMPLE).expect("shipped shapes");
+        let grok = shipped
+            .harness
+            .iter()
+            .find(|h| h.name == "grok")
+            .expect("grok shape");
+        let mut events = super::hook_events_of(grok);
+        events.sort();
+        let text = super::grok_hooks_json(Path::new("/opt/seat/bin/ljos"));
+        let v: Value = serde_json::from_str(&text).expect("the hook file is JSON");
+        let mut keys: Vec<String> = v["hooks"]
+            .as_object()
+            .expect("hooks object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, events, "{text}");
+    }
+
+    #[test]
+    fn grok_onboard_ends_with_the_shared_dependencies() {
+        let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
+        let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
+        let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
+        assert_eq!(whats[0], "hook", "{whats:?}");
+        assert_eq!(whats[whats.len() - 2..], ["pack", "host key"], "{whats:?}");
+    }
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
