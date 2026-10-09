@@ -319,9 +319,142 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
     bail!("persona {name}: every tool refused: {}", refused.join("; "))
 }
 
+/// Whether herdr is installed and its server answers. `herdr workspace list`
+/// needs the socket, so it fails when no server is running.
+#[must_use]
+pub fn herdr_up() -> bool {
+    which::which("herdr").is_ok()
+        && std::process::Command::new("herdr")
+            .args(["workspace", "list"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|st| st.success())
+}
+
+/// The herdr agent name for persona `name`.
+#[must_use]
+pub fn herdr_name(name: &str) -> String {
+    format!("persona-{name}")
+}
+
+/// The status string `herdr agent get` reports for persona `name`, when
+/// the command answers with one.
+#[must_use]
+pub fn herdr_agent_status(name: &str) -> Option<String> {
+    if !herdr_up() {
+        return None;
+    }
+    let out = std::process::Command::new("herdr")
+        .args(["agent", "get", &herdr_name(name)])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    v["result"]["agent"]["status"]
+        .as_str()
+        .or_else(|| v["result"]["status"].as_str())
+        .or_else(|| v["status"].as_str())
+        .map(str::to_string)
+}
+
+/// A message passed between personas. `Cast` is a task, `Call` expects an
+/// outcome, `Event` is a notice, `Exit` is a stop.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActorMessage {
+    Cast {
+        caller: String,
+        task: String,
+    },
+    Call {
+        request_id: String,
+        caller: String,
+        command: String,
+        timeout_ms: u64,
+    },
+    Event {
+        event: String,
+        payload: serde_json::Value,
+    },
+    Exit {
+        reason: String,
+    },
+}
+
+impl ActorMessage {
+    /// The task text `hand` writes, with the message kept in a comment.
+    #[must_use]
+    pub fn to_task_content(&self) -> String {
+        match self {
+            Self::Cast { task, caller } => format!(
+                "<!-- actor_msg: {} -->\nFrom {caller}:\n{task}",
+                serde_json::to_string(self).unwrap_or_default()
+            ),
+            Self::Call {
+                command,
+                caller,
+                request_id,
+                timeout_ms,
+            } => format!(
+                "<!-- actor_msg: {} -->\nCall {request_id} from {caller} (timeout {timeout_ms}ms):\n{command}",
+                serde_json::to_string(self).unwrap_or_default()
+            ),
+            Self::Event { event, payload } => format!(
+                "<!-- actor_msg: {} -->\nEvent {event}:\n{payload}",
+                serde_json::to_string(self).unwrap_or_default()
+            ),
+            Self::Exit { reason } => format!(
+                "<!-- actor_msg: {} -->\nExit requested: {reason}",
+                serde_json::to_string(self).unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// Hand a structured message to the persona `name`.
+///
+/// # Errors
+///
+/// The same as [`hand`].
+pub fn hand_actor(name: &str, runner: &str, msg: &ActorMessage) -> Result<String> {
+    hand(name, runner, &msg.to_task_content())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_message_serializes_and_deserializes() {
+        let msg = ActorMessage::Cast {
+            caller: "lead-architect".into(),
+            task: "Verify consensus bounds".into(),
+        };
+        let json = serde_json::to_string(&msg).expect("json");
+        assert!(json.contains("\"type\":\"cast\""));
+        assert!(json.contains("\"caller\":\"lead-architect\""));
+        let de: ActorMessage = serde_json::from_str(&json).expect("from json");
+        assert_eq!(de, msg);
+        let call = ActorMessage::Call {
+            request_id: "req-1".into(),
+            caller: "evaluator".into(),
+            command: "ljos consensus issue-12".into(),
+            timeout_ms: 5000,
+        };
+        let call_json = serde_json::to_string(&call).expect("json");
+        assert!(call_json.contains("\"type\":\"call\""));
+        let de_call: ActorMessage = serde_json::from_str(&call_json).expect("from json");
+        assert_eq!(de_call, call);
+    }
+
+    #[test]
+    fn herdr_name_formats_consistently() {
+        assert_eq!(herdr_name("reviewer"), "persona-reviewer");
+    }
 
     #[test]
     fn a_runner_starts_fresh_then_resumes_its_home_session() {

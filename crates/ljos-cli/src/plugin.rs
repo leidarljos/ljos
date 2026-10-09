@@ -3,8 +3,9 @@
 //! Permanent restarts however it exited, transient only on a crash,
 //! temporary never. `max_restarts` exits inside `window_secs` give up
 //! (Armstrong, *Making reliable distributed systems in the presence of
-//! software errors*). The start line is herdr's, the same one
-//! `persona_session` uses, for Grok Build and for every other harness.
+//! software errors*). `ljos supervise` prints a `herdr agent start`
+//! line and does not run it. A persona pane is opened by the `[[tool]]`
+//! table in `persona_session`, not by that line.
 
 use std::path::Path;
 
