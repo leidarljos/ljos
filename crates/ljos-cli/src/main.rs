@@ -62,6 +62,9 @@ enum Cmd {
         /// The deed accession that withdrew the claim. Refused if it is not one.
         #[arg(long)]
         why: Option<String>,
+        /// Print the atom JSON. The default is one line: id, kind, due, text.
+        #[arg(long)]
+        json: bool,
     },
     /// What the seat knows about a topic, ranked. Empty means the pack holds nothing on it.
     Search {
@@ -446,6 +449,9 @@ enum Cmd {
         /// The reason a stopped reader sees.
         #[arg(long)]
         why: String,
+        /// Print the atom JSON. The default is one line: id, kind, due, text.
+        #[arg(long)]
+        json: bool,
     },
     /// Record the person's explicit consent for one pending hook request.
     Approve {
@@ -561,11 +567,13 @@ enum Cmd {
         /// List every due atom to read; none of them is put up for grading.
         #[arg(long)]
         all: bool,
-        /// Put the page to the review judges: a claim they find holds is
-        /// graded recalled, a contradicted one is named, the rest stay due.
+        /// Put the page to the review judges. A claim they find holds is
+        /// named for `ljos graded`. A contradicted one is named. The rest stay due.
         #[arg(long, conflicts_with = "all")]
         judge: bool,
     },
+    /// Score the judge log against outcomes: accuracy and calibration per decision.
+    JudgeScore,
     /// Put an eb-stack bundle's modules on the tracker: one child issue per module under the parent, blockers along the dependency edges, the same ids on every run. `vissue ready` then lists what a seat can build now.
     BumpPlan {
         /// The bundle directory: `locks/default.lock.json` and `package.sbom.cdx.json` inside it.
@@ -735,9 +743,9 @@ fn main() -> Result<()> {
         Cmd::Accept { id } => {
             print!("{}", ljos_cli::admit::accept(&id)?);
         }
-        Cmd::Forget { id, why } => {
+        Cmd::Forget { id, why, json } => {
             let body = packset_forget(&id, why.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&body)?);
+            println!("{}", ljos_cli::atom_out(&body, json)?);
         }
         Cmd::Sync {
             key,
@@ -795,6 +803,9 @@ fn main() -> Result<()> {
             if add.is_empty() {
                 run("vissue", &["deed", &issue])?;
             } else {
+                for a in &add {
+                    ljos_cli::require_deed(a)?;
+                }
                 let mut argv = vec!["deed".to_string(), issue.clone()];
                 for a in &add {
                     argv.push("--add".into());
@@ -965,8 +976,13 @@ fn main() -> Result<()> {
                 let name = as_persona.as_deref().unwrap_or_default();
                 match ljos_cli::jev_vote(name, &issue)? {
                     ljos_cli::JevVote::Cast(b) => {
+                        let voter = if b.model.is_empty() {
+                            name.to_string()
+                        } else {
+                            ljos_cli::judge_voter(&b.model)
+                        };
                         println!(
-                            "{name}: Jev cast {} at confidence {:.2}",
+                            "{voter}: cast {} for {name} at confidence {:.2}",
                             b.choice, b.confidence
                         );
                         print!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
@@ -1184,13 +1200,14 @@ fn main() -> Result<()> {
             pattern,
             verdict,
             why,
+            json,
         } => {
             let body = write_rule(&Rule {
                 pattern,
                 verdict,
                 reason: why,
             })?;
-            println!("{}", serde_json::to_string_pretty(&body)?);
+            println!("{}", ljos_cli::atom_out(&body, json)?);
         }
         Cmd::Approve { id } => {
             print!("{}", ljos_cli::approval::approve(&id)?);
@@ -1653,6 +1670,9 @@ fn main() -> Result<()> {
             } else {
                 print!("{}", due_report(all)?);
             }
+        }
+        Cmd::JudgeScore => {
+            print!("{}", ljos_cli::judge_score_report());
         }
         Cmd::BumpPlan {
             bundle,

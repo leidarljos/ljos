@@ -88,8 +88,10 @@ pub struct Judge {
     pub endpoint: String,
     #[serde(default = "default_budget")]
     pub budget_ms: u64,
-    #[serde(default = "default_price_in")]
-    pub usd_per_mtok_in: f64,
+    /// US dollars per million input tokens. Absent on `jev` means 0.042.
+    /// Absent on `chat` is a refusal: a hosted chat judge is not priced as Jev.
+    #[serde(default)]
+    pub usd_per_mtok_in: Option<f64>,
     /// This judge's weight in a pool.
     #[serde(default = "default_weight")]
     pub weight: f64,
@@ -161,9 +163,10 @@ pub struct Config {
     #[serde(default = "default_min_candidates")]
     pub min_candidates: usize,
     /// US dollars per million input tokens, for an API whose answer does
-    /// not carry its cost. Output is not charged.
-    #[serde(default = "default_price_in")]
-    pub usd_per_mtok_in: f64,
+    /// not carry its cost. Output is not charged. Required when
+    /// `backend` is `chat`. Absent on `jev` means 0.042.
+    #[serde(default)]
+    pub usd_per_mtok_in: Option<f64>,
     /// The probability at which a candidate counts as bearing on the
     /// prompt; higher lets fewer off-topic claims through.
     #[serde(default = "default_cut")]
@@ -211,6 +214,23 @@ fn default_cut() -> f64 {
 }
 fn default_price_in() -> f64 {
     0.042
+}
+
+/// The price a judge is charged at. Jev defaults to 0.042. A chat judge
+/// must name `usd_per_mtok_in`. A command judge has no token price.
+pub fn price_in(backend: Backend, set: Option<f64>) -> Result<f64, &'static str> {
+    match backend {
+        Backend::Chat => set.ok_or("chat backend needs usd_per_mtok_in"),
+        Backend::Jev => Ok(set.unwrap_or_else(default_price_in)),
+        Backend::Command => Ok(set.unwrap_or(0.0)),
+    }
+}
+
+impl Judge {
+    /// This judge's token price, or why it cannot be asked.
+    pub fn price_in(&self) -> Result<f64, &'static str> {
+        price_in(self.backend, self.usd_per_mtok_in)
+    }
 }
 
 /// What a call cost: the API's own figure when it sends one (OpenRouter
@@ -553,30 +573,129 @@ fn judge_name(j: &Judge) -> String {
     }
 }
 
+/// A claim the prompt judge saw, by id and kind. The log keeps these and
+/// not the claim text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedClaim {
+    pub id: String,
+    pub kind: String,
+}
+
+/// How one ask ended: `ok`, `cache`, `timeout` or `error`.
+#[must_use]
+pub fn attempt_status(
+    answered: bool,
+    cached: bool,
+    elapsed_ms: u128,
+    budget_ms: u64,
+) -> &'static str {
+    if cached {
+        "cache"
+    } else if answered {
+        "ok"
+    } else if elapsed_ms + 50 >= u128::from(budget_ms) {
+        "timeout"
+    } else {
+        "error"
+    }
+}
+
+struct Attempt {
+    name: String,
+    weight: f64,
+    backend: &'static str,
+    model: String,
+    reply: Option<Value>,
+    cached: bool,
+    cost: f64,
+    latency_ms: u128,
+    status: &'static str,
+}
+
 /// One judge's reply to `body`, from the cache or inside its budget.
-fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Option<(Value, bool)> {
+/// A miss is still an attempt, so the log can score a timeout.
+fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
+    let started = std::time::Instant::now();
+    let backend = j.backend.name();
+    let model = j.model.clone();
+    let miss = |status: &'static str, latency_ms: u128| Attempt {
+        name: String::new(),
+        weight: j.weight,
+        backend,
+        model: model.clone(),
+        reply: None,
+        cached: false,
+        cost: 0.0,
+        latency_ms,
+        status,
+    };
+    let price = match j.price_in() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("jev: {e}");
+            return miss("error", 0);
+        }
+    };
     let mut body = body.clone();
     body["model"] = Value::String(j.model.clone());
     let request = format!("{}\n{body}", judge_name(j));
     if let Some(reply) = cached(&request, cache_days) {
-        return Some((reply, true));
+        let latency_ms = started.elapsed().as_millis();
+        return Attempt {
+            name: String::new(),
+            weight: j.weight,
+            backend,
+            model,
+            reply: Some(reply),
+            cached: true,
+            cost: 0.0,
+            latency_ms,
+            status: "cache",
+        };
     }
     let reply = match j.backend {
-        Backend::Jev => jev_post(j, key, body)?,
-        Backend::Chat => chat_post(j, key, &body)?,
-        Backend::Command => command_post(j, &body)?,
+        Backend::Jev => jev_post(j, key, body),
+        Backend::Chat => chat_post(j, key, &body),
+        Backend::Command => command_post(j, &body),
     };
-    reply.get("answers")?;
-    if cache_days > 0 {
-        keep(&request, &reply);
+    let latency_ms = started.elapsed().as_millis();
+    let answered = reply.as_ref().is_some_and(|r| r.get("answers").is_some());
+    let status = attempt_status(answered, false, latency_ms, j.budget_ms);
+    if answered {
+        if let Some(reply) = reply.as_ref() {
+            if cache_days > 0 {
+                keep(&request, reply);
+            }
+        }
     }
-    Some((reply, false))
+    let cost = reply
+        .as_ref()
+        .filter(|_| answered)
+        .map(|r| cost_of(r, price))
+        .unwrap_or(0.0);
+    Attempt {
+        name: String::new(),
+        weight: j.weight,
+        backend,
+        model,
+        reply,
+        cached: false,
+        cost,
+        latency_ms,
+        status,
+    }
 }
 
 /// Ask every judge the route names for `kind` at once, each inside its
 /// own budget, and pool what came back; record the cost and log each
 /// judge's answers beside the pool. `None` when no judge answered.
-fn post(cfg: &Config, body: Value, kind: &str, about: Value) -> Option<Value> {
+fn post(
+    cfg: &Config,
+    body: Value,
+    kind: &str,
+    about: Value,
+    claims: &[LoggedClaim],
+) -> Option<Value> {
     let decision = DECISIONS
         .iter()
         .find(|(_, k)| *k == kind)
@@ -586,84 +705,136 @@ fn post(cfg: &Config, body: Value, kind: &str, about: Value) -> Option<Value> {
         return None;
     }
     let replies = ask_all(&judges, &body, cfg.cache_days);
-    finish_post(&body, kind, about, replies)
+    finish_post(&body, kind, about, claims, replies)
 }
 
-type Reply = (String, f64, Value, bool, f64);
-
-/// Ask each judge at once, each inside its own budget; the ones that
-/// answered, with their weight, reply, whether it was cached and its cost.
-fn ask_all(judges: &[(String, Judge, String)], body: &Value, cache_days: u64) -> Vec<Reply> {
+/// Ask each judge at once, each inside its own budget.
+fn ask_all(judges: &[(String, Judge, String)], body: &Value, cache_days: u64) -> Vec<Attempt> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = judges
             .iter()
             .map(|(name, j, key)| {
+                let name = name.clone();
                 scope.spawn(move || {
-                    ask_one(j, key, body, cache_days).map(|(reply, hit)| {
-                        let cost = if hit {
-                            0.0
-                        } else {
-                            cost_of(&reply, j.usd_per_mtok_in)
-                        };
-                        (name.clone(), j.weight, reply, hit, cost)
-                    })
+                    let mut attempt = ask_one(j, key, body, cache_days);
+                    attempt.name = name;
+                    attempt
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok().flatten())
-            .collect()
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
     })
 }
 
-/// Pool the replies, record the cost and log every judge's answer and why.
-fn finish_post(body: &Value, kind: &str, about: Value, replies: Vec<Reply>) -> Option<Value> {
-    let body = body.clone();
+/// Overwrite a choice answer's confidence with [`concentration`].
+fn stamp_confidence(answers: &mut Value) {
+    let Some(obj) = answers.as_object_mut() else {
+        return;
+    };
+    for answer in obj.values_mut() {
+        let Some(probs) = answer
+            .get("probabilities")
+            .and_then(|p| p.as_object())
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(c) = concentration(&probs) else {
+            continue;
+        };
+        if let Some(map) = answer.as_object_mut() {
+            map.insert("confidence".into(), Value::from(c));
+        }
+    }
+}
+
+/// Pool the replies, record the cost and log every attempt, including a
+/// timeout or a failure. `None` when no judge answered.
+fn finish_post(
+    body: &Value,
+    kind: &str,
+    about: Value,
+    claims: &[LoggedClaim],
+    replies: Vec<Attempt>,
+) -> Option<Value> {
     if replies.is_empty() {
         return None;
     }
-    let cost: f64 = replies.iter().map(|r| r.4).sum();
-    if replies.iter().all(|r| r.3) {
-        count("cached");
-    } else {
-        record_cost(cost);
+    let ok: Vec<&Attempt> = replies
+        .iter()
+        .filter(|r| r.reply.as_ref().is_some_and(|v| v.get("answers").is_some()))
+        .collect();
+    let cost: f64 = ok.iter().map(|r| r.cost).sum();
+    if !ok.is_empty() {
+        if ok.iter().all(|r| r.cached) {
+            count("cached");
+        } else {
+            record_cost(cost);
+        }
     }
-    let weighted: Vec<(f64, Value)> = replies
+    let weighted: Vec<(f64, Value)> = ok
         .iter()
-        .map(|(_, w, reply, _, _)| (*w, reply["answers"].clone()))
+        .map(|r| (r.weight, r.reply.as_ref().unwrap()["answers"].clone()))
         .collect();
-    let answers = if replies.len() == 1 {
-        replies[0].2["answers"].clone()
+    let mut answers = if ok.is_empty() {
+        Value::Null
+    } else if ok.len() == 1 {
+        ok[0].reply.as_ref().unwrap()["answers"].clone()
     } else {
-        pool(&body, &weighted)
+        pool(body, &weighted)
     };
-    let per: serde_json::Map<String, Value> = replies
+    stamp_confidence(&mut answers);
+    let per: serde_json::Map<String, Value> = ok
         .iter()
-        .map(|(name, _, reply, _, _)| (name.clone(), reply["answers"].clone()))
+        .map(|r| (r.name.clone(), r.reply.as_ref().unwrap()["answers"].clone()))
         .collect();
-    let why: serde_json::Map<String, Value> = replies
+    let why: serde_json::Map<String, Value> = ok
         .iter()
-        .filter_map(|(name, _, reply, _, _)| {
-            reply["why"]
-                .as_str()
-                .map(|w| (name.clone(), Value::String(w.to_string())))
+        .filter_map(|r| {
+            r.reply.as_ref().and_then(|reply| {
+                reply["why"]
+                    .as_str()
+                    .map(|w| (r.name.clone(), Value::String(w.to_string())))
+            })
         })
+        .collect();
+    let status = if ok.is_empty() {
+        replies.first().map(|r| r.status).unwrap_or("error")
+    } else if replies.iter().all(|r| r.status == "cache") {
+        "cache"
+    } else {
+        "ok"
+    };
+    let latency_ms = replies.iter().map(|r| r.latency_ms).max().unwrap_or(0);
+    let prompt_hash = sha256_hex(body["state"].as_str().unwrap_or("").as_bytes());
+    let claims: Vec<Value> = claims
+        .iter()
+        .map(|c| serde_json::json!({"id": c.id, "kind": c.kind}))
         .collect();
     log(&serde_json::json!({
         "ts": crate::now_utc(),
         "kind": kind,
-        "judges": replies.iter().map(|r| r.0.clone()).collect::<Vec<_>>(),
+        "judges": replies.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
         "about": about,
-        "answers": answers,
+        "answers": answers.clone(),
         "per_judge": per,
         "why": why,
         "cost": cost,
+        "prompt_hash": prompt_hash,
+        "claims": claims,
+        "latency_ms": latency_ms,
+        "status": status,
+        "backend": replies.first().map(|r| r.backend).unwrap_or(""),
+        "model": replies.first().map(|r| r.model.clone()).unwrap_or_default(),
     }));
-    Some(serde_json::json!({
-        "answers": answers,
-        "usage": {"cost": cost},
-    }))
+    if ok.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({
+            "answers": answers,
+            "usage": {"cost": cost},
+        }))
+    }
 }
 
 /// One question's answers pooled across judges, weighted. A question no
@@ -845,16 +1016,12 @@ pub fn chat_answers(body: &Value, content: &Value) -> Value {
             };
             let mut probs: serde_json::Map<String, Value> =
                 a["probabilities"].as_object().cloned().unwrap_or_default();
-            // Jev's confidence measures how concentrated the distribution
-            // is, not the chosen option's probability; a reply without it
-            // gets one minus the normalised entropy of its probabilities.
-            let confidence = a["confidence"]
-                .as_f64()
-                .or_else(|| concentration(&probs))
-                .unwrap_or(1.0);
+            // A bare choice is sure. A stated confidence is not used: every
+            // backend takes (K·p_max − 1)/(K − 1) from the distribution.
             if probs.is_empty() {
-                probs.insert(choice.to_string(), Value::from(confidence));
+                probs.insert(choice.to_string(), Value::from(1.0));
             }
+            let confidence = concentration(&probs).unwrap_or(0.0);
             serde_json::json!({
                 "type": "choice",
                 "choice": choice,
@@ -874,26 +1041,22 @@ pub fn chat_answers(body: &Value, content: &Value) -> Value {
     Value::Object(answers)
 }
 
-/// One minus the normalised Shannon entropy of a distribution: 1 when all
-/// the mass is on one option, 0 when it is spread evenly. `None` for fewer
-/// than two options, where concentration says nothing.
+/// Choice confidence, the same cut on every backend:
+/// `(K·p_max − 1)/(K − 1)`. One when all the mass is on one option, zero
+/// when it is spread evenly. `None` for fewer than two options.
 #[must_use]
 pub fn concentration(probs: &serde_json::Map<String, Value>) -> Option<f64> {
     let p: Vec<f64> = probs.values().filter_map(Value::as_f64).collect();
-    if p.len() < 2 {
+    let k = p.len();
+    if k < 2 {
         return None;
     }
     let total: f64 = p.iter().sum();
     if total <= 0.0 {
         return None;
     }
-    let entropy: f64 = p
-        .iter()
-        .map(|x| x / total)
-        .filter(|x| *x > 0.0)
-        .map(|x| -x * x.ln())
-        .sum();
-    Some((1.0 - entropy / (p.len() as f64).ln()).clamp(0.0, 1.0))
+    let p_max = p.iter().map(|x| x / total).fold(0.0_f64, f64::max);
+    Some(((k as f64) * p_max - 1.0) / (k as f64 - 1.0))
 }
 
 /// One chat completion at `{endpoint}/chat/completions`, read back into
@@ -949,14 +1112,18 @@ fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
     (!answers.as_object()?.is_empty()).then(|| serde_json::json!({"answers": answers}))
 }
 
-/// Ask Jev about one prompt, inside the configured budget.
+/// Ask Jev about one prompt, inside the configured budget. `claims` are
+/// the ids and kinds that line up with `candidates`; the log keeps those
+/// and a hash of the prompt, not the text.
 #[must_use]
-pub fn judge(prompt: &str, candidates: &[&str]) -> Option<Judgment> {
+pub fn judge(prompt: &str, candidates: &[&str], claims: &[LoggedClaim]) -> Option<Judgment> {
     let (cfg, _) = config()?;
     let body = request(&cfg.model, prompt, candidates);
-    let reply = post(&cfg, body, "hook", Value::Null)?;
+    let reply = post(&cfg, body, "hook", Value::Null, claims)?;
     let mut judged = parse(&reply, candidates.len())?;
-    judged.cost = cost_of(&reply, cfg.usd_per_mtok_in);
+    judged.cost = price_in(cfg.backend, cfg.usd_per_mtok_in)
+        .map(|p| cost_of(&reply, p))
+        .unwrap_or(0.0);
     judged.bears_at = cfg.bears_at;
     judged.cue_at = cfg.cue_at;
     Some(judged)
@@ -973,6 +1140,8 @@ pub struct Ballot {
     pub forecast: BTreeMap<String, f64>,
     /// The machine's cut under which the ballot goes to a subagent.
     pub escalate_below: f64,
+    /// The model that answered, so the ballot is recorded as that judge.
+    pub model: String,
 }
 
 impl Ballot {
@@ -1030,46 +1199,178 @@ pub fn parse_ballot(body: &Value, options: &[String]) -> Option<Ballot> {
     if !options.contains(&choice) {
         return None;
     }
+    let probabilities = probs("ballot")?;
+    let map: serde_json::Map<String, Value> = probabilities
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::from(*v)))
+        .collect();
     Some(Ballot {
-        confidence: ballot.get("confidence")?.as_f64()?,
-        probabilities: probs("ballot")?,
+        confidence: concentration(&map).unwrap_or(0.0),
+        probabilities,
         forecast: probs("forecast")?,
         choice,
         escalate_below: 0.8,
+        model: String::new(),
     })
+}
+
+/// The model the ballot route asks, when judging is on.
+#[must_use]
+pub fn ballot_model() -> Option<String> {
+    let (cfg, _) = config()?;
+    Some(
+        judges_for(&cfg, "ballot")
+            .into_iter()
+            .next()
+            .map(|(_, j, _)| j.model)
+            .unwrap_or(cfg.model),
+    )
+}
+
+/// Option order for one persona. Stable for that name, and different
+/// names differ. The seed is [`crate::work_id`], not a process-random hash.
+#[must_use]
+pub fn shuffle_options(persona: &str, options: &[String]) -> Vec<String> {
+    let mut out = options.to_vec();
+    if out.len() < 2 {
+        return out;
+    }
+    let hex = crate::work_id(&format!("ballot-options\n{persona}"));
+    let mut state = u128::from_str_radix(&hex, 16).unwrap_or(1);
+    if state == 0 {
+        state = 1;
+    }
+    for i in (1..out.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let j = (state as usize) % (i + 1);
+        out.swap(i, j);
+    }
+    out
 }
 
 /// Ask Jev for a persona's ballot on an issue.
 #[must_use]
 pub fn ballot(persona: &str, issue: &str, brief: &str, options: &[String]) -> Option<Ballot> {
     let (cfg, _) = config()?;
-    let body = ballot_request(&cfg.model, brief, options);
-    let about = serde_json::json!({"issue": issue, "persona": persona, "options": options});
-    let reply = post(&cfg, body, "ballot", about)?;
+    let ordered = shuffle_options(persona, options);
+    let body = ballot_request(&cfg.model, brief, &ordered);
+    let about = serde_json::json!({"issue": issue, "persona": persona});
+    let reply = post(&cfg, body, "ballot", about, &[])?;
     let mut b = parse_ballot(&reply, options)?;
     b.escalate_below = cfg.escalate_below;
+    b.model = judges_for(&cfg, "ballot")
+        .into_iter()
+        .next()
+        .map(|(_, j, _)| j.model)
+        .unwrap_or_else(|| cfg.model.clone());
     Some(b)
 }
 
-/// `$XDG_CACHE_HOME/ljos/jev`, one file per request.
-fn cache_dir() -> Option<PathBuf> {
-    Some(
-        std::env::var_os("XDG_CACHE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
-            .join("ljos")
-            .join("jev"),
-    )
+/// SHA-256 of `data`, hex. The cache and the log store this, not the text.
+#[must_use]
+pub fn sha256_hex(data: &[u8]) -> String {
+    fn rotr(x: u32, n: u32) -> u32 {
+        x.rotate_right(n)
+    }
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h = [
+        0x6a09e667_u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..64 {
+            let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            let s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d) = (h[0], h[1], h[2], h[3]);
+        let (mut e, mut f, mut g, mut hh) = (h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+    h.iter().map(|x| format!("{x:08x}")).collect()
 }
 
-/// The file an identical request lands in. The hash only names the file;
-/// the file holds the whole request, and a hit must match it exactly.
+/// `$XDG_CACHE_HOME/ljos/jev`, mode 0700, one file per request hash.
+fn cache_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
+        .join("ljos")
+        .join("jev");
+    std::fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Some(dir)
+}
+
+/// The file an identical request lands in. The name is the hash. The file
+/// holds the hash and the reply, not the request.
 fn cache_file(request: &str) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    request.hash(&mut h);
-    Some(cache_dir()?.join(format!("{:016x}.json", h.finish())))
+    Some(cache_dir()?.join(sha256_hex(request.as_bytes())))
 }
 
 /// The answer to an identical request made within `days`.
@@ -1077,6 +1378,7 @@ fn cached(request: &str, days: u64) -> Option<Value> {
     if days == 0 {
         return None;
     }
+    let hash = sha256_hex(request.as_bytes());
     let path = cache_file(request)?;
     let age = std::fs::metadata(&path)
         .ok()?
@@ -1089,18 +1391,35 @@ fn cached(request: &str, days: u64) -> Option<Value> {
         return None;
     }
     let entry: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
-    (entry["request"].as_str() == Some(request)).then(|| entry["reply"].clone())
+    (entry["hash"].as_str() == Some(hash.as_str())).then(|| entry["reply"].clone())
 }
 
 fn keep(request: &str, reply: &Value) {
+    let hash = sha256_hex(request.as_bytes());
     let Some(path) = cache_file(request) else {
         return;
     };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let entry = serde_json::json!({"hash": hash, "reply": reply});
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            let _ = f.write_all(entry.to_string().as_bytes());
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
     }
-    let entry = serde_json::json!({"request": request, "reply": reply});
-    let _ = std::fs::write(path, entry.to_string());
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::write(path, entry.to_string());
+    }
 }
 
 /// Add one to this month's tally named `what` (`calls`, `cached`).
@@ -1192,7 +1511,7 @@ pub fn parse_audit(body: &Value) -> Option<Audit> {
 pub fn audit(state: &str) -> Option<Audit> {
     let (cfg, _) = config()?;
     let body = audit_request(&cfg.model, state);
-    let reply = post(&cfg, body, "stop-audit", Value::Null)?;
+    let reply = post(&cfg, body, "stop-audit", Value::Null, &[])?;
     parse_audit(&reply)
 }
 
@@ -1236,7 +1555,7 @@ pub fn review_request(model: &str, claim: &str, newer: &[&str]) -> Value {
 pub fn review(id: &str, claim: &str, newer: &[&str]) -> Option<f64> {
     let (cfg, _) = config()?;
     let body = review_request(&cfg.model, claim, newer);
-    let reply = post(&cfg, body, "review", serde_json::json!({"id": id}))?;
+    let reply = post(&cfg, body, "review", serde_json::json!({"id": id}), &[])?;
     reply["answers"]["holds"]["noul"].as_f64()
 }
 
@@ -1269,6 +1588,105 @@ fn state_dir() -> Option<PathBuf> {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?
             .join("ljos"),
     )
+}
+
+/// The judge log, one JSON object per line. Missing file is an empty log.
+#[must_use]
+pub fn read_log() -> Vec<Value> {
+    let Some(dir) = state_dir() else {
+        return Vec::new();
+    };
+    let text = std::fs::read_to_string(dir.join("jev-log.jsonl")).unwrap_or_default();
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// Per-decision accuracy and calibration. A ballot joins `about.issue` to
+/// an outcome's choice. A decision with no outcome is counted and not
+/// scored. Brier is the mean squared error of confidence against a hit.
+/// ECE is the weighted gap between mean confidence and hit rate in ten bins.
+#[must_use]
+pub fn score_log(entries: &[Value], outcomes: &BTreeMap<String, String>) -> String {
+    let mut kinds: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    for entry in entries {
+        let kind = entry
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        kinds.entry(kind.to_string()).or_default().push(entry);
+    }
+    if kinds.is_empty() {
+        return "no judge log\n".to_string();
+    }
+    let mut out = String::new();
+    for (kind, rows) in &kinds {
+        let timeouts = rows.iter().filter(|e| e["status"] == "timeout").count();
+        let errors = rows.iter().filter(|e| e["status"] == "error").count();
+        if kind != "ballot" {
+            out.push_str(&format!(
+                "{kind}  {} judged  {timeouts} timeout  {errors} error  no outcome to score\n",
+                rows.len()
+            ));
+            continue;
+        }
+        let mut joined = 0usize;
+        let mut correct = 0usize;
+        let mut brier_sum = 0.0;
+        let mut bins = [(0.0_f64, 0.0_f64, 0u32); 10];
+        for entry in rows {
+            let status = entry["status"].as_str().unwrap_or("ok");
+            if status != "ok" && status != "cache" {
+                continue;
+            }
+            let Some(issue) = entry["about"]["issue"].as_str() else {
+                continue;
+            };
+            let Some(choice) = outcomes.get(issue) else {
+                continue;
+            };
+            let Some(said) = entry["answers"]["ballot"]["choice"].as_str() else {
+                continue;
+            };
+            let p = entry["answers"]["ballot"]["confidence"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let hit = if said == choice { 1.0 } else { 0.0 };
+            joined += 1;
+            if hit == 1.0 {
+                correct += 1;
+            }
+            brier_sum += (p - hit).powi(2);
+            let bin = ((p * 10.0) as usize).min(9);
+            bins[bin].0 += p;
+            bins[bin].1 += hit;
+            bins[bin].2 += 1;
+        }
+        if joined == 0 {
+            out.push_str(&format!(
+                "{kind}  {} judged  {timeouts} timeout  {errors} error  no outcome to score\n",
+                rows.len()
+            ));
+            continue;
+        }
+        let acc = correct as f64 / joined as f64;
+        let brier = brier_sum / joined as f64;
+        let mut ece = 0.0;
+        for (sum_p, sum_o, n) in bins {
+            if n == 0 {
+                continue;
+            }
+            let n = f64::from(n);
+            ece += (n / joined as f64) * ((sum_p / n) - (sum_o / n)).abs();
+        }
+        out.push_str(&format!(
+            "{kind}  {} judged  {joined} with an outcome  accuracy {acc:.2}  brier {brier:.2}  ece {ece:.2}  {timeouts} timeout  {errors} error\n",
+            rows.len()
+        ));
+    }
+    out
 }
 
 /// Every answer Jev gave, one JSON line each in the state directory, so
@@ -1385,9 +1803,21 @@ pub fn doctor_row() -> Option<crate::Habitat> {
     })
 }
 
+/// Serialises tests that swap `XDG_CONFIG_HOME`.
+#[cfg(test)]
+pub(crate) fn judge_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        judge_env_lock()
+    }
 
     #[test]
     fn one_request_asks_about_every_candidate_and_both_cues() {
@@ -1440,6 +1870,7 @@ mod tests {
 
     #[test]
     fn jev_is_off_without_a_file_and_off_when_the_file_says_so() {
+        let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
@@ -1540,10 +1971,10 @@ mod tests {
         let reply = serde_json::json!({"answers": chat_answers(&body, &content)});
         let b = parse_ballot(&reply, &options).unwrap();
         assert_eq!(b.choice, "A");
-        let expected = 1.0 - (-(0.7f64 * 0.7f64.ln()) - 0.3 * 0.3f64.ln()) / 2f64.ln();
+        // (K·p_max − 1)/(K − 1) = (2·0.7 − 1) = 0.4
         assert!(
-            (b.confidence - expected).abs() < 1e-9,
-            "confidence is the concentration, not the chosen probability: {}",
+            (b.confidence - 0.4).abs() < 1e-9,
+            "confidence is (K·p_max − 1)/(K − 1), not the chosen probability: {}",
             b.confidence
         );
         let even: serde_json::Map<String, Value> =
@@ -1694,15 +2125,34 @@ mod tests {
 
     #[test]
     fn an_identical_request_is_answered_from_the_cache_and_only_that_one() {
+        let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
         unsafe { std::env::set_var("XDG_CACHE_HOME", dir.path()) };
         let reply = serde_json::json!({"answers": {"x": {"noul": 0.9}}});
         assert!(cached("req-a", 7).is_none(), "nothing kept yet");
         keep("req-a", &reply);
-        assert_eq!(cached("req-a", 7), Some(reply));
+        assert_eq!(cached("req-a", 7), Some(reply.clone()));
         assert!(cached("req-b", 7).is_none(), "another request misses");
         assert!(cached("req-a", 0).is_none(), "0 days is off");
+        let path = dir.path().join("ljos/jev").join(sha256_hex(b"req-a"));
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !stored.contains("req-a"),
+            "the file holds the hash, not the request: {stored}"
+        );
+        assert!(stored.contains("\"hash\""), "{stored}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "cache file is mode 0600, got {mode:o}");
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "cache directory is mode 0700, got {dir_mode:o}"
+        );
         unsafe { std::env::remove_var("XDG_CACHE_HOME") };
     }
 
@@ -1743,5 +2193,143 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn sha256_of_empty_and_abc_match() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn a_chat_judge_without_a_price_is_refused() {
+        let chat: Config = toml::from_str(
+            "enabled = true\nbackend = \"chat\"\nendpoint = \"http://127.0.0.1:9/v1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            chat.default_judge().price_in(),
+            Err("chat backend needs usd_per_mtok_in")
+        );
+        let priced: Config = toml::from_str(
+            "enabled = true\nbackend = \"chat\"\nusd_per_mtok_in = 1.5\nendpoint = \"http://127.0.0.1:9/v1\"\n",
+        )
+        .unwrap();
+        assert!((priced.default_judge().price_in().unwrap() - 1.5).abs() < 1e-12);
+        let jev: Config = toml::from_str("enabled = true\n").unwrap();
+        assert!((jev.default_judge().price_in().unwrap() - 0.042).abs() < 1e-12);
+        let command: Config =
+            toml::from_str("enabled = true\nbackend = \"command\"\ncommand = [\"true\"]\n")
+                .unwrap();
+        assert_eq!(command.default_judge().price_in().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn option_order_is_stable_per_persona_and_differs_across_them() {
+        let options = vec!["age".into(), "gpg".into(), "minisign".into()];
+        let a = shuffle_options("security-reviewer", &options);
+        assert_eq!(a, shuffle_options("security-reviewer", &options));
+        assert_eq!(a.len(), 3);
+        assert!(a.contains(&"age".into()) && a.contains(&"gpg".into()));
+        let b = shuffle_options("release", &options);
+        assert_ne!(a, b, "two personas do not see the same order");
+    }
+
+    #[test]
+    fn a_judge_log_scores_a_ballot_against_an_outcome() {
+        let entries = vec![
+            serde_json::json!({
+                "kind": "ballot", "status": "ok",
+                "about": {"issue": "ljos-1"},
+                "answers": {"ballot": {"choice": "age", "confidence": 0.9}}
+            }),
+            serde_json::json!({
+                "kind": "ballot", "status": "ok",
+                "about": {"issue": "ljos-2"},
+                "answers": {"ballot": {"choice": "gpg", "confidence": 0.2}}
+            }),
+            serde_json::json!({
+                "kind": "ballot", "status": "timeout",
+                "about": {"issue": "ljos-3"},
+                "answers": null
+            }),
+            serde_json::json!({
+                "kind": "hook", "status": "ok",
+                "prompt_hash": "abc",
+                "claims": [{"id": "c1", "kind": "lesson"}],
+                "answers": {"bears_0": {"noul": 0.8}}
+            }),
+        ];
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("ljos-1".into(), "age".into());
+        outcomes.insert("ljos-2".into(), "age".into());
+        let report = score_log(&entries, &outcomes);
+        assert!(
+            report.contains("ballot  3 judged  2 with an outcome  accuracy 0.50"),
+            "{report}"
+        );
+        assert!(report.contains("brier"), "{report}");
+        assert!(report.contains("ece"), "{report}");
+        assert!(report.contains("1 timeout"), "{report}");
+        assert!(
+            report.contains("hook  1 judged") && report.contains("no outcome to score"),
+            "{report}"
+        );
+        assert_eq!(score_log(&[], &outcomes), "no judge log\n");
+    }
+
+    #[test]
+    fn a_command_answer_is_logged_without_the_prompt() {
+        let _lock = env_lock();
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", cfg_dir.path());
+            std::env::set_var("XDG_STATE_HOME", state.path());
+            std::env::set_var("XDG_CACHE_HOME", cache.path());
+        }
+        std::fs::create_dir_all(cfg_dir.path().join("ljos")).unwrap();
+        std::fs::write(
+            cfg_dir.path().join("ljos/jev.toml"),
+            "enabled = true\nbackend = \"command\"\nmodel = \"local-1\"\ncommand = [\"sh\", \"-c\", \
+             \"cat >/dev/null; echo '{\\\"answers\\\": {\\\"bears_0\\\": 0.8, \\\"correction\\\": 0, \\\"choice\\\": 0.2}}'\"]\n",
+        )
+        .unwrap();
+        let claims = [LoggedClaim {
+            id: "c1".into(),
+            kind: "lesson".into(),
+        }];
+        let judged = judge("fix the ci tonight please", &["alpha claim"], &claims).unwrap();
+        assert_eq!(judged.bears, vec![0.8]);
+        let log = std::fs::read_to_string(state.path().join("ljos/jev-log.jsonl")).unwrap();
+        assert!(!log.contains("fix the ci"), "{log}");
+        assert!(!log.contains("alpha claim"), "{log}");
+        assert!(log.contains("\"id\":\"c1\""), "{log}");
+        assert!(log.contains("\"kind\":\"lesson\""), "{log}");
+        assert!(log.contains("prompt_hash"), "{log}");
+        assert!(log.contains("\"backend\":\"command\""), "{log}");
+        assert!(log.contains("\"model\":\"local-1\""), "{log}");
+        assert!(log.contains("\"status\":\"ok\""), "{log}");
+        assert!(log.contains("latency_ms"), "{log}");
+        std::fs::write(
+            cfg_dir.path().join("ljos/jev.toml"),
+            "enabled = true\nbackend = \"command\"\ncommand = [\"sh\", \"-c\", \"exit 1\"]\n",
+        )
+        .unwrap();
+        assert!(judge("fix the ci tonight please", &["alpha claim"], &claims).is_none());
+        let log = std::fs::read_to_string(state.path().join("ljos/jev-log.jsonl")).unwrap();
+        assert!(log.contains("\"status\":\"error\""), "{log}");
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("XDG_STATE_HOME");
+            std::env::remove_var("XDG_CACHE_HOME");
+        }
     }
 }

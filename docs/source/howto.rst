@@ -226,9 +226,12 @@ Let Jev judge the prompt
 The prompt hook makes three judgments locally. A cross-encoder picks
 the claims that bear on the prompt. Two phrase lists spot a correction
 and a choice put to the agent. Jev, TypeSafe's decision model, answers
-all three in one call. It stays off unless the machine turns it on,
-because the call sends the prompt and up to ten candidate claims off
-the machine.
+all three in one call, and a fourth route, ``review``, weighs a due claim.
+It stays off unless the machine turns it on, because the call sends the
+prompt and up to ten candidate claims off the machine. When the judge
+does not answer, the hook reranks with the local cross-encoder. A
+correction the hook files is a proposal, and a pasted or quoted prompt
+files none.
 
 The same call asks two more questions, since a call costs its input
 tokens and each question adds about 70 of them to a median of 933. An
@@ -723,30 +726,36 @@ The issue needs an ``Options: A, B`` line.
 .. code:: console
 
    $ ljos vote ljos-abcd --as security-reviewer --jev
-   security-reviewer: Jev cast age at confidence 0.97
+   judge:jev-1.13.0: cast age for security-reviewer at confidence 0.96
    $ ljos panel ljos-abcd --jev
-   3 personas on ljos-abcd through Jev: all sure, all age; cast
+   3 personas on ljos-abcd through Jev: all sure, all age; one judge ballot cast
 
 Jev reads the persona's brief and answers two choice questions: the
-persona's vote, and what the rest of the panel will pick. A cast ballot
-records the chosen option's probability as its confidence and the
-forecast as its prediction, so the settle and the surprisingly popular
-reading get both. A note on the issue says the ballot came from Jev.
+persona's vote, and what the rest of the panel will pick. The option
+order is shuffled per persona. A cast ballot is recorded as
+``judge:MODEL``, not as the persona, and ``--used`` names that judge. The
+chosen option's probability is the ballot's confidence. The forecast is
+the judge's prediction, and it stays out of the surprisingly popular
+step. A note on the issue says the ballot came from Jev. ``learn`` updates
+the trust row whose ``to`` is that judge.
 
-Jev's confidence measures how spread out its probabilities are. Under
-``escalate_below`` (0.8), ``vote --jev`` does not cast. It notes Jev's lean
-and hands the ballot to the persona's own session when the persona has
-a runner, else names the brief to start a subagent from.
+Jev's confidence is ``(K·p_max − 1)/(K − 1)``, the same cut on every
+backend. Under ``escalate_below`` (0.8), ``vote --jev`` does not cast. It
+notes Jev's lean and hands the ballot to the persona's own session when
+the persona has a runner, else names the brief to start a subagent from.
 
-A panel casts only when every seated persona is sure and all agree.
-Personas answered by one model are correlated voters, so their agreement
-settles only a question it could not change. A split or unsure panel
-casts nothing and writes a brief per seat for subagents. The metered
-model then spends only on the contested questions. A ballot costs about
-2,000 input tokens, or $0.00008.
+A panel casts only when every seated persona is sure and all agree. An
+all-one-model panel is one voter, so it casts one ballot. A split or
+unsure panel casts nothing and writes a brief per seat for subagents.
+The metered model then spends only on the contested questions. A ballot
+costs about 2,000 input tokens, or $0.00008.
 
-Every Jev answer goes to ``$XDG_STATE_HOME/ljos/jev-log.jsonl``. ``ljos
-learn`` scores a cast ballot's confidence as it does any voter's.
+Every Jev answer goes to ``$XDG_STATE_HOME/ljos/jev-log.jsonl``, with the
+claim ids, a hash of the prompt, the latency, a timeout or a failure,
+and the backend and model. The file does not keep the prompt or the
+claim text. ``ljos judge-score`` joins that log with outcomes and reports
+accuracy and calibration per decision. ``ljos learn`` scores a cast
+ballot's confidence as it does any voter's.
 
 Hold a done claim beside a red test
 ===================================

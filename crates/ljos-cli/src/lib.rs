@@ -3805,23 +3805,28 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let mut rows: Vec<&Hit> = if let Some((candidates, j)) = &judged {
         // Jev read the prompt and each claim together. What it says bears
         // goes in when the claim also names a content word of the prompt,
-        // or when Jev alone is sure: one model's lean on a vague prompt
-        // is not two signals.
+        // or when Jev alone is sure, and only when the two scorers agreed
+        // and the score clears the same floor as the local path.
+        let top = candidates.iter().map(|h| h.score).fold(0.0_f64, f64::max);
         candidates
             .iter()
             .enumerate()
             .filter(|(i, h)| {
-                j.bears(*i)
-                    && (names_the_cue(&h.text, cue)
-                        || j.bears.get(*i).is_some_and(|p| *p >= JEV_ALONE_AT))
+                admits_judged(
+                    h,
+                    j.bears(*i),
+                    j.bears.get(*i).copied().unwrap_or(0.0),
+                    cue,
+                    top,
+                )
             })
             .map(|(_, h)| h)
             .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
             .collect()
     } else {
-        // A machine that turned Jev on keeps the cross-encoder unloaded; a
-        // prompt Jev was not asked about gets the lexical search.
-        let rerank = !jev::enabled();
+        // The judge did not answer, so the local cross-encoder reranks.
+        // A skip, a timeout and a spent cap all take this path.
+        let rerank = hook_uses_rerank(false);
         // The cross-encoder only reorders the fused top twenty, and every
         // filter below but the score floor reads fields it leaves alone.
         // Reordering cannot change which of the twenty pass those
@@ -3935,7 +3940,14 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
-    let judged = jev::judge(cue, &texts)?;
+    let claims: Vec<jev::LoggedClaim> = candidates
+        .iter()
+        .map(|h| jev::LoggedClaim {
+            id: h.id.clone().unwrap_or_default(),
+            kind: h.kind.clone(),
+        })
+        .collect();
+    let judged = jev::judge(cue, &texts, &claims)?;
     Some((candidates, judged))
 }
 
@@ -3955,6 +3967,22 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
 /// How sure Jev must be that a claim bears on a prompt it shares no
 /// content word with.
 pub const JEV_ALONE_AT: f64 = 0.75;
+
+/// Whether a judged claim reaches the prompt: Jev says it bears, the two
+/// scorers agreed, and its score clears [`HOOK_SCORE_FLOOR`] of the top.
+#[must_use]
+pub fn admits_judged(h: &Hit, bears: bool, p: f64, cue: &str, top: f64) -> bool {
+    bears
+        && (names_the_cue(&h.text, cue) || p >= JEV_ALONE_AT)
+        && agreed(h)
+        && h.score >= top * HOOK_SCORE_FLOOR
+}
+
+/// The local path reranks when the judge did not answer.
+#[must_use]
+pub fn hook_uses_rerank(judge_answered: bool) -> bool {
+    !judge_answered
+}
 
 /// Whether a prompt carries pasted material: a pasted block, a code
 /// fence, terminal or log output, or many lines. Jev's injection
@@ -3987,6 +4015,31 @@ pub fn looks_pasted(cue: &str) -> bool {
         })
         .count();
     lines.len() >= 8 || marked >= 2
+}
+
+/// Whether a prompt is pasted or quoted, so a phrase match inside it is
+/// not filed as a correction. A markdown quote, or a double-quoted span,
+/// refuses the whole prompt.
+#[must_use]
+pub fn pasted_or_quoted(cue: &str) -> bool {
+    if looks_pasted(cue) {
+        return true;
+    }
+    if cue.lines().any(|l| l.trim_start().starts_with('>')) {
+        return true;
+    }
+    let mut rest = cue;
+    while let Some(start) = rest.find('"') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('"') else {
+            break;
+        };
+        if end >= 12 {
+            return true;
+        }
+        rest = &rest[end + 1..];
+    }
+    false
 }
 
 /// Whether the pack's scorers agreed on a hit: named by at least two of
@@ -5246,6 +5299,9 @@ fn store_judged_correction(call: &HookCall) {
 
 fn file_correction(call: &HookCall, key: &str) {
     if call.event != "UserPromptSubmit" {
+        return;
+    }
+    if pasted_or_quoted(&call.cue) {
         return;
     }
     if seen_ids(call.session.as_deref()).contains(key) {
@@ -7720,11 +7776,47 @@ fn odds(m: &std::collections::BTreeMap<String, f64>) -> String {
         .join(", ")
 }
 
-/// Cast Jev's ballot as the persona: the chosen option's probability is
-/// the ballot's confidence, the forecast is its prediction, and a note on
-/// the issue says the ballot came from Jev. Jev's own `confidence` is a
-/// spread over the options, not a probability, so it only decides
-/// escalation.
+/// The voter a judge's ballot is recorded as. Not the persona.
+#[must_use]
+pub fn judge_voter(model: &str) -> String {
+    format!("judge:{}", model.trim())
+}
+
+/// One effective voter per model. An all-one-model panel is one voter.
+#[must_use]
+pub fn panel_voters(models: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = models.iter().map(|m| judge_voter(m)).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Forecasts the surprisingly popular step may read. A judge's forecast
+/// stays out of that step.
+#[must_use]
+pub fn forecasts_for_surprising(predictions: &[Prediction]) -> Vec<Prediction> {
+    predictions
+        .iter()
+        .filter(|p| !p.agent.starts_with("judge:"))
+        .cloned()
+        .collect()
+}
+
+/// The trust row a judge starts with. `learn` rewrites rows whose `to` is
+/// this voter once the judge is on a ballot beside another voter.
+#[must_use]
+pub fn judge_trust_row(model: &str) -> Trust {
+    Trust {
+        from: "seat".into(),
+        to: judge_voter(model),
+        weight: 1.0,
+        about: Vec::new(),
+    }
+}
+
+/// Cast Jev's ballot as the judge, not the persona. The chosen option's
+/// probability is the ballot's confidence, the forecast is the judge's
+/// prediction, and `--used` names the judge. Confidence decides escalation.
 ///
 /// # Errors
 ///
@@ -7736,9 +7828,15 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
         .copied()
         .unwrap_or(b.confidence);
     let p = format!("{:.3}", p.clamp(0.01, 1.0));
+    let model = if b.model.is_empty() {
+        jev::ballot_model().unwrap_or_else(|| "jev".into())
+    } else {
+        b.model.clone()
+    };
+    let voter = judge_voter(&model);
     // The forecast first: a ballot cast with its forecast refused would
     // stand half recorded, and the command would still say it failed.
-    write_prediction(issue, name, &serde_json::to_string(&b.forecast)?)?;
+    write_prediction(issue, &voter, &serde_json::to_string(&b.forecast)?)?;
     run_captured_as(
         "vissue",
         &[
@@ -7747,16 +7845,17 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
             "--for",
             &b.choice,
             "--used",
-            "none",
+            &voter,
             "--confidence",
             &p,
         ],
-        Some(name),
+        Some(&voter),
     )?;
+    let _ = write_trust(&judge_trust_row(&model), &[]);
     note_jev(
         issue,
         &format!(
-            "{name}: ballot from Jev, {} ({}); forecast {}",
+            "{voter}: ballot for {name}, {} ({}); forecast {}",
             b.choice,
             odds(&b.probabilities),
             odds(&b.forecast)
@@ -7904,11 +8003,10 @@ pub fn panel_jev(issue: &str, out: &Path) -> Result<String> {
         .collect();
     let mut lines = Vec::new();
     if jev_panel_stands(&ballots) {
-        for (p, b) in personas.iter().zip(&ballots) {
-            cast_jev(&p.name, issue, b)?;
-        }
+        // One model is one voter, so the panel casts one ballot.
+        cast_jev(&personas[0].name, issue, &ballots[0])?;
         lines.push(format!(
-            "{} personas on {issue} through Jev: all sure, all {}; cast",
+            "{} personas on {issue} through Jev: all sure, all {}; one judge ballot cast",
             personas.len(),
             ballots[0].choice
         ));
@@ -8703,6 +8801,22 @@ pub fn is_version_tag(tag: &str) -> bool {
         && parts[..2]
             .iter()
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether `accession` is in the deed store. `deedar current` has to
+/// accept it. A dangling id is refused before a tracker cite.
+///
+/// # Errors
+///
+/// The store does not know the id, or `deedar` did not answer.
+pub fn require_deed(accession: &str) -> Result<()> {
+    let accession = accession.trim();
+    if accession.is_empty() {
+        bail!("deed: an accession is required");
+    }
+    run_captured("deedar", &["current", accession])
+        .map_err(|e| anyhow::anyhow!("deed: {accession} is not in the deed store: {e:#}"))?;
+    Ok(())
 }
 
 /// Whether a cite stands: a deed accession `deedar current` takes, or an
@@ -9605,6 +9719,20 @@ pub fn outcome_text(issue: &str, choice: &str) -> String {
     format!("{issue} closed on {choice}.")
 }
 
+/// `ljos judge-score`: the judge log joined with outcome atoms. A pack
+/// that does not answer is named, and the log is still scored.
+#[must_use]
+pub fn judge_score_report() -> String {
+    let entries = jev::read_log();
+    let Ok(client) = pack() else {
+        let mut body = jev::score_log(&entries, &std::collections::BTreeMap::new());
+        body.push_str("the pack did not answer; outcomes were not joined\n");
+        return body;
+    };
+    let atoms = atoms_lean(&client, &client.workspace()).unwrap_or_default();
+    jev::score_log(&entries, &outcomes_of(&atoms))
+}
+
 /// The latest outcome per issue among the pack's atoms.
 #[must_use]
 pub fn outcomes_of(atoms: &[Value]) -> std::collections::BTreeMap<String, String> {
@@ -10242,6 +10370,20 @@ pub fn format_write_ack(body: &serde_json::Value) -> String {
         body["due_at"].as_str().unwrap_or("-"),
         body["text"].as_str().unwrap_or("").replace('\n', " "),
     )
+}
+
+/// What `rule` and `forget` print. The default is one line. `--json` is
+/// the atom, embedding included.
+///
+/// # Errors
+///
+/// The atom does not serialize.
+pub fn atom_out(body: &serde_json::Value, json: bool) -> Result<String> {
+    if json {
+        Ok(serde_json::to_string_pretty(body)?)
+    } else {
+        Ok(format_write_ack(body))
+    }
 }
 
 /// The habitats the seat needs. Encoder and policyd move with the rest.
@@ -11266,13 +11408,30 @@ pub fn healthy(rows: &[Habitat]) -> bool {
         .all(|h| h.ok || !REQUIRED.contains(&h.name) && h.name != "pack")
 }
 
+/// Rows a fresh seat may lack after the first write. They are reported,
+/// and they do not fail `ljos doctor`.
+const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
+
+/// `ok` when the row answers, `info` when it is optional and absent,
+/// `no` when a required row failed.
+#[must_use]
+pub fn doctor_word(row: &Habitat) -> &'static str {
+    if row.ok {
+        "ok"
+    } else if OPTIONAL_ROWS.contains(&row.name) {
+        "info"
+    } else {
+        "no"
+    }
+}
+
 pub fn format_doctor(rows: &[Habitat]) -> String {
     rows.iter()
         .map(|h| {
             format!(
                 "{}	{}	{}
 ",
-                if h.ok { "ok" } else { "no" },
+                doctor_word(h),
                 h.name,
                 h.state
             )
@@ -11673,12 +11832,25 @@ fn newer_on(id: &str, claim: &str, ts: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// What `due --judge` says about a hold probability. A hold is a report.
+/// The seat's own `ljos graded` is what marks the claim recalled.
+#[must_use]
+pub fn review_mark(holds: f64) -> &'static str {
+    if holds >= jev::REVIEW_HOLDS_AT {
+        "holds"
+    } else if holds <= jev::REVIEW_FAILS_AT {
+        "contradicted"
+    } else {
+        "unsure"
+    }
+}
+
 /// `ljos due --judge`: the review judges weigh each claim on the page
 /// against the newer claims about it. One that holds at
-/// [`jev::REVIEW_HOLDS_AT`] is graded recalled; one at or under
+/// [`jev::REVIEW_HOLDS_AT`] is named for `ljos graded`. One at or under
 /// [`jev::REVIEW_FAILS_AT`] is named for the agent to supersede or
-/// withdraw, and stays due; the rest stay due. No claim is lapsed by a
-/// judge, since a lapse says a reader forgot it.
+/// withdraw, and stays due. The rest stay due. A judge does not grade
+/// and does not lapse.
 pub fn judge_due_page() -> Result<String> {
     if jev::config().is_none() {
         bail!(
@@ -11695,14 +11867,11 @@ pub fn judge_due_page() -> Result<String> {
         let newer = newer_on(id, text, a["ts"].as_str());
         let refs: Vec<&str> = newer.iter().map(String::as_str).collect();
         let line = match jev::review(id, text, &refs) {
-            Some(p) if p >= jev::REVIEW_HOLDS_AT => match graded(id, true) {
-                Ok(_) => {
-                    held += 1;
-                    format!("recalled\t{p:.2}\t{id}\t{text}")
-                }
-                Err(e) => format!("left\t{p:.2}\t{id}\t{e:#}"),
-            },
-            Some(p) if p <= jev::REVIEW_FAILS_AT => {
+            Some(p) if review_mark(p) == "holds" => {
+                held += 1;
+                format!("holds\t{p:.2}\t{id}\t{text}  (`ljos graded {id}` marks it recalled)")
+            }
+            Some(p) if review_mark(p) == "contradicted" => {
                 format!("contradicted\t{p:.2}\t{id}\t{text}  (supersede or withdraw it)")
             }
             Some(p) => format!("unsure\t{p:.2}\t{id}\t{text}"),
@@ -11712,7 +11881,7 @@ pub fn judge_due_page() -> Result<String> {
         out.push('\n');
     }
     out.push_str(&format!(
-        "{held} of {} on the page graded by the judges; {total} were due. {summary}\n",
+        "{held} of {} on the page the judges say hold; `ljos graded` marks one recalled. {total} were due. {summary}\n",
         shown.len()
     ));
     Ok(out)
@@ -14236,6 +14405,7 @@ pub fn panel_steps(
     if !have_ljos {
         return steps;
     }
+    let predictions = forecasts_for_surprising(predictions);
     if predictions.len() >= 2 {
         steps.push(ConsensusStep {
             bin: "ljos-consensus",
@@ -14244,7 +14414,7 @@ pub fn panel_steps(
                 "--issue".into(),
                 id.into(),
                 "--predictions".into(),
-                predictions_json(predictions),
+                predictions_json(&predictions),
             ],
         });
     }
@@ -17946,6 +18116,7 @@ mod tests {
             probabilities: Default::default(),
             forecast: Default::default(),
             escalate_below: 0.8,
+            model: "jev-1.13.0".into(),
         };
         assert!(jev_panel_stands(&[b("age", 0.95), b("age", 0.9)]));
         assert!(!jev_panel_stands(&[b("age", 0.95), b("gpg", 0.9)]), "split");
@@ -17954,6 +18125,199 @@ mod tests {
             "one unsure"
         );
         assert!(!jev_panel_stands(&[]));
+    }
+
+    #[test]
+    fn a_judge_ballot_is_the_judge_and_stays_out_of_surprising() {
+        assert_eq!(judge_voter("jev-1.13.0"), "judge:jev-1.13.0");
+        assert_eq!(
+            panel_voters(&["jev-1.13.0", "jev-1.13.0"]),
+            vec!["judge:jev-1.13.0".to_string()],
+            "one model is one voter"
+        );
+        assert_eq!(
+            panel_voters(&["jev-1.13.0", "other"]),
+            vec!["judge:jev-1.13.0".to_string(), "judge:other".to_string()]
+        );
+        let row = judge_trust_row("jev-1.13.0");
+        assert_eq!(row.to, "judge:jev-1.13.0");
+        assert_eq!(row.from, "seat");
+        let ballots = vec![
+            ("judge:jev-1.13.0".into(), "age".into()),
+            ("reader".into(), "gpg".into()),
+        ];
+        let (rows, records) =
+            learn_record(&ballots, "age", &std::collections::BTreeMap::new(), &[]).unwrap();
+        assert!(
+            rows.iter().any(|r| r.to == "judge:jev-1.13.0"),
+            "learn writes a trust row for the judge: {rows:?}"
+        );
+        assert_eq!(records["judge:jev-1.13.0"], (1.0, 0.0));
+        let predictions = vec![
+            Prediction {
+                issue: "i".into(),
+                agent: "reader".into(),
+                expect: serde_json::json!("age"),
+            },
+            Prediction {
+                issue: "i".into(),
+                agent: "judge:jev-1.13.0".into(),
+                expect: serde_json::json!("age"),
+            },
+            Prediction {
+                issue: "i".into(),
+                agent: "security".into(),
+                expect: serde_json::json!("gpg"),
+            },
+        ];
+        let kept = forecasts_for_surprising(&predictions);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|p| !p.agent.starts_with("judge:")));
+        let steps = panel_steps("i", true, &[], &predictions);
+        let surprising = steps
+            .iter()
+            .find(|s| s.args.first().map(String::as_str) == Some("surprising"));
+        let body = surprising.unwrap().args.last().unwrap();
+        assert!(!body.contains("judge:"), "{body}");
+        assert!(
+            body.contains("reader") && body.contains("security"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_judged_claim_still_needs_two_scorers_and_the_score_floor() {
+        let hit = |score, ballots, of| Hit {
+            id: None,
+            text: "the cluster fuse is CombMNZ".into(),
+            score,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec![],
+            ballots,
+            of,
+        };
+        let cue = "build on the cluster fuse";
+        assert!(admits_judged(
+            &hit(1.0, Some(2), Some(2)),
+            true,
+            0.9,
+            cue,
+            1.0
+        ));
+        assert!(
+            !admits_judged(&hit(1.0, Some(1), Some(3)), true, 0.95, cue, 1.0),
+            "one scorer of three does not admit"
+        );
+        assert!(
+            !admits_judged(&hit(0.5, Some(2), Some(2)), true, 0.95, cue, 1.0),
+            "under the score floor"
+        );
+        assert!(hook_uses_rerank(false));
+        assert!(!hook_uses_rerank(true));
+    }
+
+    #[test]
+    fn a_pasted_or_quoted_correction_is_not_filed() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&posts);
+        let (url, _) = serve_http(move |req| {
+            if req.contains("POST /v1/atoms") || req.contains("POST /v1/proposals") {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            if req.contains("POST /v1/proposals") {
+                return (403, r#"{"error":"extract is not allowed"}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let quoted = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the log says \"you should have used the cluster fuse\" and then stopped".into(),
+            session: Some("quote".into()),
+            shape: HookShape::Asks,
+        };
+        store_correction(&quoted);
+        store_judged_correction(&quoted);
+        let fenced = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "```\nnever use the laptop fuse for this run\n```".into(),
+            session: Some("fence".into()),
+            shape: HookShape::Asks,
+        };
+        store_correction(&fenced);
+        assert!(
+            !state.path().join("ljos/proposals.jsonl").exists(),
+            "pasted and quoted prompts file nothing"
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        store_correction(&HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "you should have used the cluster for this fuse run".into(),
+            session: Some("plain".into()),
+            shape: HookShape::Asks,
+        });
+        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        assert!(proposals.contains("\"kind\":\"preference\""), "{proposals}");
+        assert!(proposals.contains("\"status\":\"open\""), "{proposals}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "the proposal was the only post"
+        );
+    }
+
+    #[test]
+    fn due_judge_names_a_hold_and_does_not_grade_it() {
+        let _g = env_guard();
+        let _jev = jev::judge_env_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cfg.path().join("ljos")).unwrap();
+        std::fs::write(
+            cfg.path().join("ljos/jev.toml"),
+            "enabled = true\nbackend = \"command\"\ncommand = [\"sh\", \"-c\", \
+             \"cat >/dev/null; echo '{\\\"answers\\\": {\\\"holds\\\": 0.95}}'\"]\n",
+        )
+        .unwrap();
+        let grades = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&grades);
+        let (url, _) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("/grade") {
+                seen.fetch_add(1, Ordering::SeqCst);
+                return (200, r#"{"id":"atom-1","recalled":true}"#.into());
+            }
+            if line.starts_with("GET /v1/atoms") {
+                return (
+                    200,
+                    r#"{"atoms":[{"id":"atom-1","kind":"lesson","text":"the cluster fuse is CombMNZ","due_at":"2020-01-01T00:00:00Z"}]}"#.into(),
+                );
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[
+            ("XDG_CONFIG_HOME", cfg.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let page = judge_due_page().unwrap();
+        assert!(page.contains("holds"), "{page}");
+        assert!(page.contains("`ljos graded atom-1`"), "{page}");
+        assert!(!page.contains("recalled\t"), "{page}");
+        assert_eq!(grades.load(Ordering::SeqCst), 0, "a judge does not grade");
+        assert_eq!(review_mark(0.95), "holds");
+        assert_eq!(review_mark(0.05), "contradicted");
+        assert_eq!(review_mark(0.5), "unsure");
     }
 
     #[test]
@@ -18603,6 +18967,27 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_dangling_deed_is_refused() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("deedar");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$2\" in\nknown) exit 0;;\n*) echo \"no such deed $2\" >&2; exit 1;;\nesac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let _env = HoldEnv::set(&[("PATH", &format!("{}:{}", dir.path().display(), path))]);
+        let err = super::require_deed("deed-missing").unwrap_err().to_string();
+        assert!(err.contains("deed-missing"), "{err}");
+        assert!(err.contains("not in the deed store"), "{err}");
+        assert!(super::require_deed("known").is_ok());
+        assert!(super::require_deed("  ").is_err());
+    }
 
     /// A non-zero exit is an error carrying what was said on stderr.
     #[test]
@@ -20667,6 +21052,50 @@ mod tests {
             })),
             "ab\tlesson\tdue 2026-09-15T00:00:00Z\tThe encoder sits beside packsetd."
         );
+        let fat = serde_json::json!({
+            "id": "r1",
+            "kind": "rule",
+            "text": "Never force push.",
+            "embedding": [0.1, 0.2, 0.3]
+        });
+        let line = super::atom_out(&fat, false).unwrap();
+        assert!(
+            !line.contains("embedding") && !line.contains("0.1"),
+            "{line}"
+        );
+        assert!(line.starts_with("r1\trule\t"), "{line}");
+        let full = super::atom_out(&fat, true).unwrap();
+        assert!(full.contains("embedding"), "{full}");
+        let optional = Habitat {
+            name: "host key",
+            state: "none".into(),
+            ok: false,
+        };
+        let shown = format_doctor(&[optional, sick[0].clone()]);
+        assert!(shown.starts_with("info\thost key\t"), "{shown}");
+        assert!(shown.contains("no\tpack\t"), "{shown}");
+        assert!(healthy(&[
+            Habitat {
+                name: "host key",
+                state: "none".into(),
+                ok: false,
+            },
+            Habitat {
+                name: "runners",
+                state: "none named".into(),
+                ok: false,
+            },
+            Habitat {
+                name: "deed store",
+                state: "not on PATH".into(),
+                ok: false,
+            },
+            Habitat {
+                name: "tracker",
+                state: "not on PATH".into(),
+                ok: false,
+            },
+        ]));
         assert_eq!(super::parse_semver("ljos 0.12.8"), Some("0.12.8"));
         assert_eq!(
             super::cmp_semver("0.4.1", "0.5.3"),

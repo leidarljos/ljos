@@ -380,15 +380,16 @@ A machine without =jev.toml= runs exactly as before.
 The ballot shows the fit best. A ballot always carried a confidence, and
 =predict= always took a share per option, because the settle and the
 surprisingly popular reading need both. A subagent had to be told to guess
-them. Jev returns them: the chosen option's probability is the ballot's
-confidence, and its forecast of the panel is the prediction. =learn= then
-scores that confidence as it scores any voter's, so Jev's calibration on
-this seat's questions is a measurement.
+them. Jev returns them. The ballot is recorded as =judge:MODEL=, and the
+chosen option's probability is its confidence. The forecast is the judge's
+prediction, and it stays out of the surprisingly popular step. =learn=
+updates the trust row for that judge, so Jev's calibration on this seat's
+questions is a measurement. =ljos judge-score= is what reads the log.
 
-Two things are new. Jev's =confidence= is a spread over the options, not a
-probability, so it decides only whether to escalate. And personas answered
-by one model are one correlated voter, which is the point Chen et al.
-make about counting more voices. A panel through Jev therefore casts only
+Jev's =confidence= is =(K·p_max − 1)/(K − 1)= on every backend, so a stated
+number is not a different cut. It decides whether to escalate. Personas
+answered by one model are one voter, which is the point Chen et al. make
+about counting more voices. A panel through Jev therefore casts one ballot
 when every seat is sure and all agree, where the outcome could not move.
 A split or unsure panel goes to subagents, and the metered model spends
 only on the contested question. That is a cascade in the sense of
@@ -398,12 +399,15 @@ expensive one on what it cannot settle.
 The stop audit is the fourth point grown a judge. Whether a test ran is
 read from the commands, in code. Jev answers whether the last message
 claims done and whether the last run is red. A stop waits for another
-round only on 0.9 for the first and 0.1 for the second.
+round only on 0.9 for the first and 0.1 for the second. The review route
+is the fifth: =ljos due --judge= names a claim the judges say holds, and
+=ljos graded= is what marks it recalled.
 
 The cuts are fixed from TypeSafe's cookbooks. Every answer goes to
-=jev-log.jsonl= with its question, and every hook injection already
-reaches the pack as used or not at the session's end. Those pairs are
-what a cut is set from once there are enough of them.
+=jev-log.jsonl= with the claim ids, a hash of the prompt, the latency,
+and whether the call timed out or failed. The log does not keep the
+prompt. =ljos judge-score= joins a ballot with the outcome it was about.
+Nothing here trains on Jev's answers.
 
 * Handover that can be checked
 

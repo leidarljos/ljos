@@ -214,12 +214,14 @@ Every piece of work has an issue before it has a claim.
   weighs it at 1, everywhere); `--about` on a later trust row only adds
   weight.
 - Jev, the fast judge, answers through the vote verbs. `ljos vote ISSUE --as
-  NAME --jev` asks it for that persona's ballot and casts it when it is
-  sure (confidence 0.8 or more); when it is not, the ballot goes to the
+  NAME --jev` asks it for that persona's ballot and casts it as `judge:MODEL`
+  when it is sure (confidence 0.8 or more); when it is not, the ballot goes to the
   persona's own session if the persona has a runner, else the command
   names the brief to start a subagent from. `ljos panel ISSUE --jev` asks
-  for every seat at once and casts only when all are sure and agree.
-  `ljos due --judge` puts the due page to the review judges. Which judges
+  for every seat at once and casts one ballot when all are sure and agree
+  on one model. `ljos due --judge` names a claim the review judges say holds;
+  `ljos graded` is what marks it recalled. `ljos judge-score` reads the judge
+  log against outcomes. Which judges
   answer is `~/.config/ljos/jev.toml` (`[judges.NAME]`, `[route]`); with
   no file the verbs say so and the subagent path answers.
 - A persona with a runner, `ljos persona NAME --runner RUNNER` where

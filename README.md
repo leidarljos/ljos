@@ -218,7 +218,7 @@ When opening a decision panel (`ljos panel`), persona subagents run with bounded
 
 ## Jev, where a machine allows it
 
-`~/.config/ljos/jev.toml` with `enabled = true` and a key command hands four of the seat's judgments to Jev, TypeSafe's decision model: which claims bear on a prompt, whether the prompt corrects the agent or puts a choice, a persona's ballot, and whether an agent may stop. The local answer stays as the fallback, and a machine without the file runs as before. A prompt costs about $0.00004 and `ljos doctor` prints the month's spend. The explanation's section on judgment says how it slots into what the seat already did; the how-to has the setup.
+`~/.config/ljos/jev.toml` with `enabled = true` and a key command hands the seat's judgments to Jev, TypeSafe's decision model: which claims bear on a prompt, whether the prompt corrects the agent or puts a choice, a persona's ballot, whether an agent may stop, and whether a due claim still holds. The ballot is recorded as `judge:<model>`, not as the persona. `ljos due --judge` names a hold; `ljos graded` is what marks it recalled. `ljos judge-score` reads the judge log against outcomes. The local answer stays as the fallback, and a machine without the file runs as before. A prompt costs about $0.00004 and `ljos doctor` prints the month's spend. A chat backend has to name `usd_per_mtok_in`. The explanation's section on judgment says how it slots into what the seat already did; the how-to has the setup.
 
 ## Who is sitting
 

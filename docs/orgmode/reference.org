@@ -256,7 +256,7 @@ names.
 | =monthly_usd= | 4.0 | the month's spend in US dollars past which the hook stops asking |
 | =min_words= | 4 | a prompt with fewer words is skipped |
 | =min_candidates= | 2 | fewer candidate claims than this is skipped |
-| =usd_per_mtok_in= | 0.042 | US dollars per million input tokens, for an API whose answer carries no cost |
+| =usd_per_mtok_in= | 0.042 on =jev=, required on =chat= | US dollars per million input tokens, for an API whose answer carries no cost. A =chat= judge with no price is not asked |
 | =bears_at= | 0.5 | probability at which a claim bears on the prompt |
 | =cue_at= | 0.5 | probability at which the prompt counts as a correction or a choice |
 | =escalate_below= | 0.8 | a persona ballot under this confidence goes to a subagent |
@@ -268,9 +268,11 @@ names.
 | Path | Holds |
 |---+---|
 | =$XDG_STATE_HOME/ljos/jev-cost.toml= | the month's calls and spend |
-| =$XDG_STATE_HOME/ljos/jev-log.jsonl= | every Jev answer |
-| =$XDG_CACHE_HOME/ljos/jev= | the answer cache |
+| =$XDG_STATE_HOME/ljos/jev-log.jsonl= | every Jev answer: claim ids, a prompt hash, latency, timeout or failure, backend and model. =ljos judge-score= joins it with outcomes |
+| =$XDG_CACHE_HOME/ljos/jev= | the answer cache: a hash of the request and the reply, directory mode 0700, file mode 0600. The prompt and the claim text are not stored |
 | =$XDG_RUNTIME_DIR/ljos/jev-key= | the default judge's key from =key_cmd=, mode 0600; =jev-key-NAME= for a named judge |
+
+The four routes are =prompt=, =ballot=, =audit= and =review=. =backend = jev= posts to =endpoint= (TypeSafe's API, or OpenRouter at =https://openrouter.ai/api/alpha/decisions= with model =typesafe/jev-1.13=). =backend = chat= posts one JSON-mode completion to =endpoint= plus =/chat/completions= and must set =usd_per_mtok_in=. =backend = command= keeps the request on the machine. TypeSafe's terms say they will not train on customer data. They keep a perpetual licence to derive telemetry from inputs. Zero data retention is an enterprise term, not the default. This seat does not train on Jev's answers. A judge ballot is a trust row with =to= =judge:MODEL=, and =learn= updates it.
 
 * The learning rules
 
