@@ -5627,6 +5627,41 @@ fn writer_unreachable(err: &anyhow::Error) -> bool {
     })
 }
 
+/// A writer that answered 503: up, with every worker answering and its
+/// queue full.
+fn writer_busy(err: &anyhow::Error) -> bool {
+    err.chain().any(
+        |cause| match cause.downcast_ref::<packset_client::Error>() {
+            Some(packset_client::Error::Bad(why)) => {
+                why.contains(": 503:") || why.ends_with("status code 503")
+            }
+            Some(packset_client::Error::Http(inner)) => {
+                matches!(**inner, ureq::Error::Status(503, _))
+            }
+            _ => false,
+        },
+    )
+}
+
+/// The first wait before a busy writer is asked again; each later wait is
+/// three times the one before.
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// How many times a busy writer is asked again.
+const BUSY_TRIES: u32 = 3;
+
+/// How long one pack request may take: `PACKSET_TIMEOUT_MS`, else thirty
+/// seconds, as the pack client reads it. The status line sets 300.
+fn pack_timeout() -> std::time::Duration {
+    std::env::var("PACKSET_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis,
+        )
+}
+
 /// Start the default writer when a memory verb could not connect.
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
 /// replaced with the default writer.
@@ -5650,13 +5685,21 @@ fn ensure_writer() -> Result<()> {
 }
 
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
-    match op() {
-        Ok(value) => Ok(value),
-        Err(err) if writer_unreachable(&err) => {
-            ensure_writer()?;
-            op()
+    let mut wait = BUSY_WAIT;
+    let mut tries = 0;
+    loop {
+        match op() {
+            Err(err) if tries < BUSY_TRIES && writer_busy(&err) => {
+                tries += 1;
+                std::thread::sleep(wait);
+                wait *= 3;
+            }
+            Err(err) if writer_unreachable(&err) => {
+                ensure_writer()?;
+                return op();
+            }
+            other => return other,
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -5671,11 +5714,28 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
 /// The pack not answering, or an answer that is not atoms.
 pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
     let url = format!("{}/v1/atoms", client.base());
-    let mut body: Value = ureq::get(&url)
-        .query("workspace", workspace)
-        .query("embedding", "omit")
-        .timeout(std::time::Duration::from_secs(30))
-        .call()
+    let deadline = std::time::Instant::now() + pack_timeout();
+    let mut wait = BUSY_WAIT;
+    let mut tries = 0;
+    let answered = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let got = ureq::get(&url)
+            .query("workspace", workspace)
+            .query("embedding", "omit")
+            .timeout(left.max(std::time::Duration::from_millis(1)))
+            .call();
+        match got {
+            Err(ureq::Error::Status(503, _))
+                if tries < BUSY_TRIES && std::time::Instant::now() + wait < deadline =>
+            {
+                tries += 1;
+                std::thread::sleep(wait);
+                wait *= 3;
+            }
+            other => break other,
+        }
+    };
+    let mut body: Value = answered
         .map_err(|e| anyhow::anyhow!("{url}: {e}"))?
         .into_json()?;
     let atoms = body
@@ -17651,6 +17711,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// A non-zero exit is an error carrying what was said on stderr.
@@ -19796,6 +19857,88 @@ mod tests {
             }
         });
         (format!("http://{addr}"), captured)
+    }
+
+    /// A writer that answers busy to its first `busy` requests and then
+    /// serves `body`, counting what it was asked.
+    fn serve_busy_then(busy: usize, body: &'static str) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let _ = read_http(&mut s);
+                let (status, payload) = if count.fetch_add(1, Ordering::SeqCst) < busy {
+                    ("503 Service Unavailable", r#"{"error":"packsetd is busy"}"#)
+                } else {
+                    ("200 OK", body)
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    #[test]
+    fn a_busy_writer_is_asked_again_for_the_lean_listing() {
+        let _env = env_guard();
+        let (url, seen) = serve_busy_then(2, r#"{"atoms":[{"id":"a","kind":"rule"}]}"#);
+        let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+        // Busy past the retries is an error the caller sees, not a hang.
+        let (url, seen) = serve_busy_then(usize::MAX, "{}");
+        let err = atoms_lean(&PacksetClient::new(&url), "ws").unwrap_err();
+        assert!(err.to_string().contains("503"), "{err}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
+    }
+
+    #[test]
+    fn the_lean_listing_keeps_the_callers_timeout() {
+        let _env = env_guard();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        // Accepted and never answered: a writer that stopped reading.
+        let held = std::thread::spawn(move || listener.accept().map(|(s, _)| s));
+        let before = std::env::var_os("PACKSET_TIMEOUT_MS");
+        // SAFETY: under the lock every environment-reading test takes.
+        unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", "200") };
+        let started = std::time::Instant::now();
+        let out = atoms_lean(&PacksetClient::new(&url), "ws");
+        let took = started.elapsed();
+        unsafe {
+            match before {
+                Some(v) => std::env::set_var("PACKSET_TIMEOUT_MS", v),
+                None => std::env::remove_var("PACKSET_TIMEOUT_MS"),
+            }
+        }
+        assert!(out.is_err());
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        drop(held);
+    }
+
+    #[test]
+    fn a_busy_writer_is_not_an_absent_one() {
+        let refused = anyhow::Error::new(packset_client::Error::Bad(
+            "http://127.0.0.1:8761/v1/search: 503: packsetd is busy".into(),
+        ));
+        assert!(writer_busy(&refused));
+        assert!(!writer_unreachable(&refused));
+        let raw = ureq::Response::new(503, "Service Unavailable", "busy").unwrap();
+        let status = anyhow::Error::new(packset_client::Error::Http(Box::new(
+            ureq::Error::Status(503, raw),
+        )));
+        assert!(writer_busy(&status));
+        let other = anyhow::Error::new(packset_client::Error::Bad(
+            "http://127.0.0.1:8761/v1/search: 400: q required".into(),
+        ));
+        assert!(!writer_busy(&other));
     }
 
     #[test]
