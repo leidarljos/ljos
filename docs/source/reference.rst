@@ -148,6 +148,9 @@ answers the sender and keeps the issue. ``group NAME --add SEAT`` records
 a member. ``ljos hook --prompt`` writes a receipt for each message it
 shows. A shell seat polls ``ljos inbox``.
 
+``ljos deed --remove ACCESSION --ticket ID`` drops that citation. The
+removal is appended to the ticket. The heading is not rewritten.
+
 ``remember`` and ``prefer`` write origin ``user-declared``. ``finish --lesson``
 and ``findings --remember`` file origin ``agent-derived`` and do not write
 the atom. ``ljos accept ID`` writes it. The same text typed with

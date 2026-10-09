@@ -104,6 +104,8 @@ Every piece of work has an issue before it has a claim.
   `deedar create file --name NAME --path PATH --agent NAME` prints an
   accession; `ljos deed ISSUE --add ACCESSION` cites it on the issue.
   Citing a deed names it; the bytes stay in deedar.
+  `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
+  removal is appended. The heading is not rewritten.
 - A lesson is one `ljos remember` of two short sentences at most. It is
   stored as an episode and is not a refresher until `ljos graded ID`
   recalls it, or until consolidation finds it replaced an earlier claim.

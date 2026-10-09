@@ -8819,6 +8819,51 @@ pub fn require_deed(accession: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop `accession` from the citations on `ticket`.
+///
+/// The ledger appends the removal and a log line. The heading already on
+/// disk stays as it was. A board that is not a ledger is refused, because
+/// the only write there rewrites the file. The deed store is not asked: a
+/// dangling accession is what this drops.
+///
+/// # Errors
+///
+/// `ticket` or `accession` is empty, the ticket is not in the tracker, the
+/// ticket does not cite `accession`, or the ticket is not in a ledger.
+pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
+    let ticket = ticket.trim();
+    let accession = accession.trim();
+    if ticket.is_empty() {
+        bail!("deed: a ticket is required");
+    }
+    if accession.is_empty() {
+        bail!("deed: an accession is required");
+    }
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    let hit = vissue_core::Router::load(layout)?.find_by_id(ticket)?;
+    if !vissue_core::ledger::is_ledger(&hit.path) {
+        bail!(
+            "deed: {ticket} is not in a ledger, so a removal would rewrite the board. \
+             A removal is an appended event"
+        );
+    }
+    let card = vissue_core::agent::show_json(&hit.layout, ticket)?;
+    let cited = card
+        .get("deeds")
+        .and_then(|v| v.as_array())
+        .is_some_and(|rows| rows.iter().any(|v| v.as_str() == Some(accession)));
+    if !cited {
+        bail!("deed: {ticket} does not cite {accession}");
+    }
+    let dropped = vissue_core::ops::deed(&hit.layout, ticket, &[], &[accession.to_string()])?;
+    vissue_core::ops::note(
+        &hit.layout,
+        ticket,
+        &format!("removed citation {accession}"),
+    )?;
+    Ok(dropped)
+}
+
 /// Whether a cite stands: a deed accession `deedar current` takes, or an
 /// issue whose ballots settle (`vissue consensus --gate`) or that closed
 /// as a decision. The text says what it stood on.
@@ -18987,6 +19032,106 @@ mod tests {
         assert!(err.contains("not in the deed store"), "{err}");
         assert!(super::require_deed("known").is_ok());
         assert!(super::require_deed("  ").is_err());
+    }
+
+    /// A removal is an appended ledger event. The heading that already
+    /// cited the deed stays byte for byte, and the folded list drops it.
+    #[test]
+    fn removing_a_citation_appends_the_event_and_leaves_the_heading() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(project.join("issues")).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("issues/.ledger"), "1\nabc\n").unwrap();
+        let ledger = "\
+#+TITLE: probe issues
+#+VISSUE: 1
+#+TODO: TODO STARTED | DONE
+
+#+VISSUE_LEDGER:
+#+VISSUE_LINES: 6 11
+* TODO [#C] Cited
+:PROPERTIES:
+:ID:         probe-c1te
+:DEEDS:      deed-file deed-keep
+:END:
+#+VISSUE_LEDGER_LOG:
+";
+        let issue_file = project.join("issues/probe-c1te.org");
+        std::fs::write(&issue_file, ledger).unwrap();
+        let root_s = root.to_str().unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root_s),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+        ]);
+
+        let before = std::fs::read(&issue_file).unwrap();
+        let mark = before
+            .windows(b"#+VISSUE_LEDGER_LOG:".len())
+            .position(|w| w == b"#+VISSUE_LEDGER_LOG:")
+            .expect("ledger mark");
+        let said = super::uncite_deed("probe-c1te", "deed-file").unwrap();
+        assert!(said.contains("deeds -= deed-file"), "{said}");
+        let after = std::fs::read(&issue_file).unwrap();
+        assert_eq!(&after[..mark], &before[..mark], "the heading was rewritten");
+        assert!(after.len() > before.len(), "nothing was appended");
+        let text = String::from_utf8(after).unwrap();
+        assert!(text.contains("removed citation deed-file"), "{text}");
+        assert!(text.contains(":DEEDS:      deed-file deed-keep"), "{text}");
+        let card = super::tracker_show_json("probe-c1te").unwrap();
+        let left: Vec<&str> = card["deeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(left, vec!["deed-keep"]);
+        let again = super::uncite_deed("probe-c1te", "deed-file")
+            .unwrap_err()
+            .to_string();
+        assert!(again.contains("does not cite"), "{again}");
+        assert!(again.contains("deed-file"), "{again}");
+        assert!(super::uncite_deed("probe-c1te", "  ").is_err());
+    }
+
+    /// A single board file has no append. Removing a citation there would
+    /// rewrite it, so the verb refuses and the file stays.
+    #[test]
+    fn removing_a_citation_from_a_board_is_refused() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        let board = "\
+#+TITLE: probe issues
+#+VISSUE: 1
+#+TODO: TODO STARTED | DONE
+* TODO [#C] Board
+:PROPERTIES:
+:ID:         probe-b0rd
+:DEEDS:      deed-file
+:END:
+";
+        let issues = project.join("issues.org");
+        std::fs::write(&issues, board).unwrap();
+        let root_s = root.to_str().unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[("VISSUE_ROOT", root_s), ("VISSUE_NO_ROUTE", "1")]);
+        let before = std::fs::read(&issues).unwrap();
+        let err = super::uncite_deed("probe-b0rd", "deed-file")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in a ledger"), "{err}");
+        assert_eq!(std::fs::read(&issues).unwrap(), before);
     }
 
     /// A non-zero exit is an error carrying what was said on stderr.

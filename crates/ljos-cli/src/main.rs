@@ -15,9 +15,10 @@ use ljos_cli::{
     policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign,
     receive, release, remember_findings, resolve_assignee, rows_about, rules_from_pack, run,
     run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, verdict_for, whoami, with_discount,
-    withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule, write_trust,
-    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami,
+    with_discount, withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule,
+    write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB,
+    PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -123,12 +124,20 @@ enum Cmd {
     Evidence { accession: String },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
-    /// Cite a deed on an issue, or list what it cites. Citing a deed names it; the bytes stay in deedar.
+    /// Cite a deed on an issue, drop one, or list what it cites. Citing a deed names it; the bytes stay in deedar.
     Deed {
-        issue: String,
+        /// The issue, when citing or listing.
+        #[arg(required_unless_present = "ticket")]
+        issue: Option<String>,
         /// An accession to cite, from `deedar create`; repeat for several.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "remove")]
         add: Vec<String>,
+        /// An accession to drop. Repeat for several. The removal is appended.
+        #[arg(long, requires = "ticket")]
+        remove: Vec<String>,
+        /// The ticket `--remove` drops the accession from.
+        #[arg(long, conflicts_with = "issue")]
+        ticket: Option<String>,
     },
     /// File work found while sitting: a child of the issue this
     /// conversation holds unless `--parent` names another or `--top` none,
@@ -799,21 +808,37 @@ fn main() -> Result<()> {
         }
         Cmd::Evidence { accession } => run("deedar", &["evidence", &accession])?,
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
-        Cmd::Deed { issue, add } => {
-            if add.is_empty() {
-                run("vissue", &["deed", &issue])?;
+        Cmd::Deed {
+            issue,
+            add,
+            remove,
+            ticket,
+        } => {
+            if !remove.is_empty() {
+                let ticket = ticket.as_deref().context("deed: --ticket is required")?;
+                for a in &remove {
+                    print!("{}", uncite_deed(ticket, a)?);
+                }
+                print!(
+                    "{}",
+                    ljos_cli::persist_tracker(ticket, "removed a deed citation")
+                );
+            } else if add.is_empty() {
+                let issue = issue.as_deref().context("deed: an issue is required")?;
+                run("vissue", &["deed", issue])?;
             } else {
+                let issue = issue.as_deref().context("deed: an issue is required")?;
                 for a in &add {
                     ljos_cli::require_deed(a)?;
                 }
-                let mut argv = vec!["deed".to_string(), issue.clone()];
+                let mut argv = vec!["deed".to_string(), issue.to_string()];
                 for a in &add {
                     argv.push("--add".into());
                     argv.push(a.clone());
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 run("vissue", &refs)?;
-                print!("{}", ljos_cli::persist_tracker(&issue, "cited a deed"));
+                print!("{}", ljos_cli::persist_tracker(issue, "cited a deed"));
             }
         }
         Cmd::OpenPanel {

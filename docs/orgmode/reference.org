@@ -42,7 +42,7 @@
 | =read ID= | pack | write a read receipt for one message; a second read writes nothing |
 | =reply ID TEXT... [--interrupt]= | pack | answer the sender, keep the issue, and carry =reply:ID= |
 | =group NAME [--add SEAT]... [--remove SEAT]...= | pack | list a group, or add and drop members; membership is atoms and travels in the sealed log |
-| =deed ID [--add ACCESSION]...= | tracker | cite one or more deeds on a node (repeat =--add=), or list citations |
+| =deed ID [--add ACCESSION]...= / =--remove ACCESSION --ticket ID= | tracker | cite with =--add=, or list; =--remove= drops one citation, appended to the ledger, and the heading is not rewritten |
 | =claims [ARGS]= | tracker | who holds what: =vissue claims= with its flags (=--by NAME=, =--json=) |
 | =recall ID= | tracker | the working set |
 | =vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS\vert none] [--expect OPTION\vert JSON] [--as PERSONA] [--jev] [--withdraw]= | tracker | cast, as the seat or as a persona, or read the tally; =--confidence= is a probability in (0, 1]; =--used= lists the deed accessions the ballot used, comma-separated, or =none=, and is required with =--for=; =--expect= records the forecast of the others on the same command; =--withdraw= takes back the ballot and its forecast, and the logbook keeps what it was. =--as NAME --jev= asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it |
@@ -75,6 +75,8 @@ not answer is an error. =read ID= writes one receipt. =reply ID TEXT=
 answers the sender and keeps the issue. =group NAME --add SEAT= records
 a member. =ljos hook --prompt= writes a receipt for each message it
 shows. A shell seat polls =ljos inbox=.
+
+=ljos deed --remove ACCESSION --ticket ID= drops that citation. The removal is appended to the ticket. The heading is not rewritten.
 
 =remember= and =prefer= write origin =user-declared=. =finish --lesson=
 and =findings --remember= file origin =agent-derived= and do not write
