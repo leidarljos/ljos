@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# agy-ljos-hook EVENT
+# agy denies a PreToolUse whose JSON has no decision. ljos answers {}
+# when the seat has no rule. This wrapper writes allow for that answer
+# and leaves deny, ask, force_ask, and allow as ljos wrote them.
+# A Stop continue whose reason is the no-issue hold is forwarded once
+# per conversation. Later stops with that same reason end the turn.
+# Any other event is printed as ljos wrote it.
+set -euo pipefail
+
+event="${1:-}"
+if [[ "$event" == "install" ]]; then
+  dest="${HOME}/.local/bin/agy-ljos-hook"
+  mkdir -p "${HOME}/.local/bin"
+  cp "$0" "$dest"
+  chmod 755 "$dest"
+  python3 - "$dest" << 'PY'
+import json, pathlib, sys
+dest = sys.argv[1]
+path = pathlib.Path.home() / ".gemini" / "config" / "hooks.json"
+doc = json.loads(path.read_text())
+hook = doc.get("ljos")
+if not isinstance(hook, dict):
+    raise SystemExit(f"{path} has no ljos hook object")
+for event, groups in hook.items():
+    if event == "enabled" or not isinstance(groups, list):
+        continue
+    for group in groups:
+        handlers = group.get("hooks", [group]) if isinstance(group, dict) else []
+        if isinstance(group, dict) and "command" in group and "hooks" not in group:
+            handlers = [group]
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                continue
+            command = handler.get("command", "")
+            if "ljos" not in command and "agy-ljos-hook" not in command:
+                continue
+            handler["command"] = f"{dest} {event}"
+path.write_text(json.dumps(doc, indent=2) + "\n")
+print(f"installed {dest}")
+print(f"rewrote {path}")
+PY
+  exit 0
+fi
+
+if [[ -z "$event" ]]; then
+  echo "usage: agy-ljos-hook PreToolUse|PreInvocation|Stop|install" >&2
+  exit 2
+fi
+
+runtime="${XDG_RUNTIME_DIR:-/tmp}/ljos"
+mkdir -p "$runtime"
+input=$(mktemp "$runtime/agy-hook-in.XXXXXX")
+output=$(mktemp "$runtime/agy-hook-out.XXXXXX")
+trap 'rm -f "$input" "$output"' EXIT
+cat > "$input"
+
+set +e
+ljos hook --event "$event" < "$input" > "$output"
+set -e
+
+python3 - "$event" "$input" "$output" "$runtime" << 'PY'
+import json, pathlib, re, sys
+
+event, in_path, out_path, runtime = sys.argv[1:]
+raw = pathlib.Path(out_path).read_text()
+text = raw.strip()
+try:
+    body = json.loads(text) if text else {}
+except json.JSONDecodeError:
+    body = {}
+if not isinstance(body, dict):
+    body = {}
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+if event == "PreToolUse":
+    decision = body.get("decision")
+    if isinstance(decision, str) and decision in {"allow", "deny", "ask", "force_ask"}:
+        emit(body)
+    else:
+        body["decision"] = "allow"
+        emit(body)
+    raise SystemExit(0)
+
+if event == "Stop":
+    if body.get("decision") != "continue":
+        emit(body)
+        raise SystemExit(0)
+    reason = body.get("reason") if isinstance(body.get("reason"), str) else ""
+    if "holds no issue" not in reason:
+        emit(body)
+        raise SystemExit(0)
+    try:
+        payload = json.loads(pathlib.Path(in_path).read_text() or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    conv = str(payload.get("conversationId") or "none")
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", conv)[:80] or "none"
+    mark = pathlib.Path(runtime) / f"agy-stop-{safe}"
+    if mark.exists():
+        emit({})
+    else:
+        mark.write_text("1\n")
+        emit(body)
+    raise SystemExit(0)
+
+sys.stdout.write(raw if raw.endswith("\n") or raw == "" else raw + "\n")
+PY

@@ -101,7 +101,8 @@ a session in a persona's home and resume the latest one there; a
 persona whose =--runner= is that table's name reasons in that session
 (=ljos ask=, =vote --jev=). =hooks_named= names the key a hooks file of
 named hooks takes the seat's hooks under, each command told its event
-with =ljos hook --event=.
+with =ljos hook --event=. A steps runner denies a tool gate that omits
+=decision=. The seat answers =allow= when no rule matches.
 
 The pane script resumes a runner that exits non-zero, at most three times
 a minute, and leaves one that exits 0. =agents= names the directory the

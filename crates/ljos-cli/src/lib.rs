@@ -5044,15 +5044,17 @@ pub fn came_due_since(due: &[Value], since: &str) -> usize {
 
 /// The answer a [`HookShape::Steps`] runner reads: always one JSON object.
 /// A tool gate's verdict is its `decision`, `ask` included, since that
-/// runner asks the person itself; no verdict is `{}`, which leaves the
-/// runner's own permissions in charge. Context is one ephemeral step.
+/// runner asks the person itself. No verdict is `allow`: an object with
+/// no decision is a deny with an empty reason, so a seat with no rule
+/// lets the tool run. Context is one ephemeral step.
 fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let out = match (call.event.as_str(), verdict) {
         ("PreToolUse", Some(r)) => serde_json::json!({
             "decision": r.verdict,
             "reason": format!("{} (seat rule `{}`)", r.reason, r.pattern),
         }),
-        ("Stop", _) | ("PreToolUse", None) | ("TurnEnd", _) => serde_json::json!({}),
+        ("PreToolUse", None) => serde_json::json!({"decision": "allow"}),
+        ("Stop", _) | ("TurnEnd", _) => serde_json::json!({}),
         _ if context.is_empty() => serde_json::json!({}),
         _ => serde_json::json!({ "injectSteps": [{ "ephemeralMessage": context }] }),
     };
@@ -19224,7 +19226,11 @@ mod tests {
         let v: Value = serde_json::from_str(&hook_output_ruled(&gate, "", Some(&rule))).unwrap();
         assert_eq!(v["decision"], "ask");
         assert!(v["reason"].as_str().unwrap().contains("git push*"));
-        assert_eq!(hook_output_ruled(&gate, "", None).trim(), "{}");
+        assert_eq!(
+            hook_output_ruled(&gate, "", None).trim(),
+            r#"{"decision":"allow"}"#,
+            "an empty decision is a deny on this runner"
+        );
         let edit = hook_call_as(
             r#"{"toolCall":{"name":"write_to_file","args":{"CodeContent":"git push --force"}},"conversationId":"c-1"}"#,
             None,
