@@ -239,9 +239,9 @@ or nothing when the pack holds nothing on the cue. On ``PreToolUse`` a TCB
 or pack deny is ``permissionDecision`` ``deny`` and blocks. Plain text on
 stdin is an argv line and answered in plain lines.
 
-====================== ==========================================================================================================================================================================================================================
+====================== =====================================================================================================================================================================================================================================================
 Event                  The hook does
-====================== ==========================================================================================================================================================================================================================
+====================== =====================================================================================================================================================================================================================================================
 ``UserPromptSubmit``   answers with the memories the prompt activates, preferences first, each once between compactions; with Jev on, asks which claims bear on the prompt and whether it corrects the agent or puts a choice
 ``SessionEnd``         fires the memories injected during the session together and clears the session's record
 ``PostToolUse``        emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok delivers this event)
@@ -249,9 +249,9 @@ Event                  The hook does
 ``PreCompact``         fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and holds a note naming the issue the conversation still holds for the next delivery
 ``SessionStart``       after a compaction (``source`` ``compact``), on a runner that takes its context, answers with that note
 ``PreToolUse``         applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit``); a deny blocks
-``Stop``               speaks only when the turn ran no tool; with no issue held, holds one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript
+``Stop``               speaks only when the turn ran no tool; holds one turn that was asked for a decision and cast no ballot; with no issue held, holds one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript
 ``SubagentStop``       names the issue the subagent's conversation holds and asks for the ballot on a decision; with Jev on, audits the turn once
-====================== ==========================================================================================================================================================================================================================
+====================== =====================================================================================================================================================================================================================================================
 
 Push gate
 =========
