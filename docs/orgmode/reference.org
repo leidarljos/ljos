@@ -43,7 +43,7 @@
 | =predict ID --expect OPTION\vert JSON [--as PERSONA]= | pack | forecast the others' shares; two or more and =consensus= names the surprisingly popular answer |
 | =rule PATTERN [--verdict deny\vert ask] --why TEXT= | pack | argv law the hook and =policy= enforce: a glob, or a regular expression (=re:= or a =\\b=, =\\s= or =(a\vert b)= in it) anchored at the start, tried on the whole line and on each command it runs (split on =&&=, =\vert\vert=, =;=, =\vert= outside quotes, with =NAME=value=, =sudo=, =env=, =time=, =nohup= taken off) |
 | =consensus ID= | consensus, tracker | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged =broad= runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted |
-| =claim ID [--assignee NAME]= | claim graph | a session node for a tracker id; a busy refusal names what the name still holds; a node this name holds is a sitting resumed |
+| =claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]= | claim graph | a session node. With =--next=, or with no id, claimdag picks and claims the next ready node; =--role= and =--slack= are the affinity and the depth slack. A busy refusal names what the name still holds |
 | =release ID [--assignee NAME]= | claim graph | hand the session node back unfinished: ready, generation moved |
 | =complete ID [--status done\vert failed\vert cancelled] [--gen G] [--assignee NAME]= | claim graph | finish the session node; does not close the ticket; =--gen= and =--assignee= as on =finish= |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
@@ -92,6 +92,7 @@ when to call it.
 | =XDG_CONFIG_HOME= | where =ljos/harnesses.toml= is read from; =~/.config= when unset |
 | =LJOS_PANE_TOOL= | the one =[[tool]]= persona panes open in; unset, the first of the file's tools and the shipped herdr and tmux shapes that answers |
 | =LJOS_PANEL_RUNNER= | the runner a decision panel's members run on, through its =headless= argv; unset, the seat's own runner, else Grok |
+| =LJOS_PANEL_CONCURRENCY= | how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; =0= starts every member; =LJOS_MAX_PARALLEL= is the same knob |
 | =XDG_STATE_HOME=, =XDG_CACHE_HOME=, =XDG_RUNTIME_DIR= | where the Jev state, cache and runtime key live (see Jev settings); =XDG_RUNTIME_DIR= also holds the hud socket and the seat records |
 
 =~/.config/ljos/env= is loaded for the keys above that the shell leaves unset.
