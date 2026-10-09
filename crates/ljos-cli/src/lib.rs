@@ -4074,6 +4074,55 @@ pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -
     args
 }
 
+/// Maximum concurrent panel member processes to avoid CPU starvation, memory
+/// pressure, and LLM rate limit exhaustion. Unset defaults to available
+/// parallelism clamped to [1, 4]. Set to 0 to disable concurrency limits.
+#[must_use]
+pub fn panel_concurrency() -> usize {
+    std::env::var("LJOS_PANEL_CONCURRENCY")
+        .or_else(|_| std::env::var("LJOS_MAX_PARALLEL"))
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get().clamp(1, 4))
+                .unwrap_or(2)
+        })
+}
+
+fn spawn_member_pool(
+    members: &[(&Path, Vec<String>)],
+    concurrency: usize,
+    pool_script: &Path,
+) -> Result<()> {
+    let mut script = String::from("#!/bin/sh\n# Load-balanced panel member runner\n");
+    script.push_str(&format!("MAX_JOBS={concurrency}\n"));
+    script.push_str(
+        "run_job() {\n    log=\"$1\"\n    shift\n    \"$@\" >> \"$log\" 2>&1\n}\n\nwait_slot() {\n    while [ \"$(jobs -p | wc -l)\" -ge \"$MAX_JOBS\" ]; do\n        sleep 0.15\n    done\n}\n\n",
+    );
+    for (member_log, argv) in members {
+        script.push_str("wait_slot\n");
+        let quoted_args: Vec<String> = argv.iter().map(|a| tools::sh_quote(a)).collect();
+        script.push_str(&format!(
+            "run_job {} {} &\n",
+            tools::sh_quote(&member_log.display().to_string()),
+            quoted_args.join(" ")
+        ));
+    }
+    script.push_str("\nwait\n");
+    std::fs::write(pool_script, &script)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(pool_script, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let pool_log = pool_script.with_extension("log");
+    let pool_argv = vec!["sh".to_string(), pool_script.display().to_string()];
+    spawn_member(&pool_argv, &pool_log)
+}
+
 /// File a yes-or-no decision for `prompt` when nothing open is already one,
 /// sit it, write the briefs, and start one headless member per persona.
 /// The opener's own log is `log`.
@@ -4098,7 +4147,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
     let briefs = runtime_dir().join(format!("panel-{issue}"));
     let wrote = panel(&issue, &briefs)?;
     append_log(log, &wrote);
-    let mut n = 0;
+    let mut members: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for path in std::fs::read_dir(&briefs)
         .with_context(|| format!("read {}", briefs.display()))?
         .flatten()
@@ -4118,8 +4167,21 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         std::fs::write(&task_file, task)?;
         let argv = panel_member_argv(&task_file, cwd, &persona);
         let member_log = briefs.join(format!("{persona}.log"));
-        spawn_member(&argv, &member_log)?;
-        n += 1;
+        members.push((member_log, argv));
+    }
+    let n = members.len();
+    let concurrency = panel_concurrency();
+    if concurrency == 0 || n <= concurrency {
+        for (member_log, argv) in &members {
+            spawn_member(argv, member_log)?;
+        }
+    } else {
+        let pool_script = briefs.join("run_pool.sh");
+        let refs: Vec<(&Path, Vec<String>)> = members
+            .iter()
+            .map(|(l, a)| (l.as_path(), a.clone()))
+            .collect();
+        spawn_member_pool(&refs, concurrency, &pool_script)?;
     }
     let line = format!("opened {n} members on {issue}\n");
     append_log(log, &line);
@@ -12254,6 +12316,36 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
     }
 }
 
+/// Atomically find and claim the next ready work node with load-balanced selection.
+///
+/// # Errors
+///
+/// Refusal from the claim graph, or if no work is ready.
+pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
+    let actor = work_id(&occupancy_scope(assignee, "next"));
+    let mut args = vec!["claim-next".to_string(), "--assignee".into(), actor.clone()];
+    if let Some(r) = role {
+        args.push("--role".into());
+        args.push(r.to_string());
+    }
+    if let Some(s) = slack {
+        args.push("--slack".into());
+        args.push(s.to_string());
+    }
+    let ref_args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let said = run_captured("claimdag", &ref_args)?;
+    let claimed_id = said
+        .stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if !claimed_id.is_empty() {
+        write_hold(&actor, assignee, &claimed_id);
+    }
+    with_tracker(said.stdout, &claimed_id, assignee)
+}
+
 /// Hand a session node back before it is terminal: ready again, assignee
 /// cleared, generation moved.
 ///
@@ -20141,5 +20233,59 @@ mod tests {
         }
         let shown = shown.expect("ledger issue");
         assert_eq!(shown["title"].as_str(), Some("ledger only"));
+    }
+
+    #[test]
+    fn panel_concurrency_honors_env_override() {
+        let _g = env_guard();
+        let prev = std::env::var_os("LJOS_PANEL_CONCURRENCY");
+        unsafe {
+            std::env::set_var("LJOS_PANEL_CONCURRENCY", "7");
+        }
+        assert_eq!(panel_concurrency(), 7);
+        unsafe {
+            std::env::remove_var("LJOS_PANEL_CONCURRENCY");
+            std::env::set_var("LJOS_MAX_PARALLEL", "3");
+        }
+        assert_eq!(panel_concurrency(), 3);
+        unsafe {
+            std::env::remove_var("LJOS_MAX_PARALLEL");
+            match prev {
+                Some(v) => std::env::set_var("LJOS_PANEL_CONCURRENCY", v),
+                None => std::env::remove_var("LJOS_PANEL_CONCURRENCY"),
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_member_pool_generates_bounded_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run_pool.sh");
+        let log1 = dir.path().join("m1.log");
+        let log2 = dir.path().join("m2.log");
+        let members = vec![
+            (log1.as_path(), vec!["echo".to_string(), "m1".into()]),
+            (log2.as_path(), vec!["echo".to_string(), "m2".into()]),
+        ];
+        let mut text = String::from("#!/bin/sh\nMAX_JOBS=2\n");
+        text.push_str("run_job() {\n    log=\"$1\"\n    shift\n    \"$@\" >> \"$log\" 2>&1\n}\n\n");
+        text.push_str("wait_slot() {\n    while [ \"$(jobs -p | wc -l)\" -ge \"$MAX_JOBS\" ]; do\n        sleep 0.15\n    done\n}\n\n");
+        for (log, argv) in &members {
+            text.push_str("wait_slot\n");
+            let quoted: Vec<String> = argv.iter().map(|a| tools::sh_quote(a)).collect();
+            text.push_str(&format!(
+                "run_job {} {} &\n",
+                tools::sh_quote(&log.display().to_string()),
+                quoted.join(" ")
+            ));
+        }
+        text.push_str("\nwait\n");
+        std::fs::write(&script, &text).unwrap();
+
+        let read_back = std::fs::read_to_string(&script).unwrap();
+        assert!(read_back.contains("MAX_JOBS=2"));
+        assert!(read_back.contains("run_job"));
+        assert!(read_back.contains("wait_slot"));
+        assert!(read_back.contains("'echo' 'm1'"));
     }
 }
