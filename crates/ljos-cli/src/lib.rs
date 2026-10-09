@@ -4817,10 +4817,7 @@ fn correction_nudge_as(call: &HookCall, verdict: Option<bool>) -> Option<(String
 #[must_use]
 pub fn correction_cue(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
-    CORRECTION_CUES
-        .iter()
-        .find(|c| lower.contains(*c))
-        .copied()
+    CORRECTION_CUES.iter().find(|c| lower.contains(*c)).copied()
 }
 
 /// Write a correction into the pack. The model on a runner whose pack
@@ -15882,7 +15879,10 @@ mod tests {
             brief.contains("ljos vote") || brief.contains("ljos note"),
             "{brief}"
         );
-        assert!(!brief.contains("Do not vote") && !brief.contains("Do not note"), "{brief}");
+        assert!(
+            !brief.contains("Do not vote") && !brief.contains("Do not note"),
+            "{brief}"
+        );
         assert!(touches_seat("use_tool ljos__ljos_sitting"));
         assert!(!touches_seat("cargo build --release"));
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
@@ -16928,10 +16928,7 @@ mod tests {
             .find(|p| p.name == "company-panel")
             .unwrap();
         let panel = format_playbook_copy(&panel_pb);
-        assert!(
-            panel.contains("Do not set a model id"),
-            "{panel}"
-        );
+        assert!(panel.contains("Do not set a model id"), "{panel}");
         assert!(
             !panel.contains("spawn hints"),
             "a company panel names no model family: {panel}"
@@ -17603,7 +17600,12 @@ mod tests {
             "{}",
             steps[0].detail
         );
-        let tail: Vec<&str> = steps.iter().rev().take(2).map(|s| s.what.as_str()).collect();
+        let tail: Vec<&str> = steps
+            .iter()
+            .rev()
+            .take(2)
+            .map(|s| s.what.as_str())
+            .collect();
         assert!(
             tail.contains(&"pack") && tail.contains(&"host key"),
             "{steps:?}"
@@ -18687,13 +18689,20 @@ mod tests {
         let other = dir.path().join("cursor2/hooks.json");
         let kept = cursor_hook_step(&other, &claude, false);
         assert!(kept.ok && other.exists(), "{}", kept.detail);
-        let second: Value = serde_json::from_str(&std::fs::read_to_string(&other).unwrap()).unwrap();
+        let second: Value =
+            serde_json::from_str(&std::fs::read_to_string(&other).unwrap()).unwrap();
         for event in CURSOR_ONLY_EVENTS {
             let entries = second["hooks"][*event].as_array().unwrap();
             assert_eq!(entries.len(), 1, "{event}");
             assert!(is_seat_hook(&entries[0]), "{event}");
         }
-        for event in ["beforeSubmitPrompt", "postToolUse", "preCompact", "stop", "sessionEnd"] {
+        for event in [
+            "beforeSubmitPrompt",
+            "postToolUse",
+            "preCompact",
+            "stop",
+            "sessionEnd",
+        ] {
             assert!(second["hooks"][event].is_null(), "{event} is Claude's");
         }
     }
