@@ -2,7 +2,7 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## 0.27.0 (2026-10-09)
+## Unreleased
 
 - `ljos supervise` reads one harness exit and prints `restart`, `stop`, or `give-up`. Permanent restarts either way, transient only on a crash, temporary never. Three restarts inside the window give up. A restart prints `herdr agent start persona-NAME`. The command does not start the child.
 - `approve ID` in the chat grants the request when the prompt names the same conversation under a longer session string. A different conversation still grants nothing.
@@ -10,6 +10,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A tracker that keeps one file per issue is read and committed as that file. `ljos` follows vissue 0.20: when `issues/.ledger` is present, a sitting finds the issue there, and the tracker commit names `issues/<id>.org` rather than the project board.
 - A persona hand can carry an actor message (`cast`, `call`, `event`, or `exit`). The inbox file is still the markdown `hand` writes. Herdr is up when `herdr workspace list` exits 0.
 - `docs/orgmode/integration.org` places the seat among the memory systems it learns from and names the events each runner registers. `docs/orgmode/architecture.org` says how a persona pane, the actor message and `ljos supervise` fit together.
+
+## 0.27.0 (2026-10-09)
+
 - `ljos claim --next` claims the next ready node. `--role` and `--slack` are the affinity and the depth slack. The `claimdag` binary on `PATH` has to be one that serves `claim-next`.
 - A decision panel starts at most `LJOS_PANEL_CONCURRENCY` members at once. Unset, that is the machine's parallelism clamped to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
 - The status line's due count keeps its 300 ms bound: the lean listing ignored `PACKSET_TIMEOUT_MS` and waited up to thirty seconds on a writer that did not answer. A writer that answers busy is asked again up to three times, after 50, 150 and 450 ms, and the listing stops when its caller's timeout runs out.
