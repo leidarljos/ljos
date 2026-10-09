@@ -363,7 +363,7 @@ enum Cmd {
     /// The memory hook a runner or a policy layer calls before an action: reads the
     /// hook JSON (or plain text) on stdin, answers with the memories the action activates.
     Hook {
-        /// Most memories to inject per call; each is injected once per session.
+        /// Most memories to inject per call; each is injected once between compactions.
         #[arg(long, default_value_t = 5)]
         limit: usize,
         /// The event, for a runner whose payload does not name it
