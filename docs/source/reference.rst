@@ -138,6 +138,16 @@ Command line
 |                                                                                                                                           |                           | skill, and write the personas into its ``agents`` directory                                                                                                                            |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
+``send SEAT TEXT`` writes to one seat. ``send --group NAME TEXT`` writes to
+the other members of that group. ``--interrupt`` leads the next prompt.
+``--issue ID`` threads the message on that vissue issue, and the atom takes
+the issue's scope so ``ljos sync`` carries it in that repository's sealed
+log. ``inbox`` lists unread mail and writes no receipt. ``read ID`` writes
+one. ``reply ID TEXT`` answers the sender and keeps the issue.
+``group NAME --add SEAT`` records a member. The prompt hook prints unread mail and writes
+the receipt when the runner is given the note. A shell seat polls ``ljos
+inbox``.
+
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.
 
@@ -146,7 +156,7 @@ Model Context Protocol (MCP) tools
 
 Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_request_approval``, ``ljos_claim``,
-``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings`` (a reader without ``remember``), ``ljos_bump_plan`` (a reader with ``dry_run``), ``ljos_handover``, ``ljos_receive``. Readers: ``ljos_search`` (with ``as_of``), ``ljos_conflicts``,
+``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings`` (a reader without ``remember``), ``ljos_bump_plan`` (a reader with ``dry_run``), ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``as_of``), ``ljos_conflicts``, ``ljos_inbox``,
 ``ljos_timeline``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall``,
 ``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:

@@ -106,6 +106,31 @@ or a hook. =--fail-on-deny= exits 1 when the answer is a deny. Without
 the flag, =ljos hook= and =ljos policy= still exit 0, and a runner that
 reads the JSON is unchanged. An =ask= still exits 0; the text says =ask=.
 
+* Write to another seat
+
+Seats on one pack write to each other as pack atoms. =ljos sync= carries
+those atoms in the sealed log, so a seat on another machine sees them
+after a sync.
+
+#+begin_src console
+$ ljos group ops --add alice --add bob
+$ ljos send bob "the build is red" --issue acme-4 --interrupt
+$ ljos inbox
+$ ljos read ID
+$ ljos reply ID "looking"
+#+end_src
+
+=ljos send SEAT TEXT= writes to one seat. =ljos send --group NAME TEXT=
+writes to the other members. =--interrupt= puts the message ahead of the
+others on the next prompt. =--issue ID= threads it on that vissue issue,
+and a reply keeps the issue. =ljos inbox= lists what this seat has not
+read, and writes no receipt. =ljos read ID= writes one. =ljos reply ID
+TEXT= writes back to the sender.
+
+A runner with the prompt hook is shown unread mail at the start of the
+next prompt, and that delivery writes the receipt. A shell seat has no
+hook, so it polls =ljos inbox= and reads with =ljos read=.
+
 * Inject memory at the point of action
 
 Add =hooks= to the runner's table and onboard again:

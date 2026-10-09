@@ -37,7 +37,8 @@ COMMAND= prints the answer for one command. =ljos= is the one command and the on
 Context Protocol (MCP) server over those habitats. It adds three loops
 the habitats do not have alone: memory that is reviewed and forgotten
 on a clock, agreement that weighs voters by who turned out right, and
-a handover another seat can check and import.
+a handover another seat can check and import. Seats on one pack also
+write to each other with =ljos send=; the atoms travel in the sealed sync log.
 
 Everything is a file a person can open: Org headings, JSON lines, a
 content-addressed store, a Cap'n Proto snapshot. No model is required to

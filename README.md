@@ -193,6 +193,12 @@ source ~/.config/ljos/grokbot.env              # LJOS_SEAT=grokbot; the process 
 echo "$prompt" | ljos hook --prompt            # the prompt hook, from a shell
 ljos policy --fail-on-deny -- git push --force # exit 1 on a deny; without the flag the exit stays 0
 ljos findings out/campaign.json --remember     # an eb-stack campaign's typed findings, one lesson each under the module that failed
+ljos group ops --add bob                       # a group of seats; membership is a pack atom
+ljos send bob "the build is red" --issue acme-4 --interrupt
+ljos send --group ops "the build is red"
+ljos inbox                                     # unread mail; listing writes no receipt
+ljos read <id>                                 # the receipt the sender sees
+ljos reply <id> "looking"                      # back to the sender, on the same issue
 ```
 
 ## The loop, in two verbs
@@ -215,13 +221,17 @@ The seat is the program that connected. `ljos-mcp` names it after the client tha
 
 Nothing needs a variable set: `ljos remember` starts the writer when none is answering, the seat's memory is the one workspace `seat` from any directory, and every claim carries the seat that wrote it.
 
+## Mail
+
+`ljos send SEAT TEXT` writes a message to a named seat. `ljos send --group NAME TEXT` writes to the other members of that group. `--interrupt` leads the next prompt. `--issue ID` threads the message on a vissue issue, and the atom takes that issue's scope so `ljos sync` carries it in the sealed log. `ljos inbox` lists unread mail and writes no receipt. `ljos read ID` writes one. `ljos reply ID TEXT` answers the sender and keeps the issue. The prompt hook prints unread mail and writes the receipt when the runner is given the note. A shell seat polls `ljos inbox`.
+
 ## The smoke test
 
 `scripts/smoke.sh` runs every loop on scratch stores: memory, agreement, learning, a sitting and its finish, a rewrite that closes its earlier claim, habits, an as-of read, a signed handover received and then refused after one byte is altered, a rule through the hook and through `policy`, then two seats (distinct `LJOS_SEAT` and `*_SESSION_ID` each) handing one ticket in sequence (A sits, cites a deed, hands over; B imports; A releases; B sits, both vote, consensus, finish closes, tracker git reports the commit), then `scripts/herd.sh` (eight sittings, one contended ticket, eight finishes, one island fire). `scripts/terra/` holds the Slurm scripts that build, smoke and herd the seat on the build host, as run.
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio: forty-one tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the soonest eight claims and the total still due. Paste this where the runner keeps its servers:
+`ljos-mcp` serves the same verbs over stdio: forty-seven tools, each opening with when to call it, the protocol at `ljos://protocol`, the cards read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the soonest eight claims and the total still due. Paste this where the runner keeps its servers:
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
