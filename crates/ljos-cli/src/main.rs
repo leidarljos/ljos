@@ -54,6 +54,8 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
+    /// Write one agent proposal into the pack. Until then it is not a memory.
+    Accept { id: String },
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
         id: String,
@@ -729,6 +731,9 @@ fn main() -> Result<()> {
             let body =
                 packset_write_as("Prefer", &join(&text), as_persona.as_deref(), Some(false))?;
             println!("{}", format_write_ack(&body));
+        }
+        Cmd::Accept { id } => {
+            print!("{}", ljos_cli::admit::accept(&id)?);
         }
         Cmd::Forget { id, why } => {
             let body = packset_forget(&id, why.as_deref())?;

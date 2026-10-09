@@ -4,6 +4,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `finish --lesson` and `findings --remember` file origin `agent-derived` as proposals. The prompt hook files a correction as a proposal. `ljos accept` writes the atom. `remember` and `prefer` stay `user-declared`. An import from `receive` or `sync` is `peer`. A writer without the direct proposal path keeps the proposal locally.
 - `ljos inbox` exits non-zero when the pack does not answer, including a writer that refuses kind `message`. `ljos send` names the packset version that keeps mail before it posts. `ljos hook --prompt` writes a receipt for each message it shows. `ljos inbox` does not.
 - Seats message each other through the pack. `ljos send` writes to a seat or a group. `--interrupt` leads the next prompt. `--issue` threads the message on a vissue issue. `ljos inbox` lists unread mail. `ljos read` writes the receipt. `ljos reply` answers the sender and keeps the issue. The prompt hook prints unread mail. A shell seat polls `ljos inbox`. `ljos sync` carries the atoms in the sealed log.
 - A shell-only runner (`ljos onboard --harness grokbot`, or `shell`) writes the skill and an env file that sets `LJOS_SEAT`. It registers no MCP server and no hook. `ljos hook --prompt` reads stdin as the prompt. `ljos hook --fail-on-deny` and `ljos policy --fail-on-deny` exit 1 on a deny. Without the flag the exit stays 0.

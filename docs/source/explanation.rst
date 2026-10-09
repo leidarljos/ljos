@@ -264,9 +264,14 @@ playbook grown by deltas is a pack of one-claim atoms superseded by head,
 and MemOS's provenance and versions are an atom's writer, deeds and live
 window. ReasoningBank's lessons from failure are ``finish --lesson``, and
 the hook hands back what bears on a command when it fails. A claim enters
-the pack when someone says to keep it, or when the hook reads a prompt as
-a correction. Neither path reads a runner's own memory, so the two sit
-side by side without either writing the other.
+the pack when someone says to keep it with ``remember`` or ``prefer``, and
+that write is origin ``user-declared``. ``finish --lesson`` and
+``findings --remember`` file origin ``agent-derived`` as proposals. The
+prompt hook files a correction as a proposal and does not write it.
+``ljos accept`` writes a proposal, and so does the same text typed with
+``remember`` or ``prefer``. An import from ``receive`` or ``sync`` is origin
+``peer``. None of these paths reads a runner's own memory, so the seat
+and that memory sit side by side without either writing the other.
 
 What the others have that the seat does not: extraction. A model reading
 a transcript finds facts nobody said ``Remember`` to, and on a benchmark of

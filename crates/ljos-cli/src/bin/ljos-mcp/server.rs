@@ -1285,7 +1285,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work on an issue ends; it is the whole closing of a sitting: remember the lesson, fire the island so its links gain weight, complete the session node, and learn from the outcome when one is named. Pass the lesson: a sitting that taught nothing worth two sentences is rare, and the report says so when none is given.",
+        description = "Call this when the work on an issue ends; it is the whole closing of a sitting: file the lesson as a proposal, fire the island so its links gain weight, complete the session node, and learn from the outcome when one is named. The lesson is not a memory until `ljos accept` on the command line, or until the person types the same words with remember or prefer. Pass the lesson: a sitting that taught nothing worth two sentences is rare, and the report says so when none is given.",
         annotations(
             title = "Close a sitting",
             read_only_hint = false,
@@ -1698,7 +1698,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after eb_campaign_run or eb_campaign_status on a bump: the campaign's typed findings, one row each with its class, stage, recipe, the error line and the fix. With remember, one lesson per finding a person or a seat resolved goes to the pack under the recipe's name, so the next bump of that recipe recalls it; with issue, the state file is cited as a deed on the issue. Findings a later attempt merely got past are skipped unless all.",
+        description = "Call this after eb_campaign_run or eb_campaign_status on a bump: the campaign's typed findings, one row each with its class, stage, recipe, the error line and the fix. With remember, one lesson per finding a person or a seat resolved is filed as a proposal under the recipe's name. It is not a memory until `ljos accept` on the command line. With issue, the state file is cited as a deed on the issue. Findings a later attempt merely got past are skipped unless all.",
         annotations(
             title = "Campaign findings",
             read_only_hint = false,

@@ -8,7 +8,7 @@ Command line
 |                                                                                                                                           |                           | ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``; the name is a tracker ``playbook:`` note until finish or release                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``                         | all                       | close a sitting: remember, fire the island, complete, learn; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder    |
-|                                                                                                                                           |                           | (absent, this conversation's holder); ``--close`` closes the ticket only when the work is accepted, else the ticket stays                                                              |
+|                                                                                                                                           |                           | (absent, this conversation's holder); ``--close`` closes the ticket only when the work is accepted, else the ticket stays. ``--lesson`` is a proposal                                  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``calibrate -p PROJECT [--rounds N]``                                                                                                     | consensus, pack           | trust rows from the project's voting history (Dawid-Skene accuracy)                                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -147,6 +147,13 @@ not answer is an error. ``read ID`` writes one receipt. ``reply ID TEXT``
 answers the sender and keeps the issue. ``group NAME --add SEAT`` records
 a member. ``ljos hook --prompt`` writes a receipt for each message it
 shows. A shell seat polls ``ljos inbox``.
+
+``remember`` and ``prefer`` write origin ``user-declared``. ``finish --lesson``
+and ``findings --remember`` file origin ``agent-derived`` and do not write
+the atom. ``ljos accept ID`` writes it. The same text typed with
+``remember`` or ``prefer`` writes it as ``user-declared`` and satisfies the
+proposal. An atom taken by ``receive --import`` or by ``sync`` has origin
+``peer``, whatever origin the sender wrote.
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.

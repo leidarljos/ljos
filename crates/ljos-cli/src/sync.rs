@@ -364,6 +364,10 @@ pub fn incoming(
                 entities.push(Value::String(tag));
             }
             map.insert("entities".into(), Value::Array(entities));
+            map.insert(
+                "origin".into(),
+                Value::String(crate::admit::ORIGIN_PEER.to_string()),
+            );
             map.remove("id");
         }
         post.push(atom);
@@ -458,7 +462,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
             if let Some(map) = atom.as_object_mut() {
                 map.insert("workspace".into(), Value::String(workspace.clone()));
             }
-            match client.post_atom(&atom) {
+            match crate::admit::post_kept(&client, &atom) {
                 Ok(_) => kept += 1,
                 Err(_) => refused += 1,
             }
@@ -745,7 +749,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e == "sync:rglat")));
+        assert!(got.post.iter().all(|a| a["origin"] == "peer"));
         assert_eq!(got.retired, vec![crate::work_id("dropped")]);
+        let claimed = "{\"id\":\"c\",\"text\":\"claimed\",\"kind\":\"lesson\",\"origin\":\"user-declared\",\"entities\":[]}\n";
+        let overwrote = incoming(claimed, "rglat", &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(overwrote.post[0]["origin"], "peer");
     }
 
     #[test]

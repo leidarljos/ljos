@@ -119,8 +119,8 @@ python3 scripts/test_approval.py target/debug/ljos-mcp
   not edited.
 - A tracker, [vissue](https://github.com/leidarljos/vissue): plain org files
   in a git repository. `ljos sitting ISSUE` opens the work and claims it;
-  `ljos finish ISSUE --lesson "..."` closes the loop and records what it
-  taught.
+  `ljos finish ISSUE --lesson "..."` closes the loop and files what it
+  taught. `ljos accept ID` writes that lesson.
 - A gate on shell commands: rules in the pack (`ljos rule`), tried on each
   command a line runs, and a guard that keeps agents from rewriting the
   gate's own binaries and hook files. Pushes are free to your own unreleased
@@ -150,7 +150,8 @@ Citing a deed names it; the bytes stay in deedar. Neither a finish nor completin
 
 ```
 ljos sitting vissue-xxxx --playbook sit        # doctor, cards, due, island, playbook, recall, timeline, claim
-ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # remember, fire, complete, learn
+ljos finish vissue-xxxx --lesson "..." [--outcome ship]   # file the lesson, fire, complete, learn
+ljos accept <id>                                   # write a filed proposal into the pack
 ljos calibrate -p project                      # trust rows from the voting history, no truth labels
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
@@ -196,7 +197,7 @@ ljos onboard --harness grokbot --skills ~/.grokbot/skills   # shell-only: skill 
 source ~/.config/ljos/grokbot.env              # LJOS_SEAT=grokbot; the process tree is not this seat
 echo "$prompt" | ljos hook --prompt            # the prompt hook, from a shell
 ljos policy --fail-on-deny -- git push --force # exit 1 on a deny; without the flag the exit stays 0
-ljos findings out/campaign.json --remember     # an eb-stack campaign's typed findings, one lesson each under the module that failed
+ljos findings out/campaign.json --remember     # file each resolved finding as a proposal
 ljos group ops --add bob                       # a group of seats; membership is a pack atom
 ljos send bob "the build is red" --issue acme-4 --interrupt
 ljos send --group ops "the build is red"
@@ -207,7 +208,7 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## The loop, in two verbs
 
-`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. Absent `--playbook`, a name already bound, else a closed-set token in the title, else `sit`. The playbook name is a tracker note until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is remembered, the island fires, the session node completes, and a named outcome shrinks the voters it refuted. The ticket stays open unless `--close` is given, which closes it only when the work is accepted. The loop that makes the seat a memory runs every time, not only when somebody remembers it.
+`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. Absent `--playbook`, a name already bound, else a closed-set token in the title, else `sit`. The playbook name is a tracker note until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is filed as a proposal with origin `agent-derived`, and `ljos accept` writes it. The island fires, the session node completes, and a named outcome shrinks the voters it refuted. A lesson typed with `ljos remember` stays `user-declared`. The ticket stays open unless `--close` is given, which closes it only when the work is accepted. The loop that makes the seat a memory runs every time, not only when somebody remembers it.
 
 When the tracker is a git checkout, the claim and the finish each commit the ticket's `issues.org` (that file only) and push it, so another host sees the claim and the closure. `LJOS_TRACKER_GIT=commit` keeps it local; `off` skips it. `ljos doctor` names how many commits origin lacks and fails the tracker row when that count sits through the push wait.
 

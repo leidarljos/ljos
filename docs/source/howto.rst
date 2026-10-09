@@ -576,12 +576,13 @@ When the campaign ends, its typed findings are the lessons:
    ljos findings out/campaign.json
    ljos findings out/campaign.json --remember --issue demo-319z
 
-The first prints one line per finding. The second writes one lesson per
+The first prints one line per finding. The second files one lesson per
 finding a person or a seat resolved, under the recipe's name, the
-package and the failure class, and cites the state file on the issue as
-a deed. A finding a later attempt merely got past is skipped; ``--all``
-takes it too. The next bump of that recipe recalls the lesson from its
-island:
+package and the failure class, with origin ``agent-derived``. It does not
+write the atom. ``ljos accept ID`` writes it, and the command cites the
+state file on the issue as a deed. A finding a later attempt merely got
+past is skipped; ``--all`` takes it too. The next bump of that recipe
+recalls the lesson from its island once the proposal has been accepted:
 
 ::
 
@@ -678,7 +679,7 @@ and ``ljos release`` hands it back.
 .. code:: console
 
    $ ljos finish proj-1a2b --lesson "CombMNZ held on turns. RRF lost two points." --outcome ship
-   remembered 51778929d855529fcb8df3f4d1c4d692
+   proposed 51778929d855529fcb8df3f4d1c4d692 as agent-derived; `ljos accept 51778929d855529fcb8df3f4d1c4d692` writes it
    fired the island for "Ship the fuse change?": 8 memories
    completed the session node for proj-1a2b as done
    learned from outcome "ship": 6 trust rows rewritten

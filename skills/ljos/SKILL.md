@@ -116,8 +116,9 @@ Every piece of work has an issue before it has a claim.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
-  is a preference the pack does not hold: write it with `ljos prefer`
-  before the work it corrects, not after. A
+  is filed as a proposal. The hook does not write it. It becomes a
+  preference when the person writes it with `ljos prefer`, or when
+  `ljos accept` writes the proposal. A
   lesson that rewrites an earlier one closes the earlier one's window; the
   verb says `revises N earlier memories` when it did. `ljos consolidate`
   reports the pairs the rule would close across what is held, and
@@ -260,11 +261,12 @@ is refused. Resolve each finding through eb-stack's `campaign finding
 resolve` with the action and the files it changed, so the lesson below
 carries the fix.
 
-Every typed finding the campaign records is a lesson once somebody
+Every typed finding the campaign records is a proposal once somebody
 resolved it: `ljos findings out/campaign.json --remember --issue ISSUE`
-(the MCP `ljos_findings`) writes one lesson per resolved finding under
-the recipe's name, the package and the failure class, and cites the
-state file on the issue. A finding a later attempt merely got past is
+(the MCP `ljos_findings`) files one lesson per resolved finding under
+the recipe's name, the package and the failure class, with origin
+`agent-derived`, and cites the state file on the issue. `ljos accept ID`
+writes that lesson. A finding a later attempt merely got past is
 not a lesson; `--all` takes those too. A lesson the seat writes by hand
 names the recipe, the step, the error line and the fix: "GCCcore-15.2.0
 on terra: compile failed in the build step with linux/scc.h missing.
@@ -291,7 +293,9 @@ One verb closes the sitting:
 
     ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 
-It remembers the lesson, fires the island, completes the session node, and
+It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
+writes that lesson into the pack. A lesson the person types with `ljos remember`
+stays `user-declared`. It fires the island, completes the session node, and
 learns from the outcome when one is named. Without `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
 same four steps are:

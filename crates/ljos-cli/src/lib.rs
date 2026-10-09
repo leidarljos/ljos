@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use packset_client::{Hit, PacksetClient};
 use serde_json::Value;
 
+pub mod admit;
 pub mod approval;
 pub mod hud;
 pub mod jev;
@@ -3772,6 +3773,9 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let (correction, choice) = judged.as_ref().map_or((None, None), |(_, j)| {
         (Some(j.correction >= j.cue_at), Some(j.choice >= j.cue_at))
     });
+    if correction == Some(true) {
+        store_judged_correction(call);
+    }
     // Jev's injection answer runs high on plain requests, so it counts
     // only beside pasted material in the prompt: two signals, not one.
     let injection = judged
@@ -5211,9 +5215,10 @@ fn correction_nudge_as(call: &HookCall, verdict: Option<bool>) -> Option<(String
     }
     Some((
         key,
-        "This prompt reads as a correction. Before the work: write what it corrects as one \
+        "This prompt reads as a correction. The hook filed a proposal and did not write it. \
+         Before the work: write what it corrects as one \
          `ljos prefer \"...\"` (a standing choice) or `ljos remember \"...\"` (a lesson), \
-         so the pack holds it and the hook can raise it next time."
+         or run `ljos accept` on the proposal, so the pack holds it and the hook can raise it next time."
             .to_string(),
     ))
 }
@@ -5225,27 +5230,40 @@ pub fn correction_cue(text: &str) -> Option<&'static str> {
     CORRECTION_CUES.iter().find(|c| lower.contains(*c)).copied()
 }
 
-/// Write a correction into the pack. The model on a runner whose pack
-/// tools are behind a search step does not, and the hook already decided
-/// the prompt is a correction. Once per session per cue. A pack that does
-/// not answer is left for the note.
+/// File a correction as a proposal. The hook does not write a preference.
+/// Once per session per cue. A pack that does not answer is left for the note.
 pub fn store_correction(call: &HookCall) {
-    if call.event != "UserPromptSubmit" {
-        return;
-    }
     let Some(hit) = correction_cue(&call.cue) else {
         return;
     };
-    let key = format!("correction-stored:{hit}");
-    if seen_ids(call.session.as_deref()).contains(&key) {
+    file_correction(call, &format!("correction-stored:{hit}"));
+}
+
+/// Jev said this prompt is a correction, with or without a phrase cue.
+fn store_judged_correction(call: &HookCall) {
+    file_correction(call, "correction-stored:judged");
+}
+
+fn file_correction(call: &HookCall, key: &str) {
+    if call.event != "UserPromptSubmit" {
+        return;
+    }
+    if seen_ids(call.session.as_deref()).contains(key) {
         return;
     }
     let text: String = call.cue.trim().chars().take(400).collect();
     if text.len() < 12 {
         return;
     }
+    let key = key.to_string();
     let wrote = with_pack_timeout(1500, || {
-        packset_write_as("Prefer", &text, None, Some(false)).is_ok()
+        let Ok(client) = pack() else {
+            return false;
+        };
+        let workspace = client.workspace();
+        let mut atom = atom_body("preference", &text, &workspace);
+        stamp_horizon(&mut atom, "preference", &text, Some(false));
+        admit::propose_atom(&client, atom).is_ok()
     });
     if wrote {
         mark_seen(call.session.as_deref(), &[key]);
@@ -6323,11 +6341,12 @@ fn post_claim_horizon(
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
-    with_writer(|| {
-        client
-            .post_atom(&atom)
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+    let posted = with_writer(|| {
+        admit::post_kept(client, &atom).with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })?;
+    admit::satisfy_text(trimmed);
+    Ok(posted)
 }
 
 /// `horizon:standing` or `horizon:transient` on a claim as it is written.
@@ -6432,14 +6451,15 @@ pub fn packset_write_as(
     let mut atom = atom_body(kind, trimmed, &workspace);
     add_entities(&mut atom, [persona_entity(name)]);
     stamp_horizon(&mut atom, kind, trimmed, transient);
+    admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
     // Its own tree: the persona's conclusions replace and duplicate among
     // themselves, not against the seat's or another persona's.
     atom["set"] = Value::String(persona_set(name));
-    with_writer(|| {
-        client
-            .post_atom(&atom)
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    let posted = with_writer(|| {
+        admit::post_kept(&client, &atom).with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })?;
+    admit::satisfy_text(trimmed);
+    Ok(posted)
 }
 
 /// Retire one atom from the workspace the cwd resolves to, optionally naming
@@ -11457,8 +11477,12 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
                     entities.push(Value::String(sender.clone()));
                 }
                 map.insert("entities".into(), Value::Array(entities));
+                map.insert(
+                    "origin".into(),
+                    Value::String(admit::ORIGIN_PEER.to_string()),
+                );
             }
-            match client.post_atom(&atom) {
+            match admit::post_kept(&client, &atom) {
                 Ok(_) => kept += 1,
                 Err(e) => refused.push(e.to_string()),
             }
@@ -12957,7 +12981,7 @@ fn hold_alive(hold: &Hold) -> bool {
 /// `; revises N earlier` when the pack closed earlier memories' windows
 /// for this one (same kind, a rewrite of the same claim or an explicit
 /// `supersedes`), else empty. The revision is the pack's; this names it.
-fn revision_note(body: &Value) -> String {
+pub(crate) fn revision_note(body: &Value) -> String {
     match body["supersedes"].as_array().map(Vec::len).unwrap_or(0) {
         0 => String::new(),
         1 => "; revises 1 earlier memory, now closed".to_string(),
@@ -13468,12 +13492,22 @@ pub fn finish(
         Some(text) => {
             // A lesson learned on an issue belongs to the scope of the
             // repository that holds the issue, wherever it was written.
+            // It is a proposal until `ljos accept`, or until the person
+            // types the same words.
             let scope = sync::scope_for_issue(issue);
-            let body = packset_write_scoped("Remember", text, issue, scope.as_deref())?;
+            let client = pack()?;
+            let workspace = client.workspace();
+            let mut atom = atom_body("lesson", text, &workspace);
+            let mut tags = vec![format!("issue:{}", issue.trim())];
+            if let Some(scope) = scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                tags.push(format!("scope:{scope}"));
+            }
+            add_entities(&mut atom, tags);
+            stamp_horizon(&mut atom, "lesson", text, None);
+            let filed = admit::propose_atom(&client, atom)?;
             out.push_str(&format!(
-                "remembered {}{}\n",
-                body.get("id").and_then(Value::as_str).unwrap_or("-"),
-                revision_note(&body)
+                "proposed {} as agent-derived; `ljos accept {}` writes it\n",
+                filed.id, filed.id
             ));
         }
         None => out.push_str(
@@ -14666,8 +14700,8 @@ pub fn format_findings(campaign: &Campaign) -> String {
 pub struct Remembered {
     pub id: String,
     pub lesson: String,
-    /// The pack's answer: the atom id, `held` when the pack already had
-    /// it, `skipped` for a retry supersession, else the refusal.
+    /// The pack's answer: `proposed ID` for a lesson filed and not yet
+    /// written, `skipped` for a retry supersession, else the refusal.
     pub result: String,
 }
 
@@ -14704,12 +14738,8 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         let lesson = finding_lesson(&campaign, f);
         let mut atom = atom_body("lesson", &lesson, &workspace);
         add_entities(&mut atom, finding_entities(&campaign, f));
-        let result = match client.post_atom(&atom) {
-            Ok(body) => format!(
-                "{}{}",
-                body["id"].as_str().unwrap_or("written"),
-                revision_note(&body)
-            ),
+        let result = match admit::propose_atom(&client, atom) {
+            Ok(filed) => format!("proposed {}", filed.id),
             Err(e) => format!("refused: {e}"),
         };
         out.push(Remembered {
@@ -20976,7 +21006,237 @@ mod tests {
         assert!(req.contains("the default fuse is CombMNZ"), "{req}");
         assert!(req.contains("\"level\":\"explicit\""), "{req}");
         assert!(req.contains("horizon:transient"), "{req}");
+        assert!(req.contains("\"origin\":\"user-declared\""), "{req}");
         assert!(!req.contains("extract"), "{req}");
+    }
+
+    /// Many requests, each answered by `on`. The log is the request line
+    /// plus ` origin` when the body carried that field.
+    fn serve_http(
+        on: impl Fn(&str) -> (u16, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let req = read_http(&mut s);
+                let first = req.lines().next().unwrap_or("");
+                let mark = if req.contains("\"origin\"") {
+                    " origin"
+                } else {
+                    ""
+                };
+                log.lock().unwrap().push(format!("{first}{mark}"));
+                let (code, body) = on(&req);
+                let status = match code {
+                    200 => "200 OK",
+                    400 => "400 Bad Request",
+                    403 => "403 Forbidden",
+                    404 => "404 Not Found",
+                    _ => "500 Internal Server Error",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    struct HoldEnv {
+        pairs: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl HoldEnv {
+        fn set(pairs: &[(&'static str, &str)]) -> Self {
+            let pairs = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let prev = std::env::var_os(k);
+                    unsafe { std::env::set_var(k, v) };
+                    (*k, prev)
+                })
+                .collect();
+            Self { pairs }
+        }
+    }
+
+    impl Drop for HoldEnv {
+        fn drop(&mut self) {
+            for (k, prev) in &self.pairs {
+                unsafe {
+                    match prev {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    /// An agent lesson stays a proposal. Accept writes a lesson with origin
+    /// `agent-derived`, not a user preference. The person's own prefer of
+    /// the same words is the path that writes `user-declared`.
+    #[test]
+    fn an_agent_lesson_is_not_a_user_preference_without_accept() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.contains("POST /v1/proposals") {
+                return (
+                    403,
+                    r#"{"error":"extract is not allowed on onDemand"}"#.into(),
+                );
+            }
+            if path.contains("POST /v1/atoms") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let n = slot.lock().unwrap().len();
+                atom["id"] = Value::String(format!("atom-{n}"));
+                slot.lock().unwrap().push(atom.clone());
+                return (200, atom.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+
+        let user = packset_write_as("Remember", "the default fuse is CombMNZ", None, None).unwrap();
+        assert_eq!(user["origin"], "user-declared");
+        assert_eq!(user["kind"], "lesson");
+
+        let client = pack().unwrap();
+        let lesson = "always build on the cluster fuse";
+        let mut atom = atom_body("lesson", lesson, &client.workspace());
+        stamp_horizon(&mut atom, "lesson", lesson, None);
+        let filed = admit::propose_atom(&client, atom).unwrap();
+        assert!(!filed.remote);
+
+        store_correction(&HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "you should have used the cluster for this fuse run".into(),
+            session: Some("launder".into()),
+            shape: HookShape::Asks,
+        });
+
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(
+            live.len(),
+            1,
+            "the proposal and the hook wrote no atom: {live:?}"
+        );
+        assert!(live.iter().all(|a| a["text"] != lesson));
+        assert!(live.iter().all(|a| a["kind"] != "preference"));
+        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        assert!(proposals.contains("\"status\":\"open\""), "{proposals}");
+        assert!(proposals.contains("agent-derived"), "{proposals}");
+        assert!(proposals.contains(lesson), "{proposals}");
+
+        let said = admit::accept(&filed.id).unwrap();
+        assert!(said.contains("agent-derived"), "{said}");
+        let live = stored.lock().unwrap().clone();
+        let admitted: Vec<_> = live.iter().filter(|a| a["text"] == lesson).collect();
+        assert_eq!(admitted.len(), 1, "{live:?}");
+        assert_eq!(admitted[0]["kind"], "lesson");
+        assert_eq!(admitted[0]["origin"], "agent-derived");
+        assert!(live.iter().all(|a| a["kind"] != "preference"), "{live:?}");
+
+        let choice = "use uv for every script";
+        let mut pref = atom_body("preference", choice, &client.workspace());
+        stamp_horizon(&mut pref, "preference", choice, Some(false));
+        let open = admit::propose_atom(&client, pref).unwrap();
+        let wrote = packset_write_as("Prefer", choice, None, Some(false)).unwrap();
+        assert_eq!(wrote["origin"], "user-declared");
+        assert_eq!(wrote["kind"], "preference");
+        let again = admit::accept(&open.id).unwrap();
+        assert!(
+            again.contains("already written by remember or prefer"),
+            "{again}"
+        );
+        let prefs: Vec<_> = stored
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a["text"] == choice)
+            .cloned()
+            .collect();
+        assert_eq!(
+            prefs.len(),
+            1,
+            "accept did not post a second atom: {prefs:?}"
+        );
+        assert_eq!(prefs[0]["origin"], "user-declared");
+    }
+
+    #[test]
+    fn a_writer_that_refuses_origin_still_takes_the_claim() {
+        let _g = env_guard();
+        let (url, log) = serve_http(|req| {
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if body.contains("\"origin\"") {
+                (400, r#"{"error":"unknown field origin"}"#.into())
+            } else {
+                (
+                    200,
+                    r#"{"id":"atom-1","kind":"lesson","text":"kept"}"#.into(),
+                )
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let body = packset_write_as("Remember", "kept without the field", None, None).unwrap();
+        assert_eq!(body["id"], "atom-1");
+        let lines = log.lock().unwrap().clone();
+        assert!(lines[0].contains("origin"), "{lines:?}");
+        assert!(!lines[1].contains("origin"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_direct_proposal_is_accepted_on_the_writer() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let (url, log) = serve_http(|req| {
+            let path = req.lines().next().unwrap_or("");
+            if path.contains("POST /v1/proposals/accept") {
+                (
+                    200,
+                    r#"{"id":"atom-9","kind":"lesson","origin":"agent-derived"}"#.into(),
+                )
+            } else if path.contains("POST /v1/proposals") {
+                (200, r#"{"id":"prop-9"}"#.into())
+            } else {
+                (500, r#"{"error":"live atom"}"#.into())
+            }
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let client = pack().unwrap();
+        let atom = atom_body(
+            "lesson",
+            "remote lesson stays a proposal",
+            &client.workspace(),
+        );
+        let filed = admit::propose_atom(&client, atom).unwrap();
+        assert!(filed.remote);
+        let said = admit::accept(&filed.id).unwrap();
+        assert!(said.contains("agent-derived"), "{said}");
+        let lines = log.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains("/v1/proposals/accept")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().all(|l| !l.contains("/v1/atoms")), "{lines:?}");
     }
 
     #[test]
