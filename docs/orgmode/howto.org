@@ -124,12 +124,14 @@ $ ljos reply ID "looking"
 writes to the other members. =--interrupt= puts the message ahead of the
 others on the next prompt. =--issue ID= threads it on that vissue issue,
 and a reply keeps the issue. =ljos inbox= lists what this seat has not
-read, and writes no receipt. =ljos read ID= writes one. =ljos reply ID
-TEXT= writes back to the sender.
+read, and writes no receipt. A pack that does not answer is an error.
+=ljos send= names the packset version that keeps mail. =ljos read ID=
+writes one receipt. =ljos reply ID TEXT= writes back to the sender.
 
-A runner with the prompt hook is shown unread mail at the start of the
-next prompt, and that delivery writes the receipt. A shell seat has no
-hook, so it polls =ljos inbox= and reads with =ljos read=.
+=ljos hook --prompt= shows unread mail at the start of the next prompt
+and writes a receipt for each message it shows. Shown there is read.
+A shell seat has no hook, so it polls =ljos inbox= and reads with
+=ljos read=.
 
 * Inject memory at the point of action
 

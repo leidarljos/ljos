@@ -20765,6 +20765,162 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
     }
 
+    /// Answers one scratch pack: `down` fails the listing, `refuse` rejects
+    /// kind `message`, `keep` accepts the kind and refuses the empty probe.
+    fn serve_pack(kind: &'static str) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&posts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let req = read_http(&mut s);
+                let line = req.lines().next().unwrap_or("");
+                let (code, body): (u16, &str) = if line.starts_with("GET /v1/status") {
+                    (200, r#"{"version":"0.12.1"}"#)
+                } else if line.starts_with("GET /v1/atoms") {
+                    if kind == "down" {
+                        (500, r#"{"error":"the store is down"}"#)
+                    } else {
+                        (200, r#"{"atoms":[]}"#)
+                    }
+                } else if line.starts_with("POST /v1/atoms") {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if kind == "refuse" {
+                        (400, r#"{"error":"unknown atom kind: message"}"#)
+                    } else if req.contains("\"text\":\"\"") {
+                        (400, r#"{"error":"atom text is required"}"#)
+                    } else {
+                        (200, r#"{"id":"m1","kind":"message"}"#)
+                    }
+                } else {
+                    (500, r#"{"error":"unexpected"}"#)
+                };
+                let status = match code {
+                    200 => "200 OK",
+                    400 => "400 Bad Request",
+                    _ => "500 Internal Server Error",
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), posts)
+    }
+
+    /// Set the pack URL for one test and put the previous values back,
+    /// including when the test panics.
+    struct PackUrl {
+        url: Option<String>,
+        seat: Option<String>,
+        timeout: Option<String>,
+    }
+
+    impl PackUrl {
+        fn set(url: &str) -> Self {
+            let take = |key: &str| std::env::var(key).ok();
+            let held = Self {
+                url: take("PACKSET_URL"),
+                seat: take("LJOS_SEAT"),
+                timeout: take("PACKSET_TIMEOUT_MS"),
+            };
+            unsafe {
+                std::env::set_var("PACKSET_URL", url);
+                std::env::set_var("LJOS_SEAT", "inky");
+                std::env::set_var("PACKSET_TIMEOUT_MS", "2000");
+            }
+            held
+        }
+    }
+
+    impl Drop for PackUrl {
+        fn drop(&mut self) {
+            let put = |key: &str, prev: &Option<String>| unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            };
+            put("PACKSET_URL", &self.url);
+            put("LJOS_SEAT", &self.seat);
+            put("PACKSET_TIMEOUT_MS", &self.timeout);
+        }
+    }
+
+    #[test]
+    fn a_pack_that_cannot_keep_mail_is_not_an_empty_inbox() {
+        let _g = env_guard();
+        let (url, posts) = serve_pack("refuse");
+        let _held = PackUrl::set(&url);
+        let err = super::mail::inbox(false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("inbox:"), "{text}");
+        assert!(text.contains("packset 0.12.1"), "{text}");
+        assert!(text.contains(super::mail::MAIL_PACKSET), "{text}");
+        assert!(!text.contains("nothing unread"), "{text}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "the probe is the only post"
+        );
+
+        let err = super::mail::send(&super::mail::Send {
+            seat: Some("scratch"),
+            group: None,
+            text: "hello",
+            interrupt: false,
+            issue: None,
+        })
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.starts_with("send:"), "{text}");
+        assert!(text.contains(super::mail::MAIL_PACKSET), "{text}");
+        assert!(text.contains("packset 0.12.1"), "{text}");
+        assert!(!text.contains("POST /v1/atoms failed"), "{text}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            2,
+            "send probes and does not post the message"
+        );
+    }
+
+    #[test]
+    fn a_pack_that_does_not_answer_is_not_an_empty_inbox() {
+        let _g = env_guard();
+        let (url, posts) = serve_pack("down");
+        let _held = PackUrl::set(&url);
+        let err = super::mail::inbox(false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("did not answer"), "{text}");
+        assert!(!text.contains("nothing unread"), "{text}");
+        assert!(!text.contains(super::mail::MAIL_PACKSET), "{text}");
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_empty_inbox_on_a_pack_that_keeps_mail_says_so() {
+        let _g = env_guard();
+        let (url, posts) = serve_pack("keep");
+        let _held = PackUrl::set(&url);
+        let text = super::mail::inbox(false).unwrap();
+        assert_eq!(text, "inbox: nothing unread\n");
+        let sent = super::mail::send(&super::mail::Send {
+            seat: Some("scratch"),
+            group: None,
+            text: "hello",
+            interrupt: false,
+            issue: None,
+        })
+        .unwrap();
+        assert!(sent.starts_with("sent "), "{sent}");
+        assert!(sent.contains("scratch"), "{sent}");
+        assert_eq!(posts.load(Ordering::SeqCst), 3);
+    }
+
     #[test]
     fn the_lean_listing_keeps_the_callers_timeout() {
         let _env = env_guard();

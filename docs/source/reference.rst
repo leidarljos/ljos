@@ -142,11 +142,11 @@ Command line
 the other members of that group. ``--interrupt`` leads the next prompt.
 ``--issue ID`` threads the message on that vissue issue, and the atom takes
 the issue's scope so ``ljos sync`` carries it in that repository's sealed
-log. ``inbox`` lists unread mail and writes no receipt. ``read ID`` writes
-one. ``reply ID TEXT`` answers the sender and keeps the issue.
-``group NAME --add SEAT`` records a member. The prompt hook prints unread mail and writes
-the receipt when the runner is given the note. A shell seat polls ``ljos
-inbox``.
+log. ``inbox`` lists unread mail and writes no receipt. A pack that does
+not answer is an error. ``read ID`` writes one receipt. ``reply ID TEXT``
+answers the sender and keeps the issue. ``group NAME --add SEAT`` records
+a member. ``ljos hook --prompt`` writes a receipt for each message it
+shows. A shell seat polls ``ljos inbox``.
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.

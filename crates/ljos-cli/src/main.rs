@@ -191,6 +191,8 @@ enum Cmd {
         issue: Option<String>,
     },
     /// Mail this seat has not read. Listing does not write a receipt.
+    /// `ljos hook --prompt` writes a receipt for each message it shows.
+    /// A pack that does not answer is an error.
     Inbox {
         /// Include mail this seat has already read.
         #[arg(long)]
@@ -466,6 +468,7 @@ enum Cmd {
         #[arg(long)]
         event: Option<String>,
         /// Read stdin as the person's prompt, including when it is plain text.
+        /// Mail it shows is marked read.
         #[arg(long, conflicts_with = "event")]
         prompt: bool,
         /// Exit 1 when the answer is a deny. Without this flag the exit stays 0,

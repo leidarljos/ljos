@@ -200,7 +200,7 @@ ljos findings out/campaign.json --remember     # an eb-stack campaign's typed fi
 ljos group ops --add bob                       # a group of seats; membership is a pack atom
 ljos send bob "the build is red" --issue acme-4 --interrupt
 ljos send --group ops "the build is red"
-ljos inbox                                     # unread mail; listing writes no receipt
+ljos inbox                                     # unread mail; listing writes no receipt. hook --prompt marks what it shows read
 ljos read <id>                                 # the receipt the sender sees
 ljos reply <id> "looking"                      # back to the sender, on the same issue
 ```
@@ -227,7 +227,7 @@ Nothing needs a variable set: `ljos remember` starts the writer when none is ans
 
 ## Mail
 
-`ljos send SEAT TEXT` writes a message to a named seat. `ljos send --group NAME TEXT` writes to the other members of that group. `--interrupt` leads the next prompt. `--issue ID` threads the message on a vissue issue, and the atom takes that issue's scope so `ljos sync` carries it in the sealed log. `ljos inbox` lists unread mail and writes no receipt. `ljos read ID` writes one. `ljos reply ID TEXT` answers the sender and keeps the issue. The prompt hook prints unread mail and writes the receipt when the runner is given the note. A shell seat polls `ljos inbox`.
+`ljos send SEAT TEXT` writes a message to a named seat. `ljos send --group NAME TEXT` writes to the other members of that group. `--interrupt` leads the next prompt. `--issue ID` threads the message on a vissue issue, and the atom takes that issue's scope so `ljos sync` carries it in the sealed log. `ljos inbox` lists unread mail and writes no receipt. A pack that does not answer is an error, and `ljos send` names the packset version that keeps mail. `ljos read ID` writes one receipt. `ljos reply ID TEXT` answers the sender and keeps the issue. `ljos hook --prompt` prints unread mail and writes a receipt for each message it shows. A shell seat polls `ljos inbox`.
 
 ## The smoke test
 

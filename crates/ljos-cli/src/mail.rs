@@ -16,6 +16,47 @@ use serde_json::{json, Value};
 /// How many messages a prompt is shown. The rest stay unread.
 const PROMPT_CAP: usize = 8;
 
+/// The first packset that keeps kinds `message`, `receipt` and `group`.
+///
+/// 0.12.1 refuses them. A new kind has been a minor release: `outcome`
+/// arrived in 0.12.0, and `prediction` and `rule` in 0.6.0.
+pub(crate) const MAIL_PACKSET: &str = "0.13.0";
+
+/// What a probe post of an empty `message` means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// The writer refused the kind.
+    Refused,
+    /// The kind passed and a later check refused the empty probe.
+    Kept,
+    /// The writer did not answer.
+    Store,
+}
+
+/// Classify a probe error. Kind is checked before the text, so an empty
+/// message is refused as unknown when the pack cannot keep mail, and as
+/// missing text when it can.
+fn probe_of(text: &str) -> Probe {
+    if text.contains("unknown atom kind") {
+        Probe::Refused
+    } else if text.contains(": 400:") {
+        Probe::Kept
+    } else {
+        Probe::Store
+    }
+}
+
+fn unsupported_mail(version: Option<&str>) -> String {
+    match version {
+        Some(version) => format!(
+            "this pack does not keep mail. packset {version} refused kind message. Mail needs packset {MAIL_PACKSET}."
+        ),
+        None => format!(
+            "this pack does not keep mail. The writer refused kind message. Mail needs packset {MAIL_PACKSET}."
+        ),
+    }
+}
+
 /// One message as it is written.
 #[derive(Debug, Clone)]
 pub struct Outgoing {
@@ -464,10 +505,60 @@ pub fn recipients(
     Ok(vec![seat])
 }
 
-fn load() -> Result<Vec<Value>> {
+fn is_mail_atom(atom: &Value) -> bool {
+    matches!(atom["kind"].as_str(), Some("message" | "receipt" | "group"))
+}
+
+fn writer_version(client: &packset_client::PacksetClient) -> Option<String> {
+    client
+        .status(Some(&client.workspace()))
+        .ok()
+        .and_then(|status| {
+            status
+                .get("version")
+                .and_then(Value::as_str)
+                .filter(|version| !version.is_empty())
+                .map(str::to_string)
+        })
+}
+
+/// Fail when this writer does not keep mail. An empty message is not
+/// stored: the kind is refused, or the text is.
+fn ensure_mail(client: &packset_client::PacksetClient, verb: &str) -> Result<()> {
+    let probe = json!({
+        "schema": "inside.atom/v1",
+        "kind": "message",
+        "level": "explicit",
+        "text": "",
+        "workspace": workspace_of(Some(&client.workspace())),
+    });
+    let posted = super::with_writer(|| client.post_atom(&probe).map_err(anyhow::Error::from));
+    match posted {
+        Ok(_) => Ok(()),
+        Err(err) => match probe_of(&format!("{err:#}")) {
+            Probe::Kept => Ok(()),
+            Probe::Refused => {
+                let version = writer_version(client);
+                bail!("{verb}: {}", unsupported_mail(version.as_deref()));
+            }
+            Probe::Store => Err(err).context("mail: the pack did not answer"),
+        },
+    }
+}
+
+fn listed() -> Result<Vec<Value>> {
     let client = super::pack()?;
     let workspace = client.workspace();
     super::atoms_lean(&client, &workspace).context("mail: the pack did not answer")
+}
+
+fn load(verb: &str) -> Result<Vec<Value>> {
+    let client = super::pack()?;
+    let atoms = listed()?;
+    if !atoms.iter().any(is_mail_atom) {
+        ensure_mail(&client, verb)?;
+    }
+    Ok(atoms)
 }
 
 fn load_quiet() -> Option<Vec<Value>> {
@@ -500,20 +591,27 @@ pub fn send(args: &Send<'_>) -> Result<String> {
         bail!("send: empty text");
     }
     let from = super::seat_name();
-    let atoms = if args.group.is_some() {
-        load()?
-    } else {
-        Vec::new()
-    };
     let group = args
         .group
         .map(|name| check_name("send", name))
         .transpose()?;
+    let client = super::pack()?;
+    // A named seat is checked before the pack, so "this seat" stays that
+    // error. A group has no roster until the pack answers.
+    let atoms = if group.is_some() {
+        ensure_mail(&client, "send")?;
+        listed()?
+    } else {
+        Vec::new()
+    };
     let roster = group
         .as_deref()
         .map(|name| members(&atoms, name))
         .unwrap_or_default();
     let to = recipients(from.as_str(), args.seat, group.as_deref(), &roster)?;
+    if group.is_none() {
+        ensure_mail(&client, "send")?;
+    }
     let issue = args
         .issue
         .map(str::trim)
@@ -532,7 +630,6 @@ pub fn send(args: &Send<'_>) -> Result<String> {
         reply: None,
         scope,
     };
-    let client = super::pack()?;
     let mut atom = message_atom(&outgoing, &workspace_of(Some(&client.workspace())));
     stamp_source(&mut atom);
     post(&atom, "send")?;
@@ -540,9 +637,13 @@ pub fn send(args: &Send<'_>) -> Result<String> {
 }
 
 /// Unread mail for this seat, then receipts on what it sent that it has not
-/// been shown yet. Listing does not write a receipt.
+/// been shown yet.
+///
+/// Listing does not write a receipt. `ljos hook --prompt` does, for each
+/// message it shows. A pack that does not answer, or that refuses mail, is
+/// an error. `ljos_inbox` calls this.
 pub fn inbox(all: bool) -> Result<String> {
-    let atoms = load()?;
+    let atoms = load("inbox")?;
     let seat = super::seat_name();
     let seen = receipt_seen();
     let (text, keys) = render_inbox(&atoms, &seat, all, &seen);
@@ -584,7 +685,7 @@ pub fn read(id: &str) -> Result<String> {
     if id.is_empty() {
         bail!("read: name a message");
     }
-    let atoms = load()?;
+    let atoms = load("read")?;
     let seat = super::seat_name();
     let letter = find_letter(&atoms, id).context("read")?;
     if !letter.to.iter().any(|to| to == &seat) {
@@ -638,7 +739,7 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     if text.is_empty() {
         bail!("reply: empty text");
     }
-    let atoms = load()?;
+    let atoms = load("reply")?;
     let parent = find_letter(&atoms, id).context("reply")?;
     let from = super::seat_name();
     if parent.from == from {
@@ -703,7 +804,7 @@ fn group_atom(name: &str, seat: &str, drop: bool, by: &str, workspace: &str) -> 
 pub fn group(name: &str, add: &[String], remove: &[String]) -> Result<String> {
     let name = check_name("group", name)?;
     if add.is_empty() && remove.is_empty() {
-        let atoms = load()?;
+        let atoms = load("group")?;
         let seats = members(&atoms, &name);
         if seats.is_empty() {
             return Ok(format!("{name}\t(no members)\n"));
@@ -714,7 +815,7 @@ pub fn group(name: &str, add: &[String], remove: &[String]) -> Result<String> {
         }
         return Ok(out);
     }
-    let atoms = load()?;
+    let atoms = load("group")?;
     let by = super::seat_name();
     let client = super::pack()?;
     let workspace = client.workspace();
@@ -1009,5 +1110,23 @@ mod tests {
         assert!(text.contains("2 more in ljos inbox"), "{text}");
         assert_eq!(ids.iter().filter(|id| id.starts_with("mail:")).count(), 8);
         assert!(!ids.iter().any(|id| id == "mail:m7" || id == "mail:m8"));
+    }
+
+    #[test]
+    fn an_unknown_kind_is_a_pack_without_mail() {
+        let refused =
+            "bad response: http://127.0.0.1:8761/v1/atoms: 400: unknown atom kind: message";
+        assert_eq!(probe_of(refused), Probe::Refused);
+        let kept = "bad response: http://127.0.0.1:8761/v1/atoms: 400: atom text is required";
+        assert_eq!(probe_of(kept), Probe::Kept);
+        let down = "http://127.0.0.1:8761/v1/atoms: http: connection refused";
+        assert_eq!(probe_of(down), Probe::Store);
+        let named = unsupported_mail(Some("0.12.1"));
+        assert!(named.contains("packset 0.12.1"), "{named}");
+        assert!(named.contains(MAIL_PACKSET), "{named}");
+        assert!(named.contains("kind message"), "{named}");
+        let quiet = unsupported_mail(None);
+        assert!(quiet.contains(MAIL_PACKSET), "{quiet}");
+        assert!(quiet.contains("refused kind message"), "{quiet}");
     }
 }

@@ -37,7 +37,7 @@
 | =file TITLE [--parent ID\vert --top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT]= | tracker | file work found while sitting: a child of the held issue unless =--parent= names another or =--top= none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed |
 | =note ID TEXT...= | tracker | a dated progress note on the issue, committed |
 | =send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]= | pack | write to one seat, or with =--group= to the other members of that group; =--interrupt= leads the next prompt; =--issue= threads the message on that vissue issue and the atom takes the issue's scope, so =ljos sync= carries it in that repository's sealed log |
-| =inbox [--all]= | pack | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; =--all= includes mail already read |
+| =inbox [--all]= | pack | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; =ljos hook --prompt= writes a receipt for each message it shows; a pack that does not answer is an error; =--all= includes mail already read |
 | =read ID= | pack | write a read receipt for one message; a second read writes nothing |
 | =reply ID TEXT... [--interrupt]= | pack | answer the sender, keep the issue, and carry =reply:ID= |
 | =group NAME [--add SEAT]... [--remove SEAT]...= | pack | list a group, or add and drop members; membership is atoms and travels in the sealed log |
@@ -69,11 +69,11 @@
 the other members of that group. =--interrupt= leads the next prompt.
 =--issue ID= threads the message on that vissue issue, and the atom takes
 the issue's scope so =ljos sync= carries it in that repository's sealed
-log. =inbox= lists unread mail and writes no receipt. =read ID= writes
-one. =reply ID TEXT= answers the sender and keeps the issue.
-=group NAME --add SEAT= records a member. The prompt hook prints unread mail and writes
-the receipt when the runner is given the note. A shell seat polls =ljos
-inbox=.
+log. =inbox= lists unread mail and writes no receipt. A pack that does
+not answer is an error. =read ID= writes one receipt. =reply ID TEXT=
+answers the sender and keeps the issue. =group NAME --add SEAT= records
+a member. =ljos hook --prompt= writes a receipt for each message it
+shows. A shell seat polls =ljos inbox=.
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
 to one actor; a 32-hex id passes through.

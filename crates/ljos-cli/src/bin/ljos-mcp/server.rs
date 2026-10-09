@@ -1939,7 +1939,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to see what other seats have sent this seat. The list is unread mail, and it does not write a receipt. Pass all to include mail already read. Receipts on messages this seat sent are listed once, the first time they are shown.",
+        description = "Call this to see what other seats have sent this seat. The list is unread mail, and listing does not write a receipt. ljos hook --prompt writes a receipt for each message it shows. Pass all to include mail already read. A pack that does not answer is an error, not an empty list. Receipts on messages this seat sent are listed once, the first time they are shown.",
         annotations(title = "Inbox", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_inbox(
