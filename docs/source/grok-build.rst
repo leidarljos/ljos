@@ -82,7 +82,7 @@ front matter in ``~/.grok/agents``. ``ljos onboard --harness grok`` and
 Grok Build's own parser, ``AgentDefinition::parse`` in
 ``xai-grok-agent/src/config.rs``, accepts each file. Its front matter sets
 ``capabilityMode: execute``: it reads and runs commands and has no edit
-tool. Its body runs ``ljos brief NAME ISSUE``, casts one ballot before
+tool. The persona runs ``ljos brief NAME ISSUE``, casts one ballot before
 reading the others, notes why, and stops. A panel is one ``spawn_subagent``
 call a persona, with ``subagent_type`` ``ljos-NAME`` and the issue id as its
 prompt; the main agent then runs ``ljos consensus ISSUE``.

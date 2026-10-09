@@ -110,14 +110,15 @@ arrives when it first matters, not on every command after.
 A runner that reports a failed tool, as Grok Build does with
 =PostToolUseFailure=, gets a search of its own. The hook searches on the
 command and its error and hands back up to three standing claims that
-share two or more content words with them.
+share two or more content words with them. A prompt needs only one.
 
 A compaction drops what the seat handed the conversation. If two or more
 memories were handed over, up to eight of them fire together before it.
-Every one then leaves the session's record, so a later prompt can bring it
-back. The next delivery names the issue the conversation still holds and
-where its working set is. Claude Code hears it as the session resumes,
-Grok Build and Cursor with the next tool result.
+Every memory handed over then leaves the session's record, so a later
+prompt can bring it back. The next delivery names the issue the
+conversation still holds and where its working set is. Claude Code hears
+it as the session resumes, Grok Build and Cursor with the next tool
+result.
 
 The hook holds a turn's stop once if the turn used tools, held no issue
 and never touched the seat. A turn asked for a decision that cast no
@@ -237,19 +238,19 @@ not: ballots settled under trust rows that learn from outcomes, deeds
 that stand for what the work produced, a claim graph for who holds what,
 and a signed handover another seat can check.
 
-ReasoningBank (doi:10.48550/arXiv.2509.25140), one of the systems of 2025,
-distills reasoning strategies from the agent's own judged successes and
-failures and retrieves them on the next task. ACE
-(doi:10.48550/arXiv.2510.04618) keeps a playbook of itemised strategies
-that a reflector and a curator grow by small deltas, because rewriting a
-context whole erodes it. MemOS (doi:10.48550/arXiv.2507.03724) treats
-memory as a resource with provenance, versions and a lifecycle; MIRIX
-(doi:10.48550/arXiv.2507.07957) splits it into six typed stores, each run
-by its own agent. Memory-R1 (doi:10.48550/arXiv.2508.19828) trains its
-add, update and delete choices by reinforcement learning. The runners grew
-memories of their own: Grok Build's keeps Markdown topics per workspace,
-captures observations after each turn and folds them in with a =/dream=
-pass.
+More systems came later in 2025. ReasoningBank
+(doi:10.48550/arXiv.2509.25140) distills reasoning strategies from the
+agent's own judged successes and failures and retrieves them on the next
+task. ACE (doi:10.48550/arXiv.2510.04618) keeps a playbook of itemised
+strategies that a reflector and a curator grow by small deltas, because
+rewriting a context whole erodes it. MemOS (doi:10.48550/arXiv.2507.03724)
+treats memory as a resource with provenance, versions and a lifecycle;
+MIRIX (doi:10.48550/arXiv.2507.07957) splits it into six typed stores,
+each run by its own agent. Memory-R1 (doi:10.48550/arXiv.2508.19828)
+trains its add, update and delete choices by reinforcement learning. The
+runners grew memories of their own: Grok Build's keeps Markdown topics per
+workspace, captures observations after each turn and folds them in with a
+=/dream= pass.
 
 The pack already keeps much of what these systems add: ACE's itemised
 playbook grown by deltas is a pack of one-claim atoms superseded by head,
@@ -323,13 +324,13 @@ takes.
 
 A settle is a weighted vote outside a =broad= issue: each voter's weight
 is its social power. The iterate and exact engines print that power as
-=influence=, beside the shares, and the number of equal voices it is worth
-as =effective_voters=. A margin inside what the residual leaves open comes
-back as a =tie=. A voter weighs its own ballot as the others weigh it, so
-with no voter anchored and no discount, the log-odds rows =learn= writes
-settle as the weighted vote they describe. One constant self-weight for
-everyone had flattened them toward a count. A weak crowd could outvote its
-best voter.
+=influence=, beside the shares, and the number of equal voices the settle
+is worth as =effective_voters=. A margin inside what the residual leaves
+open comes back as a =tie=. A voter weighs its own ballot as the others
+weigh it, so with no voter anchored and no discount, the log-odds rows
+=learn= writes settle as the weighted vote they describe. One constant
+self-weight for everyone had flattened them toward a count. A weak crowd
+could outvote its best voter.
 
 Personas that run on one model share its mistakes, which is why =learn=
 keeps the option each issue closed on. =consensus= asks the consensus
@@ -430,24 +431,23 @@ and trust accrue to the seat across conversations; claims are held by
 the seat tagged with the conversation's process, so two conversations of
 one runner hold two tickets. =LJOS_SEAT= is the override, not the setup.
 
-The tools persona panes open in are declared in =[[tool]]= tables, beside
-the runners' =[[harness]]= tables. A persona that reasons in a session of
-its own opens in the first tool that answers: the runners file's
-=[[tool]]= tables first, then herdr through its workspace and agent
-commands when its server is up, then tmux. Every verb but =pane_pointer=
-is an argv or a list of argvs, so a tool the seat has not met is one more
-table. A tool that refuses is named in its own words, and the next one is
-tried. Half the herdr calls the seat used to make had gone stale against
-herdr's command line, =agent start= among them. A quiet fallback to tmux
-hid it.
+Persona panes open in tools declared in =[[tool]]= tables, beside the
+runners' =[[harness]]= tables. A persona that reasons in a session of its
+own opens in the first tool that answers: the runners file's =[[tool]]=
+tables first, then herdr through its workspace and agent commands when
+its server is up, then tmux. Every verb but =pane_pointer= is an argv or
+a list of argvs, so a tool the seat has not met is one more table. A tool
+that refuses is named in its own words, and the next one is tried. Half
+the herdr calls the seat used to make had gone stale against herdr's
+command line, =agent start= among them. A quiet fallback to tmux hid it.
 
 The pane resumes a runner that exits non-zero, at most three times a
 minute, and leaves a clean exit alone, as an OTP supervisor treats a
 transient child. Three of five personas on a panel chose the tool adapters
-over fixing the herdr calls in place (=examples/runtime-panel=). None
+over fixing the herdr calls in place (=examples/runtime-panel=), and none
 chose a Go rewrite or OTP-style supervision, in Rust or on the BEAM. Both
-would start the same operating-system processes. Nor is speed a reason:
-the shell gate answers in under ten milliseconds.
+would start the same operating-system processes. Speed is no reason to
+rewrite the seat: the shell gate answers in under ten milliseconds.
 
 The agent is told how, in one text. The protocol =ljos protocol= prints is
 the same text =ljos onboard= installs as a skill and the server serves at
