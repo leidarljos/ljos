@@ -371,10 +371,10 @@ The four routes are ``prompt``, ``ballot``, ``audit`` and ``review``.
 ``https://openrouter.ai/api/alpha/decisions`` with model ``typesafe/jev-1.13``).
 ``backend = chat`` posts one JSON-mode completion to ``endpoint`` plus
 ``/chat/completions`` and must set ``usd_per_mtok_in``; without that price
-the judge is not asked. ``backend = command`` keeps the request on the
-machine. TypeSafe's terms say they will not train on customer data. They
+the judge is not asked. With ``backend = command``, the request stays on
+the machine. TypeSafe's terms say they will not train on customer data. They
 keep a perpetual licence to derive telemetry from inputs. Zero data
-retention is an enterprise term, not the default. This seat does not train
+retention needs an enterprise agreement and is off by default. This seat does not train
 on Jev's answers. The cache stores a hash of the request and the reply,
 directory mode 0700, file mode 0600, and not the prompt. ``ljos judge-score``
 joins the log with outcomes. A judge ballot is a trust row with ``to``

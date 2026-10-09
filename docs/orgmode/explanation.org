@@ -382,9 +382,9 @@ The ballot shows the fit best. A ballot always carried a confidence, and
 surprisingly popular reading need both. A subagent had to be told to guess
 them. Jev returns them. The ballot is recorded as =judge:MODEL=, and the
 chosen option's probability is its confidence. The forecast is the judge's
-prediction, and it stays out of the surprisingly popular step. =learn=
-updates the trust row for that judge, so Jev's calibration on this seat's
-questions is a measurement. =ljos judge-score= is what reads the log.
+prediction, and =consensus= does not read it. =learn= updates that
+judge's trust row, which makes Jev's calibration on this seat's
+questions a measurement. =ljos judge-score= is what reads the log.
 
 Jev's =confidence= is =(K·p_max − 1)/(K − 1)= on every backend, so a stated
 number is not a different cut. It decides whether to escalate. Personas
@@ -400,7 +400,7 @@ The stop audit is the fourth point grown a judge. Whether a test ran is
 read from the commands, in code. Jev answers whether the last message
 claims done and whether the last run is red. A stop waits for another
 round only on 0.9 for the first and 0.1 for the second. The review route
-is the fifth: =ljos due --judge= names a claim the judges say holds, and
+is the fifth: =ljos due --judge= names a claim the judges still find true, and
 =ljos graded= is what marks it recalled.
 
 The cuts are fixed from TypeSafe's cookbooks. Every answer goes to

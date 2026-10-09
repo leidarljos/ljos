@@ -114,8 +114,8 @@ Every piece of work has an issue before it has a claim.
   correction from the person ("you should have", "do you not remember")
   is filed as a proposal. The hook does not write it. It becomes a
   preference when the person writes it with `ljos prefer`, or when
-  `ljos accept` writes the proposal. A
-  lesson that rewrites an earlier one closes the earlier one's window; the
+  `ljos accept` writes the proposal. When a
+  lesson rewrites an earlier one, it closes the earlier one's window. The
   verb says `revises N earlier memories` when it did. `ljos consolidate`
   reports the pairs the rule would close across what is held, and
   `--apply` closes them; run it after a handover is imported.
@@ -209,14 +209,15 @@ Every piece of work has an issue before it has a claim.
   Writing a persona also writes one unscoped inbound trust row (the seat
   weighs it at 1, everywhere); `--about` on a later trust row only adds
   weight.
-- Jev, the fast judge, answers through the vote verbs. `ljos vote ISSUE --as
-  NAME --jev` asks it for that persona's ballot and casts it as `judge:MODEL`
-  when it is sure (confidence 0.8 or more); when it is not, the ballot goes to the
+- Jev, the fast judge, answers through the vote verbs.
+  `ljos vote ISSUE --as NAME --jev` asks it for that persona's ballot and
+  casts it as `judge:MODEL` when it is sure (confidence 0.8 or more); when
+  it is not, the ballot goes to the
   persona's own session if the persona has a runner, else the command
   names the brief to start a subagent from. `ljos panel ISSUE --jev` asks
   for every seat at once and casts one ballot when all are sure and agree
-  on one model. `ljos due --judge` names a claim the review judges say holds;
-  `ljos graded` is what marks it recalled. `ljos judge-score` reads the judge
+  on one model. `ljos due --judge` names a claim the review judges still
+  find true; `ljos graded` is what marks it recalled. `ljos judge-score` reads the judge
   log against outcomes. Which judges
   answer is `~/.config/ljos/jev.toml` (`[judges.NAME]`, `[route]`); with
   no file the verbs say so and the subagent path answers.
@@ -293,8 +294,8 @@ One verb closes the sitting:
 
 It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
 writes that lesson into the pack. A lesson the person types with `ljos remember`
-stays `user-declared`. It fires the island, completes the session node, and
-learns from the outcome when one is named. Without `--lesson` it says so;
+stays `user-declared`. The verb then fires the island, completes the
+session node, and learns from a named outcome. Without `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
 same four steps are:
 

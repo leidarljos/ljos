@@ -584,8 +584,8 @@ finding a person or a seat resolved, under the recipe's name, the
 package and the failure class, with origin ``agent-derived``. It does not
 write the atom. ``ljos accept ID`` writes it, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
-past is skipped; ``--all`` takes it too. The next bump of that recipe
-recalls the lesson from its island once the proposal has been accepted:
+past is skipped; ``--all`` takes it too. Once someone accepts the
+proposal, the recipe's next bump recalls this lesson from its island.
 
 ::
 
@@ -735,14 +735,15 @@ persona's vote, and what the rest of the panel will pick. The option
 order is shuffled per persona. A cast ballot is recorded as
 ``judge:MODEL``, not as the persona, and ``--used`` names that judge. The
 chosen option's probability is the ballot's confidence. The forecast is
-the judge's prediction, and it stays out of the surprisingly popular
-step. A note on the issue says the ballot came from Jev. ``learn`` updates
-the trust row whose ``to`` is that judge.
+the judge's prediction, and ``consensus`` does not read it. A note on
+the issue says the ballot came from Jev. ``learn`` updates the trust row
+whose ``to`` is that judge.
 
 Jev's confidence is ``(K·p_max − 1)/(K − 1)``, the same cut on every
 backend. Under ``escalate_below`` (0.8), ``vote --jev`` does not cast. It
-notes Jev's lean and hands the ballot to the persona's own session when
-the persona has a runner, else names the brief to start a subagent from.
+notes Jev's lean. A persona with a runner gets the ballot in its own
+session; for any other, the command names the brief to start a subagent
+from.
 
 A panel casts only when every seated persona is sure and all agree. An
 all-one-model panel is one voter, so it casts one ballot. A split or
