@@ -354,7 +354,7 @@ Wire the seat into Cursor
 
    $ ljos onboard --harness cursor
    ok  cursor mcp  set /mcpServers/ljos in /home/me/.cursor/mcp.json
-   ok  hook    added the seat's hook on beforeShellExecution, beforeSubmitPrompt, postToolUse, postToolUseFailure, preCompact, stop, sessionEnd in /home/me/.cursor/hooks.json
+   ok  hook    added the seat's hook on beforeShellExecution, preToolUse, beforeMCPExecution, beforeReadFile, beforeSubmitPrompt, postToolUse, postToolUseFailure, preCompact, stop, sessionEnd in /home/me/.cursor/hooks.json
    ok  skill   wrote /home/me/.cursor/skills/ljos/SKILL.md
    ok  agents  wrote 5 and removed 0 agent definitions in /home/me/.cursor/agents
 
@@ -364,8 +364,11 @@ does not hand a prompt hook's context to the model, so the memories a
 prompt activates arrive with the first tool result instead, as on Grok
 Build. A shell command gets an ``ask`` rule's question as Cursor's own
 permission prompt. Cursor runs the Claude hooks itself where
-``ljos onboard --harness claude`` already ran: no Cursor hooks file is
-written, and the seat answers them in Cursor's shape.
+``ljos onboard --harness claude`` already ran. The events Claude's file
+names stay there. ``beforeShellExecution``, ``preToolUse``,
+``beforeMCPExecution``, ``beforeReadFile`` and ``postToolUseFailure``
+are still written to ``~/.cursor/hooks.json``, and the permission
+events fail closed. The seat answers both files in Cursor's shape.
 
 Spawn a persona as a subagent of Grok Build or Claude Code
 ==========================================================

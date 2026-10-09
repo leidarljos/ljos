@@ -1951,6 +1951,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
                 dry,
             ));
         }
+        steps.extend([pack_step(dry), host_key_step(dry)]);
         return Ok(steps);
     }
     let all = harnesses_from(file)?;
@@ -2419,6 +2420,9 @@ fn hook_installed(file: &Path, events: &[String]) -> bool {
 /// held, since Cursor does not hand a prompt hook's context to the model.
 pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
     ("beforeShellExecution", 10),
+    ("preToolUse", 10),
+    ("beforeMCPExecution", 10),
+    ("beforeReadFile", 10),
     ("beforeSubmitPrompt", 20),
     ("postToolUse", 10),
     ("postToolUseFailure", 10),
@@ -2427,13 +2431,33 @@ pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
     ("sessionEnd", 5),
 ];
 
+/// Events Claude's settings file does not carry. They are written into
+/// Cursor's hooks file even when Cursor also runs the Claude hooks.
+const CURSOR_ONLY_EVENTS: &[&str] = &[
+    "beforeShellExecution",
+    "preToolUse",
+    "beforeMCPExecution",
+    "beforeReadFile",
+    "postToolUseFailure",
+];
+
+/// Permission events. Cursor treats `failClosed` as a deny when the hook
+/// does not answer.
+const CURSOR_FAIL_CLOSED: &[&str] = &[
+    "beforeShellExecution",
+    "preToolUse",
+    "beforeMCPExecution",
+    "beforeReadFile",
+];
+
 /// Merge the seat's hook into Cursor's hooks file,
 /// `{"version": 1, "hooks": {"<event>": [{"command": ..., "timeout": ...}]}}`.
 /// The entries are flat, not Claude's matcher groups. Cursor also runs
 /// the hooks in `~/.claude/settings.json`, and the seat answers both in
 /// Cursor's shape: it knows Cursor by the `cursor_version` in the
-/// payload. When that file already carries the seat's hook, nothing is
-/// written here; two copies would answer every event twice.
+/// payload. When that file already carries the seat's hook, the events
+/// Claude runs are left to it. Cursor-only events are still written here,
+/// because Claude's file does not name them.
 fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     let what = "hook".to_string();
     let claude_has_seat = std::fs::read_to_string(claude_settings)
@@ -2453,17 +2477,6 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
                     })
             })
         });
-    if claude_has_seat {
-        return Step {
-            what,
-            detail: format!(
-                "Cursor runs the seat's hooks from {}; none written to {}",
-                claude_settings.display(),
-                file.display()
-            ),
-            ok: true,
-        };
-    }
     let mut root: Value = match std::fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -2496,6 +2509,9 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     let command = hook_command();
     let mut added = Vec::new();
     for (event, timeout) in CURSOR_HOOK_EVENTS {
+        if claude_has_seat && !CURSOR_ONLY_EVENTS.contains(event) {
+            continue;
+        }
         let entries = hooks
             .entry((*event).to_string())
             .or_insert_with(|| serde_json::json!([]));
@@ -2505,7 +2521,11 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         if entries.iter().any(is_seat_hook) {
             continue;
         }
-        entries.push(serde_json::json!({"command": command, "timeout": timeout}));
+        let mut entry = serde_json::json!({"command": command, "timeout": timeout});
+        if CURSOR_FAIL_CLOSED.contains(event) {
+            entry["failClosed"] = serde_json::json!(true);
+        }
+        entries.push(entry);
         added.push(*event);
     }
     if added.is_empty() {
@@ -5249,6 +5269,13 @@ fn harness_rows() -> Vec<Habitat> {
             let path = expand(file);
             let installed = match &h.hooks_named {
                 Some(name) => named_hook_installed(&path, name),
+                None if h.hooks_format.as_deref() == Some("cursor") => hook_installed(
+                    &path,
+                    &CURSOR_HOOK_EVENTS
+                        .iter()
+                        .map(|(event, _)| (*event).to_string())
+                        .collect::<Vec<_>>(),
+                ),
                 None => hook_installed(&path, &hook_events_of(h)),
             };
             rows.push(Habitat {
@@ -8361,10 +8388,18 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
             "screen" => has(&["paste"]),
             _ => false,
         };
-        if (types_keys
-            && words
-                .iter()
-                .any(|w| w.to_ascii_lowercase().contains("approve")))
+        // A paste writes a buffer into a pane. The buffer can hold an
+        // approval that this segment does not spell.
+        let pastes = match first {
+            "tmux" => has(&["paste-buffer", "pasteb", "load-buffer", "loadb"]),
+            "screen" => has(&["paste"]),
+            _ => false,
+        };
+        if pastes
+            || (types_keys
+                && words
+                    .iter()
+                    .any(|w| w.to_ascii_lowercase().contains("approve")))
             || (streams_keys && line.to_ascii_lowercase().contains("approve"))
         {
             return Some(Rule {
@@ -17568,6 +17603,12 @@ mod tests {
             "{}",
             steps[0].detail
         );
+        let tail: Vec<&str> = steps.iter().rev().take(2).map(|s| s.what.as_str()).collect();
+        assert!(
+            tail.contains(&"pack") && tail.contains(&"host key"),
+            "{steps:?}"
+        );
+        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
     }
 
     #[test]
@@ -18631,6 +18672,9 @@ mod tests {
             let entries = doc["hooks"][*event].as_array().unwrap();
             assert_eq!(entries.len(), 1, "{event}");
             assert!(is_seat_hook(&entries[0]) && entries[0]["timeout"] == *timeout);
+            if CURSOR_FAIL_CLOSED.contains(event) {
+                assert_eq!(entries[0]["failClosed"], true, "{event}");
+            }
         }
         let again = cursor_hook_step(&file, &claude, false);
         assert!(again.detail.contains("carries"), "{}", again.detail);
@@ -18641,12 +18685,17 @@ mod tests {
         )
         .unwrap();
         let other = dir.path().join("cursor2/hooks.json");
-        let skipped = cursor_hook_step(&other, &claude, false);
-        assert!(
-            skipped.detail.contains("none written") && !other.exists(),
-            "{}",
-            skipped.detail
-        );
+        let kept = cursor_hook_step(&other, &claude, false);
+        assert!(kept.ok && other.exists(), "{}", kept.detail);
+        let second: Value = serde_json::from_str(&std::fs::read_to_string(&other).unwrap()).unwrap();
+        for event in CURSOR_ONLY_EVENTS {
+            let entries = second["hooks"][*event].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{event}");
+            assert!(is_seat_hook(&entries[0]), "{event}");
+        }
+        for event in ["beforeSubmitPrompt", "postToolUse", "preCompact", "stop", "sessionEnd"] {
+            assert!(second["hooks"][event].is_null(), "{event} is Claude's");
+        }
     }
 
     /// A persona becomes an agent definition. Grok and Claude Code read the
@@ -18877,7 +18926,9 @@ mod tests {
         assert!(seat_guard(&format!("tmux pipe-pane -I -t seat \"echo approve {id}\"")).is_some());
         assert!(seat_guard(&format!("wtype 'approve {id}'")).is_some());
         assert!(seat_guard("tmux send-keys -t seat 'cargo test' Enter").is_none());
-        assert!(seat_guard("tmux paste-buffer -t seat").is_none());
+        assert!(seat_guard("tmux paste-buffer -t seat").is_some());
+        assert!(seat_guard("tmux load-buffer /tmp/keys && tmux paste-buffer -t seat").is_some());
+        assert!(seat_guard("screen -S seat -X paste").is_some());
         assert!(seat_guard(&format!(
             "tmux pipe-pane -t seat 'grep approve {id} >> log'"
         ))
