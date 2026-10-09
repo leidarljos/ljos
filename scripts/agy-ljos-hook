@@ -9,6 +9,14 @@
 set -euo pipefail
 
 event="${1:-}"
+if [[ "$event" == "hook" ]]; then
+  shift
+  event="${1:-}"
+fi
+if [[ "$event" == "--event" ]]; then
+  shift
+  event="${1:-}"
+fi
 if [[ "$event" == "install" ]]; then
   dest="${HOME}/.local/bin/agy-ljos-hook"
   mkdir -p "${HOME}/.local/bin"

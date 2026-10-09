@@ -2386,9 +2386,10 @@ fn named_hook_installed(file: &Path, name: &str) -> bool {
 }
 
 fn is_seat_event_hook(h: &Value) -> bool {
-    h["command"]
-        .as_str()
-        .is_some_and(|c| c.contains("ljos") && c.contains(" hook --event "))
+    h["command"].as_str().is_some_and(|c| {
+        c.contains("agy-ljos-hook")
+            || (c.contains("ljos") && (c.contains(" hook --event ") || c.contains(" hook ")))
+    })
 }
 
 /// Whether a runner's hooks file carries the memory hook on every event.
@@ -3847,6 +3848,17 @@ fn block_text(content: &Value) -> String {
     }
 }
 
+fn strip_user_request(s: &str) -> String {
+    if let Some(start) = s.find("<USER_REQUEST>") {
+        let after = &s[start + "<USER_REQUEST>".len()..];
+        if let Some(end) = after.find("</USER_REQUEST>") {
+            return after[..end].trim().to_string();
+        }
+        return after.trim().to_string();
+    }
+    s.to_string()
+}
+
 /// The text of one transcript entry: Claude puts it under `message.content`,
 /// and a runner that records `tool_calls` puts it under `content`.
 fn entry_text(e: &Value) -> String {
@@ -3855,7 +3867,7 @@ fn entry_text(e: &Value) -> String {
         return nested;
     }
     match &e["content"] {
-        Value::String(s) => s.clone(),
+        Value::String(s) => strip_user_request(s),
         Value::Array(parts) => parts
             .iter()
             .filter_map(|p| p["text"].as_str())
@@ -3868,7 +3880,8 @@ fn entry_text(e: &Value) -> String {
 /// Whether this entry is the person's request, not a tool result and not a
 /// synthetic note. Both transcript shapes count.
 fn is_user_prompt(e: &Value) -> bool {
-    if e["type"] != "user"
+    let t = e["type"].as_str().unwrap_or("");
+    if (t != "user" && t != "USER_INPUT")
         || e["isMeta"].as_bool().unwrap_or(false)
         || e.get("synthetic_reason").is_some()
     {
@@ -3880,7 +3893,10 @@ fn is_user_prompt(e: &Value) -> bool {
         &e["content"]
     };
     match content {
-        Value::String(t) => !t.trim_start().starts_with('<'),
+        Value::String(t) => {
+            let s = t.trim_start();
+            !s.starts_with('<') || s.starts_with("<USER_REQUEST>")
+        }
         Value::Array(parts) => {
             parts
                 .iter()
@@ -4075,7 +4091,7 @@ pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -
 }
 
 /// Maximum concurrent panel member processes to avoid CPU starvation, memory
-/// pressure, and LLM rate limit exhaustion. Unset defaults to available
+/// pressure, and model rate limit exhaustion. Unset defaults to available
 /// parallelism clamped to [1, 4]. Set to 0 to disable concurrency limits.
 #[must_use]
 pub fn panel_concurrency() -> usize {
@@ -4307,17 +4323,49 @@ fn note_ballot(turn: &mut StopTurn, text: &str) {
     }
 }
 
-fn record_tool_call(turn: &mut StopTurn, name: &str, arguments: &str) {
+fn record_tool_call(turn: &mut StopTurn, name: &str, call: &Value) {
     turn.used_tool = true;
-    let cue = format!("{name} {arguments}");
+    let mut cue = name.to_string();
+    let mut cmd_found: Option<String> = None;
+
+    let args_val = if !call["args"].is_null() {
+        Some(&call["args"])
+    } else if !call["arguments"].is_null() {
+        Some(&call["arguments"])
+    } else {
+        None
+    };
+
+    let parsed_obj: Option<Value> = match args_val {
+        Some(Value::Object(_)) => args_val.cloned(),
+        Some(Value::String(s)) => {
+            cue.push(' ');
+            cue.push_str(s);
+            serde_json::from_str::<Value>(s).ok()
+        }
+        _ => None,
+    };
+
+    if let Some(obj) = parsed_obj {
+        if let Some(map) = obj.as_object() {
+            for (k, v) in map {
+                if let Some(s) = v.as_str() {
+                    let cleaned = s.trim_matches('"');
+                    cue.push(' ');
+                    cue.push_str(cleaned);
+                    if (k == "command" || k == "CommandLine" || k == "cmd") && cmd_found.is_none() {
+                        cmd_found = Some(cleaned.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     if touches_seat(&cue) {
         turn.touched_seat = true;
     }
     note_ballot(turn, &cue);
-    let Ok(args) = serde_json::from_str::<Value>(arguments) else {
-        return;
-    };
-    if let Some(cmd) = args["command"].as_str() {
+    if let Some(cmd) = cmd_found {
         let cmd: String = cmd.chars().take(200).collect();
         note_ballot(turn, &cmd);
         turn.test_ran |= runs_tests(&cmd);
@@ -4345,13 +4393,13 @@ pub fn stop_turn_from_transcript(text: &str) -> StopTurn {
         if let Some(calls) = e.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let name = call["name"].as_str().unwrap_or("");
-                let arguments = call["arguments"].as_str().unwrap_or("");
-                record_tool_call(&mut turn, name, arguments);
+                record_tool_call(&mut turn, name, call);
             }
         }
         let Value::Array(parts) = &e["message"]["content"] else {
             let text = entry_text(e);
-            if e["type"] == "assistant" && !text.is_empty() {
+            let t = e["type"].as_str().unwrap_or("");
+            if (t == "assistant" || t == "PLANNER_RESPONSE") && !text.is_empty() {
                 turn.final_message = text;
             }
             continue;
@@ -17396,6 +17444,25 @@ mod tests {
             r#"{"type":"assistant","content":"","tool_calls":[{"id":"c1","name":"run_terminal_command","arguments":"{\"command\":\"cargo test -p brio\"}"}]}"#,
             r#"{"type":"tool_result","tool_call_id":"c1","content":"FAILED"}"#,
             r#"{"type":"assistant","content":"Still working.","tool_calls":[{"id":"c2","name":"use_tool","arguments":"{\"tool_name\":\"ljos__ljos_sitting\"}"}]}"#,
+        ]
+        .join("\n");
+        let open = stop_turn_from_transcript(&lines.lines().take(2).collect::<Vec<_>>().join("\n"));
+        assert_eq!(open.request, "fix the parser");
+        assert!(open.used_tool);
+        assert!(!open.touched_seat);
+        assert_eq!(open.commands, vec!["cargo test -p brio"]);
+        assert!(open.test_ran);
+        let sat = stop_turn_from_transcript(&lines);
+        assert!(sat.touched_seat);
+        assert_eq!(sat.final_message, "Still working.");
+    }
+
+    #[test]
+    fn antigravity_transcript_tool_calls_and_user_request_are_recognized() {
+        let lines = [
+            r#"{"type":"USER_INPUT","content":"<USER_REQUEST>\nfix the parser\n</USER_REQUEST>"}"#,
+            r#"{"type":"PLANNER_RESPONSE","content":"","tool_calls":[{"name":"run_command","args":{"CommandLine":"cargo test -p brio"}}]}"#,
+            r#"{"type":"PLANNER_RESPONSE","content":"Still working.","tool_calls":[{"name":"call_mcp_tool","args":{"ServerName":"ljos","ToolName":"ljos_sitting"}}]}"#,
         ]
         .join("\n");
         let open = stop_turn_from_transcript(&lines.lines().take(2).collect::<Vec<_>>().join("\n"));
