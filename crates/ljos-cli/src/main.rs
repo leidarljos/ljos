@@ -276,8 +276,8 @@ enum Cmd {
     /// The personas the pack holds: name, anchor, domains and view, one per line.
     Personas,
     /// Write every persona as an agent definition in each runner's agents
-    /// directory. A runner spawns it by name, as a subagent that casts
-    /// that persona's ballot before it reads the others.
+    /// directory. A runner starts it as a subagent that casts that
+    /// persona's ballot before it reads the others.
     Agents {
         /// One runner, from harnesses.toml or the shipped shapes; every runner in harnesses.toml with an agents directory when absent.
         #[arg(long)]
@@ -1168,7 +1168,7 @@ fn main() -> Result<()> {
                     ctx
                 }
                 // The pack is searched on a failed tool's command and its
-                // error. What bears on the failure goes back with the
+                // error; what bears on the failure goes back with the
                 // result.
                 "PostToolUseFailure" => {
                     let error = ljos_cli::tool_error(&input);
@@ -1176,9 +1176,9 @@ fn main() -> Result<()> {
                     mark_seen(call.session.as_deref(), &ids);
                     ctx
                 }
-                // Compaction drops what the seat handed the conversation.
-                // Its memories leave the seen list, and up to eight fire
-                // together when two or more were handed over. The held
+                // Compaction drops what the seat handed the conversation:
+                // those memories leave the seen list, and up to eight
+                // fire together when two or more were handed over. A held
                 // issue is said again on the next delivery.
                 "PreCompact" => {
                     let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());

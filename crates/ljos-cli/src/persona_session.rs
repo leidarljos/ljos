@@ -98,8 +98,8 @@ pub fn home(name: &str) -> PathBuf {
 /// The script a persona's pane runs: the runner as the seat named after
 /// the persona, in its home, then a shell left open for the person. A
 /// runner that fails is resumed with `again`, [`RESTARTS`] times in
-/// [`RESTART_WINDOW_S`] seconds before the pane gives up. The script's
-/// pid is in `.runner.pid` while a runner is up.
+/// [`RESTART_WINDOW_S`] seconds before the pane gives up. `.runner.pid`
+/// holds the script's pid while a runner is up.
 #[must_use]
 pub fn pane_script(name: &str, argv: &[String], again: &[String], home: &Path) -> String {
     let words = |a: &[String]| {
@@ -357,7 +357,7 @@ mod tests {
     }
 
     /// A runner that fails is resumed until the restart budget runs out; one
-    /// that exits 0 is not run again; the pid file is gone either way.
+    /// that exits 0 is not run again. Neither leaves a pid file behind.
     #[test]
     fn the_pane_resumes_a_failing_runner_a_bounded_number_of_times() {
         let dir = tempfile::tempdir().unwrap();

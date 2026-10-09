@@ -5,7 +5,7 @@
 //! `[[tool]]` tables in harnesses.toml declare them beside the runners.
 //! herdr and tmux ship as shapes ([`SHIPPED_TOOLS`]); a table of the same
 //! name replaces a shipped one. Every verb is an argv with
-//! `{placeholders}`, so a tool the seat has never heard of is one table. A
+//! `{placeholders}`. A tool the seat has never heard of is one table. A
 //! tool that refuses is named with its own words and the next one is
 //! tried, so a shape gone stale against its tool shows in what `hand`
 //! returns.
@@ -22,8 +22,8 @@ pub struct Tool {
     #[serde(default)]
     pub detect: Vec<String>,
     /// Ways to open the persona's pane, tried in order until one exits 0.
-    /// The pane runs `{script}`, which changes to `{home}` first, or, when
-    /// `run` is set, starts as a shell that `run` types the script into.
+    /// The pane runs `{script}`, which changes to `{home}` first. With
+    /// `run` set it starts as a shell, and `run` types the script into it.
     #[serde(default)]
     pub open: Vec<Vec<String>>,
     /// Where `open`'s JSON output names the new pane, as a JSON pointer.
@@ -74,7 +74,7 @@ prompt = [["herdr", "agent", "prompt", "{pane}", "{line}"]]
 type_line = [["herdr", "pane", "send-text", "{pane}", "{line}"], ["herdr", "pane", "send-keys", "{pane}", "enter"]]
 alive = ["herdr", "pane", "get", "{pane}"]
 # `herdr agent wait` answers agent_not_found until herdr recognises the
-# runner. A runner it never recognises gets the line typed raw once
+# runner; a runner it never recognises gets the line typed raw once
 # `ready_s` runs out.
 ready = ["herdr", "agent", "wait", "{pane}", "--until", "idle", "--until", "done", "--timeout", "5000"]
 ready_s = 20

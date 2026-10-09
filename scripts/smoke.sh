@@ -8,8 +8,8 @@
 set -euo pipefail
 # grep -q stops reading at its first match, so a verb that prints a later
 # line, such as the tracker commit after a claim, dies of SIGPIPE. Under
-# pipefail the check then fails even when the line was there, so this
-# grep reads everything.
+# pipefail the check then fails even when the line was there. This grep
+# reads everything.
 grep() {
   case "${1-}" in
     -q) shift; command grep "$@" >/dev/null ;;
