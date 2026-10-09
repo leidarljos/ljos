@@ -59,6 +59,18 @@ pair with =ask=: Grok shows that as the in-chat permission prompt. A runner
 that cannot ask (stdin carrying =turn_id=) still gets the ask rewritten to
 a deny.
 
+* A panel member is a supervised child
+
+A child that exits is classified before it is started again.
+=ljos supervise NAME --harness grok --exit crash --at SECONDS= prints
+=restart=, =stop= or =give-up=, and on a restart the herdr line
+=herdr agent start persona-NAME --no-focus --cwd HOME -- sh SCRIPT=.
+The same command with =--harness claude= or =--harness codex= is the
+other runners: the policy is one, and the harness name is the part that
+changes. =permanent= restarts however it exited, =transient= only on a
+crash, =temporary= never. Three restarts inside sixty seconds give up.
+The command prints the decision. It does not start the pane.
+
 * Smoke
 
 #+begin_src console

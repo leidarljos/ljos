@@ -297,7 +297,11 @@ runner continues the latest session of the directory it starts in, so
 the next hand-off resumes the same conversation, and an open pane takes
 the next task in place. A task goes to the persona's inbox, and the pane
 is told the file in one line. =ljos ask NAME "..."= puts a question to
-the persona the same way. =ljos panel --jev= hands each unsure persona's
+the persona the same way. =ljos supervise NAME --harness RUNNER --exit crash --at SECONDS=
+says whether that child should be started again, under the restart
+policy (permanent, transient, temporary, three strikes in a minute), and
+prints the herdr line when the answer is yes. It does not start the pane.
+=ljos panel --jev= hands each unsure persona's
 brief to its own session when the panel splits. A persona with no runner
 gets a brief for a subagent, as before.
 

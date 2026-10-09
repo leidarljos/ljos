@@ -14,6 +14,7 @@ pub mod approval;
 pub mod hud;
 pub mod jev;
 pub mod persona_session;
+pub mod plugin;
 pub mod sync;
 pub mod tools;
 pub mod upgrade;

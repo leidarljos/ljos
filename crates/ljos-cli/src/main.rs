@@ -267,6 +267,39 @@ enum Cmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Classify one harness exit under the restart policy, and print the
+    /// herdr line that would start the child again. This does not start it.
+    Supervise {
+        /// The child's name. The herdr agent is `persona-NAME`.
+        name: String,
+        /// The harness this child runs.
+        #[arg(long)]
+        harness: String,
+        /// `permanent`, `transient`, or `temporary`.
+        #[arg(long, default_value = "permanent")]
+        restart: String,
+        /// Restarts allowed inside the window before the supervisor gives up.
+        #[arg(long, default_value_t = 3)]
+        max_restarts: u32,
+        /// The intensity window, in seconds.
+        #[arg(long, default_value_t = 60)]
+        window: u64,
+        /// `clean` or `crash`.
+        #[arg(long)]
+        exit: String,
+        /// Seconds since the epoch. The window is read from this clock.
+        #[arg(long)]
+        at: u64,
+        /// Earlier exits already counted, comma-separated seconds.
+        #[arg(long, default_value = "")]
+        failures: String,
+        /// The persona home herdr starts in.
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        /// The script herdr runs.
+        #[arg(long, default_value = "run.sh")]
+        script: PathBuf,
+    },
     /// Hand a persona a question or a task in its own session, opening its pane when it is closed.
     Ask {
         name: String,
@@ -914,6 +947,51 @@ fn main() -> Result<()> {
                 "{}",
                 ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref())?
             );
+        }
+        Cmd::Supervise {
+            name,
+            harness,
+            restart,
+            max_restarts,
+            window,
+            exit,
+            at,
+            failures,
+            cwd,
+            script,
+        } => {
+            let restart = ljos_cli::plugin::Restart::parse(&restart)
+                .with_context(|| format!("restart {restart}: permanent, transient, or temporary"))?;
+            let exit = ljos_cli::plugin::ExitKind::parse(&exit)
+                .with_context(|| format!("exit {exit}: clean or crash"))?;
+            let failures = failures
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().parse::<u64>().with_context(|| format!("failure time {s}")))
+                .collect::<Result<Vec<_>>>()?;
+            let mut sup = ljos_cli::plugin::Supervisor {
+                child: ljos_cli::plugin::Child {
+                    name: name.clone(),
+                    harness: harness.clone(),
+                    restart,
+                    max_restarts,
+                    window_secs: window,
+                },
+                failures,
+            };
+            let action = sup.on_exit(exit, at);
+            let herdr = if action == ljos_cli::plugin::Action::Restart {
+                ljos_cli::plugin::herdr_argv(&name, &cwd, &script)
+            } else {
+                Vec::new()
+            };
+            let decision = ljos_cli::plugin::Decision {
+                action,
+                harness,
+                herdr,
+                failures: sup.failures,
+            };
+            println!("{}", serde_json::to_string_pretty(&decision)?);
         }
         Cmd::Ask { name, text } => {
             println!("{}", ljos_cli::ask_persona(&name, &text.join(" "))?);
