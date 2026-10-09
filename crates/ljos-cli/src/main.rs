@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, complete, conflicts, consensus_steps_for,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, complete, conflicts, consensus_steps_for,
     copy_playbook, doctor, due_report, finish, forecasts_from_json, format_bump_rows,
     format_consolidation, format_doctor, format_findings, format_hits, format_hubs, format_island,
     format_personas, format_playbooks, format_readings, format_remembered, format_seat,
@@ -299,11 +299,21 @@ enum Cmd {
     Playbooks,
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
-        /// A tracker id, or a 32-hex claim-graph id.
+        /// A tracker id, or a 32-hex claim-graph id. Omit when claiming next.
+        #[arg(default_value = "")]
         node: String,
         /// Your name; mapped to one actor id. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
+        /// Atomically claim the next balanced ready work node from the graph.
+        #[arg(long)]
+        next: bool,
+        /// Desired role affinity when claiming next work ('explore', 'architect', 'implementor', 'verifier', 'orchestrator', 'general').
+        #[arg(long)]
+        role: Option<String>,
+        /// Critical depth slack for candidate dispersion.
+        #[arg(long)]
+        slack: Option<usize>,
     },
     /// Hand a session node back unfinished: ready again, generation moved.
     Release {
@@ -929,8 +939,22 @@ fn main() -> Result<()> {
         Cmd::Playbooks => {
             print!("{}", format_playbooks(&playbooks_from_pack()?));
         }
-        Cmd::Claim { node, assignee } => {
-            print!("{}", claim(&node, &resolve_assignee(assignee.as_deref()))?)
+        Cmd::Claim {
+            node,
+            assignee,
+            next,
+            role,
+            slack,
+        } => {
+            let assignee = resolve_assignee(assignee.as_deref());
+            if next || node.is_empty() {
+                print!(
+                    "{}",
+                    claim_next(&assignee, role.as_deref(), slack)?
+                );
+            } else {
+                print!("{}", claim(&node, &assignee)?);
+            }
         }
         Cmd::Release { node, assignee } => {
             print!(
