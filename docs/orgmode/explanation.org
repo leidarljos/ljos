@@ -104,8 +104,8 @@ recency half-life at 0.270 (the packset site carries the table).
 The hook speaks at a prompt, a failed tool and a stop, and fires its
 memories before a compaction. A prompt gets what it activates: the
 preferences and standing lessons that two scorers named and that share a
-word with it. A claim reaches a session once. It arrives when it first
-matters, not on every command after.
+word with it. A claim reaches a session once between compactions. It
+arrives when it first matters, not on every command after.
 
 A runner that reports a failed tool, as Grok Build does with
 =PostToolUseFailure=, gets a search of its own. The hook searches on the
@@ -326,9 +326,10 @@ is its social power. The iterate and exact engines print that power as
 =influence=, beside the shares, and the number of equal voices it is worth
 as =effective_voters=. A margin inside what the residual leaves open comes
 back as a =tie=. A voter weighs its own ballot as the others weigh it, so
-with no voter anchored, the log-odds rows =learn= writes settle as the
-weighted vote they describe. One constant self-weight for everyone had
-flattened them toward a count. A weak crowd could outvote its best voter.
+with no voter anchored and no discount, the log-odds rows =learn= writes
+settle as the weighted vote they describe. One constant self-weight for
+everyone had flattened them toward a count. A weak crowd could outvote its
+best voter.
 
 Personas that run on one model share its mistakes, which is why =learn=
 keeps the option each issue closed on. =consensus= asks the consensus
