@@ -118,10 +118,10 @@ the seat's hook, since Cursor runs that file's hooks too.
 
 The hook reads a Cursor call off =cursor_version= in its stdin and answers
 in Cursor's fields: =permission= at the gate, with =user_message= and
-=agent_message=. It still answers =allow= when there is no verdict, since
+=agent_message=; =additional_context= on a tool result; =followup_message=
+on a held stop. It still answers =allow= when there is no verdict, since
 Cursor blocks the command when a gate's answer is not JSON. An ask on
-=preToolUse=, which Cursor does not enforce, becomes a deny. A tool result
-gets =additional_context=, and a held stop =followup_message=.
+=preToolUse=, which Cursor does not enforce, becomes a deny.
 
 =[[tool]]= tables in the same file declare the tools a runner lives in.
 Two ship as shapes, herdr and tmux. A table of the same name replaces one.
@@ -241,7 +241,7 @@ spread beyond binomial noise; the first outcome leaves every voter alike,
 and a long record keeps the differences it shows.
 
 The weight every other voter gives a voter is the log odds of that
-accuracy, Nitzan and Paroush's weight (doi:10.2307/2526438). The best
+accuracy, Nitzan and Paroush's weight (doi:10.2307/2526438); the best
 voter weighs one and none weighs less than 0.01. A panel with nobody above
 chance weighs every voter 0.01. Rows are written complete, so the settle
 sees the whole graph, and each carries its voter's record. =learn= also
@@ -254,12 +254,12 @@ floored at 0.01. A vindicated voter keeps its weight, and a missing row
 starts at 1.
 
 =consensus= reads each issue's ballots beside the option it closed on once
-five issues have an outcome. It asks =ljos-consensus correlation= how far
+five issues have an outcome, and asks =ljos-consensus correlation= how far
 the voters share their mistakes. A pair counts only when its correlation
 passes the one-sided test of independence at five percent. A voter's
 inbound weight in the settle is multiplied by
-=1 / (1 + the sum of its counted correlations)= (=settle --discount-of=).
-Exact clones count as one voice under it if their record holds a hit and a
+=1 / (1 + the sum of its counted correlations)= (=settle --discount-of=);
+exact clones count as one voice under it if their record holds a hit and a
 miss, and a looser cluster as more than one. A line before the settle
 names the outcomes read, the independent voices the panel holds and each
 voter discounted. Nothing is passed or printed when no pair counts.

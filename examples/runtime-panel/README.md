@@ -61,7 +61,7 @@ equal voices.
 ## What the panel found besides its answer
 
 - The pack closed four of five persona inbound rows, and four of five
-  forecasts, as rewrites of one another. `a weighs b at 1.000.` and
+  forecasts, as rewrites of one another: `a weighs b at 1.000.` and
   `a weighs c at 1.000.` share five of their seven tokens. The surprisingly
   popular reading needs two forecasts, so it never ran. packset now keeps
   claims with a different `from`, `to`, `about`, `agent`, `issue`, or `name`

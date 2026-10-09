@@ -243,7 +243,7 @@ failures and retrieves them on the next task. ACE
 (doi:10.48550/arXiv.2510.04618) keeps a playbook of itemised strategies
 that a reflector and a curator grow by small deltas, because rewriting a
 context whole erodes it. MemOS (doi:10.48550/arXiv.2507.03724) treats
-memory as a resource with provenance, versions and a lifecycle. MIRIX
+memory as a resource with provenance, versions and a lifecycle; MIRIX
 (doi:10.48550/arXiv.2507.07957) splits it into six typed stores, each run
 by its own agent. Memory-R1 (doi:10.48550/arXiv.2508.19828) trains its
 add, update and delete choices by reinforcement learning. The runners grew
@@ -251,9 +251,9 @@ memories of their own: Grok Build's keeps Markdown topics per workspace,
 captures observations after each turn and folds them in with a =/dream=
 pass.
 
-The pack already keeps much of what these systems add. ACE's itemised
-playbook grown by deltas is a pack of one-claim atoms superseded by head;
-MemOS's provenance and versions are an atom's writer, deeds and live
+The pack already keeps much of what these systems add: ACE's itemised
+playbook grown by deltas is a pack of one-claim atoms superseded by head,
+and MemOS's provenance and versions are an atom's writer, deeds and live
 window. ReasoningBank's lessons from failure are =finish --lesson=, and
 the hook hands back what bears on a command when it fails. A claim enters
 the pack when someone says to keep it, or when the hook reads a prompt as
@@ -334,13 +334,13 @@ best voter.
 Personas that run on one model share its mistakes, which is why =learn=
 keeps the option each issue closed on. =consensus= asks the consensus
 crate's =correlation= who errs with whom once five issues have one, and
-discounts each correlated cluster. Exact clones count once if their record
+discounts each correlated cluster; exact clones count once if their record
 holds a hit and a miss. A pair counts only when its correlation passes a
 test of independence, so a short history does not discount a voter by
 noise. The consensus crate's =derive/= checks the settle and that test.
 
-A short record misleads the weights too. Plug-in log odds drop a good
-voter who started unlucky. They lose to a plain count by 6.4 points on a
+A short record misleads the weights too: plug-in log odds drop a good
+voter who started unlucky, and lose to a plain count by 6.4 points on a
 panel of seven similar voters at three outcomes. =learn= therefore shrinks
 each voter's accuracy toward the panel's pooled accuracy before weighing
 it, by empirical Bayes (Efron and Morris,
@@ -348,8 +348,8 @@ doi:10.1080/01621459.1975.10479864). The first outcome leaves the voters
 alike, and a long record keeps the differences it shows.
 
 A ballot follows its own reading, not the others'. The brief carries no
-other ballot and tells the persona to cast before it reads a tally. A
-ballot cast after the others adds a voice and no evidence.
+other ballot and tells the persona to cast before it reads a tally,
+since a ballot cast after the others adds a voice and no evidence.
 
 * Judgment, and where a judge slots in
 
@@ -432,8 +432,8 @@ one runner hold two tickets. =LJOS_SEAT= is the override, not the setup.
 
 The tools persona panes open in are declared in =[[tool]]= tables, beside
 the runners' =[[harness]]= tables. A persona that reasons in a session of
-its own opens in the first tool that answers. The runners file's
-=[[tool]]= tables come first, then herdr through its workspace and agent
+its own opens in the first tool that answers: the runners file's
+=[[tool]]= tables first, then herdr through its workspace and agent
 commands when its server is up, then tmux. Every verb but =pane_pointer=
 is an argv or a list of argvs, so a tool the seat has not met is one more
 table. A tool that refuses is named in its own words, and the next one is
