@@ -146,6 +146,20 @@ pub struct Harness {
     /// empty template runs `grok` with the seat's fallback flags.
     #[serde(default)]
     pub headless: Vec<String>,
+    /// Shell only: no MCP server and no hook file. `onboard` writes the
+    /// skill and an env file that sets `LJOS_SEAT` to this runner's name.
+    /// A shell the agent opens is that seat. The process tree is not.
+    /// Grok Bot is one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shell: bool,
+    /// Where that env file goes. Unset, it sits beside `harnesses.toml`
+    /// as `<name>.env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// How long a status line is reused before the stores are asked again: a
@@ -596,8 +610,8 @@ resume = ["agy", "--continue"]
 
 [[harness]]
 name = "cursor"
-# Cursor's agent and its `agent` CLI read servers from mcp.json and hooks
-# from a flat hooks.json of their own. Cursor also runs the hooks in
+# The IDE and the `agent` CLI read one file, ~/.cursor/mcp.json, and one
+# hooks file, ~/.cursor/hooks.json. Cursor also runs the hooks in
 # ~/.claude/settings.json. Events that file already runs stay there.
 # beforeShellExecution, preToolUse, beforeMCPExecution, beforeReadFile and
 # postToolUseFailure are still written here, and the permission events
@@ -625,6 +639,89 @@ resume = ["grok", "--continue"]
 # decision panel's member runs headless with this argv.
 agents = "~/.grok/agents"
 headless = ["grok", "--prompt-file", "{prompt_file}", "--yolo", "--max-turns", "6", "--effort", "low", "--disallowed-tools", "Agent", "--cwd", "{cwd}"]
+
+# A shell-only agent has no MCP server and no command hook. Grok Bot is
+# one: it runs commands on a Linux box, so the process tree is not its
+# seat. `onboard` writes the skill and an env file. Source the file.
+# `--skills DIR` writes the skill there. Before a prompt, `ljos hook
+# --prompt`. Before a command, `ljos policy --fail-on-deny -- COMMAND`.
+# A deny exits 1. Without the flag, `ljos hook` still exits 0.
+
+[[harness]]
+name = "grokbot"
+shell = true
+skills = "~/.grokbot/skills"
+
+[[harness]]
+name = "shell"
+shell = true
+skills = "~/.agents/skills"
+
+# More runners that speak MCP over stdio, each in the file it reads.
+# `ljos onboard --harness NAME` registers the server and writes the skill.
+
+[[harness]]
+name = "windsurf"
+config_json = "~/.codeium/windsurf/mcp_config.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.codeium/windsurf/skills"
+
+[[harness]]
+name = "zed"
+config_json = "~/.config/zed/settings.json"
+json_pointer = "/context_servers/ljos"
+json_entry = '{"source": "custom", "command": "{server}", "args": [], "env": {}}'
+skills = "~/.config/zed/skills"
+
+[[harness]]
+name = "vscode"
+# VS Code and Copilot Chat read `servers`, not `mcpServers`.
+config_json = "~/.config/Code/User/mcp.json"
+json_pointer = "/servers/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.config/Code/User/skills"
+
+[[harness]]
+name = "claude-desktop"
+config_json = "~/.config/Claude/claude_desktop_config.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.config/Claude/skills"
+
+[[harness]]
+name = "gemini"
+# The Gemini CLI. Antigravity's agy keeps its own file under ~/.gemini/config.
+config_json = "~/.gemini/settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": [], "env": {"LJOS_SEAT": "{name}"}}'
+skills = "~/.gemini/skills"
+
+[[harness]]
+name = "amazonq"
+config_json = "~/.aws/amazonq/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.aws/amazonq/skills"
+
+[[harness]]
+name = "kiro"
+config_json = "~/.kiro/settings/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.kiro/skills"
+
+# Goose reads YAML. A snippet appended to a file that already has
+# `extensions:` is a second key, so this shape is an example to copy,
+# not one `onboard` merges. Continue's servers are a JSON array and
+# take the same treatment.
+#
+# [[harness]]
+# name = "goose"
+# config = "~/.config/goose/config.yaml"
+# marker = "  ljos:"
+# snippet = "\nextensions:\n  ljos:\n    enabled: true\n    type: stdio\n    cmd: \"{server}\"\n    args: []\n"
+# skills = "~/.config/goose/skills"
 
 # The tools a persona's runner lives in. Two ship as shapes: herdr, through
 # its agent API when its server answers, and tmux. `ljos doctor` names the
@@ -1875,7 +1972,18 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
 ///
 /// No such runner in the file, no home directory, or `ljos-mcp` not on `PATH`.
 pub fn onboard(harness: &str, dry: bool) -> Result<Vec<Step>> {
-    onboard_from(&harnesses_path(), harness, dry)
+    onboard_in(&harnesses_path(), harness, dry, None)
+}
+
+/// [`onboard`] with a skills directory. A shell runner that names none
+/// needs one. On any runner the skill is written here for this run.
+///
+/// # Errors
+///
+/// Same as [`onboard`]. A shell runner with no skills directory, in the
+/// table or in `skills`, is an error.
+pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
+    onboard_in(&harnesses_path(), harness, dry, skills)
 }
 
 /// Frozen Grok hook file. Copied to `~/.grok/hooks/ljos.json`.
@@ -1918,6 +2026,102 @@ fn write_grok_hooks(dry: bool) -> Result<Step> {
 }
 
 pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> {
+    onboard_in(file, harness, dry, None)
+}
+
+/// The env file a shell runner sources, beside the runners file unless
+/// the table names `env_file`.
+fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
+    match &h.env_file {
+        Some(path) => expand(path),
+        None => file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{}.env", h.name)),
+    }
+}
+
+fn export_assignment(name: &str) -> String {
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        format!("export LJOS_SEAT={name}")
+    } else {
+        format!("export LJOS_SEAT='{}'", name.replace('\'', "'\\''"))
+    }
+}
+
+/// What a shell runner sources. `LJOS_SEAT` is the harness name, because
+/// this agent has no MCP client and the process tree is not its seat.
+fn seat_env_text(name: &str) -> String {
+    format!(
+        "# Source this in the shell that runs the agent's commands.\n\
+         # This runner has no MCP client, so the process tree is not its seat.\n\
+         # LJOS_SEAT is the name memory, ballots and trust use.\n\
+         # Before a prompt: ljos hook --prompt\n\
+         # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
+         {}\n",
+        export_assignment(name)
+    )
+}
+
+fn env_step(path: &Path, name: &str, dry: bool) -> Step {
+    let text = seat_env_text(name);
+    let source = format!("source {}", path.display());
+    if std::fs::read_to_string(path).is_ok_and(|have| have == text) {
+        return Step {
+            what: "env".into(),
+            detail: format!("{} is current; {source}", path.display()),
+            ok: true,
+        };
+    }
+    if dry {
+        return Step {
+            what: "env".into(),
+            detail: format!("would write {}; {source}", path.display()),
+            ok: true,
+        };
+    }
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(path, text));
+    match written {
+        Ok(()) => Step {
+            what: "env".into(),
+            detail: format!("wrote {}; {source}", path.display()),
+            ok: true,
+        },
+        Err(e) => Step {
+            what: "env".into(),
+            detail: format!("{}: {e}", path.display()),
+            ok: false,
+        },
+    }
+}
+
+fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Result<Vec<Step>> {
+    let Some(dir) = &h.skills else {
+        bail!(
+            "onboard: {} is a shell runner and needs a skills directory; pass --skills DIR",
+            h.name
+        );
+    };
+    let mut steps: Vec<Step> = shipped.into_iter().collect();
+    steps.push(write_skill(&expand(dir), dry));
+    steps.push(env_step(&env_path_for(file, h), &h.name, dry));
+    steps.extend([pack_step(dry), host_key_step(dry)]);
+    Ok(steps)
+}
+
+pub fn onboard_in(
+    file: &Path,
+    harness: &str,
+    dry: bool,
+    skills: Option<&Path>,
+) -> Result<Vec<Step>> {
     if harness == "json" {
         return Ok(vec![Step {
             what: "json".into(),
@@ -1963,23 +2167,24 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
     // the doctor and persona sessions know the runner too: a first
     // `ljos onboard --harness claude` needs no file of its own.
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
-    let from_shipped = shipped
+    let names: Vec<String> = all.harness.iter().map(|h| h.name.clone()).collect();
+    let named = names.iter().any(|n| n == harness);
+    let mut from_shipped = shipped
         .harness
-        .iter()
+        .into_iter()
         .find(|h| h.name == harness && !h.name.starts_with("runner-with-"))
-        .filter(|_| !all.harness.iter().any(|h| h.name == harness))
-        .cloned();
+        .filter(|_| !named);
+    if let Some(h) = &mut from_shipped {
+        if let Some(dir) = skills {
+            h.skills = Some(dir.display().to_string());
+        }
+    }
     let mut shipped_step = None;
     if let Some(h) = &from_shipped {
         shipped_step = Some(adopt_shipped_shape(file, h, dry));
     }
-    let Some(h) = all
-        .harness
-        .iter()
-        .find(|h| h.name == harness)
-        .or(from_shipped.as_ref())
-    else {
-        let names: Vec<&str> = all.harness.iter().map(|h| h.name.as_str()).collect();
+    let from_file = all.harness.into_iter().find(|h| h.name == harness);
+    let Some(mut h) = from_file.or(from_shipped) else {
         bail!(
             "onboard: no runner {harness:?} in {}; it names {}. `ljos onboard --example` \
              prints the file's shape, and `--harness json` prints the entry to paste anywhere.",
@@ -1991,6 +2196,13 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
             }
         );
     };
+    if let Some(dir) = skills {
+        h.skills = Some(dir.display().to_string());
+    }
+    if h.shell {
+        return shell_steps(file, &h, dry, shipped_step);
+    }
+    let h = &h;
     let server = server_path()?;
     let dependencies = [pack_step(dry), host_key_step(dry)];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
@@ -2717,6 +2929,25 @@ impl HookShape {
 #[must_use]
 pub fn hook_call(input: &str) -> HookCall {
     hook_call_as(input, None)
+}
+
+/// Stdin as the person's prompt. Plain text is the prompt. JSON keeps the
+/// runner's shape and is read as `UserPromptSubmit`, so a shell agent does
+/// not have to wrap a prompt as a tool call.
+#[must_use]
+pub fn prompt_call(input: &str) -> HookCall {
+    let trimmed = input.trim();
+    if serde_json::from_str::<Value>(trimmed).is_ok() {
+        let mut call = hook_call_as(trimmed, Some("UserPromptSubmit"));
+        call.event = "UserPromptSubmit".into();
+        return call;
+    }
+    HookCall {
+        event: "UserPromptSubmit".into(),
+        cue: trimmed.to_string(),
+        session: None,
+        shape: HookShape::Asks,
+    }
 }
 
 /// The text of the person's last message in a transcript of JSON lines,
@@ -5322,6 +5553,49 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
     Value::Object(top).to_string() + "\n"
 }
 
+/// Whether an answer refuses the action. JSON is a `deny` on `decision`,
+/// `permission` or `permissionDecision`. Plain text is a later line, or
+/// the only line, that starts with `deny:` or `deny` and a tab. A lesson
+/// that merely contains the word does not count, and an `ask` does not.
+#[must_use]
+pub fn answer_denies(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return json_denies(&value);
+    }
+    trimmed.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("deny:") || line.starts_with("deny\t")
+    })
+}
+
+fn json_denies(value: &Value) -> bool {
+    let decision = value
+        .get("permission")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("decision").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(Value::as_str)
+        });
+    decision == Some("deny")
+}
+
+/// Exit status for a shell agent. `fail_on_deny` leaves the usual exit of
+/// 0 alone, and otherwise returns 1 when [`answer_denies`] is true.
+#[must_use]
+pub fn shell_exit(fail_on_deny: bool, text: &str) -> i32 {
+    if fail_on_deny && answer_denies(text) {
+        1
+    } else {
+        0
+    }
+}
+
 /// An answer in Cursor's hook contract. A gate always answers, because
 /// Cursor blocks the command when a permission hook's answer is not
 /// JSON. A verdict goes with its reason to the person (`user_message`)
@@ -5411,25 +5685,6 @@ fn harness_rows() -> Vec<Habitat> {
     let server = server_path().unwrap_or_else(|_| PathBuf::from("ljos-mcp"));
     let mut rows = Vec::new();
     for h in &all.harness {
-        let registered = is_registered(h, &server) == Some(true);
-        let probed = (registered && !h.probe.is_empty()).then(|| probe_lists_ljos(&h.probe));
-        rows.push(Habitat {
-            name: "runner mcp",
-            state: match (registered, &probed) {
-                (false, _) => format!(
-                    "{}: not registered; ljos onboard --harness {}",
-                    h.name, h.name
-                ),
-                (true, Some(Err(why))) => format!(
-                    "{}: registered, but `{}` does not list ljos_sitting: {why}",
-                    h.name,
-                    h.probe.join(" ")
-                ),
-                (true, Some(Ok(()))) => format!("{}: ljos registered and loads", h.name),
-                (true, None) => format!("{}: ljos registered", h.name),
-            },
-            ok: registered && !matches!(probed, Some(Err(_))),
-        });
         let skill = h
             .skills
             .as_deref()
@@ -5437,70 +5692,104 @@ fn harness_rows() -> Vec<Habitat> {
         let current = skill
             .as_ref()
             .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t == skill_text()));
-        if let Some(file) = &h.hooks {
-            let path = expand(file);
-            let installed = match &h.hooks_named {
-                Some(name) => named_hook_installed(&path, name),
-                None if h.hooks_format.as_deref() == Some("cursor") => {
-                    cursor_hooks_satisfy(&path, &expand("~/.claude/settings.json"))
-                }
-                None => hook_installed(&path, &hook_events_of(h)),
-            };
+        if h.shell {
+            let env_path = env_path_for(&path, h);
+            let ready =
+                std::fs::read_to_string(&env_path).is_ok_and(|t| t == seat_env_text(&h.name));
             rows.push(Habitat {
-                name: "runner hook",
-                state: if installed {
-                    format!("{}: memory hook on {}", h.name, path.display())
+                name: "runner env",
+                state: if ready {
+                    format!("{}: source {}", h.name, env_path.display())
                 } else {
-                    format!(
-                        "{}: no memory hook; ljos onboard --harness {}",
-                        h.name, h.name
-                    )
+                    format!("{}: no seat env; ljos onboard --harness {}", h.name, h.name)
                 },
-                ok: installed,
+                ok: ready,
             });
-        } else if h.plugin.is_none() {
-            if let Some(cfg) = &h.config {
-                let path = expand(cfg);
-                let installed =
-                    std::fs::read_to_string(&path).is_ok_and(|t| t.contains("ljos hook"));
+        } else {
+            let registered = is_registered(h, &server) == Some(true);
+            let probed = (registered && !h.probe.is_empty()).then(|| probe_lists_ljos(&h.probe));
+            rows.push(Habitat {
+                name: "runner mcp",
+                state: match (registered, &probed) {
+                    (false, _) => format!(
+                        "{}: not registered; ljos onboard --harness {}",
+                        h.name, h.name
+                    ),
+                    (true, Some(Err(why))) => format!(
+                        "{}: registered, but `{}` does not list ljos_sitting: {why}",
+                        h.name,
+                        h.probe.join(" ")
+                    ),
+                    (true, Some(Ok(()))) => format!("{}: ljos registered and loads", h.name),
+                    (true, None) => format!("{}: ljos registered", h.name),
+                },
+                ok: registered && !matches!(probed, Some(Err(_))),
+            });
+            if let Some(file) = &h.hooks {
+                let path = expand(file);
+                let installed = match &h.hooks_named {
+                    Some(name) => named_hook_installed(&path, name),
+                    None if h.hooks_format.as_deref() == Some("cursor") => {
+                        cursor_hooks_satisfy(&path, &expand("~/.claude/settings.json"))
+                    }
+                    None => hook_installed(&path, &hook_events_of(h)),
+                };
                 rows.push(Habitat {
                     name: "runner hook",
                     state: if installed {
-                        format!("{}: memory hook in {}", h.name, path.display())
+                        format!("{}: memory hook on {}", h.name, path.display())
                     } else {
                         format!(
-                            "{}: no memory hook in {}; ljos onboard --harness {}",
-                            h.name,
-                            path.display(),
-                            h.name
+                            "{}: no memory hook; ljos onboard --harness {}",
+                            h.name, h.name
                         )
                     },
                     ok: installed,
                 });
+            } else if h.plugin.is_none() {
+                if let Some(cfg) = &h.config {
+                    let path = expand(cfg);
+                    let installed =
+                        std::fs::read_to_string(&path).is_ok_and(|t| t.contains("ljos hook"));
+                    rows.push(Habitat {
+                        name: "runner hook",
+                        state: if installed {
+                            format!("{}: memory hook in {}", h.name, path.display())
+                        } else {
+                            format!(
+                                "{}: no memory hook in {}; ljos onboard --harness {}",
+                                h.name,
+                                path.display(),
+                                h.name
+                            )
+                        },
+                        ok: installed,
+                    });
+                }
             }
-        }
-        if let Some(dest) = &h.plugin {
-            let path = expand(dest);
-            let want = ljos_path().ok().and_then(|l| plugin_text(h, &l));
-            let current = want
-                .as_ref()
-                .is_some_and(|w| std::fs::read_to_string(&path).is_ok_and(|t| &t == w));
-            rows.push(Habitat {
-                name: "runner hook",
-                state: if current {
-                    format!("{}: plugin {}", h.name, path.display())
-                } else if path.is_file() {
-                    format!(
-                        "{}: plugin {} is stale; ljos onboard --harness {}",
-                        h.name,
-                        path.display(),
-                        h.name
-                    )
-                } else {
-                    format!("{}: no plugin; ljos onboard --harness {}", h.name, h.name)
-                },
-                ok: current,
-            });
+            if let Some(dest) = &h.plugin {
+                let path = expand(dest);
+                let want = ljos_path().ok().and_then(|l| plugin_text(h, &l));
+                let current = want
+                    .as_ref()
+                    .is_some_and(|w| std::fs::read_to_string(&path).is_ok_and(|t| &t == w));
+                rows.push(Habitat {
+                    name: "runner hook",
+                    state: if current {
+                        format!("{}: plugin {}", h.name, path.display())
+                    } else if path.is_file() {
+                        format!(
+                            "{}: plugin {} is stale; ljos onboard --harness {}",
+                            h.name,
+                            path.display(),
+                            h.name
+                        )
+                    } else {
+                        format!("{}: no plugin; ljos onboard --harness {}", h.name, h.name)
+                    },
+                    ok: current,
+                });
+            }
         }
         rows.push(Habitat {
             name: "runner skill",
@@ -16835,7 +17124,10 @@ mod tests {
             stop_context_for_runner(HookShape::CamelCase, delivered.clone()),
             ""
         );
-        assert_eq!(stop_context_for_runner(HookShape::Asks, delivered), "no tool");
+        assert_eq!(
+            stop_context_for_runner(HookShape::Asks, delivered),
+            "no tool"
+        );
         assert!(stop_hook_stdout(Some(&quiet), true).0.is_empty());
         let argv = hook_call("rm -rf build");
         assert_eq!(argv.event, "argv");
@@ -17963,12 +18255,51 @@ mod tests {
     fn onboarding_a_config_file_runner_writes_once() {
         let _g = env_guard();
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
-        // Three shapes, then the eight runners this seat has carried.
-        assert_eq!(all.harness.len(), 11);
-        assert!(all.harness[3..].iter().all(|h| h.register.len()
-            + usize::from(h.config.is_some())
-            + usize::from(h.config_json.is_some())
-            > 0));
+        // Three shapes, then the runners this seat ships. Two of them are
+        // shell-only and register nothing.
+        assert_eq!(all.harness.len(), 20);
+        assert!(all.harness[3..].iter().all(|h| h.shell
+            || h.register.len()
+                + usize::from(h.config.is_some())
+                + usize::from(h.config_json.is_some())
+                > 0));
+        let shell: Vec<_> = all
+            .harness
+            .iter()
+            .filter(|h| h.shell)
+            .map(|h| h.name.as_str())
+            .collect();
+        assert_eq!(shell, ["grokbot", "shell"]);
+        for h in all.harness.iter().filter(|h| h.shell) {
+            assert!(
+                h.register.is_empty()
+                    && h.config.is_none()
+                    && h.config_json.is_none()
+                    && h.hooks.is_none()
+                    && h.plugin.is_none(),
+                "{h:?}"
+            );
+            assert!(h.skills.is_some(), "{h:?}");
+        }
+        let cursor = all.harness.iter().find(|h| h.name == "cursor").unwrap();
+        assert_eq!(cursor.config_json.as_deref(), Some("~/.cursor/mcp.json"));
+        assert_eq!(cursor.hooks_format.as_deref(), Some("cursor"));
+        for name in [
+            "windsurf",
+            "zed",
+            "vscode",
+            "claude-desktop",
+            "gemini",
+            "amazonq",
+            "kiro",
+        ] {
+            let h = all
+                .harness
+                .iter()
+                .find(|h| h.name == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(h.config_json.is_some() && !h.shell, "{name}");
+        }
         assert_eq!(all.harness[1].marker.as_deref(), Some("[mcp_servers.ljos]"));
         assert_eq!(all.harness[2].json_pointer.as_deref(), Some("/mcp/ljos"));
 
@@ -18039,6 +18370,123 @@ mod tests {
             "the entry was appended twice"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_shell_runner_writes_the_skill_and_the_seat_env() {
+        let _g = env_guard();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+        }
+        let dir = std::env::temp_dir().join(format!("ljos-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("harnesses.toml");
+        let skills = dir.join("given");
+        let dry = super::onboard_in(&file, "grokbot", true, Some(&skills)).unwrap();
+        assert!(dry.iter().all(|s| s.ok), "{dry:?}");
+        assert!(dry
+            .iter()
+            .any(|s| s.what == "skill" && s.detail.contains("would write")));
+        assert!(dry.iter().any(|s| {
+            s.what == "env" && s.detail.contains("grokbot.env") && s.detail.contains("source ")
+        }));
+        assert!(dry
+            .iter()
+            .all(|s| s.what != "hook" && !s.what.contains("mcp")));
+        assert!(!skills.exists(), "a dry run wrote the skill");
+
+        let steps = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
+        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
+        let skill = std::fs::read_to_string(skills.join("ljos/SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\nname: ljos\n"));
+        assert!(skill.contains("## Before the work"));
+        let env = std::fs::read_to_string(dir.join("grokbot.env")).unwrap();
+        assert!(env.contains("export LJOS_SEAT=grokbot\n"), "{env}");
+        assert!(env.contains("LJOS_SEAT is the name"), "{env}");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved.contains("shell = true"), "{saved}");
+        assert!(saved.contains(&skills.display().to_string()), "{saved}");
+        assert!(!saved.contains("json_pointer"), "{saved}");
+        let again = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
+        assert!(again
+            .iter()
+            .any(|s| s.what == "skill" && s.detail.contains("is current")));
+        assert!(again.iter().any(|s| s.what == "env"
+            && s.detail.contains("is current")
+            && s.detail.contains("source ")));
+        let missing = dir.join("bare.toml");
+        std::fs::write(&missing, "[[harness]]\nname = \"box\"\nshell = true\n").unwrap();
+        let err = super::onboard_in(&missing, "box", true, None).unwrap_err();
+        assert!(err.to_string().contains("--skills"), "{err}");
+        unsafe {
+            std::env::remove_var("PACKSET_URL");
+            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deny_answer_exits_only_when_the_shell_asks() {
+        let deny = Rule {
+            pattern: "*--force*".into(),
+            verdict: "deny".into(),
+            reason: "Never force push.".into(),
+        };
+        let ask = Rule {
+            pattern: "rm*".into(),
+            verdict: "ask".into(),
+            reason: "ask first".into(),
+        };
+        let gate = HookCall {
+            event: "PreToolUse".into(),
+            cue: "git push --force".into(),
+            session: None,
+            shape: HookShape::Asks,
+        };
+        let denied = hook_output_ruled(&gate, "", Some(&deny));
+        assert!(answer_denies(&denied), "{denied}");
+        assert_eq!(shell_exit(true, &denied), 1);
+        assert_eq!(
+            shell_exit(false, &denied),
+            0,
+            "a runner's hook still exits 0"
+        );
+        let asked = hook_output_ruled(&gate, "", Some(&ask));
+        assert!(!answer_denies(&asked), "{asked}");
+        assert_eq!(shell_exit(true, &asked), 0);
+        let argv = HookCall {
+            event: "argv".into(),
+            cue: "git push --force".into(),
+            session: None,
+            shape: HookShape::Asks,
+        };
+        let plain = hook_output_ruled(
+            &argv,
+            "a lesson that says deny in the middle\n",
+            Some(&deny),
+        );
+        assert!(answer_denies(&plain), "{plain}");
+        let open = hook_output_ruled(&argv, "deny is only a word here\n", None);
+        assert!(!answer_denies(&open), "{open}");
+        assert!(answer_denies("git push --force\ndeny\tgit-force-push\n"));
+        assert!(!answer_denies("git status\nallow\t\n"));
+        let cursor = HookCall {
+            event: "PreToolUse".into(),
+            cue: "git push --force".into(),
+            session: None,
+            shape: HookShape::Cursor,
+        };
+        let cursor_deny = hook_output_ruled(&cursor, "", Some(&deny));
+        assert!(answer_denies(&cursor_deny), "{cursor_deny}");
+        let prompt = prompt_call("tag the release");
+        assert_eq!(prompt.event, "UserPromptSubmit");
+        assert_eq!(prompt.cue, "tag the release");
+        let wrapped = prompt_call(r#"{"prompt":"tag the release","hook_event_name":"PreToolUse"}"#);
+        assert_eq!(wrapped.event, "UserPromptSubmit");
+        assert_eq!(wrapped.cue, "tag the release");
     }
 
     #[test]
@@ -18499,6 +18947,8 @@ mod tests {
             resume: Vec::new(),
             agents: None,
             headless: Vec::new(),
+            shell: false,
+            env_file: None,
         };
         assert_eq!(is_registered(&h, Path::new("/bin/ljos-mcp")), Some(true));
         let _ = std::fs::remove_dir_all(&dir);

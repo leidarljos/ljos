@@ -3,21 +3,21 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, complete, conflicts, consensus_steps_for,
-    copy_playbook, doctor, due_report, finish, forecasts_from_json, format_bump_rows,
-    format_consolidation, format_doctor, format_findings, format_hits, format_hubs, format_island,
-    format_personas, format_playbooks, format_readings, format_remembered, format_seat,
-    format_steps, format_write_ack, graded, habit, habits, handover, healthy, hook_note,
-    identity_or_seat, island_entities, join, learn_anchors, learn_and_write, learn_reading,
-    learn_shared, mark_seen, now_utc, on_path, onboard, pack, packset_consolidate, packset_forget,
-    packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout,
-    predictions_of, prompt_hook_stdout, read_campaign, receive, release, remember_findings,
-    resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
-    settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words, tracker_show_json,
-    trim_num, trust_from_pack, verdict_for, whoami, with_discount, withdraw_prediction,
-    write_outcome, write_persona, write_prediction, write_rule, write_trust, Persona, Reading,
-    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, complete, conflicts,
+    consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
+    format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
+    format_hubs, format_island, format_personas, format_playbooks, format_readings,
+    format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
+    handover, healthy, hook_note, identity_or_seat, island_entities, join, learn_anchors,
+    learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, pack,
+    packset_consolidate, packset_forget, packset_hubs, packset_island_as, packset_search_as_of,
+    packset_write_as, panel, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
+    policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign,
+    receive, release, remember_findings, resolve_assignee, rows_about, rules_from_pack, run,
+    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, verdict_for, whoami, with_discount,
+    withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -402,7 +402,12 @@ enum Cmd {
         id: String,
     },
     /// Argv law: the line as it would run, then what the pack knows that bears on it.
-    Policy { argv: Vec<String> },
+    Policy {
+        /// Exit 1 when the answer is a deny. Without this flag the exit stays 0.
+        #[arg(long)]
+        fail_on_deny: bool,
+        argv: Vec<String>,
+    },
     /// The memory hook a runner or a policy layer calls before an action: reads the
     /// hook JSON (or plain text) on stdin, answers with the memories the action activates.
     Hook {
@@ -413,6 +418,13 @@ enum Cmd {
         /// (`PreToolUse`, `PreInvocation`, `Stop`).
         #[arg(long)]
         event: Option<String>,
+        /// Read stdin as the person's prompt, including when it is plain text.
+        #[arg(long, conflicts_with = "event")]
+        prompt: bool,
+        /// Exit 1 when the answer is a deny. Without this flag the exit stays 0,
+        /// so a runner that reads the JSON is unchanged.
+        #[arg(long)]
+        fail_on_deny: bool,
     },
     /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
     Consensus { id: String },
@@ -463,6 +475,10 @@ enum Cmd {
         /// Print an example harnesses.toml and stop.
         #[arg(long)]
         example: bool,
+        /// Skills directory. A shell runner that names none needs one.
+        /// On any runner the skill is written here for this run.
+        #[arg(long)]
+        skills: Option<PathBuf>,
     },
     /// Pack a slice of the seat: satchel, atoms, the deeds both cite; sealed and signed.
     Handover {
@@ -960,14 +976,19 @@ fn main() -> Result<()> {
             cwd,
             script,
         } => {
-            let restart = ljos_cli::plugin::Restart::parse(&restart)
-                .with_context(|| format!("restart {restart}: permanent, transient, or temporary"))?;
+            let restart = ljos_cli::plugin::Restart::parse(&restart).with_context(|| {
+                format!("restart {restart}: permanent, transient, or temporary")
+            })?;
             let exit = ljos_cli::plugin::ExitKind::parse(&exit)
                 .with_context(|| format!("exit {exit}: clean or crash"))?;
             let failures = failures
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
-                .map(|s| s.trim().parse::<u64>().with_context(|| format!("failure time {s}")))
+                .map(|s| {
+                    s.trim()
+                        .parse::<u64>()
+                        .with_context(|| format!("failure time {s}"))
+                })
                 .collect::<Result<Vec<_>>>()?;
             let mut sup = ljos_cli::plugin::Supervisor {
                 child: ljos_cli::plugin::Child {
@@ -1026,10 +1047,7 @@ fn main() -> Result<()> {
         } => {
             let assignee = resolve_assignee(assignee.as_deref());
             if next || node.is_empty() {
-                print!(
-                    "{}",
-                    claim_next(&assignee, role.as_deref(), slack)?
-                );
+                print!("{}", claim_next(&assignee, role.as_deref(), slack)?);
             } else {
                 print!("{}", claim(&node, &assignee)?);
             }
@@ -1082,15 +1100,28 @@ fn main() -> Result<()> {
         Cmd::Approve { id } => {
             print!("{}", ljos_cli::approval::approve(&id)?);
         }
-        Cmd::Policy { argv } => {
+        Cmd::Policy { argv, fail_on_deny } => {
             eprintln!("ljos: {POLICY_TCB}");
-            print!("{}", policy_with_memory(&argv)?);
+            let text = policy_with_memory(&argv)?;
+            print!("{text}");
+            if ljos_cli::shell_exit(fail_on_deny, &text) != 0 {
+                std::process::exit(1);
+            }
         }
-        Cmd::Hook { limit, event } => {
+        Cmd::Hook {
+            limit,
+            event,
+            prompt,
+            fail_on_deny,
+        } => {
             use std::io::Read;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
-            let call = ljos_cli::hook_call_as(&input, event.as_deref());
+            let call = if prompt {
+                ljos_cli::prompt_call(&input)
+            } else {
+                ljos_cli::hook_call_as(&input, event.as_deref())
+            };
             // A runner the seat asked for a judgment hears nothing from the
             // seat, so the judgment cannot open sittings or judge again;
             // the law on its tool calls still holds.
@@ -1376,16 +1407,17 @@ fn main() -> Result<()> {
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
             };
-            print!(
-                "{}",
-                ljos_cli::approval::hook_output(&input, &call, &context, verdict)
-            );
+            let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
+            print!("{output}");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
             }
             if ack_nudge {
                 ljos_cli::work_nudge_delivered(call.session.as_deref());
+            }
+            if ljos_cli::shell_exit(fail_on_deny, &output) != 0 {
+                std::process::exit(1);
             }
         }
         Cmd::Consensus { id } => {
@@ -1470,12 +1502,13 @@ fn main() -> Result<()> {
             harness,
             dry_run,
             example,
+            skills,
         } => {
             if example {
                 print!("{HARNESSES_EXAMPLE}");
                 return Ok(());
             }
-            let steps = onboard(&harness, dry_run)?;
+            let steps = onboard_to(&harness, dry_run, skills.as_deref())?;
             print!("{}", format_steps(&steps));
             if steps.iter().any(|s| !s.ok) {
                 std::process::exit(1);
