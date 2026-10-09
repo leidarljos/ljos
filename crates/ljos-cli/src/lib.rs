@@ -13,6 +13,7 @@ use serde_json::Value;
 pub mod approval;
 pub mod hud;
 pub mod jev;
+pub mod mail;
 pub mod persona_session;
 pub mod plugin;
 pub mod sync;
@@ -11493,10 +11494,20 @@ pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
 }
 
 /// Kinds that are weighed, not recalled, and so never come up for review.
-/// Kinds the review clock never holds and the hook never injects: trust
-/// and persona rows are weighed, playbooks are copied, and a prediction is a
-/// forecast on one ballot, with nothing in it to recall.
-const UNREVIEWED_KINDS: &[&str] = &["trust", "persona", "playbook", "prediction", "outcome"];
+/// Kinds the review clock never holds and the hook never injects as a
+/// lesson: trust and persona rows are weighed, playbooks are copied, a
+/// prediction is a forecast on one ballot, and mail is delivered by the
+/// prompt hook on its own path.
+const UNREVIEWED_KINDS: &[&str] = &[
+    "trust",
+    "persona",
+    "playbook",
+    "prediction",
+    "outcome",
+    "message",
+    "receipt",
+    "group",
+];
 
 /// Whether an atom is a claim the review clock should hold at all.
 fn reviewable(a: &Value) -> bool {

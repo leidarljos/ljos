@@ -175,6 +175,53 @@ enum Cmd {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
+    /// Write to one seat (`SEAT TEXT...`), or to a group with `--group NAME`.
+    Send {
+        /// The seat and the message, or with `--group` the message alone.
+        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        words: Vec<String>,
+        /// Write to every other member of this group.
+        #[arg(long)]
+        group: Option<String>,
+        /// Show this ahead of other mail on the next prompt.
+        #[arg(long)]
+        interrupt: bool,
+        /// The vissue issue this message is about. A reply keeps it.
+        #[arg(long)]
+        issue: Option<String>,
+    },
+    /// Mail this seat has not read. Listing does not write a receipt.
+    Inbox {
+        /// Include mail this seat has already read.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Write a read receipt for one message.
+    Read {
+        /// The id `send` printed.
+        id: String,
+    },
+    /// Answer a message. The reply goes to its sender and keeps its issue.
+    Reply {
+        /// The id `send` printed.
+        id: String,
+        /// The reply; several words are one reply.
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+        /// Show this ahead of other mail on the next prompt.
+        #[arg(long)]
+        interrupt: bool,
+    },
+    /// A group of seats. With `--add` or `--remove`, change it; alone, list it.
+    Group {
+        name: String,
+        /// A seat to add. Repeat for several.
+        #[arg(long)]
+        add: Vec<String>,
+        /// A seat to drop. Repeat for several.
+        #[arg(long)]
+        remove: Vec<String>,
+    },
     /// Who holds what on the tracker: `vissue claims`, with its flags.
     Claims {
         /// Passed to `vissue claims` as given (`--by NAME`, `--json`, `-p PROJECT`).
@@ -830,6 +877,46 @@ fn main() -> Result<()> {
             run("vissue", &["note", &issue, &text.join(" ")])?;
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
+        Cmd::Send {
+            words,
+            group,
+            interrupt,
+            issue,
+        } => {
+            let (seat, text) = if group.is_some() {
+                (None, words.join(" "))
+            } else {
+                let mut words = words;
+                if words.len() < 2 {
+                    bail!("send: name a seat and the message");
+                }
+                let seat = words.remove(0);
+                (Some(seat), words.join(" "))
+            };
+            print!(
+                "{}",
+                ljos_cli::mail::send(&ljos_cli::mail::Send {
+                    seat: seat.as_deref(),
+                    group: group.as_deref(),
+                    text: &text,
+                    interrupt,
+                    issue: issue.as_deref(),
+                })?
+            );
+        }
+        Cmd::Inbox { all } => print!("{}", ljos_cli::mail::inbox(all)?),
+        Cmd::Read { id } => print!("{}", ljos_cli::mail::read(&id)?),
+        Cmd::Reply {
+            id,
+            text,
+            interrupt,
+        } => print!(
+            "{}",
+            ljos_cli::mail::reply(&id, &text.join(" "), interrupt)?
+        ),
+        Cmd::Group { name, add, remove } => {
+            print!("{}", ljos_cli::mail::group(&name, &add, &remove)?)
+        }
         Cmd::Claims { args } => {
             let mut argv = vec!["claims"];
             argv.extend(args.iter().map(String::as_str));
@@ -1368,7 +1455,7 @@ fn main() -> Result<()> {
                     if call.event == "UserPromptSubmit" {
                         ljos_cli::store_correction(&call);
                     }
-                    let (mut ctx, ids) = hook_note(&call, limit);
+                    let (mut ctx, mut ids) = hook_note(&call, limit);
                     if call.shape == ljos_cli::HookShape::CamelCase
                         && call.event == "UserPromptSubmit"
                     {
@@ -1401,6 +1488,17 @@ fn main() -> Result<()> {
                             format!("{granted}\n{ctx}")
                         };
                     }
+                    if call.event == "UserPromptSubmit" {
+                        let (mail, mail_ids) = ljos_cli::mail::prompt_note();
+                        if !mail.is_empty() {
+                            ctx = if ctx.is_empty() {
+                                mail
+                            } else {
+                                format!("{mail}\n{ctx}")
+                            };
+                            ids.extend(mail_ids);
+                        }
+                    }
                     if !call.shape.holds_prompt_note() {
                         seen_later.extend(ids.clone());
                     }
@@ -1412,6 +1510,7 @@ fn main() -> Result<()> {
             let _ = std::io::Write::flush(&mut std::io::stdout());
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
+                ljos_cli::mail::ack_delivered(&seen_later);
             }
             if ack_nudge {
                 ljos_cli::work_nudge_delivered(call.session.as_deref());

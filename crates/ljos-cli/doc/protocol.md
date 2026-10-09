@@ -15,6 +15,7 @@ name with the prefix `ljos_`.
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
 | who votes with a view of its own | pack, persona atoms | `persona`, `vote --as` |
 | which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
+| what another seat sent | pack, message atoms | `send`, `inbox`, `reply`, `read`, `group` |
 
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
@@ -373,11 +374,39 @@ under equal weights is a count; under calibrated rows it is not.
   the memories that action activates, what two of the pack's scorers
   agreed on, preferences first, then lessons
   oldest to newest, each with its age (`[lesson, 3 weeks ago]`), so a
-  later lesson reads as a revision of an earlier one. When the session
+  later lesson reads as a revision of an earlier one. Unread mail is
+  printed first, interrupts ahead of the rest, and that delivery writes
+  the receipt. When the session
   ends, the memories it injected fire together, so what served one sitting
   is wired for the next. `ljos onboard`
   installs it on the runner's tool-call and prompt events, so the seat's
   memory reaches the agent at the point of action without being asked.
+
+## Mail between seats
+
+One pack, many seats. A message is an atom of kind `message`. `ljos send
+SEAT TEXT` writes to one named seat. `ljos send --group NAME TEXT` writes
+to the other members of that group. `--interrupt` adds `priority:interrupt`
+and the next prompt shows that message first. `--issue ID` adds `issue:ID`
+and the atom takes that issue's scope, so `ljos sync` carries it in the
+sealed log of the repository that holds the issue. A message with no issue
+travels in the machine's default scope, the same way an unscoped lesson does.
+
+`ljos inbox` lists what this seat has not read. It writes no receipt.
+`ljos read ID` writes one, kind `receipt`, and the sender sees it on a later
+`ljos inbox`. `ljos reply ID TEXT` writes back to the sender, keeps the
+issue, and carries `reply:ID`, so the thread stays on the work.
+
+`ljos group NAME --add SEAT` records a member. `--remove SEAT` records the
+drop. Membership is atoms of kind `group`, so it travels in the same log.
+
+The prompt hook prints unread mail at the front of the next prompt and
+writes the receipt when the runner is given that note. A shell seat has no
+hook. It polls `ljos inbox` and receipts with `ljos read`.
+
+The text of a message carries its id. Two messages with the same words stay
+two messages when a sealed log is imported. The same holds for a receipt
+and for a group membership.
 
 ## Identity and environment
 

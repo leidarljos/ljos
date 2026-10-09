@@ -713,6 +713,70 @@ fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<S
     Ok(said(ljos_cli::Said { stdout, stderr }))
 }
 
+/// A message to one seat, or to a group.
+#[derive(Deserialize, JsonSchema)]
+pub struct SendMailArgs {
+    /// The seat to write to. Omit when `group` is set.
+    #[serde(default)]
+    pub seat: Option<String>,
+    /// The message, as it will be stored.
+    pub text: String,
+    /// Write to every other member of this group.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Show this ahead of other mail on the next prompt.
+    #[serde(default)]
+    pub interrupt: Option<bool>,
+    /// The vissue issue this message is about. A reply keeps it.
+    #[serde(default)]
+    pub issue: Option<String>,
+}
+
+/// Whether the inbox includes mail already read.
+#[derive(Deserialize, JsonSchema)]
+pub struct InboxArgs {
+    /// Include mail this seat has already read.
+    #[serde(default)]
+    pub all: Option<bool>,
+}
+
+/// One message, by the id `ljos_send` printed.
+#[derive(Deserialize, JsonSchema)]
+pub struct MailIdArgs {
+    /// The id `ljos_send` printed.
+    pub id: String,
+}
+
+/// A reply to one message.
+#[derive(Deserialize, JsonSchema)]
+pub struct ReplyArgs {
+    /// The id `ljos_send` printed.
+    pub id: String,
+    /// The reply, as it will be stored.
+    pub text: String,
+    /// Show this ahead of other mail on the next prompt.
+    #[serde(default)]
+    pub interrupt: Option<bool>,
+}
+
+/// A group of seats.
+#[derive(Deserialize, JsonSchema)]
+pub struct GroupArgs {
+    /// The group's name.
+    pub name: String,
+    /// Seats to add.
+    #[serde(default)]
+    pub add: Vec<String>,
+    /// Seats to drop.
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+fn mail_said(text: anyhow::Result<String>) -> Result<Json<Said>, McpError> {
+    text.map(|text| Json(Said { text, aside: None }))
+        .map_err(refused)
+}
+
 #[tool_router]
 impl LjosServer {
     /// Read the cards directory from `LJOS_CARDS_DIR`, or the working directory,
@@ -1850,6 +1914,95 @@ impl LjosServer {
             .map(object)
             .map_err(refused)
     }
+
+    #[tool(
+        description = "Call this to write to another seat, or to every other member of a group. Pass seat or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. The id in the answer is what ljos_read and ljos_reply take.",
+        annotations(
+            title = "Send",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_send(
+        &self,
+        Parameters(args): Parameters<SendMailArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        mail_said(ljos_cli::mail::send(&ljos_cli::mail::Send {
+            seat: args.seat.as_deref(),
+            group: args.group.as_deref(),
+            text: &args.text,
+            interrupt: args.interrupt.unwrap_or(false),
+            issue: args.issue.as_deref(),
+        }))
+    }
+
+    #[tool(
+        description = "Call this to see what other seats have sent this seat. The list is unread mail, and it does not write a receipt. Pass all to include mail already read. Receipts on messages this seat sent are listed once, the first time they are shown.",
+        annotations(title = "Inbox", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_inbox(
+        &self,
+        Parameters(args): Parameters<InboxArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        mail_said(ljos_cli::mail::inbox(args.all.unwrap_or(false)))
+    }
+
+    #[tool(
+        description = "Call this when this seat has read a message. It writes a receipt the sender sees on a later inbox. The id is the one ljos_send printed. A second read of the same message writes nothing.",
+        annotations(
+            title = "Read",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_read(
+        &self,
+        Parameters(args): Parameters<MailIdArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        mail_said(ljos_cli::mail::read(&args.id))
+    }
+
+    #[tool(
+        description = "Call this to answer a message. The reply goes to its sender, keeps the vissue issue the message was about, and carries that message id so the thread stays on the issue.",
+        annotations(
+            title = "Reply",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_reply(
+        &self,
+        Parameters(args): Parameters<ReplyArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        mail_said(ljos_cli::mail::reply(
+            &args.id,
+            &args.text,
+            args.interrupt.unwrap_or(false),
+        ))
+    }
+
+    #[tool(
+        description = "Call this to list a group of seats, or to add or remove a member. A later ljos_send with that group writes to the other members. Membership is pack atoms, so ljos sync carries it in the sealed log.",
+        annotations(
+            title = "Group",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_group(
+        &self,
+        Parameters(args): Parameters<GroupArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        mail_said(ljos_cli::mail::group(&args.name, &args.add, &args.remove))
+    }
 }
 
 // ---- prompts ---------------------------------------------------------------
@@ -2337,7 +2490,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            42,
+            47,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -2379,6 +2532,7 @@ mod tests {
                 "ljos_finish",
                 "ljos_forget",
                 "ljos_graded",
+                "ljos_group",
                 "ljos_habit",
                 "ljos_handover",
                 "ljos_island",
@@ -2388,11 +2542,14 @@ mod tests {
                 "ljos_playbook",
                 "ljos_predict",
                 "ljos_prefer",
+                "ljos_read",
                 "ljos_receive",
                 "ljos_release",
                 "ljos_remember",
+                "ljos_reply",
                 "ljos_request_approval",
                 "ljos_rule",
+                "ljos_send",
                 "ljos_sitting",
                 "ljos_trust",
                 "ljos_vote"
