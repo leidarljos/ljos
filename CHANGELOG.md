@@ -2,8 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
-## Unreleased
+## 0.27.0 (2026-10-09)
 
+- `ljos claim --next` claims the next ready node. `--role` and `--slack` are the affinity and the depth slack. The `claimdag` binary on `PATH` has to be one that serves `claim-next`.
+- A decision panel starts at most `LJOS_PANEL_CONCURRENCY` members at once. Unset, that is the machine's parallelism clamped to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
 - The status line's due count keeps its 300 ms bound: the lean listing ignored `PACKSET_TIMEOUT_MS` and waited up to thirty seconds on a writer that did not answer. A writer that answers busy is asked again up to three times, after 50, 150 and 450 ms, and the listing stops when its caller's timeout runs out.
 
 ## 0.26.1 (2026-10-09)
