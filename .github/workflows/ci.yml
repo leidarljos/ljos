@@ -33,6 +33,7 @@ jobs:
           mkdir -p "${{ runner.temp }}/bin"
           install -m 0755 "${{ runner.temp }}/packset/target/debug/packset" "${{ runner.temp }}/bin/packset"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/bin:${PATH}"
           command -v age-keygen
           command -v packset
       - name: Workspace tests
