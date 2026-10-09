@@ -2,6 +2,10 @@
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
+## 0.26.1 (2026-10-09)
+
+- `ljos doctor` counts Cursor's hook as installed when `beforeShellExecution`, `preToolUse`, `beforeMCPExecution`, `beforeReadFile` and `postToolUseFailure` are in Cursor's file and Claude's settings carry the seat hook, or when Cursor's file carries every event. The reference page says the same.
+
 ## 0.26.0 (2026-10-09)
 
 - An ask a runner cannot show as its own prompt is granted by the client's consent form (`ljos_request_approval`), by replying `approve ID` in the same conversation, or by `ljos approve ID` in a terminal.

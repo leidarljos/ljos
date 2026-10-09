@@ -597,9 +597,11 @@ resume = ["agy", "--continue"]
 name = "cursor"
 # Cursor's agent and its `agent` CLI read servers from mcp.json and hooks
 # from a flat hooks.json of their own. Cursor also runs the hooks in
-# ~/.claude/settings.json. If ~/.claude/settings.json already carries the
-# seat's hook, no second copy is written; a hook Cursor runs from either
-# file is answered in Cursor's shape.
+# ~/.claude/settings.json. Events that file already runs stay there.
+# beforeShellExecution, preToolUse, beforeMCPExecution, beforeReadFile and
+# postToolUseFailure are still written here, and the permission events
+# fail closed. A hook Cursor runs from either file is answered in
+# Cursor's shape.
 config_json = "~/.cursor/mcp.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
@@ -2458,9 +2460,10 @@ const CURSOR_FAIL_CLOSED: &[&str] = &[
 /// payload. When that file already carries the seat's hook, the events
 /// Claude runs are left to it. Cursor-only events are still written here,
 /// because Claude's file does not name them.
-fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
-    let what = "hook".to_string();
-    let claude_has_seat = std::fs::read_to_string(claude_settings)
+/// Claude's settings carry the seat hook when a matcher group's command
+/// is the seat's. Cursor runs that file, so those events stay there.
+fn claude_has_seat_hook(claude_settings: &Path) -> bool {
+    std::fs::read_to_string(claude_settings)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .is_some_and(|v| {
@@ -2476,7 +2479,30 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
                             .any(is_seat_hook)
                     })
             })
-        });
+        })
+}
+
+/// Cursor's file is the memory hook when it carries every Cursor event,
+/// or the events Claude's file does not name while Claude's file has the
+/// seat hook.
+fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
+    let all: Vec<String> = CURSOR_HOOK_EVENTS
+        .iter()
+        .map(|(event, _)| (*event).to_string())
+        .collect();
+    if hook_installed(cursor, &all) {
+        return true;
+    }
+    let only: Vec<String> = CURSOR_ONLY_EVENTS
+        .iter()
+        .map(|event| (*event).to_string())
+        .collect();
+    hook_installed(cursor, &only) && claude_has_seat_hook(claude)
+}
+
+fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
+    let what = "hook".to_string();
+    let claude_has_seat = claude_has_seat_hook(claude_settings);
     let mut root: Value = match std::fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -5266,13 +5292,9 @@ fn harness_rows() -> Vec<Habitat> {
             let path = expand(file);
             let installed = match &h.hooks_named {
                 Some(name) => named_hook_installed(&path, name),
-                None if h.hooks_format.as_deref() == Some("cursor") => hook_installed(
-                    &path,
-                    &CURSOR_HOOK_EVENTS
-                        .iter()
-                        .map(|(event, _)| (*event).to_string())
-                        .collect::<Vec<_>>(),
-                ),
+                None if h.hooks_format.as_deref() == Some("cursor") => {
+                    cursor_hooks_satisfy(&path, &expand("~/.claude/settings.json"))
+                }
                 None => hook_installed(&path, &hook_events_of(h)),
             };
             rows.push(Habitat {
@@ -18655,8 +18677,8 @@ mod tests {
         );
     }
 
-    /// Cursor's hooks file is written flat, once, and not at all where
-    /// Cursor already runs the seat's hooks from Claude's settings.
+    /// Cursor's hooks file is written flat, once. Events Claude's settings
+    /// run stay there. The events that file does not name are still written.
     #[test]
     fn cursor_hooks_are_written_flat_and_never_twice() {
         let dir = tempfile::tempdir().unwrap();
@@ -18705,6 +18727,14 @@ mod tests {
         ] {
             assert!(second["hooks"][event].is_null(), "{event} is Claude's");
         }
+        assert!(super::cursor_hooks_satisfy(&file, &claude));
+        assert!(super::cursor_hooks_satisfy(&other, &claude));
+        let mut dropped = second.clone();
+        dropped["hooks"]["beforeReadFile"] = Value::Null;
+        let dropped_file = dir.path().join("cursor3/hooks.json");
+        std::fs::create_dir_all(dropped_file.parent().unwrap()).unwrap();
+        std::fs::write(&dropped_file, serde_json::to_string(&dropped).unwrap()).unwrap();
+        assert!(!super::cursor_hooks_satisfy(&dropped_file, &claude));
     }
 
     /// A persona becomes an agent definition. Grok and Claude Code read the

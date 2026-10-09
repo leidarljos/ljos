@@ -113,8 +113,13 @@ when it is empty, the member runs =grok= with the seat's fallback flags.
 =hooks_format = "cursor"= writes =hooks= in Cursor's flat shape: =version=
 1, and one ={command, timeout}= entry an event. The seat registers the
 gate, the prompt, both tool results, compaction, stop and session end
-there. It writes nothing where =~/.claude/settings.json= already carries
-the seat's hook, since Cursor runs that file's hooks too.
+there. Events =~/.claude/settings.json= already runs stay in that file.
+=beforeShellExecution=, =preToolUse=, =beforeMCPExecution=,
+=beforeReadFile= and =postToolUseFailure= are still written here, and
+the permission events fail closed, since Cursor runs that file's hooks
+too and Claude's file does not name these. =ljos doctor= counts the
+hook installed when those five are present and Claude's file carries
+the seat hook, or when Cursor's file carries every event.
 
 The hook reads a Cursor call off =cursor_version= in its stdin and answers
 in Cursor's fields: =permission= at the gate, with =user_message= and
