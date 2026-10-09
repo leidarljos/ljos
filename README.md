@@ -13,8 +13,12 @@ turn on a remote judge.
 
 ## Five minutes
 
+The sitting and finish loop also calls deedar, claimdag, ljos-policyd and
+ljos-consensus, so the first line installs them with the seat. `ljos doctor`
+names any that are missing.
+
 ```
-cargo binstall ljos packset vissue-cli      # or: cargo install ljos packset vissue-cli
+cargo binstall ljos packset vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule '*--force*' --verdict deny --why "Never force push."
