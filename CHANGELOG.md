@@ -3,6 +3,10 @@
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), heads-up display (HUD), software bill of materials (SBOM), European Environment for Scientific Software Installations (EESSI).
 
+## Unreleased
+
+- ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
+
 ## 0.28.0 (2026-10-10)
 
 - A sitting opens with no encoder. The pack ranks by words alone, the sitting says so, and `finish` still declines a weak island. A refusal names the rows that stopped it. `ljos doctor` still fails on a missing encoder.
