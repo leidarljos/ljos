@@ -2057,16 +2057,45 @@ fn export_assignment(name: &str) -> String {
 
 /// What a shell runner sources. `LJOS_SEAT` is the harness name, because
 /// this agent has no MCP client and the process tree is not its seat.
+/// `LJOS_SESSION_ID` gives every shell the runner opens one holder, unless
+/// the runner stamps its own; without it each shell hashed its own process
+/// into a new holder, and `ljos finish` in a second shell was refused as
+/// not the assignee.
 fn seat_env_text(name: &str) -> String {
     format!(
         "# Source this in the shell that runs the agent's commands.\n\
          # This runner has no MCP client, so the process tree is not its seat.\n\
          # LJOS_SEAT is the name memory, ballots and trust use.\n\
+         # LJOS_SESSION_ID is the holder every shell of this runner claims under.\n\
          # Before a prompt: ljos hook --prompt\n\
          # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
+         {}\n\
          {}\n",
-        export_assignment(name)
+        export_assignment(name),
+        session_assignment(name)
     )
+}
+
+/// `export LJOS_SESSION_ID="${{LJOS_SESSION_ID:-NAME-shell}}"`: a holder
+/// that stays the same across the runner's shells, kept when the runner
+/// already set one. Padded to the eight characters a session id needs.
+fn session_assignment(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut id = format!("{safe}-shell");
+    while id.len() < 8 {
+        id.push('-');
+        id.push_str("seat");
+    }
+    format!("export LJOS_SESSION_ID=\"${{LJOS_SESSION_ID:-{id}}}\"")
 }
 
 fn env_step(path: &Path, name: &str, dry: bool) -> Step {
@@ -8280,33 +8309,192 @@ pub fn glob_matches(pattern: &str, line: &str) -> bool {
 
 /// The commands a shell line runs: split on `&&`, `||`, `;`, `|` and new
 /// lines outside quotes, each with leading `NAME=value` assignments and
-/// the prefixes `sudo`, `env`, `time`, `nohup` and `exec` taken off. A
+/// the prefixes in [`SEGMENT_PREFIXES`] taken off with their flags. A
 /// rule anchored at a command's start then sees `cd x && git push` and
 /// `FOO=1 git push` as the push they run, and quoted text is not split, so
 /// a commit message naming a command is not that command.
 #[must_use]
 pub fn command_segments(line: &str) -> Vec<String> {
-    raw_segments(line)
-        .iter()
-        .map(|p| strip_prefixes(p).join(" "))
-        .filter(|p| !p.is_empty())
-        .collect()
+    command_segments_at(line, 0)
+}
+
+/// [`command_segments`], plus the commands of each `sh -c SCRIPT` (or
+/// `bash -lc`, under any prefix) and each `env -S STRING` read as a line of
+/// its own, down to a few levels. A rule on `git push*` then sees
+/// `sh -c "git push -f"`.
+fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in raw_segments(line) {
+        let seg = strip_prefixes(&raw).join(" ");
+        if !seg.is_empty() {
+            out.push(seg);
+        }
+        if depth < 4 {
+            if let Some(script) = shell_c_script(&raw) {
+                out.extend(command_segments_at(&script, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// The script a segment hands to a shell: the word after a shell's `-c`
+/// (past `--` and options that take a value, such as `-o pipefail`), or
+/// the string of `env -S`, past any leading assignments and prefixes.
+fn shell_c_script(segment: &str) -> Option<String> {
+    let words = shell_words(segment);
+    let (at, split) = prefix_end(&words);
+    if split.is_some() {
+        return split;
+    }
+    let shell = words.get(at)?;
+    let base = shell.rsplit('/').next().unwrap_or(shell);
+    if !["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(&base) {
+        return None;
+    }
+    let mut it = words[at + 1..].iter().map(String::as_str);
+    let mut takes = false;
+    while let Some(w) = it.next() {
+        if takes {
+            if w == "--" {
+                continue;
+            }
+            return Some(w.to_string());
+        }
+        let flag = (w.starts_with('-') || w.starts_with('+')) && w.len() > 1;
+        if !flag {
+            return None;
+        }
+        if w.starts_with('-') && !w.starts_with("--") && w[1..].contains('c') {
+            takes = true;
+        } else if matches!(w, "--rcfile" | "--init-file")
+            || (!w.starts_with("--") && w.ends_with(['o', 'O']))
+        {
+            // `-o pipefail`, `+O extglob`, `--rcfile FILE`: the next word is
+            // the option's value, not the script.
+            it.next();
+        }
+    }
+    None
+}
+
+/// Words that run the command after them, taken off a segment's front,
+/// with the flags of each that take a separate value.
+const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
+    (
+        "sudo",
+        &[
+            "-u",
+            "--user",
+            "-g",
+            "--group",
+            "-C",
+            "--close-from",
+            "-D",
+            "--chdir",
+            "-p",
+            "--prompt",
+            "-r",
+            "--role",
+            "-t",
+            "--type",
+            "-U",
+            "--other-user",
+            "-T",
+            "--command-timeout",
+        ],
+    ),
+    ("doas", &["-u", "-C"]),
+    ("env", &["-u", "--unset", "-C", "--chdir"]),
+    ("time", &["-f", "--format", "-o", "--output"]),
+    ("nohup", &[]),
+    ("exec", &["-a"]),
+    ("command", &[]),
+    ("nice", &["-n", "--adjustment"]),
+    ("timeout", &["-k", "--kill-after", "-s", "--signal"]),
+    ("setsid", &[]),
+    ("stdbuf", &["-i", "-o", "-e"]),
+    (
+        "xargs",
+        &[
+            "-I",
+            "-n",
+            "-P",
+            "-L",
+            "-d",
+            "-E",
+            "-a",
+            "-s",
+            "--delimiter",
+            "--max-args",
+            "--max-procs",
+            "--arg-file",
+        ],
+    ),
+];
+
+/// Where the command starts in `words`: past leading `NAME=value` words and
+/// each prefix in [`SEGMENT_PREFIXES`] with its flags, the values of those
+/// flags, a `--`, and the duration `timeout` takes. `command -v` and
+/// `command -V` only look a name up, so the line stops at `command`.
+/// The second value is the string of `env -S STRING`, a command line env
+/// splits and runs; nothing after it is a command of this line.
+fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
+    let is_assign = |w: &str| {
+        w.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    };
+    let mut i = 0;
+    while let Some(w) = words.get(i).map(AsRef::as_ref) {
+        if is_assign(w) {
+            i += 1;
+            continue;
+        }
+        let Some((name, valued)) = SEGMENT_PREFIXES.iter().find(|(n, _)| *n == w) else {
+            break;
+        };
+        let at = i;
+        i += 1;
+        while let Some(a) = words.get(i).map(AsRef::as_ref) {
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if *name == "command" && matches!(a, "-v" | "-V") {
+                return (at, None);
+            }
+            if *name == "env" && (a == "-S" || a == "--split-string") {
+                let rest: Vec<&str> = words[i + 1..].iter().map(AsRef::as_ref).collect();
+                return (words.len(), Some(rest.join(" ")));
+            }
+            if *name == "env" {
+                if let Some(v) = a.strip_prefix("--split-string=") {
+                    let mut rest = vec![v];
+                    rest.extend(words[i + 1..].iter().map(AsRef::as_ref));
+                    return (words.len(), Some(rest.join(" ")));
+                }
+            }
+            if *name == "env" && is_assign(a) {
+                i += 1;
+            } else if a.starts_with('-') && a.len() > 1 {
+                i += if valued.contains(&a) { 2 } else { 1 };
+            } else {
+                break;
+            }
+        }
+        if *name == "timeout" && i < words.len() {
+            i += 1;
+        }
+    }
+    (i.min(words.len()), None)
 }
 
 /// A command's words with leading assignments and wrapper commands off.
 fn strip_prefixes(segment: &str) -> Vec<&str> {
-    let mut words: Vec<&str> = segment.split_whitespace().collect();
-    while let Some(w) = words.first() {
-        let assign = w.split_once('=').is_some_and(|(k, _)| {
-            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        });
-        if assign || ["sudo", "env", "time", "nohup", "exec"].contains(w) {
-            words.remove(0);
-        } else {
-            break;
-        }
-    }
-    words
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    let (at, _) = prefix_end(&words);
+    words[at..].to_vec()
 }
 
 /// The word a here-document at `chars[i..]` (just past `<<`) ends at:
@@ -10792,7 +10980,12 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 ),
                 false,
             ),
-            (None, _, None) => ("not on PATH".into(), false),
+            // No crates.io answer (offline, or the lookup failed): the
+            // install line still names the crate.
+            (None, _, None) => (
+                format!("not on PATH; cargo install --locked {crate_name}"),
+                false,
+            ),
             (Some(path), have, Some(cr)) => bin_health(&path.display().to_string(), have, Some(cr)),
             (Some(path), have, None) => {
                 let ver = have.unwrap_or("?");
@@ -11465,13 +11658,21 @@ pub fn failing_for_sitting<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
 /// and they do not fail `ljos doctor`.
 const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
 
+/// A seat binary doctor lists but the seat runs without (`ljos-hud`,
+/// `ljos-consensus`, `packset-mcp`): absent, its row is `info`, the same
+/// as [`healthy`] already treated it. It said `no` before, beside an exit
+/// of 0.
+fn optional_bin(name: &str) -> bool {
+    SEAT_BINS.iter().any(|(bin, _)| *bin == name) && !REQUIRED.contains(&name)
+}
+
 /// `ok` when the row answers, `info` when it is optional and absent,
 /// `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.ok {
         "ok"
-    } else if OPTIONAL_ROWS.contains(&row.name) {
+    } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
     } else {
         "no"
@@ -13760,10 +13961,68 @@ pub fn complete(
         args.push("--status");
         args.push(s);
     }
-    let said = run_captured("claimdag", &args)?;
+    let said = match run_captured("claimdag", &args) {
+        Ok(said) => said,
+        Err(e) if e.to_string().contains("not assignee") => {
+            let hold = run_captured("claimdag", &["get", id.as_str()])
+                .ok()
+                .and_then(|g| holder_of(&g.stdout))
+                .and_then(|h| read_hold(&h));
+            let tracker = tracker_show_json(node).ok().and_then(|v| {
+                v["claimed_by"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+            bail!(
+                "{}",
+                not_assignee_message(node, assignee, hold.as_ref(), tracker.as_deref())
+            );
+        }
+        Err(e) => return Err(e),
+    };
     drop_hold(&actor);
     drop_playbook(node);
     Ok(said.stdout)
+}
+
+/// Refusal when this shell's holder is not the name that holds the node:
+/// names the holder from the hold record, else from the tracker, and the
+/// `--assignee` that finishes under it. A shell runner without a session id
+/// gets a new holder per shell, which is the usual cause.
+#[must_use]
+pub fn not_assignee_message(
+    node: &str,
+    assignee: &str,
+    hold: Option<&Hold>,
+    tracker: Option<&str>,
+) -> String {
+    let unscoped = |n: &str| {
+        n.strip_suffix(&format!(":{}", node.trim()))
+            .unwrap_or(n)
+            .to_string()
+    };
+    let named = hold
+        .map(|h| {
+            (
+                unscoped(&h.assignee),
+                format!(" (seat {}, since {})", h.seat, h.since),
+            )
+        })
+        .or_else(|| tracker.map(|t| (unscoped(t), " (the tracker's claim)".to_string())));
+    let mine = unscoped(assignee);
+    let fix = "A shell runner's env file sets LJOS_SESSION_ID so every shell holds under one name; `ljos onboard` writes it";
+    match named {
+        Some((name, whence)) => format!(
+            "complete: {node} is held by {name}{whence}, not by {mine}, this shell's holder (`ljos seat` says where it came from). \
+             Run it again with `--assignee {name}` to finish under the name that holds it. {fix}"
+        ),
+        None => format!(
+            "complete: {node} is not held by {mine}, this shell's holder (`ljos seat` says where it came from), and no record on this host names the holder. \
+             Pass `--assignee NAME` with the name it was claimed under. {fix}"
+        ),
+    }
 }
 
 #[expect(
@@ -16198,12 +16457,76 @@ mod tests {
         );
     }
 
+    /// binstall falls back to a source build on a target
+    /// with no release tarball, and never to cargo-quickinstall, which
+    /// ships `ljos` without `ljos-mcp`.
+    #[test]
+    fn binstall_builds_from_source_when_no_tarball_fits() {
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../Cargo.toml")).expect("Cargo.toml parses");
+        let off: Vec<&str> = manifest["package"]["metadata"]["binstall"]["disabled-strategies"]
+            .as_array()
+            .expect("disabled-strategies")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect();
+        assert!(off.contains(&"quick-install"), "{off:?}");
+        assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
     #[test]
     fn doctor_lists_ljos_hud_but_does_not_require_it() {
         assert!(SEAT_BINS
             .iter()
             .any(|(n, c)| *n == "ljos-hud" && *c == "ljos-hud"));
         assert!(!REQUIRED.contains(&"ljos-hud"));
+        let hud = Habitat {
+            name: "ljos-hud",
+            state: "not on PATH".into(),
+            ok: false,
+        };
+        let embed = Habitat {
+            name: "packset-embed",
+            state: "not on PATH".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&hud), "info");
+        assert!(healthy(std::slice::from_ref(&hud)));
+        assert_eq!(doctor_word(&embed), "no");
+        assert!(!healthy(&[embed]));
+    }
+
+    /// every install line the README and the docs print installs every
+    /// binary the doctor requires, so a seat that follows one is not red on
+    /// day one.
+    #[test]
+    fn every_install_line_covers_every_required_binary() {
+        // These sit at the repository root, outside a packaged crate.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for file in [
+            "README.md",
+            "docs/orgmode/getting-started.org",
+            "docs/source/getting-started.rst",
+            "docs/orgmode/index.org",
+            "docs/source/index.rst",
+        ] {
+            let Ok(text) = std::fs::read_to_string(root.join(file)) else {
+                continue;
+            };
+            let line = text
+                .lines()
+                .map(|l| l.trim_start().trim_start_matches("$ "))
+                .find(|l| l.starts_with("cargo binstall ljos "))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            for (bin, crate_name) in SEAT_BINS {
+                if REQUIRED.contains(bin) {
+                    assert!(
+                        line.split_whitespace().any(|w| w == *crate_name),
+                        "{file}: {bin} ({crate_name}) is required and not in: {line}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -19059,6 +19382,86 @@ mod tests {
         );
     }
 
+    /// two shells that source a shell runner's env file hold
+    /// under one name, and a runner's own session id is kept.
+    #[test]
+    fn every_shell_of_a_shell_runner_holds_under_one_name() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let env = dir.path().join("grokbot.env");
+        std::fs::write(&env, super::seat_env_text("grokbot")).unwrap();
+        let holder_in_a_new_shell = |pre: &str| {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "{pre} . '{}' && printf %s \"$LJOS_SESSION_ID\"",
+                    env.display()
+                ))
+                .env_remove("LJOS_SESSION_ID")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(holder_in_a_new_shell(""), "grokbot-shell");
+        assert_eq!(holder_in_a_new_shell(""), holder_in_a_new_shell(""));
+        assert_eq!(
+            holder_in_a_new_shell("export LJOS_SESSION_ID=runner-own-id;"),
+            "runner-own-id"
+        );
+        assert_eq!(
+            super::session_assignment("a"),
+            "export LJOS_SESSION_ID=\"${LJOS_SESSION_ID:-a-shell-seat}\""
+        );
+        // Other runners' ids in this test's own environment would join the
+        // holder, so they are set aside while it reads.
+        let others: Vec<(String, String)> = std::env::vars()
+            .filter(|(k, v)| super::runner_session_var(k, v))
+            .collect();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            for (k, _) in &others {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("LJOS_SESSION_ID", "grokbot-shell");
+        }
+        let held = super::whoami().holder;
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("LJOS_SESSION_ID");
+            for (k, v) in &others {
+                std::env::set_var(k, v);
+            }
+        }
+        assert_eq!(held, "grokbot-shell");
+    }
+
+    /// a finish refused as not the assignee names the holder
+    /// and the `--assignee` that finishes under it.
+    #[test]
+    fn not_the_assignee_names_the_holder_and_the_flag() {
+        let hold = super::Hold {
+            assignee: "grokbot-ppyr:demo-dlnj".into(),
+            seat: "grokbot".into(),
+            pid: 1,
+            comm: "bash".into(),
+            since: "2026-10-10T06:00:00".into(),
+        };
+        let said =
+            super::not_assignee_message("demo-dlnj", "grokbot-pqxm:demo-dlnj", Some(&hold), None);
+        assert!(
+            said.contains("held by grokbot-ppyr (seat grokbot"),
+            "{said}"
+        );
+        assert!(said.contains("not by grokbot-pqxm,"), "{said}");
+        assert!(said.contains("`--assignee grokbot-ppyr`"), "{said}");
+        assert!(said.contains("LJOS_SESSION_ID"), "{said}");
+        let said =
+            super::not_assignee_message("demo-dlnj", "grokbot-pqxm", None, Some("grokbot-ppyr"));
+        assert!(said.contains("`--assignee grokbot-ppyr`"), "{said}");
+        let said = super::not_assignee_message("demo-dlnj", "grokbot-pqxm", None, None);
+        assert!(said.contains("--assignee NAME"), "{said}");
+    }
+
     #[test]
     fn a_shell_runner_writes_the_skill_and_the_seat_env() {
         let _g = env_guard();
@@ -19093,6 +19496,10 @@ mod tests {
         let env = std::fs::read_to_string(dir.join("grokbot.env")).unwrap();
         assert!(env.contains("export LJOS_SEAT=grokbot\n"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
+        assert!(
+            env.contains("export LJOS_SESSION_ID=\"${LJOS_SESSION_ID:-grokbot-shell}\"\n"),
+            "{env}"
+        );
         let saved = std::fs::read_to_string(&file).unwrap();
         assert!(saved.contains("shell = true"), "{saved}");
         assert!(saved.contains(&skills.display().to_string()), "{saved}");
@@ -20877,6 +21284,66 @@ mod tests {
             command_segments("run &> out & wait"),
             ["run &> out", "wait"]
         );
+    }
+
+    /// a shell's `-c` script is commands, so a rule sees
+    /// the push inside it; quoted text under any other command stays data.
+    #[test]
+    fn a_rule_sees_the_commands_of_a_shell_c_script() {
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        for line in [
+            "sh -c \"git push -f origin main\"",
+            "env git push -f origin main",
+            "command git push -f",
+            "bash -lc 'cd repo && git push --force'",
+            "FOO=1 env sh -c 'env git push -f'",
+            "bash -c \"sh -c 'git push -f'\"",
+            "sh -c -- 'git push -f'",
+            "bash -o pipefail -c 'git push -f | tee log'",
+            "bash +O extglob --rcfile /dev/null -c 'git push -f'",
+            "sudo -u deploy git push -f",
+            "sudo -u deploy sh -c 'git push -f'",
+            "env -u HOME -C /repo git push -f",
+            "env -S 'git push -f'",
+            "env --split-string='git push -f'",
+            "nice -n 10 timeout -s KILL 30 git push -f",
+            "timeout 30 bash -c 'git push -f'",
+            "ls | xargs -n 1 git push -f",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+        }
+        for line in [
+            "echo 'sh -c \"git push -f\"'",
+            "git commit -m 'sh -c git push'",
+            "sh script.sh -c 'git push -f'",
+            "bash -c 'echo git push'",
+            "bash -o pipefail script.sh",
+            "command -v git push",
+            "env -u GIT_DIR cargo test",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
+    }
+
+    /// prefixes come off with their flags and the values those flags take,
+    /// so the command a rule anchors on is the one that runs.
+    #[test]
+    fn a_prefix_comes_off_with_its_flags() {
+        assert_eq!(
+            command_segments("sudo -u deploy -E git push -f"),
+            ["git push -f"]
+        );
+        assert_eq!(
+            command_segments("FOO=1 nice -n 5 timeout -k 5 30 cargo test"),
+            ["cargo test"]
+        );
+        assert_eq!(command_segments("env -i A=1 -- make"), ["make"]);
+        assert_eq!(command_segments("command -v git"), ["command -v git"]);
+        assert_eq!(command_segments("stdbuf -oL tail -f log"), ["tail -f log"]);
     }
 
     #[test]
