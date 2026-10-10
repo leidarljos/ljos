@@ -16319,6 +16319,23 @@ mod tests {
         );
     }
 
+    /// binstall falls back to a source build on a target
+    /// with no release tarball, and never to cargo-quickinstall, which
+    /// ships `ljos` without `ljos-mcp`.
+    #[test]
+    fn binstall_builds_from_source_when_no_tarball_fits() {
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../Cargo.toml")).expect("Cargo.toml parses");
+        let off: Vec<&str> = manifest["package"]["metadata"]["binstall"]["disabled-strategies"]
+            .as_array()
+            .expect("disabled-strategies")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect();
+        assert!(off.contains(&"quick-install"), "{off:?}");
+        assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
     #[test]
     fn doctor_lists_ljos_hud_but_does_not_require_it() {
         assert!(SEAT_BINS
