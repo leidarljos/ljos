@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos onboard` makes the default deed store (`$XDG_DATA_HOME/deedar/store`) and a tracker at `$XDG_DATA_HOME/vissue/tracker`, and writes the `root` line in vissue's `config.toml` that names it. Before, a fresh seat had neither: `deedar create` refused with `no store at ~/.local/share/deedar/store`, and vissue said the home directory was not a tracker. A store or tracker named by `DEEDAR_URL`, `VISSUE_ROOT`, `ISSUE_ROOT` or an existing `root` line is left alone.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)

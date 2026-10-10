@@ -2114,7 +2114,12 @@ fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Re
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
     steps.push(env_step(&env_path_for(file, h), &h.name, dry));
-    steps.extend([pack_step(dry), host_key_step(dry)]);
+    steps.extend([
+        deed_store_step(dry),
+        tracker_step(dry),
+        pack_step(dry),
+        host_key_step(dry),
+    ]);
     Ok(steps)
 }
 
@@ -2206,7 +2211,12 @@ pub fn onboard_in(
     }
     let h = &h;
     let server = server_path()?;
-    let dependencies = [pack_step(dry), host_key_step(dry)];
+    let dependencies = [
+        deed_store_step(dry),
+        tracker_step(dry),
+        pack_step(dry),
+        host_key_step(dry),
+    ];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
@@ -5969,6 +5979,134 @@ fn pack_step(dry: bool) -> Step {
 /// Make the seat's host key at `~/.config/deedar/host.key` when there is
 /// none, so handovers go out signed from the first one. An existing key, or
 /// one named by `DEEDAR_HOST_SIGNING_KEY`, is left alone.
+/// `$XDG_DATA_HOME`, else `~/.local/share`.
+fn data_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+}
+
+/// `$XDG_CONFIG_HOME`, else `~/.config`.
+fn config_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+}
+
+fn named_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The deed store deedar uses when `DEEDAR_URL` is unset:
+/// `$XDG_DATA_HOME/deedar/store`. deedar refuses to make one on its own, so
+/// a fresh seat's first deed failed until someone made the directory.
+/// An empty directory is a store; the first deed writes
+/// its layout.
+fn deed_store_step(dry: bool) -> Step {
+    let step = |detail: String, ok: bool| Step {
+        what: "deed store".into(),
+        detail,
+        ok,
+    };
+    if let Some(url) = named_env("DEEDAR_URL") {
+        return step(format!("DEEDAR_URL={url} names the store"), true);
+    }
+    let Some(dir) = data_base().map(|b| b.join("deedar").join("store")) else {
+        return step("no home directory to keep a deed store in".into(), false);
+    };
+    if dir.is_dir() {
+        return step(format!("{} exists", dir.display()), true);
+    }
+    if dry {
+        return step(format!("would create {}", dir.display()), true);
+    }
+    let made = std::fs::create_dir_all(&dir).and_then(|()| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    });
+    match made {
+        Ok(()) => step(
+            format!(
+                "created {}; deedar uses it with DEEDAR_URL unset",
+                dir.display()
+            ),
+            true,
+        ),
+        Err(e) => step(format!("{}: {e}", dir.display()), false),
+    }
+}
+
+/// The tracker vissue uses when no variable names one. vissue falls back to
+/// `root` in `$XDG_CONFIG_HOME/vissue/config.toml`, then to the working
+/// directory, so a fresh seat filed into whichever directory it stood in or
+/// was refused. With neither a variable nor a configured
+/// root, this makes `$XDG_DATA_HOME/vissue/tracker` with its `Software`
+/// prefix directory and writes the config line that names it.
+fn tracker_step(dry: bool) -> Step {
+    let step = |detail: String, ok: bool| Step {
+        what: "tracker".into(),
+        detail,
+        ok,
+    };
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        if let Some(root) = named_env(key) {
+            return step(format!("{key}={root} names the tracker"), true);
+        }
+    }
+    let (Some(cfg), Some(root)) = (
+        named_env("VISSUE_CONFIG")
+            .map(PathBuf::from)
+            .or_else(|| config_base().map(|b| b.join("vissue").join("config.toml"))),
+        data_base().map(|b| b.join("vissue").join("tracker")),
+    ) else {
+        return step("no home directory to keep a tracker in".into(), false);
+    };
+    let have = std::fs::read_to_string(&cfg).unwrap_or_default();
+    // `root` is a top-level key: one under a `[table]` is something else.
+    if let Some(line) = have
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find(|l| l.split('=').next().is_some_and(|k| k.trim() == "root"))
+    {
+        return step(format!("{} sets {}", cfg.display(), line.trim()), true);
+    }
+    if dry {
+        return step(
+            format!(
+                "would create {} and name it in {}",
+                root.display(),
+                cfg.display()
+            ),
+            true,
+        );
+    }
+    let line = format!("root = {:?}\n", root.display().to_string());
+    let made = std::fs::create_dir_all(root.join("Software")).and_then(|()| {
+        if let Some(dir) = cfg.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // First, so it stays top-level above any table the file has.
+        std::fs::write(&cfg, format!("{line}{have}"))
+    });
+    match made {
+        Ok(()) => step(
+            format!(
+                "created {}; {} names it, so vissue needs no VISSUE_ROOT",
+                root.display(),
+                cfg.display()
+            ),
+            true,
+        ),
+        Err(e) => step(format!("{}: {e}", root.display()), false),
+    }
+}
+
 fn host_key_step(dry: bool) -> Step {
     if let Some(path) = host_key_path() {
         return Step {
@@ -18764,6 +18902,23 @@ mod tests {
     #[test]
     fn onboarding_a_config_file_runner_writes_once() {
         let _g = env_guard();
+        // Named stores, so onboarding leaves the real home's alone.
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
+            std::env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
+        }
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                // SAFETY: still under the test's lock.
+                unsafe {
+                    std::env::remove_var("DEEDAR_URL");
+                    std::env::remove_var("VISSUE_ROOT");
+                }
+            }
+        }
+        let _unset = Unset;
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
@@ -18882,9 +19037,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// with no variable naming them, onboard makes the deed
+    /// store deedar falls back to and a tracker that vissue's config names,
+    /// and leaves both alone after.
+    #[test]
+    fn onboard_makes_the_default_deed_store_and_tracker() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config = dir.path().join("config");
+        let keys = [
+            "DEEDAR_URL",
+            "ISSUE_ROOT",
+            "VISSUE_ROOT",
+            "VISSUE_CONFIG",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_DATA_HOME", &data);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+        }
+        let store = data.join("deedar/store");
+        let root = data.join("vissue/tracker");
+        let cfg = config.join("vissue/config.toml");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, "[routes]\n").unwrap();
+
+        let dry = [super::deed_store_step(true), super::tracker_step(true)];
+        assert!(
+            dry.iter().all(|s| s.ok && s.detail.starts_with("would")),
+            "{dry:?}"
+        );
+        assert!(!store.exists() && !root.exists());
+
+        let made = [super::deed_store_step(false), super::tracker_step(false)];
+        assert!(
+            made.iter().all(|s| s.ok && s.detail.starts_with("created")),
+            "{made:?}"
+        );
+        assert!(store.is_dir());
+        assert!(root.join("Software").is_dir());
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert_eq!(
+            text,
+            format!("root = {:?}\n[routes]\n", root.display().to_string())
+        );
+
+        let again = [super::deed_store_step(false), super::tracker_step(false)];
+        assert!(again[0].detail.ends_with("exists"), "{again:?}");
+        assert!(again[1].detail.contains("sets root"), "{again:?}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text, "written once");
+
+        // vissue itself, from another directory, resolves the new root.
+        if which::which("vissue").is_ok() {
+            let out = std::process::Command::new("vissue")
+                .arg("identity")
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(said.contains(&format!("root={}", root.display())), "{said}");
+        }
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", "/elsewhere");
+            std::env::set_var("DEEDAR_URL", "file:///elsewhere");
+        }
+        assert!(super::tracker_step(true)
+            .detail
+            .contains("VISSUE_ROOT=/elsewhere"));
+        assert!(super::deed_store_step(true).detail.contains("DEEDAR_URL="));
+        // SAFETY: as above.
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_shell_runner_writes_the_skill_and_the_seat_env() {
         let _g = env_guard();
+        // Named stores, so onboarding leaves the real home's alone.
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
+            std::env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
+        }
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                // SAFETY: still under the test's lock.
+                unsafe {
+                    std::env::remove_var("DEEDAR_URL");
+                    std::env::remove_var("VISSUE_ROOT");
+                }
+            }
+        }
+        let _unset = Unset;
         // SAFETY: the lock above is the only environment this test touches.
         unsafe {
             std::env::set_var("PACKSET_URL", "off");
