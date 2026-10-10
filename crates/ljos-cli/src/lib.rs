@@ -14482,10 +14482,75 @@ fn taken_first(text: &str) -> bool {
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
-    let said = run_captured("claimdag", &["release", &id, "--actor", &actor])?;
+    let said = match run_captured("claimdag", &["release", &id, "--actor", &actor]) {
+        Ok(said) => said,
+        Err(e) if e.to_string().contains("not assignee") => {
+            let Some((holder, hold)) = same_seat_hold(&id, &actor) else {
+                return Err(e);
+            };
+            let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
+            drop_hold(&holder);
+            drop_playbook(node);
+            return Ok(format!(
+                "{}{}",
+                same_seat_note(node, "released", &hold),
+                said.stdout
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     drop_hold(&actor);
     drop_playbook(node);
     Ok(said.stdout)
+}
+
+/// The holder and hold record of node `id` when another conversation of
+/// this seat holds it: a background worker the seat started, or the
+/// conversation that started this worker. The seat owns its
+/// conversations, so it may finish or hand back what any of them holds.
+/// `None` when `actor` holds it, when no record on this host names the
+/// holder, or when the record names another seat or another claim graph.
+fn same_seat_hold(id: &str, actor: &str) -> Option<(String, Hold)> {
+    let holder = run_captured("claimdag", &["get", id])
+        .ok()
+        .and_then(|g| holder_of(&g.stdout))?;
+    if holder == actor {
+        return None;
+    }
+    let hold = read_hold(&holder)?;
+    let graph = hold_graph(&holder);
+    (hold.seat == seat_name() && graph.is_none_or(|g| g == claim_graph_scope()))
+        .then_some((holder, hold))
+}
+
+/// The claim graph a hold record names on its seventh line; `None` for a
+/// record written before that line existed.
+fn hold_graph(actor: &str) -> Option<String> {
+    std::fs::read_to_string(hold_record_path(actor))
+        .ok()?
+        .lines()
+        .nth(6)
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .map(str::to_string)
+}
+
+/// The line that says the seat acted on a node another of its
+/// conversations held.
+fn same_seat_note(node: &str, verb: &str, hold: &Hold) -> String {
+    let name = hold
+        .assignee
+        .strip_suffix(&format!(":{}", node.trim()))
+        .unwrap_or(&hold.assignee);
+    let state = if hold_alive(hold) {
+        "still running"
+    } else {
+        "gone"
+    };
+    format!(
+        "{verb} {node} under {name}, another conversation of seat {} ({state}, held since {})\n",
+        hold.seat, hold.since
+    )
 }
 
 /// What a conversation left beside the claim graph when it took a node:
@@ -15130,21 +15195,36 @@ pub fn complete(
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     let gen_s = live_gen(&id, gen)?.to_string();
-    let mut args = vec![
-        "complete",
-        id.as_str(),
-        "--actor",
-        actor.as_str(),
-        "--gen",
-        gen_s.as_str(),
-    ];
-    if let Some(s) = status {
-        args.push("--status");
-        args.push(s);
-    }
-    let said = match run_captured("claimdag", &args) {
+    let run = |actor: &str| {
+        let mut args = vec![
+            "complete",
+            id.as_str(),
+            "--actor",
+            actor,
+            "--gen",
+            gen_s.as_str(),
+        ];
+        if let Some(s) = status {
+            args.push("--status");
+            args.push(s);
+        }
+        run_captured("claimdag", &args)
+    };
+    let said = match run(&actor) {
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
+            // A worker this seat started, or the conversation that started
+            // this worker, holds it: the seat finishes its own work.
+            if let Some((holder, hold)) = same_seat_hold(&id, &actor) {
+                let said = run(&holder)?;
+                drop_hold(&holder);
+                drop_playbook(node);
+                return Ok(format!(
+                    "{}{}",
+                    same_seat_note(node, "completed", &hold),
+                    said.stdout
+                ));
+            }
             let hold = run_captured("claimdag", &["get", id.as_str()])
                 .ok()
                 .and_then(|g| holder_of(&g.stdout))
@@ -25152,6 +25232,90 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    /// A background worker of this seat holds the node, and is gone. The
+    /// seat completes it, and hands it back, under the worker's name. A
+    /// worker of another seat is still refused, with its name.
+    #[test]
+    fn the_seat_finishes_what_its_own_worker_holds() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("claimdag.log");
+        let worker = work_id("worker-1:proj-cccc");
+        let script = format!(
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  get) echo \"$2  claimed  task  gen=3  assignee={worker}\" ;;\n  complete|release) [ \"$4\" = '{worker}' ] || {{ echo \"$1: not assignee\" >&2; exit 1; }}; echo ok ;;\nesac\n",
+            log = log.display(),
+        );
+        let fake = dir.path().join("claimdag");
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let saved: Vec<_> = ["XDG_RUNTIME_DIR", "LJOS_SEAT", "CLAIMDAG_DIR"]
+            .into_iter()
+            .map(|k| (k, std::env::var_os(k)))
+            .collect();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEAT", "alice");
+            std::env::remove_var("CLAIMDAG_DIR");
+        }
+        let hold = dir.path().join("ljos").join(format!("hold-{worker}"));
+        std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+        let write_hold_of = |seat: &str| {
+            std::fs::write(
+                &hold,
+                format!("worker-1:proj-cccc\n{seat}\n999999999\nnode\n2026-10-10T12:00:00Z\nproj-cccc\n-\n"),
+            )
+            .unwrap();
+        };
+        let (done, released, refused) = with_fake_on_path(dir.path(), || {
+            write_hold_of("alice");
+            let done = complete("proj-cccc", Some("done"), "parent-1", Some(3));
+            let dropped = !hold.exists();
+            write_hold_of("alice");
+            let released = release("proj-cccc", "parent-1");
+            write_hold_of("bob");
+            let refused = complete("proj-cccc", Some("done"), "parent-1", Some(3));
+            (done.map(|d| (d, dropped)), released, refused)
+        });
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        let (done, dropped) = done.unwrap();
+        assert!(
+            done.starts_with(
+                "completed proj-cccc under worker-1, another conversation of seat alice"
+            ),
+            "{done}"
+        );
+        assert!(
+            dropped,
+            "the worker's hold record stays after the seat completed"
+        );
+        let released = released.unwrap();
+        assert!(
+            released.starts_with("released proj-cccc under worker-1"),
+            "{released}"
+        );
+        let refused = format!("{:#}", refused.unwrap_err());
+        assert!(refused.contains("held by worker-1 (seat bob"), "{refused}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!(
+                "complete {} --actor {worker} --gen 3 --status done",
+                work_id("proj-cccc")
+            )),
+            "{calls}"
+        );
     }
 
     /// Another conversation took the asker's first node.
