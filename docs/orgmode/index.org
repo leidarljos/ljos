@@ -51,7 +51,7 @@ MCP tool can sit in the seat.
 * Install
 
 #+begin_src console
-$ cargo binstall --locked ljos packset packset-embed deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
+$ cargo binstall --locked ljos packset packset-embed deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
 $ packset ensure
 $ ljos doctor
 $ ljos onboard --harness json
@@ -59,7 +59,7 @@ $ ljos onboard --harness json
 
 =ljos= provides =ljos= and =ljos-mcp=. =packset= provides =packset= and the
 writer =packsetd=. =packset-embed= is the encoder =packsetd= runs. =deedar-cli= provides =deedar=. =claimdag-cli= provides
-=claimdag=. =vissue-cli= provides =vissue=. =ljos-consensus= provides
+=claimdag=. =vissue-cli= provides =vissue=, and =vissue-mcp= the tracker server. =ljos-consensus= provides
 =ljos-consensus=, which =ljos consensus= runs. =ljos-policyd= is the command
 check. Those are the binaries the tutorial calls. Each comes prebuilt from
 its GitHub release; =cargo install= takes the same names and builds from

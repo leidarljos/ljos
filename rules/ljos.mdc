@@ -1,0 +1,18 @@
+---
+description: Use ljos memory, the tracker and the command guard during agent work.
+alwaysApply: true
+---
+
+# ljos
+
+- Before answering from memory about this project or this person, search the
+  store: `ljos search TOPIC` (or the `ljos_search` tool).
+- When the person says always, never, prefer or remember, save it with the
+  ljos-remember skill. A command they rule out becomes `ljos rule`.
+- When the ljos hook refuses a command, do not run it another way. Tell the
+  person the exact command and the reason, and leave it to them.
+- Work on a ticket: open it with `ljos sitting ISSUE` and close it with
+  `ljos finish ISSUE --lesson "..."` (ljos-sitting skill).
+- Text the hook adds under "What this seat already knows" is the person's
+  standing guidance. Follow it unless the person says otherwise in this chat.
+- If a hook says an ljos program is not installed, offer the ljos-setup skill.

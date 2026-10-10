@@ -22,7 +22,7 @@ on what), ljos-policyd (the command check) and ljos-consensus (voting).
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 
 ```
-cargo binstall --locked ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
+cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
@@ -127,9 +127,11 @@ row when that count stays above zero through the push wait.
 
 ## Claude Code plugin
 
-The plugin bundles the MCP server, the seat protocol skill, the sitting and
-finish commands, and the hooks `ljos onboard --harness claude` registers. The
-marketplace file is in this repository.
+The plugin bundles the tool server (`ljos-mcp`), the skills (the seat protocol, setup,
+remember, sitting, filing, decisions and mail), the sitting, finish, remember
+and doctor commands, a panelist agent, and the hooks
+`ljos onboard --harness claude` registers. The marketplace file is in this
+repository, and the same tree is the Cursor plugin below.
 
 ```
 claude plugin marketplace add leidarljos/ljos
@@ -148,6 +150,39 @@ session. `/ljos:sitting ISSUE` opens a sitting and
 `claude plugin validate .` checks the marketplace and
 `claude plugin validate .claude-plugin/plugin.json` checks the plugin. Pass
 `--strict` to fail on warnings.
+
+## Cursor plugin
+
+This repository is also a Cursor plugin. It gives Cursor's agent the ljos
+memory, the command guard, the `ljos_*` tools, the skills above, a rule that tells
+the agent to use them, and four commands: `/sitting`, `/finish`, `/remember`
+and `/doctor`.
+
+Install the programs first (the `cargo binstall` line in Five minutes), then
+type this in Cursor's agent chat:
+
+```
+/add-plugin leidarljos/ljos
+```
+
+Cursor pins a plugin added this way to the commit it first fetched. To follow
+updates, put a clone in Cursor's local plugin folder instead and pull it:
+
+```
+git clone https://github.com/leidarljos/ljos ~/.cursor/plugins/local/ljos
+```
+
+Then reload the window. Cursor loads a symlink in that folder only when it
+points inside the folder, so clone rather than link.
+
+The hooks run the same `ljos hook` as `ljos onboard --harness cursor`. Two of
+them, `beforeShellExecution` and `preToolUse`, check each command before it
+runs. A third, `beforeSubmitPrompt`, looks up what the seat knows. Cursor does not pass a
+prompt hook's text to the model, so that note reaches the agent with the next
+tool result. With the plugin installed, skip `ljos onboard --harness cursor`;
+it would register the hooks a second time. When the programs are missing, the
+hooks say how to install them and let commands run, and the ljos-setup skill
+walks the agent through the install.
 
 ## Command consent in chat
 
