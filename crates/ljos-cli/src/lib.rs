@@ -16699,6 +16699,63 @@ mod tests {
     /// cargo runs tests on threads, and one process has one environment.
     /// The runner session the test process inherited is dropped first, so a
     /// test that sets one session id sees that one alone.
+    /// A home, data and config directory of the test's own, no pack and no
+    /// deed store or tracker named, for a dry onboard whose steps would
+    /// otherwise read the machine: packset on PATH, a writer up, a host key.
+    /// Hold [`env_guard`] for as long as this lives; dropping it restores
+    /// the environment.
+    struct HermeticSeat {
+        _dir: tempfile::TempDir,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl HermeticSeat {
+        const KEYS: [&'static str; 9] = [
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "PACKSET_URL",
+            "DEEDAR_URL",
+            "DEEDAR_HOST_SIGNING_KEY",
+            "ISSUE_ROOT",
+            "VISSUE_ROOT",
+            "VISSUE_CONFIG",
+        ];
+
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let saved = Self::KEYS
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+            // SAFETY: the caller holds env_guard.
+            unsafe {
+                for k in Self::KEYS {
+                    std::env::remove_var(k);
+                }
+                std::env::set_var("HOME", dir.path());
+                std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
+                std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+                std::env::set_var("PACKSET_URL", "off");
+            }
+            Self { _dir: dir, saved }
+        }
+    }
+
+    impl Drop for HermeticSeat {
+        fn drop(&mut self) {
+            // SAFETY: the caller still holds env_guard.
+            unsafe {
+                for (k, v) in &self.saved {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -21026,6 +21083,8 @@ mod tests {
 
     #[test]
     fn grok_onboard_names_the_frozen_hook_file() {
+        let _g = env_guard();
+        let _seat = HermeticSeat::new();
         let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
         let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
         assert!(steps[0].ok, "{steps:?}");
@@ -21085,6 +21144,8 @@ mod tests {
 
     #[test]
     fn grok_onboard_ends_with_the_shared_dependencies() {
+        let _g = env_guard();
+        let _seat = HermeticSeat::new();
         let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
         let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
