@@ -293,9 +293,11 @@ One verb closes the sitting:
     ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 
 It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
-writes that lesson into the pack. A lesson the person types with `ljos remember`
-stays `user-declared`. The verb then fires the island, completes the
-session node, and learns from a named outcome. Without `--lesson` it says so;
+writes that lesson into the pack and records that the person accepted it.
+A lesson the person types with `ljos remember` stays `user-declared`, and
+the same words satisfy the open proposal. The verb then fires the island,
+completes the session node, and learns from a named outcome. Without
+`--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
 same four steps are:
 
@@ -411,8 +413,9 @@ drop. Membership is atoms of kind `group`, so it travels in the same log.
 
 `ljos hook --prompt` prints unread mail at the front of the next prompt
 and writes a receipt for each message it shows. Shown there is read.
-A shell seat has no hook. It polls `ljos inbox` and writes a receipt with
-`ljos read`.
+When the pack does not answer, the hook prints `mail could not be checked`
+and does not block the prompt. A shell seat has no hook. It polls
+`ljos inbox` and writes a receipt with `ljos read`.
 
 The text of a message carries its id. Two messages with the same words stay
 two messages when a sealed log is imported. The same holds for a receipt

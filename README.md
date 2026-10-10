@@ -120,7 +120,7 @@ python3 scripts/test_approval.py target/debug/ljos-mcp
 - A tracker, [vissue](https://github.com/leidarljos/vissue): plain org files
   in a git repository. `ljos sitting ISSUE` opens the work and claims it;
   `ljos finish ISSUE --lesson "..."` closes the loop and files what it
-  taught. `ljos accept ID` writes that lesson.
+  taught. `ljos accept ID` writes that lesson and records the acceptance.
 - A gate on shell commands: rules in the pack (`ljos rule`), tried on each
   command a line runs, and a guard that keeps agents from rewriting the
   gate's own binaries and hook files. Pushes are free to your own unreleased
@@ -208,7 +208,7 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## The loop, in two verbs
 
-`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. Absent `--playbook`, a name already bound, else a closed-set token in the title, else `sit`. The playbook name is a tracker note until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is filed as a proposal with origin `agent-derived`, and `ljos accept` writes it. The island fires, the session node completes, and a named outcome shrinks the voters it refuted. A lesson typed with `ljos remember` stays `user-declared`. The ticket stays open unless `--close` is given, which closes it only when the work is accepted. The loop that makes the seat a memory runs every time, whether or not somebody remembers it.
+`ljos sitting ISSUE [--playbook NAME]` opens a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, the timeline, the claim. Absent `--playbook`, a name already bound, else a closed-set token in the title, else `sit`. The playbook name is a tracker note until finish or release. `ljos panel` refuses until one is bound. `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it: the lesson is filed as a proposal with origin `agent-derived`, and `ljos accept` writes it and records that the person accepted it. The island fires, the session node completes, and a named outcome shrinks the voters it refuted. A lesson typed with `ljos remember` stays `user-declared`, and the same words satisfy the open proposal. The ticket stays open unless `--close` is given, which closes it only when the work is accepted. The loop that makes the seat a memory runs every time, whether or not somebody remembers it.
 
 When the tracker is a git checkout, the claim and the finish each commit the ticket's `issues.org` (that file only) and push it, so another host sees the claim and the closure. `LJOS_TRACKER_GIT=commit` keeps it local; `off` skips it. `ljos doctor` names how many commits origin lacks and fails the tracker row when that count sits through the push wait.
 
@@ -228,7 +228,7 @@ Nothing needs a variable set: `ljos remember` starts the writer when none is ans
 
 ## Mail
 
-`ljos send SEAT TEXT` writes a message to a named seat. `ljos send --group NAME TEXT` writes to the other members of that group. `--interrupt` leads the next prompt. `--issue ID` threads the message on a vissue issue, and the atom takes that issue's scope so `ljos sync` carries it in the sealed log. `ljos inbox` lists unread mail and writes no receipt. A pack that does not answer is an error, and `ljos send` names the packset version that keeps mail. `ljos read ID` writes one receipt. `ljos reply ID TEXT` answers the sender and keeps the issue. `ljos hook --prompt` prints unread mail and writes a receipt for each message it shows. A shell seat polls `ljos inbox`.
+`ljos send SEAT TEXT` writes a message to a named seat. `ljos send --group NAME TEXT` writes to the other members of that group. `--interrupt` leads the next prompt. `--issue ID` threads the message on a vissue issue, and the atom takes that issue's scope so `ljos sync` carries it in the sealed log. `ljos inbox` lists unread mail and writes no receipt. A pack that does not answer is an error, and `ljos send` names the packset version that keeps mail. `ljos read ID` writes one receipt. `ljos reply ID TEXT` answers the sender and keeps the issue. `ljos hook --prompt` prints unread mail and writes a receipt for each message it shows. When the pack does not answer, it prints `mail could not be checked` and still exits 0. A shell seat polls `ljos inbox`.
 
 ## The smoke test
 

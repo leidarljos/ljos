@@ -19010,7 +19010,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -21506,6 +21506,27 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_says_when_mail_could_not_be_checked() {
+        let _g = env_guard();
+        let (url, _) = serve_pack("down");
+        let _held = PackUrl::set(&url);
+        let (text, ids) = super::mail::prompt_note();
+        assert_eq!(text, super::mail::MAIL_UNCHECKED);
+        assert!(ids.is_empty(), "{ids:?}");
+        let call = prompt_call("check the mail please");
+        let out = hook_output(&call, &text);
+        assert!(out.contains(super::mail::MAIL_UNCHECKED), "{out}");
+        assert!(!answer_denies(&out), "{out}");
+        assert_eq!(shell_exit(true, &out), 0);
+
+        let (quiet, _) = serve_pack("keep");
+        let _kept = PackUrl::set(&quiet);
+        let (empty, ids) = super::mail::prompt_note();
+        assert_eq!(empty, "");
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[test]
     fn an_empty_inbox_on_a_pack_that_keeps_mail_says_so() {
         let _g = env_guard();
         let (url, posts) = serve_pack("keep");
@@ -21663,17 +21684,51 @@ mod tests {
         let runtime = tempfile::tempdir().unwrap();
         let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let slot = Arc::clone(&stored);
+        let held: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let held_slot = Arc::clone(&held);
         let (url, _) = serve_http(move |req| {
             let path = req.lines().next().unwrap_or("");
             let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-            if path.contains("POST /v1/proposals") {
-                return (
-                    403,
-                    r#"{"error":"extract is not allowed on onDemand"}"#.into(),
-                );
+            if path.contains("POST /v1/proposals/accept") {
+                let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let id = asked["id"].as_str().unwrap_or("").to_string();
+                let mut held = held_slot.lock().unwrap();
+                let Some(pos) = held.iter().position(|(held_id, _)| held_id == &id) else {
+                    return (400, format!(r#"{{"error":"no open proposal {id}"}}"#));
+                };
+                let mut atom = held.remove(pos).1;
+                atom["origin"] = Value::String("user-declared".into());
+                let stored = slot.lock().unwrap();
+                if let Some(existing) = stored
+                    .iter()
+                    .find(|row| row["text"] == atom["text"] && row["kind"] == atom["kind"])
+                {
+                    return (200, existing.to_string());
+                }
+                drop(stored);
+                let n = slot.lock().unwrap().len();
+                atom["id"] = Value::String(format!("atom-{n}"));
+                slot.lock().unwrap().push(atom.clone());
+                return (200, atom.to_string());
             }
             if path.contains("POST /v1/atoms") {
                 let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                if atom["origin"].as_str() == Some("agent-derived") {
+                    let text = atom["text"].as_str().unwrap_or("").to_string();
+                    let mut held = held_slot.lock().unwrap();
+                    let id = held
+                        .iter()
+                        .find(|(_, row)| row["text"].as_str() == Some(text.as_str()))
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or_else(|| format!("{:032x}", held.len() + 1));
+                    if held.iter().all(|(held_id, _)| held_id != &id) {
+                        held.push((id.clone(), atom));
+                    }
+                    return (
+                        400,
+                        format!(r#"{{"error":"held as proposal {id}: agent-derived"}}"#),
+                    );
+                }
                 let n = slot.lock().unwrap().len();
                 atom["id"] = Value::String(format!("atom-{n}"));
                 slot.lock().unwrap().push(atom.clone());
@@ -21696,7 +21751,7 @@ mod tests {
         let mut atom = atom_body("lesson", lesson, &client.workspace());
         stamp_horizon(&mut atom, "lesson", lesson, None);
         let filed = admit::propose_atom(&client, atom).unwrap();
-        assert!(!filed.remote);
+        assert!(filed.remote);
 
         store_correction(&HookCall {
             event: "UserPromptSubmit".into(),
@@ -21719,12 +21774,19 @@ mod tests {
         assert!(proposals.contains(lesson), "{proposals}");
 
         let said = admit::accept(&filed.id).unwrap();
-        assert!(said.contains("agent-derived"), "{said}");
+        assert!(said.contains("user-declared"), "{said}");
         let live = stored.lock().unwrap().clone();
         let admitted: Vec<_> = live.iter().filter(|a| a["text"] == lesson).collect();
         assert_eq!(admitted.len(), 1, "{live:?}");
         assert_eq!(admitted[0]["kind"], "lesson");
-        assert_eq!(admitted[0]["origin"], "agent-derived");
+        assert_eq!(admitted[0]["origin"], "user-declared");
+        assert!(
+            held.lock()
+                .unwrap()
+                .iter()
+                .all(|(_, atom)| atom["text"] != lesson),
+            "accept left the lesson held"
+        );
         assert!(live.iter().all(|a| a["kind"] != "preference"), "{live:?}");
 
         let choice = "use uv for every script";
@@ -21777,7 +21839,7 @@ mod tests {
     }
 
     #[test]
-    fn a_direct_proposal_is_accepted_on_the_writer() {
+    fn a_held_proposal_is_accepted_on_the_writer() {
         let _g = env_guard();
         let state = tempfile::tempdir().unwrap();
         let (url, log) = serve_http(|req| {
@@ -21785,10 +21847,14 @@ mod tests {
             if path.contains("POST /v1/proposals/accept") {
                 (
                     200,
-                    r#"{"id":"atom-9","kind":"lesson","origin":"agent-derived"}"#.into(),
+                    r#"{"id":"atom-9","kind":"lesson","origin":"user-declared"}"#.into(),
                 )
-            } else if path.contains("POST /v1/proposals") {
-                (200, r#"{"id":"prop-9"}"#.into())
+            } else if path.contains("POST /v1/atoms") {
+                (
+                    400,
+                    r#"{"error":"held as proposal 6517088a3fd44661d78a9ce8b8764433: agent-derived"}"#
+                        .into(),
+                )
             } else {
                 (500, r#"{"error":"live atom"}"#.into())
             }
@@ -21804,13 +21870,127 @@ mod tests {
         let filed = admit::propose_atom(&client, atom).unwrap();
         assert!(filed.remote);
         let said = admit::accept(&filed.id).unwrap();
-        assert!(said.contains("agent-derived"), "{said}");
+        assert!(said.contains("user-declared"), "{said}");
         let lines = log.lock().unwrap().clone();
         assert!(
             lines.iter().any(|l| l.contains("/v1/proposals/accept")),
             "{lines:?}"
         );
-        assert!(lines.iter().all(|l| !l.contains("/v1/atoms")), "{lines:?}");
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("/v1/atoms")).count(),
+            1,
+            "filing is the only atom post: {lines:?}"
+        );
+        let again = admit::accept(&filed.id).unwrap();
+        assert!(again.contains("already in the pack"), "{again}");
+        let lines = log.lock().unwrap().clone();
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("/v1/atoms")).count(),
+            1,
+            "a second accept does not file another proposal: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_writer_that_does_not_hold_stores_the_atom_on_accept() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.contains("POST /v1/atoms") && body.contains("\"origin\"") {
+                return (400, r#"{"error":"unknown field origin"}"#.into());
+            }
+            if path.contains("POST /v1/atoms") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                atom["id"] = Value::String("atom-local".into());
+                slot.lock().unwrap().push(atom.clone());
+                return (200, atom.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let client = pack().unwrap();
+        let lesson = "a local writer takes the lesson on accept";
+        let atom = atom_body("lesson", lesson, &client.workspace());
+        let filed = admit::propose_atom(&client, atom).unwrap();
+        assert!(!filed.remote);
+        assert!(stored.lock().unwrap().is_empty());
+        let said = admit::accept(&filed.id).unwrap();
+        assert!(
+            said.contains("atom-local") || said.contains("lesson"),
+            "{said}"
+        );
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["text"], lesson);
+        assert!(live[0].get("origin").is_none(), "{live:?}");
+    }
+
+    /// A proposal kept locally, the way a miner refusal used to leave it,
+    /// is still one held proposal on accept, and that proposal is closed.
+    #[test]
+    fn a_local_proposal_is_closed_when_the_writer_holds_it() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let held: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let held_slot = Arc::clone(&held);
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let filing = Arc::new(AtomicBool::new(true));
+        let filing_flag = Arc::clone(&filing);
+        let (url, _) = serve_http(move |req| {
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.contains("POST /v1/proposals/accept") {
+                let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let id = asked["id"].as_str().unwrap_or("").to_string();
+                let mut held = held_slot.lock().unwrap();
+                let Some(pos) = held.iter().position(|(held_id, _)| held_id == &id) else {
+                    return (400, format!(r#"{{"error":"no open proposal {id}"}}"#));
+                };
+                let mut atom = held.remove(pos).1;
+                atom["origin"] = Value::String("user-declared".into());
+                atom["id"] = Value::String("atom-held".into());
+                slot.lock().unwrap().push(atom.clone());
+                return (200, atom.to_string());
+            }
+            if path.contains("POST /v1/atoms") {
+                if filing_flag.load(Ordering::SeqCst) {
+                    return (404, r#"{"error":"missing"}"#.into());
+                }
+                let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let id = "6517088a3fd44661d78a9ce8b8764433".to_string();
+                held_slot.lock().unwrap().push((id.clone(), atom));
+                return (
+                    400,
+                    format!(r#"{{"error":"held as proposal {id}: agent-derived"}}"#),
+                );
+            }
+            (500, r#"{"error":"unexpected"}"#.into())
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let client = pack().unwrap();
+        let lesson = "a local row becomes the held lesson";
+        let atom = atom_body("lesson", lesson, &client.workspace());
+        let filed = admit::propose_atom(&client, atom).unwrap();
+        assert!(!filed.remote, "a writer without proposals stays local");
+        assert!(stored.lock().unwrap().is_empty());
+        filing.store(false, Ordering::SeqCst);
+        let said = admit::accept(&filed.id).unwrap();
+        assert!(said.contains("user-declared"), "{said}");
+        assert!(
+            held.lock().unwrap().is_empty(),
+            "accept left the proposal open"
+        );
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["text"], lesson);
+        assert_eq!(live[0]["origin"], "user-declared");
     }
 
     #[test]

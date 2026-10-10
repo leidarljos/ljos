@@ -1,17 +1,17 @@
 //! Origin-bound admission.
 //!
-//! A direct proposal, for a writer that grew the path beside the miner:
+//! An agent lesson is filed by posting the atom. A writer that admits by
+//! origin answers 400 `held as proposal <id>` and keeps that proposal,
+//! including the atom. `POST /v1/proposals/accept` with `{"workspace","id"}`
+//! writes the atom and records the acceptance. The same text held again is
+//! that proposal, so a retry does not leave another one.
 //!
-//! ```json
-//! {"schema":"inside.proposal/v1","id":"<stable>","workspace":"...","text":"...","kind":"lesson","origin":"agent-derived","level":"explicit","entities":[],"source":{},"direct":true}
-//! ```
+//! `POST /v1/proposals` is the miner. This path does not call it.
 //!
-//! `POST /v1/proposals` with `direct: true`. A 200 keeps it on the writer and
-//! `POST /v1/proposals/accept` with `{"workspace","id"}` writes the atom.
-//! A 403 whose body says `not allowed`, or a 404, means this writer still
-//! mines and will not take a direct proposal. The proposal stays in
-//! `$XDG_STATE_HOME/ljos/proposals.jsonl` and `ljos accept` posts the atom.
-//! A live atom is never the fallback.
+//! A 400 that names `origin` as unknown, or a 404, means this writer does
+//! not hold. The proposal stays in `$XDG_STATE_HOME/ljos/proposals.jsonl`
+//! and `ljos accept` posts the atom. A writer that does not answer keeps
+//! the proposal local for this call.
 //!
 //! `origin` on a live atom is `user-declared`, `agent-derived` or `peer`.
 //! A 400 that names `origin` as unknown is retried once without the field.
@@ -184,43 +184,60 @@ fn remember_proposal_mode(base: &str, remote: bool) {
         .insert(base.to_string(), remote);
 }
 
-/// `Ok(None)` is a writer that still mines. `Ok(Some(id))` is the writer's id.
-fn post_direct(client: &PacksetClient, id: &str, atom: &Value) -> Result<Option<String>> {
+/// The id in `held as proposal <id>`.
+fn held_proposal_id(text: &str) -> Option<String> {
+    let marker = "held as proposal ";
+    let rest = text.get(text.find(marker)? + marker.len()..)?;
+    let id: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    (id.len() == 32).then_some(id)
+}
+
+/// A writer that will not hold the atom, and did not store it.
+fn filing_is_local(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    origin_rejected(text)
+        || lower.contains(": 404:")
+        || lower.contains("status code 404")
+        || (lower.contains("403") && lower.contains("not allowed"))
+}
+
+/// `Ok(None)` is a writer that does not hold. `Ok(Some(id))` is its proposal id.
+fn post_direct(client: &PacksetClient, atom: &Value) -> Result<Option<String>> {
     let base = client.base();
     if proposal_is_local(base) {
         return Ok(None);
     }
-    let url = format!("{base}/v1/proposals");
-    let mut body = atom.clone();
-    if let Some(map) = body.as_object_mut() {
-        map.insert("schema".into(), Value::String("inside.proposal/v1".into()));
-        map.insert("direct".into(), Value::Bool(true));
-        map.insert("id".into(), Value::String(id.to_string()));
-    }
-    match ureq::post(&url).timeout(http_timeout()).send_json(body) {
-        Ok(resp) => {
-            let parsed: Value = resp.into_json().unwrap_or(Value::Null);
-            remember_proposal_mode(base, true);
-            let remote_id = parsed.get("id").and_then(Value::as_str).map(str::to_string);
-            Ok(Some(remote_id.unwrap_or_else(|| id.to_string())))
+    match client.post_atom(atom) {
+        Ok(_) => {
+            // This writer stored the atom. It does not hold proposals.
+            remember_proposal_mode(base, false);
+            Ok(None)
         }
-        Err(ureq::Error::Status(code, resp)) => {
-            let text = resp.into_string().unwrap_or_default();
-            let lower = text.to_lowercase();
-            if code == 404 || (code == 403 && lower.contains("not allowed")) {
+        Err(e) => {
+            let text = e.to_string();
+            if let Some(id) = held_proposal_id(&text) {
+                remember_proposal_mode(base, true);
+                return Ok(Some(id));
+            }
+            if filing_is_local(&text) {
                 remember_proposal_mode(base, false);
                 return Ok(None);
             }
-            bail!("propose: POST /v1/proposals failed: {code}: {text}");
+            // A writer that did not answer keeps this proposal local. The
+            // next filing tries the writer again.
+            if !text.contains("bad response") {
+                return Ok(None);
+            }
+            bail!("propose: POST /v1/atoms failed: {text}");
         }
-        Err(e) => bail!("propose: POST /v1/proposals failed: {e}"),
     }
 }
 
-/// File `atom` as an agent proposal. The atom is not posted.
+/// File `atom` as an agent proposal by posting it.
 ///
-/// The id is stable for one kind and one text, so the same lesson is one
-/// open proposal. An open, accepted or satisfied row is returned as it stands.
+/// A held answer is the proposal. The id is stable for one kind and one
+/// text, so the same lesson is one open proposal. An open, accepted or
+/// satisfied row is returned as it stands.
 pub fn propose_atom(client: &PacksetClient, mut atom: Value) -> Result<Filed> {
     let _g = gate();
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
@@ -238,7 +255,7 @@ pub fn propose_atom(client: &PacksetClient, mut atom: Value) -> Result<Filed> {
             });
         }
     }
-    let remote_id = post_direct(client, &id, &atom)?;
+    let remote_id = post_direct(client, &atom)?;
     let rec = Record {
         id: id.clone(),
         status: "open".into(),
@@ -268,7 +285,49 @@ pub fn satisfy_text(text: &str) {
     for mut rec in open {
         rec.status = "satisfied".into();
         let _ = append(&rec);
+        close_remote(&rec);
     }
+}
+
+fn workspace_of(client: &PacksetClient, rec: &Record) -> String {
+    let workspace = rec
+        .atom
+        .get("workspace")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if workspace.is_empty() {
+        client.workspace()
+    } else {
+        workspace.to_string()
+    }
+}
+
+/// Close a held proposal whose text is already a live claim. The writer's
+/// duplicate rule keeps one atom when the text and kind match.
+fn close_remote(rec: &Record) {
+    if !rec.remote {
+        return;
+    }
+    let Some(remote_id) = rec.remote_id.as_deref() else {
+        return;
+    };
+    let Ok(client) = crate::pack() else {
+        return;
+    };
+    let workspace = workspace_of(&client, rec);
+    let _ = accept_on_writer(&client, &workspace, remote_id);
+}
+
+fn accepted_line(id: &str, kind: &str, posted: &Value) -> String {
+    let origin = posted
+        .get("origin")
+        .and_then(Value::as_str)
+        .filter(|origin| !origin.is_empty())
+        .unwrap_or(ORIGIN_AGENT);
+    format!(
+        "accepted {id} as {kind} origin {origin}{}\n",
+        crate::revision_note(posted)
+    )
 }
 
 fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result<Value> {
@@ -299,6 +358,7 @@ pub fn accept(id: &str) -> Result<String> {
     };
     match rec.status.as_str() {
         "satisfied" => {
+            close_remote(&rec);
             return Ok(format!("{id} was already written by remember or prefer\n"));
         }
         "accepted" => return Ok(format!("{id} is already in the pack\n")),
@@ -308,33 +368,32 @@ pub fn accept(id: &str) -> Result<String> {
     let client = crate::pack()?;
     if rec.remote {
         let remote_id = rec.remote_id.clone().unwrap_or_else(|| rec.id.clone());
-        let workspace = rec
-            .atom
-            .get("workspace")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let workspace = if workspace.is_empty() {
-            client.workspace()
-        } else {
-            workspace
-        };
-        accept_on_writer(&client, &workspace, &remote_id)?;
-    } else {
-        let posted = post_kept(&client, &rec.atom)
-            .with_context(|| format!("accept: POST /v1/atoms failed for {id}"))?;
+        let workspace = workspace_of(&client, &rec);
+        let posted = accept_on_writer(&client, &workspace, &remote_id)?;
         rec.status = "accepted".into();
         append(&rec)?;
-        return Ok(format!(
-            "accepted {id} as {} origin {ORIGIN_AGENT}{}\n",
-            rec.kind,
-            crate::revision_note(&posted)
-        ));
+        return Ok(accepted_line(&rec.id, &rec.kind, &posted));
     }
-    rec.status = "accepted".into();
-    append(&rec)?;
-    Ok(format!(
-        "accepted {id} as {} origin {ORIGIN_AGENT}\n",
-        rec.kind
-    ))
+    match post_kept(&client, &rec.atom) {
+        Ok(posted) => {
+            rec.status = "accepted".into();
+            append(&rec)?;
+            Ok(accepted_line(&rec.id, &rec.kind, &posted))
+        }
+        Err(e) => {
+            let text = e.to_string();
+            let Some(remote_id) = held_proposal_id(&text) else {
+                return Err(e).with_context(|| format!("accept: POST /v1/atoms failed for {id}"));
+            };
+            // Filed while this writer was not holding, or the post is the
+            // filing. Accept that proposal. Do not leave it open.
+            let workspace = workspace_of(&client, &rec);
+            let posted = accept_on_writer(&client, &workspace, &remote_id)?;
+            rec.remote = true;
+            rec.remote_id = Some(remote_id);
+            rec.status = "accepted".into();
+            append(&rec)?;
+            Ok(accepted_line(&rec.id, &rec.kind, &posted))
+        }
+    }
 }

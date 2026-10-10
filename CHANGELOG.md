@@ -4,6 +4,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## Unreleased
 
+- `ljos accept` writes an agent lesson the writer held. Filing posts the atom, and a `held as proposal` answer is the proposal. Accept calls `/v1/proposals/accept`, so the lesson becomes live, the acceptance is recorded, and a retry does not leave another held proposal. `remember` or `prefer` of the same text still satisfies the proposal and closes it.
+- `ljos hook --prompt` prints `mail could not be checked` when the pack does not answer, and still exits 0.
 - `ljos deed --remove ACCESSION --ticket ID` drops that citation. The removal is appended to the ticket. The heading is not rewritten.
 - A phrase match files a correction as a proposal, and not from pasted or quoted text. A Jev admission still needs the two scorers to agree and the score floor. `due --judge` names a hold and does not grade it. `ljos judge-score` joins the judge log with outcomes. A ballot is recorded as `judge:<model>`, and one model is one voter. `consensus` does not read a judge's forecast. Choice confidence is `(K·p_max − 1)/(K − 1)` on every backend. The cache stores a hash, mode 0600. A chat backend needs `usd_per_mtok_in`.
 - `finish --lesson` and `findings --remember` file origin `agent-derived` as proposals. The prompt hook files a correction as a proposal. `ljos accept` writes the atom. `remember` and `prefer` stay `user-declared`. An import from `receive` or `sync` is `peer`. A writer without the direct proposal path keeps the proposal locally.

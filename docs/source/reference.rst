@@ -146,16 +146,18 @@ log. ``inbox`` lists unread mail and writes no receipt. A pack that does
 not answer is an error. ``read ID`` writes one receipt. ``reply ID TEXT``
 answers the sender and keeps the issue. ``group NAME --add SEAT`` records
 a member. ``ljos hook --prompt`` writes a receipt for each message it
-shows. A shell seat polls ``ljos inbox``.
+shows. When the pack does not answer, the hook prints ``mail could not be checked``
+and still exits 0. A shell seat polls ``ljos inbox``.
 
 ``ljos deed --remove ACCESSION --ticket ID`` drops that citation. The
 removal is appended to the ticket. The heading is not rewritten.
 
 ``remember`` and ``prefer`` write origin ``user-declared``. ``finish --lesson``
 and ``findings --remember`` file origin ``agent-derived`` and do not write
-the atom. ``ljos accept ID`` writes it. The same text typed with
-``remember`` or ``prefer`` writes it as ``user-declared`` and satisfies the
-proposal. An atom taken by ``receive --import`` or by ``sync`` has origin
+the atom. ``ljos accept ID`` writes the held atom. The writer records the
+acceptance. The same text typed with ``remember`` or ``prefer`` writes it
+as ``user-declared`` and satisfies the proposal, and the held proposal is
+closed. An atom taken by ``receive --import`` or by ``sync`` has origin
 ``peer``, whatever origin the sender wrote.
 
 A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name

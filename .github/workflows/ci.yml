@@ -29,12 +29,14 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --branch develop https://github.com/leidarljos/packset.git "${{ runner.temp }}/packset"
-          cargo build --locked --manifest-path "${{ runner.temp }}/packset/Cargo.toml" -p packset --bin packset
+          cargo build --locked --manifest-path "${{ runner.temp }}/packset/Cargo.toml" -p packset --bin packset --bin packsetd
           mkdir -p "${{ runner.temp }}/bin"
           install -m 0755 "${{ runner.temp }}/packset/target/debug/packset" "${{ runner.temp }}/bin/packset"
+          install -m 0755 "${{ runner.temp }}/packset/target/debug/packsetd" "${{ runner.temp }}/bin/packsetd"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           export PATH="${{ runner.temp }}/bin:${PATH}"
           command -v age-keygen
           command -v packset
+          command -v packsetd
       - name: Workspace tests
         run: cargo test --workspace

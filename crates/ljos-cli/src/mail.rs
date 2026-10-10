@@ -892,12 +892,17 @@ fn remember_receipts(keys: &[String]) {
     let _ = std::fs::write(path, text);
 }
 
+/// What the prompt hook prints when the pack does not answer.
+///
+/// One line. The hook still exits 0, so the prompt is not blocked.
+pub const MAIL_UNCHECKED: &str = "mail could not be checked";
+
 /// Unread mail and unseen receipts for the prompt hook. A pack that does
-/// not answer leaves the prompt as it was.
+/// not answer leaves one line, so unread mail is not silent.
 #[must_use]
 pub fn prompt_note() -> (String, Vec<String>) {
     let Some(atoms) = load_quiet() else {
-        return (String::new(), Vec::new());
+        return (MAIL_UNCHECKED.to_string(), Vec::new());
     };
     let seat = super::seat_name();
     let letters = inbox_letters(&atoms, &seat, false);
