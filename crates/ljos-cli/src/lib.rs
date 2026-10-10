@@ -10792,7 +10792,12 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 ),
                 false,
             ),
-            (None, _, None) => ("not on PATH".into(), false),
+            // No crates.io answer (offline, or the lookup failed): the
+            // install line still names the crate.
+            (None, _, None) => (
+                format!("not on PATH; cargo install --locked {crate_name}"),
+                false,
+            ),
             (Some(path), have, Some(cr)) => bin_health(&path.display().to_string(), have, Some(cr)),
             (Some(path), have, None) => {
                 let ver = have.unwrap_or("?");
@@ -16190,25 +16195,35 @@ mod tests {
         assert!(!healthy(&[embed]));
     }
 
-    /// the README's install line installs every binary the
-    /// doctor requires, so a seat that follows it is not red on day one.
+    /// every install line the README and the docs print installs every
+    /// binary the doctor requires, so a seat that follows one is not red on
+    /// day one.
     #[test]
-    fn the_readme_install_line_covers_every_required_binary() {
-        // The README sits at the repository root, outside a packaged crate.
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
-        let Ok(readme) = std::fs::read_to_string(&path) else {
-            return;
-        };
-        let line = readme
-            .lines()
-            .find(|l| l.starts_with("cargo binstall ljos "))
-            .expect("an install line");
-        for (bin, crate_name) in SEAT_BINS {
-            if REQUIRED.contains(bin) {
-                assert!(
-                    line.split_whitespace().any(|w| w == *crate_name),
-                    "{bin} ({crate_name}) is required and not in: {line}"
-                );
+    fn every_install_line_covers_every_required_binary() {
+        // These sit at the repository root, outside a packaged crate.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for file in [
+            "README.md",
+            "docs/orgmode/getting-started.org",
+            "docs/source/getting-started.rst",
+            "docs/orgmode/index.org",
+            "docs/source/index.rst",
+        ] {
+            let Ok(text) = std::fs::read_to_string(root.join(file)) else {
+                continue;
+            };
+            let line = text
+                .lines()
+                .map(|l| l.trim_start().trim_start_matches("$ "))
+                .find(|l| l.starts_with("cargo binstall ljos "))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            for (bin, crate_name) in SEAT_BINS {
+                if REQUIRED.contains(bin) {
+                    assert!(
+                        line.split_whitespace().any(|w| w == *crate_name),
+                        "{file}: {bin} ({crate_name}) is required and not in: {line}"
+                    );
+                }
             }
         }
     }

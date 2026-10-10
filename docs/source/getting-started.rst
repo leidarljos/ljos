@@ -10,10 +10,10 @@ Install the binaries once:
 
 .. code:: console
 
-   $ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
+   $ cargo binstall ljos packset packset-embed deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
 
 They provide ``ljos``, ``ljos-mcp``, ``ljos-policyd``, ``ljos-consensus``, ``packset``,
-``packsetd``, ``deedar``, ``claimdag`` and ``vissue``. ``VISSUE_ROOT`` must name an existing
+``packsetd``, ``packset-embed``, ``deedar``, ``claimdag`` and ``vissue``. ``VISSUE_ROOT`` must name an existing
 directory with a prefix directory inside it, and ``packset ensure`` starts the
 pack writer.
 
