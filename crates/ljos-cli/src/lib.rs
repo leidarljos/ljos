@@ -4880,8 +4880,9 @@ pub fn stop_audit(input: &str, stop_active: bool) -> Option<String> {
 }
 
 /// Why a turn is held for one more round. A decision that has not been
-/// sat is held even when an issue is already open. A conversation that
-/// holds no issue and used tools without touching the seat is held too.
+/// sat is held even when an issue is already open. With
+/// [`tracks_work`] on, a conversation that holds no issue and used tools
+/// without touching the seat is held too.
 /// A subagent is left to its brief. The second stop of the same turn is
 /// not held. `None` lets the turn end.
 #[must_use]
@@ -4899,15 +4900,13 @@ pub fn seat_stop_reason(input: &str, stop_active: bool, subagent: bool) -> Optio
     if asks_decision(&turn.request) && !turn.balloted {
         return Some(decision_hold());
     }
-    if held_issue().is_some() || !turn.used_tool || turn.touched_seat {
+    if held_issue().is_some() || !turn.used_tool || turn.touched_seat || !tracks_work() {
         return None;
     }
-    Some(
+    Some(format!(
         "This conversation holds no issue, and this turn used tools without touching the seat. \
-         Work goes on an issue: `ljos file \"TITLE\" -p PROJECT --top` prints an id, then \
-         `ljos sitting ID` opens it."
-            .into(),
-    )
+         {OPEN_AN_ISSUE}"
+    ))
 }
 
 /// The id of the runner's notice that its usage limit is reached, when the
@@ -4976,8 +4975,33 @@ pub fn limit_stop(input: &str, session: Option<&str>) -> Option<String> {
 
 /// Tool calls a conversation that already holds an issue may make without a
 /// word to the seat before the hook reminds it. A conversation that holds
-/// none is told on the first result.
+/// none is told on the first result, when the seat tracks work.
 pub const WORK_NUDGE_EVERY: u64 = 40;
+
+/// A seat setting: the process environment, else `~/.config/ljos/env`.
+fn seat_setting(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        return Some(v);
+    }
+    let text = std::fs::read_to_string(home().ok()?.join(".config/ljos/env")).ok()?;
+    text.lines().find_map(|line| {
+        let (k, v) = line.trim().split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
+/// Whether the hooks ask a conversation that holds no issue to open one.
+/// Off unless `LJOS_TRACK_WORK=on`: a person who installed the seat for its
+/// memory and its guard did not ask for a tracker in every conversation.
+/// A conversation that sat on an issue is reminded either way.
+#[must_use]
+pub fn tracks_work() -> bool {
+    seat_setting("LJOS_TRACK_WORK").is_some_and(|v| matches!(v.trim(), "on" | "1" | "true" | "yes"))
+}
+
+/// What the hooks tell a conversation that holds no issue.
+const OPEN_AN_ISSUE: &str = "Work goes on an issue: `vissue q -p PROJECT \"TITLE\"` prints an id, \
+     then `ljos sitting ID` opens it.";
 
 /// Whether a hook call's cue is the seat's own verbs or tools.
 #[must_use]
@@ -4987,8 +5011,8 @@ pub fn touches_seat(cue: &str) -> bool {
 }
 
 /// Count this conversation's tool calls since it last touched the seat.
-/// With no issue held, the first `PostToolUse` of a stretch says to file
-/// one and sit. With an issue held, a `PostToolUse` that reaches
+/// With no issue held and [`tracks_work`] on, the first `PostToolUse` of a
+/// stretch says to open one and sit; with it off, nothing is said. With an issue held, a `PostToolUse` that reaches
 /// [`WORK_NUDGE_EVERY`] says what to record. A subagent is left to its brief.
 pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
     let session = call.session.as_deref()?;
@@ -5008,12 +5032,15 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
     if call.event != "PostToolUse" {
         return None;
     }
+    let held = held_issue();
+    if held.is_none() && !tracks_work() {
+        return None;
+    }
     let count = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| t.trim().parse::<u64>().ok())
         .unwrap_or(0)
         + 1;
-    let held = held_issue();
     let due = match &held {
         None => count == 1 || count >= WORK_NUDGE_EVERY,
         Some(_) => count >= WORK_NUDGE_EVERY,
@@ -5035,10 +5062,10 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
              that holds next time is `ljos remember \"...\"`, an artifact is `ljos deed {issue} \
              --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
         ),
-        None => "This conversation holds no issue. Work goes on an issue: \
-                 `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
-                 Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
-            .to_string(),
+        None => format!(
+            "This conversation holds no issue. {OPEN_AN_ISSUE} Start subagents that record on \
+             the issue with `ljos vote ID` or `ljos note ID`."
+        ),
     })
 }
 
@@ -18739,6 +18766,15 @@ mod tests {
             session: Some("work-test".into()),
             shape: HookShape::Asks,
         };
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "off") };
+        for _ in 0..=WORK_NUDGE_EVERY {
+            assert!(
+                work_nudge(&call("cargo test", "PostToolUse"), false).is_none(),
+                "a seat that does not track work is never told to open an issue"
+            );
+        }
+        let _ = std::fs::remove_file(dir.path().join("ljos/work-work-test"));
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let said = work_nudge(&call("cargo test", "PostToolUse"), false)
             .expect("the first result with no issue says to sit");
         assert!(
@@ -18768,7 +18804,9 @@ mod tests {
             .expect("a new stretch opens on the next result");
         assert!(fresh.contains("ljos sitting"), "{fresh}");
         assert!(
-            fresh.contains("ljos file") && fresh.contains("subagents"),
+            fresh.contains("vissue q")
+                && !fresh.contains("ljos file")
+                && fresh.contains("subagents"),
             "{fresh}"
         );
         work_nudge_delivered(Some("work-test"));
@@ -18798,6 +18836,7 @@ mod tests {
         assert!(touches_seat("use_tool ljos__ljos_sitting"));
         assert!(!touches_seat("cargo build --release"));
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        unsafe { std::env::remove_var("LJOS_TRACK_WORK") };
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
@@ -20524,8 +20563,17 @@ mod tests {
             r#"{{"transcriptPath":"{}","stopHookActive":false}}"#,
             transcript.display()
         );
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "off") };
+        assert!(
+            seat_stop_reason(&input, false, false).is_none(),
+            "a seat that does not track work lets the turn end"
+        );
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let reason = seat_stop_reason(&input, false, false).expect("held");
-        assert!(reason.contains("ljos sitting"), "{reason}");
+        assert!(
+            reason.contains("ljos sitting") && reason.contains("vissue q"),
+            "{reason}"
+        );
         assert!(seat_stop_reason(&input, true, false).is_none());
         assert!(seat_stop_reason(&input, false, true).is_none());
         std::fs::write(
@@ -20536,6 +20584,7 @@ mod tests {
         .unwrap();
         assert!(seat_stop_reason(&input, false, false).is_none());
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        unsafe { std::env::remove_var("LJOS_TRACK_WORK") };
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 

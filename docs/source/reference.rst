@@ -210,6 +210,7 @@ Variable                                                    Read by
 ``LJOS_HUD_SOCKET``                                         summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``
 ``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org`` without pushing; ``off`` skips the commit and push; unset, commit and push
 ``LJOS_TRACKER_PUSH_WAIT``                                  seconds the tracker push after a claim or finish waits; 5 when unset
+``LJOS_TRACK_WORK``                                         ``on`` makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else ``~/.config/ljos/env``; unset, they say nothing until it sits
 ``XDG_CONFIG_HOME``                                         where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset
 ``LJOS_PANE_TOOL``                                          the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers
 ``LJOS_PANEL_RUNNER``                                       the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else Grok
