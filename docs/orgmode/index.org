@@ -51,14 +51,14 @@ MCP tool can sit in the seat.
 * Install
 
 #+begin_src console
-$ cargo binstall --locked ljos packset packset-embed deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
+$ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
 $ packset ensure
 $ ljos doctor
 $ ljos onboard --harness json
 #+end_src
 
 =ljos= provides =ljos= and =ljos-mcp=. =packset= provides =packset= and the
-writer =packsetd=. =packset-embed= is the encoder =packsetd= runs. =deedar-cli= provides =deedar=. =claimdag-cli= provides
+writer =packsetd=. =packset-embed=, the encoder for meaning-based search, is optional: =packsetd= matches words without it, and nothing needs ONNX Runtime. =scripts/install.sh= installs the same set with checksums and onboards each runner it finds. =deedar-cli= provides =deedar=. =claimdag-cli= provides
 =claimdag=. =vissue-cli= provides =vissue=. =ljos-consensus= provides
 =ljos-consensus=, which =ljos consensus= runs. =ljos-policyd= is the command
 check. Those are the binaries the tutorial calls. Each comes prebuilt from
