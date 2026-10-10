@@ -8280,7 +8280,7 @@ pub fn glob_matches(pattern: &str, line: &str) -> bool {
 
 /// The commands a shell line runs: split on `&&`, `||`, `;`, `|` and new
 /// lines outside quotes, each with leading `NAME=value` assignments and
-/// the prefixes `sudo`, `env`, `time`, `nohup` and `exec` taken off. A
+/// the prefixes in [`SEGMENT_PREFIXES`] taken off with their flags. A
 /// rule anchored at a command's start then sees `cd x && git push` and
 /// `FOO=1 git push` as the push they run, and quoted text is not split, so
 /// a commit message naming a command is not that command.
@@ -8290,16 +8290,16 @@ pub fn command_segments(line: &str) -> Vec<String> {
 }
 
 /// [`command_segments`], plus the commands of each `sh -c SCRIPT` (or
-/// `bash -lc`, under any prefix) read as a line of its own, down to a few
-/// levels. A rule on `git push*` then sees `sh -c "git push -f"`.
+/// `bash -lc`, under any prefix) and each `env -S STRING` read as a line of
+/// its own, down to a few levels. A rule on `git push*` then sees
+/// `sh -c "git push -f"`.
 fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
     let mut out = Vec::new();
     for raw in raw_segments(line) {
         let seg = strip_prefixes(&raw).join(" ");
-        if seg.is_empty() {
-            continue;
+        if !seg.is_empty() {
+            out.push(seg);
         }
-        out.push(seg);
         if depth < 4 {
             if let Some(script) = shell_c_script(&raw) {
                 out.extend(command_segments_at(&script, depth + 1));
@@ -8309,52 +8309,163 @@ fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
     out
 }
 
-/// The script a command runs with a shell's `-c` flag, past any leading
-/// assignments and wrapper words.
+/// The script a segment hands to a shell: the word after a shell's `-c`
+/// (past `--` and options that take a value, such as `-o pipefail`), or
+/// the string of `env -S`, past any leading assignments and prefixes.
 fn shell_c_script(segment: &str) -> Option<String> {
     let words = shell_words(segment);
-    let mut it = words.iter().map(String::as_str).skip_while(|w| {
-        let assign = w.split_once('=').is_some_and(|(k, _)| {
-            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        });
-        assign || SEGMENT_PREFIXES.contains(w) || w.starts_with('-')
-    });
-    let shell = it.next()?;
+    let (at, split) = prefix_end(&words);
+    if split.is_some() {
+        return split;
+    }
+    let shell = words.get(at)?;
     let base = shell.rsplit('/').next().unwrap_or(shell);
     if !["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(&base) {
         return None;
     }
+    let mut it = words[at + 1..].iter().map(String::as_str);
     let mut takes = false;
-    for w in it {
+    while let Some(w) = it.next() {
         if takes {
+            if w == "--" {
+                continue;
+            }
             return Some(w.to_string());
+        }
+        let flag = (w.starts_with('-') || w.starts_with('+')) && w.len() > 1;
+        if !flag {
+            return None;
         }
         if w.starts_with('-') && !w.starts_with("--") && w[1..].contains('c') {
             takes = true;
-        } else if !w.starts_with('-') {
-            return None;
+        } else if matches!(w, "--rcfile" | "--init-file")
+            || (!w.starts_with("--") && w.ends_with(['o', 'O']))
+        {
+            // `-o pipefail`, `+O extglob`, `--rcfile FILE`: the next word is
+            // the option's value, not the script.
+            it.next();
         }
     }
     None
 }
 
-/// Words that run the command after them, taken off a segment's front.
-const SEGMENT_PREFIXES: &[&str] = &["sudo", "env", "time", "nohup", "exec", "command"];
+/// Words that run the command after them, taken off a segment's front,
+/// with the flags of each that take a separate value.
+const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
+    (
+        "sudo",
+        &[
+            "-u",
+            "--user",
+            "-g",
+            "--group",
+            "-C",
+            "--close-from",
+            "-D",
+            "--chdir",
+            "-p",
+            "--prompt",
+            "-r",
+            "--role",
+            "-t",
+            "--type",
+            "-U",
+            "--other-user",
+            "-T",
+            "--command-timeout",
+        ],
+    ),
+    ("doas", &["-u", "-C"]),
+    ("env", &["-u", "--unset", "-C", "--chdir"]),
+    ("time", &["-f", "--format", "-o", "--output"]),
+    ("nohup", &[]),
+    ("exec", &["-a"]),
+    ("command", &[]),
+    ("nice", &["-n", "--adjustment"]),
+    ("timeout", &["-k", "--kill-after", "-s", "--signal"]),
+    ("setsid", &[]),
+    ("stdbuf", &["-i", "-o", "-e"]),
+    (
+        "xargs",
+        &[
+            "-I",
+            "-n",
+            "-P",
+            "-L",
+            "-d",
+            "-E",
+            "-a",
+            "-s",
+            "--delimiter",
+            "--max-args",
+            "--max-procs",
+            "--arg-file",
+        ],
+    ),
+];
+
+/// Where the command starts in `words`: past leading `NAME=value` words and
+/// each prefix in [`SEGMENT_PREFIXES`] with its flags, the values of those
+/// flags, a `--`, and the duration `timeout` takes. `command -v` and
+/// `command -V` only look a name up, so the line stops at `command`.
+/// The second value is the string of `env -S STRING`, a command line env
+/// splits and runs; nothing after it is a command of this line.
+fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
+    let is_assign = |w: &str| {
+        w.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    };
+    let mut i = 0;
+    while let Some(w) = words.get(i).map(AsRef::as_ref) {
+        if is_assign(w) {
+            i += 1;
+            continue;
+        }
+        let Some((name, valued)) = SEGMENT_PREFIXES.iter().find(|(n, _)| *n == w) else {
+            break;
+        };
+        let at = i;
+        i += 1;
+        while let Some(a) = words.get(i).map(AsRef::as_ref) {
+            if a == "--" {
+                i += 1;
+                break;
+            }
+            if *name == "command" && matches!(a, "-v" | "-V") {
+                return (at, None);
+            }
+            if *name == "env" && (a == "-S" || a == "--split-string") {
+                let rest: Vec<&str> = words[i + 1..].iter().map(AsRef::as_ref).collect();
+                return (words.len(), Some(rest.join(" ")));
+            }
+            if *name == "env" {
+                if let Some(v) = a.strip_prefix("--split-string=") {
+                    let mut rest = vec![v];
+                    rest.extend(words[i + 1..].iter().map(AsRef::as_ref));
+                    return (words.len(), Some(rest.join(" ")));
+                }
+            }
+            if *name == "env" && is_assign(a) {
+                i += 1;
+            } else if a.starts_with('-') && a.len() > 1 {
+                i += if valued.contains(&a) { 2 } else { 1 };
+            } else {
+                break;
+            }
+        }
+        if *name == "timeout" && i < words.len() {
+            i += 1;
+        }
+    }
+    (i.min(words.len()), None)
+}
 
 /// A command's words with leading assignments and wrapper commands off.
 fn strip_prefixes(segment: &str) -> Vec<&str> {
-    let mut words: Vec<&str> = segment.split_whitespace().collect();
-    while let Some(w) = words.first() {
-        let assign = w.split_once('=').is_some_and(|(k, _)| {
-            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        });
-        if assign || SEGMENT_PREFIXES.contains(w) {
-            words.remove(0);
-        } else {
-            break;
-        }
-    }
-    words
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    let (at, _) = prefix_end(&words);
+    words[at..].to_vec()
 }
 
 /// The word a here-document at `chars[i..]` (just past `<<`) ends at:
@@ -20766,6 +20877,17 @@ mod tests {
             "bash -lc 'cd repo && git push --force'",
             "FOO=1 env sh -c 'env git push -f'",
             "bash -c \"sh -c 'git push -f'\"",
+            "sh -c -- 'git push -f'",
+            "bash -o pipefail -c 'git push -f | tee log'",
+            "bash +O extglob --rcfile /dev/null -c 'git push -f'",
+            "sudo -u deploy git push -f",
+            "sudo -u deploy sh -c 'git push -f'",
+            "env -u HOME -C /repo git push -f",
+            "env -S 'git push -f'",
+            "env --split-string='git push -f'",
+            "nice -n 10 timeout -s KILL 30 git push -f",
+            "timeout 30 bash -c 'git push -f'",
+            "ls | xargs -n 1 git push -f",
         ] {
             assert!(verdict_for(&rules, line).is_some(), "{line}");
         }
@@ -20774,9 +20896,29 @@ mod tests {
             "git commit -m 'sh -c git push'",
             "sh script.sh -c 'git push -f'",
             "bash -c 'echo git push'",
+            "bash -o pipefail script.sh",
+            "command -v git push",
+            "env -u GIT_DIR cargo test",
         ] {
             assert!(verdict_for(&rules, line).is_none(), "{line}");
         }
+    }
+
+    /// prefixes come off with their flags and the values those flags take,
+    /// so the command a rule anchors on is the one that runs.
+    #[test]
+    fn a_prefix_comes_off_with_its_flags() {
+        assert_eq!(
+            command_segments("sudo -u deploy -E git push -f"),
+            ["git push -f"]
+        );
+        assert_eq!(
+            command_segments("FOO=1 nice -n 5 timeout -k 5 30 cargo test"),
+            ["cargo test"]
+        );
+        assert_eq!(command_segments("env -i A=1 -- make"), ["make"]);
+        assert_eq!(command_segments("command -v git"), ["command -v git"]);
+        assert_eq!(command_segments("stdbuf -oL tail -f log"), ["tail -f log"]);
     }
 
     #[test]

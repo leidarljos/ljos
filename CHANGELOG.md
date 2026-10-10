@@ -5,7 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
-- A seat rule sees the commands inside `sh -c SCRIPT` (and `bash -lc`, under any prefix), and `command` joins the prefixes taken off a command. A `git push*` rule now meets `sh -c "git push -f"` and `command git push -f`; text quoted under any other command is still data.
+- A seat rule sees the commands inside `sh -c SCRIPT` (and `bash -lc`, `sh -c -- SCRIPT`, `bash -o pipefail -c`) and inside `env -S STRING`, under any prefix. The prefixes taken off a command are now `sudo`, `doas`, `env`, `time`, `nohup`, `exec`, `command`, `nice`, `timeout`, `setsid`, `stdbuf` and `xargs`, each with its flags and their values, so `sudo -u deploy git push -f` is the push it runs. A `git push*` rule now meets `sh -c "git push -f"` and `command git push -f`; `command -v git` only looks a name up, and text quoted under any other command is still data.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)
