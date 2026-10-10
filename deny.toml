@@ -1,0 +1,26 @@
+# Licenses this workspace may depend on. CI runs `cargo deny check licenses`.
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    # webpki-roots ships the Mozilla CA list under this licence.
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = [
+    # libfuzzer-sys wraps LLVM's fuzzer and adds NCSA. It arrives through
+    # ljos-hud's image decoding (image -> ravif -> rav1e) and is built only
+    # when fuzzing.
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+    # ksni is ljos-hud's StatusNotifier tray.
+    { crate = "ksni", allow = ["Unlicense"] },
+]

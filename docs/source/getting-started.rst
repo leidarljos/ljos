@@ -15,14 +15,17 @@ Install the binaries once:
 They provide ``ljos``, ``ljos-mcp``, ``ljos-policyd``, ``ljos-consensus``, ``packset``,
 ``packsetd``, ``packset-embed``, ``deedar``, ``claimdag`` and ``vissue``. ``VISSUE_ROOT`` must name an existing
 directory with a prefix directory inside it, and ``packset ensure`` starts the
-pack writer.
+pack writer. ``mktemp -d`` gives a directory only you own: a fixed ``/tmp`` path can be
+another user's or left from an earlier run. The tracker commits each change,
+so git needs an identity (``git config --global user.email``).
 
 .. code:: console
 
-   $ mkdir -p /tmp/seat/tracker/Issues && cd /tmp/seat && git init -q
-   $ export VISSUE_ROOT=/tmp/seat/tracker DEEDAR_URL=file:///tmp/seat/deeds
-   $ export CLAIMDAG_DIR=/tmp/seat/claims
-   $ packsetd --port 18761 --home /tmp/seat-pack &
+   $ seat=$(mktemp -d) && mkdir -p "$seat/tracker/Software" "$seat/deeds"
+   $ git -C "$seat/tracker" init -q && cd "$seat"
+   $ export VISSUE_ROOT="$seat/tracker" DEEDAR_URL="file://$seat/deeds"
+   $ export CLAIMDAG_DIR="$seat/claims"
+   $ packsetd --port 18761 --home "$seat/pack" &
    $ export PACKSET_URL=http://127.0.0.1:18761
    $ ljos doctor
    ok  vissue  ...
@@ -109,15 +112,17 @@ superseded, and travel in a handover. A person can also set one by hand:
    id=deed-file-the-fuse-patch ...
    $ ljos deed $id --add deed-file-the-fuse-patch
    $ ljos finish $id --assignee alice --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold
-   remembered ...
+   proposed 1735... as agent-derived; `ljos accept 1735...` writes it
    fired the island for "Ship the fuse change?": 3 memories
    completed the session node for demo-... as done
    learned from outcome "hold": 6 trust rows rewritten
+   tracker git: committed chore(issues): demo-... finished; push refused: fatal: No configured push destination.
+   $ ljos accept 1735...
 
 ``sitting`` opens: it runs ``doctor``, prints the cards and what is due,
 activates the island the issue's title touches, recalls the working set,
 and claims a session node. ``deed`` cites what the work produced. ``finish``
-closes: the lesson is remembered, the island fires, the node completes,
+closes: the lesson is proposed (``ljos accept ID`` makes it live), the island fires, the node completes,
 and the outcome reweighs the voters as in step 2. Completing the session node does not close the ticket. ``ljos finish ISSUE --close`` does, when the work is accepted. To stop without finishing,
 ``ljos release $id --assignee alice`` hands the node back; until then a second
 ``claim`` under the same name is refused, and the refusal names this issue.
@@ -176,6 +181,17 @@ sitting then runs in the order above. A runner that registers servers by
 a command of its own can be described once in
 ``~/.config/ljos/harnesses.toml`` and onboarded with ``ljos onboard --harness
 NAME``; the :doc:`how-to <howto>` shows the file.
+
+Clean up
+========
+
+The scratch seat is one directory and the pack writer started in step 0.
+Stop the writer and remove the directory, and the next run starts clean on
+the same port:
+
+.. code:: console
+
+   $ kill %1 && rm -rf "$seat"
 
 Where next
 ==========
