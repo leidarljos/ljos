@@ -18,10 +18,11 @@ machine unless you turn on a remote judge.
 The first line installs the seat and the programs a sitting calls: packset
 (memory), vissue (the tracker), deedar (records of work), claimdag (who works
 on what), ljos-policyd (the command check) and ljos-consensus (voting).
-`ljos doctor` names any that are missing.
+`ljos doctor` names any that are missing. `packset-embed` is the encoder packsetd runs beside it.
+`ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 
 ```
-cargo binstall ljos packset vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install, same list
+cargo binstall ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule '*--force*' --verdict deny --why "Never force push."
@@ -189,9 +190,13 @@ seat. `ljos seat` prints both names and where they came from. `ljos onboard`
 prints the one MCP entry any runner takes, and `ljos protocol` prints the
 text an agent reads first.
 
-Nothing needs a variable set. `ljos remember` starts the writer when none is
-answering. The seat's memory is the one workspace `seat` from any directory,
-and every claim carries the seat that wrote it.
+Nothing needs a variable set. `ljos onboard` makes the deed store deedar
+falls back to (`~/.local/share/deedar/store`) and a tracker under
+`~/.local/share/vissue/tracker` that `~/.config/vissue/config.toml` names,
+unless `DEEDAR_URL` or `VISSUE_ROOT` already names one. `ljos remember`
+starts the writer when none is answering. The seat's memory is the one
+workspace `seat` from any directory, and every claim carries the seat that
+wrote it.
 
 ## Mail
 
