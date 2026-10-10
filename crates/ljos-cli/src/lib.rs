@@ -5099,11 +5099,10 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
              that holds next time is `ljos remember \"...\"`, an artifact is `ljos deed {issue} \
              --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
         ),
-        None => format!(
-            "This conversation holds no issue. Work goes on an issue: \
-             `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
-             Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
-        ),
+        None => "This conversation holds no issue. Work goes on an issue: \
+                 `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
+                 Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
+            .to_string(),
     })
 }
 
@@ -12814,7 +12813,7 @@ pub fn healthy(rows: &[Habitat]) -> bool {
 
 /// The required rows that do not answer, by name.
 #[must_use]
-pub fn failing<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
+pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
         .filter(|h| !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack"))
         .map(|h| h.name)
@@ -12828,7 +12827,7 @@ const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
 /// The required rows a sitting cannot open without, by name.
 #[must_use]
-pub fn failing_for_sitting<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
+pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
     failing(rows)
         .into_iter()
         .filter(|name| !SITTING_DEGRADED.contains(name))
