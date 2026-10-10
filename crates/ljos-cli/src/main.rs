@@ -120,7 +120,8 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
-    /// Whether a deed's bytes are intact and its sources are too.
+    /// Whether a deed's bytes are intact and its sources are too. `at=` is
+    /// the produced time in ISO 8601 with this machine's offset.
     Evidence { accession: String },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
@@ -813,7 +814,10 @@ fn main() -> Result<()> {
                 )?)
             );
         }
-        Cmd::Evidence { accession } => run("deedar", &["evidence", &accession])?,
+        Cmd::Evidence { accession } => {
+            let said = run_captured("deedar", &["evidence", &accession])?;
+            print!("{}", ljos_cli::evidence_here(&said.stdout));
+        }
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
             issue,
