@@ -158,8 +158,9 @@ rules still apply.
 
 For clients without form elicitation, reply `approve REQUEST_ID` in this
 conversation, or run `ljos approve REQUEST_ID` in your own terminal. The
-terminal command refuses to run under a coding runner. A chat message that
-does not name that id grants nothing.
+terminal command refuses to run under a coding runner, and the seat's guard
+refuses it in any command an agent runs. A chat message that does not name
+that id grants nothing.
 
 A client must load the tool before using it, so reconnect after upgrading
 from a version without `ljos_request_approval`. When other calls forward to an
@@ -249,7 +250,7 @@ ljos playbooks                                 # sit, arena, land, company-panel
 ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer
-ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it
+ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
