@@ -9908,6 +9908,7 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     };
     if let Ok(v) = tracker_show_json(cite) {
         if ok("vissue", &["consensus", cite, "--gate"]) {
+            settled_by_seats(cite)?;
             return Ok(format!("{cite} settles"));
         }
         if v["state"].as_str() == Some("DONE") && is_decision(&v) {
@@ -9923,6 +9924,90 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     Err(format!(
         "{cite} is neither a tracker issue nor a current deed"
     ))
+}
+
+/// The option an issue settled on, from `vissue consensus --json`: the
+/// choice the consensus weighs most.
+#[must_use]
+pub fn settled_choice(consensus: &Value) -> Option<String> {
+    let choices = consensus["choices"].as_array()?;
+    let weights = consensus["consensus"].as_array()?;
+    let (i, _) = weights
+        .iter()
+        .filter_map(Value::as_f64)
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    choices.get(i)?.as_str().map(str::to_string)
+}
+
+/// Whether a cite's settle stands on seat ballots alone. A persona's
+/// ballot, or a Jev ballot (`judge:MODEL`) cast for one, is left out:
+/// a seat can write personas and have them vote with it, so they do not
+/// let it push. What is left has to hold at least one ballot, and every
+/// one of them for `choice`.
+///
+/// # Errors
+///
+/// The refusal, naming the ballots it looked at.
+pub fn settles_on_seats(
+    cite: &str,
+    ballots: &[Value],
+    choice: &str,
+    personas: &std::collections::BTreeSet<String>,
+) -> std::result::Result<(), String> {
+    let seats: Vec<(&str, &str)> = ballots
+        .iter()
+        .filter_map(|b| Some((b["agent"].as_str()?.trim(), b["choice"].as_str()?)))
+        .filter(|(agent, _)| !personas.contains(*agent) && !agent.starts_with("judge:"))
+        .collect();
+    if seats.is_empty() {
+        return Err(format!(
+            "{cite} settles on persona ballots alone, and those do not count toward a push cite; \
+             a seat has to vote {choice}"
+        ));
+    }
+    let against: Vec<String> = seats
+        .iter()
+        .filter(|(_, c)| *c != choice)
+        .map(|(a, c)| format!("{a} for {c}"))
+        .collect();
+    if !against.is_empty() {
+        return Err(format!(
+            "without its persona ballots {cite} does not settle on {choice}: {}",
+            against.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// [`settles_on_seats`] for an issue on the tracker. A count or a roster
+/// that cannot be read does not stand.
+fn settled_by_seats(cite: &str) -> std::result::Result<(), String> {
+    let read = |args: &[&str]| -> std::result::Result<Value, String> {
+        let said = run_captured("vissue", args).map_err(|e| format!("{e:#}"))?;
+        serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
+    };
+    let consensus = read(&["consensus", cite, "--json"])
+        .map_err(|e| format!("{cite}: the settle is not readable: {e}"))?;
+    let ballots = read(&["vote", cite, "--json"])
+        .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
+    let choice =
+        settled_choice(&consensus).ok_or_else(|| format!("{cite}: the settle names no option"))?;
+    let personas = personas_from_pack()
+        .map_err(|e| {
+            format!(
+                "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
+            )
+        })?
+        .into_iter()
+        .map(|p| p.name.trim().to_string())
+        .collect();
+    settles_on_seats(
+        cite,
+        ballots.as_array().map_or(&[][..], Vec::as_slice),
+        &choice,
+        &personas,
+    )
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -21741,6 +21826,32 @@ mod tests {
             "text": "Reads pipelines.", "runner": "grok", "ts": "2026-10-02T00:00:00Z"
         })]);
         assert_eq!(back.pop().unwrap().runner.as_deref(), Some("grok"));
+    }
+
+    #[test]
+    fn persona_ballots_do_not_settle_a_push_cite() {
+        let consensus = serde_json::json!({
+            "choices": ["hold", "ship"], "consensus": [0.2, 0.8]
+        });
+        assert_eq!(settled_choice(&consensus).as_deref(), Some("ship"));
+        let personas: std::collections::BTreeSet<String> =
+            ["reviewer".to_string(), "reader".to_string()].into();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let only = [
+            ballot("reviewer", "ship"),
+            ballot("reader", "ship"),
+            ballot("judge:grok-4", "ship"),
+        ];
+        let err = settles_on_seats("surf-ab12", &only, "ship", &personas).unwrap_err();
+        assert!(err.contains("persona ballots alone"), "{err}");
+        let mut seat = only.to_vec();
+        seat.push(ballot("grok", "ship"));
+        assert!(settles_on_seats("surf-ab12", &seat, "ship", &personas).is_ok());
+        let mut split = seat.clone();
+        split.push(ballot("codex", "hold"));
+        let err = settles_on_seats("surf-ab12", &split, "ship", &personas).unwrap_err();
+        assert!(err.contains("codex for hold"), "{err}");
     }
 
     #[test]

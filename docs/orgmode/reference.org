@@ -254,7 +254,7 @@ forgotten with =ljos forget ID=, and the next push asks the forge again.
 | Push | Needs |
 |---+---|
 | a branch, to the person's own account, no other collaborator, no releases or tags | nothing; it runs |
-| a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name | =LJOS_CITE=ISSUE= where =ISSUE= settles (=vissue consensus ISSUE --gate=) or closed as a decision, or =LJOS_CITE=ACCESSION= for a current deed; the pass is noted on =ISSUE= |
+| a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name | =LJOS_CITE=ISSUE= where =ISSUE= settles (=vissue consensus ISSUE --gate=) on seat ballots alone (persona and Jev ballots do not count here), or closed as a decision, or =LJOS_CITE=ACCESSION= for a current deed; the pass is noted on =ISSUE= |
 | a remote the person cannot push to, =--tags=, =--follow-tags=, =--mirror=, =--all=, =refs/tags/=, a force | the person runs it |
 
 The remote is the one the command names, else the branch's upstream,
