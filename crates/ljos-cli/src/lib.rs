@@ -9555,7 +9555,7 @@ pub enum PushTier {
     /// A branch push to an unreleased repository of the person's own.
     Free,
     /// A push to the person's own repository that is released or shared:
-    /// it runs when it cites a settled decision or a current deed.
+    /// it runs when it cites a settled decision.
     Cite(String),
     /// Somebody else's remote, tags, a mirror or a force: the person runs it.
     Person(String),
@@ -9893,10 +9893,12 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
     Ok(dropped)
 }
 
-/// Whether a cite stands: a deed accession `deedar current` takes, or an
-/// issue whose ballots settle (`vissue consensus --gate`) or that closed
-/// as a decision, either one backed by a seat other than the one
-/// pushing. The text says what it stood on.
+/// Whether a cite stands: an issue whose ballots settle (`vissue
+/// consensus --gate`) or that closed as a decision, either one backed by
+/// a seat other than the one pushing. The text says what it stood on. A
+/// deed alone does not stand: the pushing seat can mint one with
+/// `deedar create` a moment before the push, so the decision has to be
+/// on an issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     let ok = |bin: &str, args: &[&str]| {
         std::process::Command::new(bin)
@@ -9921,11 +9923,18 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
         ));
     }
     if ok("deedar", &["current", cite]) {
-        return Ok(format!("deed {cite} is current"));
+        return Err(deed_alone(cite));
     }
-    Err(format!(
-        "{cite} is neither a tracker issue nor a current deed"
-    ))
+    Err(format!("{cite} is not a tracker issue"))
+}
+
+/// Why a deed cited on its own does not let a push through.
+#[must_use]
+pub fn deed_alone(cite: &str) -> String {
+    format!(
+        "{cite} is a deed, and a deed alone does not stand for a push: the pushing seat can mint one. \
+         Cite the issue that records the decision, with a ballot from another seat"
+    )
 }
 
 /// The option an issue settled on, from `vissue consensus --json`: the
@@ -10474,7 +10483,7 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
             None => Some(ruled(format!(
                 "{why}, so the push cites the decision behind it: run it as `LJOS_CITE=ISSUE {}`, \
                  where ISSUE settles (`vissue consensus ISSUE --gate`) or closed as a decision, \
-                 with a ballot from another seat, or LJOS_CITE=ACCESSION for a current deed",
+                 with a ballot from another seat",
                 line.trim()
             ))),
         },
@@ -24392,6 +24401,32 @@ mod tests {
         assert!(out.is_err());
         assert!(took < std::time::Duration::from_secs(5), "{took:?}");
         drop(held);
+    }
+
+    #[test]
+    fn a_deed_the_pusher_minted_does_not_carry_a_push() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for (name, body) in [
+            ("deedar", "#!/bin/sh\nexit 0\n"),
+            ("vissue", "#!/bin/sh\nexit 1\n"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let tracker = dir.path().join("tracker");
+        std::fs::create_dir_all(&tracker).unwrap();
+        let _held = HoldEnv::set(&[
+            ("PATH", bin.to_str().unwrap()),
+            ("VISSUE_ROOT", tracker.to_str().unwrap()),
+        ]);
+        let said = cite_stands("deed-file-self-minted").unwrap_err();
+        assert!(said.contains("a deed alone does not stand"), "{said}");
+        assert!(said.contains("another seat"), "{said}");
     }
 
     #[test]
