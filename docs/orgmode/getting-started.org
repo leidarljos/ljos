@@ -11,7 +11,7 @@ second seat that checked it.
 Install the binaries once:
 
 #+begin_src console
-$ cargo binstall --locked ljos packset packset-embed deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
+$ cargo binstall --locked ljos packset packset-embed deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
 #+end_src
 
 They provide =ljos=, =ljos-mcp=, =ljos-policyd=, =ljos-consensus=, =packset=,

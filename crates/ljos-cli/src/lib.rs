@@ -5747,10 +5747,16 @@ pub fn shell_exit(fail_on_deny: bool, text: &str) -> i32 {
 /// `allow`. An `ask` that Cursor would not enforce is a deny that says
 /// so. Cursor gives context to the model as `additional_context` after a
 /// tool result, a failed one, or at session start. A held stop is a
-/// `followup_message`.
+/// `followup_message`. `beforeMCPExecution` and `beforeReadFile` are
+/// permission events too, and Cursor blocks the call when such a hook
+/// prints nothing and `failClosed` is set. The seat judges those calls on
+/// `preToolUse`, which Cursor fires for every tool, so here they allow.
 fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
+        "beforeMCPExecution" | "beforeReadFile" => {
+            out.insert("permission".into(), Value::String("allow".into()));
+        }
         "PreToolUse" => {
             let (permission, reason) = match verdict {
                 Some(r) if r.verdict == "ask" && !call.shape.asks() => (
@@ -11692,6 +11698,8 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("ljos-policyd", "ljos-policyd"),
     ("ljos-consensus", "ljos-consensus"),
     ("vissue", "vissue-cli"),
+    // The tracker server the vissue plugin runs; its own crate.
+    ("vissue-mcp", "vissue-mcp"),
     ("deedar", "deedar-cli"),
     ("claimdag", "claimdag-cli"),
     ("packset", "packset"),
@@ -22677,6 +22685,24 @@ mod tests {
             hook_output_ruled(&post, "a note", None),
             "{\"additional_context\":\"a note\"}\n"
         );
+        for gate in [
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/README.md","content":"x"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_search","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#,
+        ] {
+            // Registered with failClosed, so an empty answer would block
+            // every file read and MCP call.
+            let call = hook_call(gate);
+            assert_eq!(
+                hook_output_ruled(&call, "", None),
+                "{\"permission\":\"allow\"}\n",
+                "{gate}"
+            );
+            assert_eq!(
+                hook_output_ruled(&call, "", Some(&ask)),
+                "{\"permission\":\"allow\"}\n",
+                "{gate}"
+            );
+        }
         let failed = r#"{"cursor_version":"2.4.0","hook_event_name":"postToolUseFailure","error_message":"exit 2"}"#;
         assert_eq!(hook_call(failed).event, "PostToolUseFailure");
         assert_eq!(tool_error(failed), "exit 2");
@@ -25089,6 +25115,25 @@ mod tests {
             vissue_entry["mcpServers"]["vissue"]["command"],
             "vissue-mcp"
         );
+        // The server the vissue plugin runs is its own crate, so every
+        // install line names it and the doctor knows where it comes from.
+        assert!(super::SEAT_BINS.contains(&("vissue-mcp", "vissue-mcp")));
+        for file in [
+            "README.md",
+            "bin/ljos-plugin",
+            "skills/ljos-setup/SKILL.md",
+            "docs/source/getting-started.rst",
+            "docs/source/index.rst",
+            "docs/orgmode/getting-started.org",
+            "docs/orgmode/index.org",
+        ] {
+            let text = read(file);
+            let line = text
+                .lines()
+                .find(|l| l.contains("binstall --locked ljos"))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            assert!(line.contains(" vissue-mcp "), "{file}: {line}");
+        }
 
         let command = plugin["mcpServers"]["ljos"]["command"].as_str().unwrap();
         assert_eq!(plugin["mcpServers"]["ljos"]["args"][0], "ljos-mcp");
@@ -25117,6 +25162,117 @@ mod tests {
                 "{rel} contains a home directory path"
             );
             assert!(!text.contains("HaoZeke"), "{rel} names a fork");
+        }
+    }
+
+    /// The same tree is a Cursor plugin: `.cursor-plugin/plugin.json` names
+    /// the seat's version and repository, every path it declares exists and
+    /// stays inside the tree, `mcp.json` starts `ljos-mcp` through the
+    /// launcher, and `hooks/cursor.json` takes the seat's Cursor events in
+    /// Cursor's flat shape. `beforeMCPExecution` and `beforeReadFile` are
+    /// left to `preToolUse`, which Cursor fires for every tool, so an older
+    /// binary that prints nothing on them cannot block a read. The plugin
+    /// adds `sessionStart`, where a missing seat says how to install it.
+    /// Claude's hooks stay in `hooks/hooks.json`, which Cursor does not read
+    /// because the manifest names its own file.
+    #[test]
+    fn the_cursor_plugin_ships_the_seat() {
+        use serde_json::Value;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        let plugin: Value = serde_json::from_str(&read(".cursor-plugin/plugin.json")).unwrap();
+        let claude: Value = serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
+        assert_eq!(plugin["name"], "ljos");
+        assert_eq!(plugin["version"], claude["version"]);
+        assert_eq!(plugin["repository"], claude["repository"]);
+        assert_eq!(plugin["license"], claude["license"]);
+        for key in [
+            "skills",
+            "rules",
+            "agents",
+            "commands",
+            "hooks",
+            "mcpServers",
+            "logo",
+        ] {
+            let rel = plugin[key].as_str().unwrap_or_else(|| panic!("{key}"));
+            assert!(
+                !rel.starts_with('/') && !rel.contains(".."),
+                "{key}: {rel} leaves the tree"
+            );
+            assert!(root.join(rel).exists(), "{key}: {rel} is missing");
+        }
+        assert_eq!(plugin["hooks"], "./hooks/cursor.json");
+
+        let mcp: Value = serde_json::from_str(&read("mcp.json")).unwrap();
+        let server = &mcp["mcpServers"]["ljos"];
+        assert_eq!(server["command"], "${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin");
+        assert_eq!(server["args"][0], "ljos-mcp");
+
+        let hooks: Value = serde_json::from_str(&read("hooks/cursor.json")).unwrap();
+        assert_eq!(hooks["version"], 1);
+        let left_to_pre_tool_use = ["beforeMCPExecution", "beforeReadFile"];
+        let mut want: Vec<(&str, u64)> = vec![("sessionStart", 5)];
+        want.extend(
+            super::CURSOR_HOOK_EVENTS
+                .iter()
+                .filter(|(e, _)| !left_to_pre_tool_use.contains(e))
+                .copied(),
+        );
+        let obj = hooks["hooks"].as_object().expect("hooks object");
+        let mut have: Vec<&str> = obj.keys().map(String::as_str).collect();
+        let mut named: Vec<&str> = want.iter().map(|(e, _)| *e).collect();
+        have.sort_unstable();
+        named.sort_unstable();
+        assert_eq!(have, named);
+        for (event, timeout) in &want {
+            let entries = obj[*event].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{event}");
+            let entry = &entries[0];
+            assert_eq!(
+                entry["command"], "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+                "{event}"
+            );
+            assert_eq!(entry["timeout"], *timeout, "{event}");
+            assert_eq!(
+                entry["failClosed"].as_bool().unwrap_or(false),
+                super::CURSOR_FAIL_CLOSED.contains(event),
+                "{event}"
+            );
+        }
+
+        let front = |rel: &str| {
+            let text = read(rel);
+            let parts: Vec<&str> = text.splitn(3, "---\n").collect();
+            assert!(
+                parts.len() == 3 && parts[0].is_empty(),
+                "{rel} has no front matter"
+            );
+            parts[1].to_string()
+        };
+        for dir in ["skills", "agents", "commands", "rules"] {
+            for e in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+                let rel = if dir == "skills" {
+                    format!("skills/{}/SKILL.md", e.file_name().to_string_lossy())
+                } else {
+                    format!("{dir}/{}", e.file_name().to_string_lossy())
+                };
+                let head = front(&rel);
+                assert!(head.contains("description:"), "{rel}");
+                if dir == "skills" {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    assert!(head.contains(&format!("name: {name}\n")), "{rel}");
+                } else if dir == "rules" {
+                    assert!(head.contains("alwaysApply:"), "{rel}");
+                } else {
+                    assert!(head.contains("name: "), "{rel}");
+                }
+                let text = read(&rel);
+                assert!(!text.contains("/home/"), "{rel} names a home directory");
+                assert!(!text.contains("HaoZeke"), "{rel} names a fork");
+            }
         }
     }
 
