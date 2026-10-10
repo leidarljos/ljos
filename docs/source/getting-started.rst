@@ -46,7 +46,8 @@ so git needs an identity (``git config --global user.email``).
    1.0000  1/3 preference  ... today   CombMNZ over RRF for fusing two ballots.
 
 A claim is two sentences at most, stored as written. The pack never mines a
-transcript. Tomorrow, ``ljos due`` lists both claims; read each and grade it:
+transcript. A lesson you type takes effect at once, like the preference, so the
+hook shows both from the next prompt they bear on. Tomorrow, ``ljos due`` lists both claims; read each and grade it:
 
 .. code:: console
 
@@ -122,7 +123,7 @@ superseded, and travel in a handover. A person can also set one by hand:
 ``sitting`` opens: it runs ``doctor``, prints the cards and what is due,
 activates the island the issue's title touches, recalls the working set,
 and claims a session node. ``deed`` cites what the work produced. ``finish``
-closes: the lesson is proposed (``ljos accept ID`` makes it live), the island fires, the node completes,
+closes: the lesson is proposed (``ljos accept ID``, typed by the person, makes it a standing lesson), the island fires, the node completes,
 and the outcome reweighs the voters as in step 2. Completing the session node does not close the ticket. ``ljos finish ISSUE --close`` does, when the work is accepted. To stop without finishing,
 ``ljos release $id --assignee alice`` hands the node back; until then a second
 ``claim`` under the same name is refused, and the refusal names this issue.

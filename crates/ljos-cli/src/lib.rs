@@ -1670,6 +1670,14 @@ pub fn seat_name() -> String {
     whoami().seat
 }
 
+/// Whether a conversation under a runner may accept a proposal: only one
+/// another conversation filed, such as a worker it started. `proposer` is
+/// the holder the proposal's atom names, `holder` this conversation's.
+#[must_use]
+pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> bool {
+    proposer.is_some_and(|p| !p.trim().is_empty() && p.trim() != holder.trim())
+}
+
 /// The name this conversation's claims are held under.
 #[must_use]
 pub fn holder_name() -> String {
@@ -6786,6 +6794,8 @@ fn post_claim_horizon(
 /// `horizon:standing` or `horizon:transient` on a claim as it is written.
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
+/// `ljos remember` typed by the person says standing; see
+/// [`remember_horizon`].
 fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>) {
     let transient = match (kind, force) {
         ("preference", _) => false,
@@ -6798,6 +6808,35 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
         "horizon:standing"
     };
     add_entities(atom, [tag.to_string()]);
+}
+
+/// The horizon `ljos remember` writes when neither `--transient` nor
+/// `--standing` is given. The person typing it is the review, so the lesson
+/// takes effect at once, like `prefer` and `rule`. Run under an agent runner it is
+/// the agent's lesson: an episode, shown once a review promotes it.
+#[must_use]
+pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
+    if transient {
+        Some(true)
+    } else if standing || !under_runner {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The line `ljos remember` prints after the write, saying when the hook
+/// shows the lesson.
+#[must_use]
+pub fn remember_note(body: &Value) -> &'static str {
+    let standing = body["entities"]
+        .as_array()
+        .is_some_and(|e| e.iter().any(|v| v == "horizon:standing"));
+    if standing {
+        "standing: the hook shows it from the next prompt it bears on"
+    } else {
+        "episode: written from an agent runner, so the hook shows it once `ljos due` and `ljos graded` promote it; the person's `ljos remember` or `ljos accept` takes effect at once"
+    }
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
@@ -15250,7 +15289,10 @@ pub fn finish(
                 tags.push(format!("scope:{scope}"));
             }
             add_entities(&mut atom, tags);
-            stamp_horizon(&mut atom, "lesson", text, None);
+            // Standing once accepted: the person's `ljos accept` is the
+            // review, so the hook shows the lesson from the next prompt.
+            // Until then the writer holds it and no search returns it.
+            stamp_horizon(&mut atom, "lesson", text, Some(false));
             let filed = admit::propose_atom(&client, atom)?;
             out.push_str(&format!(
                 "proposed {} as agent-derived; `ljos accept {}` writes it\n",
@@ -16717,6 +16759,8 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         let lesson = finding_lesson(&campaign, f);
         let mut atom = atom_body("lesson", &lesson, &workspace);
         add_entities(&mut atom, finding_entities(&campaign, f));
+        // Standing once the person accepts it, like a finish lesson.
+        stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
         let result = match admit::propose_atom(&client, atom) {
             Ok(filed) => format!("proposed {}", filed.id),
             Err(e) => format!("refused: {e}"),
@@ -21691,6 +21735,61 @@ mod tests {
             join(&["the default fuse".into(), "is CombMNZ".into()]),
             "the default fuse is CombMNZ"
         );
+    }
+
+    #[test]
+    fn a_conversation_accepts_only_another_s_proposal() {
+        assert!(accepts_another_conversation(
+            Some("claude-worker-2"),
+            "claude-parent-1"
+        ));
+        assert!(!accepts_another_conversation(
+            Some("claude-parent-1"),
+            "claude-parent-1"
+        ));
+        assert!(!accepts_another_conversation(Some(" "), "claude-parent-1"));
+        assert!(!accepts_another_conversation(None, "claude-parent-1"));
+    }
+
+    #[test]
+    fn the_person_s_remember_stands_and_an_agent_s_waits() {
+        assert_eq!(remember_horizon(false, false, false), Some(false));
+        assert_eq!(remember_horizon(false, false, true), None);
+        assert_eq!(remember_horizon(true, false, false), Some(true));
+        assert_eq!(remember_horizon(false, true, true), Some(false));
+        let mut person = atom_body("lesson", "Run the linter before the push.", "w");
+        stamp_horizon(
+            &mut person,
+            "lesson",
+            "",
+            remember_horizon(false, false, false),
+        );
+        let mut agent = atom_body("lesson", "Run the linter before the push.", "w");
+        stamp_horizon(
+            &mut agent,
+            "lesson",
+            "",
+            remember_horizon(false, false, true),
+        );
+        assert!(remember_note(&person).starts_with("standing"));
+        assert!(remember_note(&agent).starts_with("episode"));
+        let hit = |atom: &Value| Hit {
+            id: None,
+            text: "Run the linter before the push.".into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            ballots: None,
+            of: None,
+        };
+        assert!(is_refresher(&hit(&person)), "the hook shows it at once");
+        assert!(!is_refresher(&hit(&agent)), "a review promotes it first");
     }
 
     #[test]

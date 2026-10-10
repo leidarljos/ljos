@@ -57,9 +57,12 @@ that rule:
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (seat rule `terraform destroy*`)"}}
 ```
 
-The hook shows a preference from the moment it is written. A lesson
-(`ljos remember`) comes back once a review or a consolidation promotes it, and
-`ljos due` lists the lessons waiting.
+The hook shows what you write from the moment it is written: a preference
+(`ljos prefer`), a rule (`ljos rule`), and a lesson you type with
+`ljos remember`. A lesson the agent proposes at `ljos finish` stays out until
+you run `ljos accept ID` in your own terminal; then it shows at once too. An
+`ljos remember` that an agent runs from inside its runner is an episode: the
+hook shows it once a review promotes it, and `ljos due` lists those.
 
 The hooks also keep the work on the tracker. A conversation with no issue
 gets told, on the first tool result, to file one and sit. `Stop` blocks that
@@ -111,8 +114,10 @@ lives as a tracker note until finish or release, and `ljos panel` refuses to
 run until one is bound.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
-goes in as a proposal with origin `agent-derived`. `ljos accept` writes it and
-records that the person accepted it. The island fires, the session node
+goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
+standing lesson and records that the person accepted it. Under an agent runner
+it accepts only a proposal another conversation filed, such as a worker's, so
+an agent can't accept its own proposal. The island fires, the session node
 completes, and a named outcome shrinks the weight of the voters it refuted. A
 lesson typed with `ljos remember` stays `user-declared`, and the same words
 satisfy the open proposal. The ticket stays open unless `--close` is given,
