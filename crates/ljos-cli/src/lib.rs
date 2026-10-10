@@ -2295,6 +2295,23 @@ pub fn onboard_in(
         host_key_step(dry),
     ];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
+    // The Cursor plugin carries the server, the hooks and the skill.
+    let plugin = (h.hooks_format.as_deref() == Some("cursor"))
+        .then(|| cursor_plugin_in(&expand("~/.cursor/plugins")))
+        .flatten();
+    if let Some(dir) = &plugin {
+        let hooks = expand(h.hooks.as_deref().unwrap_or("~/.cursor/hooks.json"));
+        steps.push(cursor_plugin_step(dir, &hooks));
+        if let Some(dir) = &h.agents {
+            steps.push(agents_step(
+                &expand(dir),
+                &personas_from_pack().unwrap_or_default(),
+                dry,
+            ));
+        }
+        steps.extend(dependencies);
+        return Ok(steps);
+    }
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
         steps.push(match (&h.hooks_named, h.hooks_format.as_deref()) {
@@ -2805,6 +2822,66 @@ fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
         .map(|event| (*event).to_string())
         .collect();
     hook_installed(cursor, &only) && claude_has_seat_hook(claude)
+}
+
+/// The ljos Cursor plugin under Cursor's plugins directory, when installed:
+/// a clone in `local/ljos`, or a marketplace or `/add-plugin` install in
+/// `cache/<marketplace>/ljos/<commit>`.
+#[must_use]
+pub fn cursor_plugin_in(plugins: &Path) -> Option<PathBuf> {
+    let manifest = |dir: &Path| dir.join(".cursor-plugin/plugin.json").is_file();
+    let local = plugins.join("local/ljos");
+    if manifest(&local) {
+        return Some(local);
+    }
+    let markets = std::fs::read_dir(plugins.join("cache")).ok()?;
+    markets
+        .flatten()
+        .map(|market| market.path().join("ljos"))
+        .filter_map(|plugin| std::fs::read_dir(plugin).ok())
+        .flat_map(|commits| commits.flatten().map(|c| c.path()))
+        .find(|commit| manifest(commit))
+}
+
+/// Whether a hooks file carries the seat's hook on any event.
+fn file_has_seat_hook(file: &Path) -> bool {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| {
+            v["hooks"].as_object().is_some_and(|events| {
+                events
+                    .values()
+                    .flat_map(|e| e.as_array().into_iter().flatten())
+                    .any(is_seat_hook)
+            })
+        })
+}
+
+/// The step that stands in for the tool server, the hooks and the skill
+/// when the Cursor plugin carries them. Writing them as well would run every
+/// hook twice and list the tool server twice. A hooks file an earlier
+/// onboard wrote is named, since Cursor still runs it.
+fn cursor_plugin_step(plugin: &Path, hooks: &Path) -> Step {
+    let mut detail = format!(
+        "the ljos Cursor plugin at {} carries the tool server, the hooks and the skill, \
+         so onboard wrote none of them",
+        plugin.display()
+    );
+    let earlier = file_has_seat_hook(hooks);
+    if earlier {
+        detail.push_str(&format!(
+            "; {} still carries the seat's hook from an earlier onboard. Remove those \
+             entries and the ljos entry in ~/.cursor/mcp.json; until then a hook call \
+             the two make together is answered once",
+            hooks.display()
+        ));
+    }
+    Step {
+        what: "cursor plugin".into(),
+        detail,
+        ok: true,
+    }
 }
 
 fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
@@ -5314,6 +5391,43 @@ pub fn hook_already_running(call: &HookCall) -> bool {
         call.session.as_deref().unwrap_or(""),
         call.cue
     ));
+    hook_marker_fresh(&key, std::time::Duration::from_secs(20))
+}
+
+/// Events said once per occurrence, whose twin from a second registration
+/// is dropped by [`hook_twin`]. A tool gate is never dropped: its verdict
+/// must reach the runner from every registration.
+pub const TWIN_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "SubagentStop",
+    "PreCompact",
+    "PostToolUseFailure",
+];
+
+/// Whether this call is the twin of one that started in the last ten
+/// seconds: the same event with the same payload, byte for byte. A Cursor
+/// with the plugin and an earlier onboard, or a runner that also loads
+/// Claude's settings, runs the seat's hook twice for one event, and both
+/// copies get the same payload. A later event of the same kind carries a
+/// new generation, loop count or transcript, and is not a twin.
+pub fn hook_twin(call: &HookCall, input: &str) -> bool {
+    if !TWIN_EVENTS.contains(&call.event.as_str()) {
+        return false;
+    }
+    let key = work_id(&format!(
+        "twin|{}|{}|{}",
+        call.event,
+        call.session.as_deref().unwrap_or(""),
+        input.trim()
+    ));
+    hook_marker_fresh(&key, std::time::Duration::from_secs(10))
+}
+
+/// Make the marker for `key`, or say whether one younger than `window`
+/// already stands. A stale marker is renewed and the call goes on.
+fn hook_marker_fresh(key: &str, window: std::time::Duration) -> bool {
     let dir = runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
     // About one call in sixteen sweeps markers older than a minute.
@@ -5344,7 +5458,7 @@ pub fn hook_already_running(call: &HookCall) -> bool {
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age < std::time::Duration::from_secs(20));
+                .is_some_and(|age| age < window);
             if !fresh {
                 let _ = std::fs::write(&path, "");
             }
@@ -18829,6 +18943,88 @@ mod tests {
             "another prompt answers"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// An event said once is answered once when two registrations run it
+    /// with the same payload. The next stop of the same session carries a
+    /// new loop count and is answered, and a tool gate is never dropped.
+    #[test]
+    fn a_twin_stop_or_session_end_is_answered_once() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let call = |event: &str| HookCall {
+            event: event.into(),
+            cue: String::new(),
+            session: Some("conv-1".into()),
+            shape: HookShape::Cursor,
+        };
+        let stop = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","generation_id":"g-1","hook_event_name":"stop","status":"completed","loop_count":0}"#;
+        assert!(!hook_twin(&call("Stop"), stop), "the first answers");
+        assert!(hook_twin(&call("Stop"), stop), "its twin returns");
+        let next = stop.replace("\"loop_count\":0", "\"loop_count\":1");
+        assert!(!hook_twin(&call("Stop"), &next), "the next stop answers");
+        let end = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","hook_event_name":"sessionEnd","reason":"completed"}"#;
+        assert!(!hook_twin(&call("SessionEnd"), end));
+        assert!(hook_twin(&call("SessionEnd"), end));
+        let gate = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","hook_event_name":"beforeShellExecution","command":"git push -f"}"#;
+        assert!(!hook_twin(&call("PreToolUse"), gate));
+        assert!(
+            !hook_twin(&call("PreToolUse"), gate),
+            "a gate always answers"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// Onboarding Cursor finds the plugin in either place Cursor keeps it,
+    /// and says so instead of writing a second server and second hooks. A
+    /// hooks file an earlier onboard wrote is named.
+    #[test]
+    fn onboard_leaves_cursor_to_an_installed_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join(".cursor/plugins");
+        assert_eq!(cursor_plugin_in(&plugins), None);
+        let cached = plugins.join("cache/leidarljos/ljos/0123abc");
+        std::fs::create_dir_all(cached.join(".cursor-plugin")).unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), None, "no manifest yet");
+        std::fs::write(
+            cached.join(".cursor-plugin/plugin.json"),
+            r#"{"name":"ljos"}"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), Some(cached.clone()));
+        let local = plugins.join("local/ljos");
+        std::fs::create_dir_all(local.join(".cursor-plugin")).unwrap();
+        std::fs::write(
+            local.join(".cursor-plugin/plugin.json"),
+            r#"{"name":"ljos"}"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), Some(local.clone()));
+
+        let hooks = dir.path().join(".cursor/hooks.json");
+        let clean = cursor_plugin_step(&local, &hooks);
+        assert!(
+            clean.ok && clean.detail.contains("wrote none"),
+            "{}",
+            clean.detail
+        );
+        assert!(
+            !clean.detail.contains("earlier onboard"),
+            "{}",
+            clean.detail
+        );
+        std::fs::write(
+            &hooks,
+            r#"{"version":1,"hooks":{"stop":[{"command":"/b/ljos hook","timeout":15}]}}"#,
+        )
+        .unwrap();
+        let earlier = cursor_plugin_step(&local, &hooks);
+        assert!(
+            earlier.detail.contains("earlier onboard"),
+            "{}",
+            earlier.detail
+        );
     }
 
     #[test]

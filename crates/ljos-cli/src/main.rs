@@ -1282,6 +1282,11 @@ fn main() -> Result<()> {
             // from both: its verdict must not be lost to a clock. Exiting
             // at the deadline writes no deny, and the runner then allows
             // the command.
+            // The same holds for an event said once, such as a stop or the
+            // end of a session: its twin is answered with nothing.
+            if ljos_cli::hook_twin(&call, &input) {
+                return Ok(());
+            }
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
                 if ljos_cli::hook_already_running(&call) {
                     return Ok(());
