@@ -8584,6 +8584,52 @@ pub fn write_rule(rule: &Rule) -> Result<Value> {
         .context("rule: POST /v1/atoms failed")
 }
 
+/// The rules a preference carries: one per `--deny` and `--ask` pattern,
+/// each with the preference as its reason, so the person who is stopped
+/// reads the words they wrote. Checked before anything is written, so a
+/// bad pattern leaves neither the preference nor a rule behind.
+pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<Vec<Rule>> {
+    if text.trim().is_empty() && !(deny.is_empty() && ask.is_empty()) {
+        bail!("prefer: the preference is the rule's reason, so it needs words");
+    }
+    let rules: Vec<Rule> = deny
+        .iter()
+        .map(|p| ("deny", p))
+        .chain(ask.iter().map(|p| ("ask", p)))
+        .map(|(verdict, pattern)| Rule {
+            pattern: pattern.trim().to_string(),
+            verdict: verdict.to_string(),
+            reason: text.trim().to_string(),
+        })
+        .collect();
+    if rules.iter().any(|r| r.pattern.is_empty()) {
+        bail!("prefer: a --deny or --ask pattern over the command line is required");
+    }
+    Ok(rules)
+}
+
+/// The rules as `ljos rules` prints them: `verdict\tpattern\treason`, deny
+/// first, or a JSON array.
+#[must_use]
+pub fn format_rules(rules: &[Rule], json: bool) -> String {
+    let mut sorted: Vec<&Rule> = rules.iter().collect();
+    sorted.sort_by_key(|r| r.verdict != "deny");
+    if json {
+        let rows: Vec<Value> = sorted
+            .iter()
+            .map(|r| serde_json::json!({"pattern": r.pattern, "verdict": r.verdict, "reason": r.reason}))
+            .collect();
+        return format!("{}\n", Value::Array(rows));
+    }
+    if sorted.is_empty() {
+        return "no rules; `ljos rule PATTERN --verdict deny --why TEXT` writes one\n".to_string();
+    }
+    sorted
+        .iter()
+        .map(|r| format!("{}\t{}\t{}\n", r.verdict, r.pattern, r.reason))
+        .collect()
+}
+
 /// The live rules in a set of atoms.
 pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
     atoms
@@ -23291,6 +23337,37 @@ mod tests {
         );
         std::fs::write(&path, "not json").unwrap();
         assert!(kept_rules(&path).is_empty());
+    }
+
+    #[test]
+    fn a_preference_carries_the_rules_that_enforce_it() {
+        let text = "never tear down the terraform stack";
+        let rules = preference_rules(
+            text,
+            &["terraform destroy*".to_string()],
+            &["re:^terraform apply .*-destroy".to_string()],
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].verdict, "deny");
+        assert_eq!(rules[0].reason, text);
+        assert_eq!(rules[1].verdict, "ask");
+        assert_eq!(
+            verdict_for(&rules, "cd infra && terraform destroy -auto-approve")
+                .map(|r| r.verdict.as_str()),
+            Some("deny")
+        );
+        assert!(preference_rules(text, &[], &[]).unwrap().is_empty());
+        assert!(preference_rules(text, &[" ".to_string()], &[]).is_err());
+        assert!(preference_rules(" ", &["x*".to_string()], &[]).is_err());
+        let listed = format_rules(&rules, false);
+        assert!(
+            listed.starts_with("deny\tterraform destroy*\tnever"),
+            "{listed}"
+        );
+        let json: Value = serde_json::from_str(&format_rules(&rules, true)).unwrap();
+        assert_eq!(json[1]["verdict"], "ask");
+        assert!(format_rules(&[], false).starts_with("no rules"));
     }
 
     #[test]

@@ -180,6 +180,10 @@ Every piece of work has an issue before it has a claim.
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks before the command runs, and
   `ljos policy` says the same; the rule is memory and travels in handovers.
+  A preference that forbids a command ("never run terraform destroy") is
+  written with the rule it needs: `ljos prefer "..." --deny 'PATTERN'`.
+  A preference alone is only recalled, never enforced. `ljos rules` lists
+  what the hook enforces.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
