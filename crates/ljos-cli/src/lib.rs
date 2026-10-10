@@ -8685,6 +8685,55 @@ fn reads_script_on_stdin(segment: &str) -> bool {
     })
 }
 
+/// The interpreter a segment runs on a program from standard input, with
+/// the flag that takes a program as its next word: `python3 -`, `python3`,
+/// `node`, `perl` or `ruby` with no script file, as in `python3 - <<EOF`.
+fn reads_program_on_stdin(segment: &str) -> Option<(String, &'static str)> {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let name = words.get(at)?;
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let flag = if base.starts_with("python") {
+        "-c"
+    } else if matches!(base, "node" | "perl" | "ruby") {
+        "-e"
+    } else {
+        return None;
+    };
+    // Flags and redirections leave stdin as the program: `2>&1` and
+    // `>out` are each a `>` word and the target after it.
+    let mut rest = words[at + 1..].iter();
+    while let Some(w) = rest.next() {
+        if w == ">" {
+            rest.next();
+        } else if !(w.starts_with('-') || w.starts_with('<')) {
+            return None;
+        }
+    }
+    Some((name.clone(), flag))
+}
+
+/// Each here-document `line` feeds an interpreter as its program, as the
+/// argv that runs the same program inline: `python3 - <<EOF` with a body
+/// `B` is `python3 -c B`. ljos-policyd reads such a program for the shell
+/// calls and tree deletes it makes; a rule on the line does not see it.
+fn stdin_programs(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for sub in nested_lines(line, 0) {
+        let mut bodies = Vec::new();
+        split_commands_with(&sub.replace("\\\n", ""), false, &mut bodies);
+        for (body, _, owner) in bodies {
+            if let Some((name, flag)) = raw_segments(&owner)
+                .iter()
+                .find_map(|s| reads_program_on_stdin(s))
+            {
+                out.push(vec![name, flag.to_string(), body]);
+            }
+        }
+    }
+    out
+}
+
 /// The text an `echo` or `printf` segment writes, as a shell would read it
 /// from a pipe: `echo 'git push' | sh` runs `git push`.
 fn echoed_text(segment: &str) -> Option<String> {
@@ -15776,8 +15825,14 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     // command is one word, and a download piped into a shell is one call.
     // The substitutions and scripts inside the line run too, so each of
     // their pipelines is judged as well: `echo $(git push -f)` is a push.
-    for seg in nested_lines(line, 0).iter().flat_map(|l| pipelines(l)) {
-        let argv = shell_words(&seg);
+    // A here-document fed to `python3 -` or `node` is that program, sent
+    // as `python3 -c BODY`, so a shell call inside it is judged.
+    let argvs = nested_lines(line, 0)
+        .into_iter()
+        .flat_map(|l| pipelines(&l))
+        .map(|seg| shell_words(&seg))
+        .chain(stdin_programs(line));
+    for argv in argvs {
         if argv.is_empty() {
             continue;
         }
@@ -23097,6 +23152,57 @@ mod tests {
         assert_eq!(back.harness.len(), 1);
         assert_eq!(back.harness[0].name, "claude");
         assert_eq!(back.harness[0].resume, ["claude", "--continue"]);
+    }
+
+    #[test]
+    fn a_heredoc_fed_to_an_interpreter_goes_to_policyd_as_its_program() {
+        let line = "python3 - <<'PY'\nimport os\nos.system('git push -f')\nPY";
+        assert_eq!(
+            stdin_programs(line),
+            [vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "import os\nos.system('git push -f')\n".to_string()
+            ]]
+        );
+        assert_eq!(
+            stdin_programs("cd x && node <<EOF\nrequire('fs')\nEOF")[0][..2],
+            ["node".to_string(), "-e".to_string()]
+        );
+        assert!(
+            stdin_programs("python3 gen.py <<EOF\nx\nEOF").is_empty(),
+            "a script file reads the body as data"
+        );
+        assert!(stdin_programs("cat <<EOF\nos.system('x')\nEOF").is_empty());
+    }
+
+    #[test]
+    fn a_redirection_after_the_heredoc_word_keeps_stdin_the_program() {
+        let body = "import os\nos.system('git push -f')\n";
+        for line in [
+            "python3 - <<EOF 2>&1\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<EOF >out\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<'EOF' > out.log 2>/dev/null\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<EOF &>>log\nimport os\nos.system('git push -f')\nEOF",
+        ] {
+            assert_eq!(
+                stdin_programs(line),
+                [vec![
+                    "python3".to_string(),
+                    "-c".to_string(),
+                    body.to_string()
+                ]],
+                "{line}"
+            );
+        }
+        assert!(
+            stdin_programs("python3 gen.py <<EOF >out\nx\nEOF").is_empty(),
+            "a script file after a redirection still reads the body as data"
+        );
+        assert!(
+            stdin_programs("python3 >out gen.py <<EOF\nx\nEOF").is_empty(),
+            "a script file after a redirection target is still a script file"
+        );
     }
 
     #[test]
