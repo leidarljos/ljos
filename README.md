@@ -190,9 +190,13 @@ seat. `ljos seat` prints both names and where they came from. `ljos onboard`
 prints the one MCP entry any runner takes, and `ljos protocol` prints the
 text an agent reads first.
 
-Nothing needs a variable set. `ljos remember` starts the writer when none is
-answering. The seat's memory is the one workspace `seat` from any directory,
-and every claim carries the seat that wrote it.
+Nothing needs a variable set. `ljos onboard` makes the deed store deedar
+falls back to (`~/.local/share/deedar/store`) and a tracker under
+`~/.local/share/vissue/tracker` that `~/.config/vissue/config.toml` names,
+unless `DEEDAR_URL` or `VISSUE_ROOT` already names one. `ljos remember`
+starts the writer when none is answering. The seat's memory is the one
+workspace `seat` from any directory, and every claim carries the seat that
+wrote it.
 
 ## Mail
 
