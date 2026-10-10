@@ -494,7 +494,14 @@ enum Cmd {
         fail_on_deny: bool,
     },
     /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
-    Consensus { id: String },
+    /// The settle prints in words: shares, who leads, influence, and what
+    /// each anchor did.
+    Consensus {
+        id: String,
+        /// Print the settle's JSON as the model crate wrote it, not the words.
+        #[arg(long)]
+        json: bool,
+    },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
         from: String,
@@ -1569,7 +1576,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Consensus { id } => {
+        Cmd::Consensus { id, json } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -1582,12 +1589,16 @@ fn main() -> Result<()> {
                         .context("consensus: GET /v1/atoms failed")
                 })
                 .unwrap_or_default();
+            // A persona on the ballot settles under its anchor, and every
+            // other voter, the seat too, under the default one; a ballot
+            // of seats alone stays plain DeGroot.
+            let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::ballot_voters(&id));
             let mut steps = consensus_steps_for(
                 &id,
                 on_path("ljos-consensus"),
                 on_path("vissue"),
                 &trust,
-                &personas,
+                &anchors,
                 &tags,
             )?;
             // The named outcomes show which voters err together, and
@@ -1597,7 +1608,17 @@ fn main() -> Result<()> {
                 println!("{line}");
             }
             for step in steps {
-                run(step.bin, &step.args)?;
+                let settle = step.bin == "ljos-consensus"
+                    && step.args.first().map(String::as_str) == Some("settle");
+                if !settle || json {
+                    run(step.bin, &step.args)?;
+                    continue;
+                }
+                let said = run_captured(step.bin, &step.args)?;
+                match ljos_cli::settle_in_words(&said.stdout, &anchors) {
+                    Some(words) => print!("{words}"),
+                    None => print!("{}", said.stdout),
+                }
             }
             // Beside the settle: the surprisingly popular answer when two
             // or more voters forecast, and the voters' standing when rows

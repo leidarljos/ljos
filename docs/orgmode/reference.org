@@ -47,7 +47,7 @@
 | =recall ID= | tracker | the working set |
 | =vote ID [--for OPTION] [--confidence P] [--used ACCESSIONS\vert none] [--expect OPTION\vert JSON] [--as PERSONA] [--jev] [--withdraw]= | tracker | cast, as the seat or as a persona, or read the tally; =--confidence= is a probability in (0, 1]; =--used= lists the deed accessions the ballot used, comma-separated, or =none=, and is required with =--for=; =--expect= records the forecast of the others on the same command; =--withdraw= takes back the ballot and its forecast, and the logbook keeps what it was. =--as NAME --jev= asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it |
 | =predict ID --expect OPTION\vert JSON [--as PERSONA]= | pack | forecast the others' shares; two or more and =consensus= names the answer more popular than forecast (Prelec, doi:10.1038/nature21054) |
-| =rule PATTERN [--verdict deny\vert ask] --why TEXT= | pack | argv law the hook and =policy= enforce: a glob, or a regular expression (=re:= or a =\\b=, =\\s= or =(a\vert b)= in it) anchored at the start, tried on the whole line and on each command it runs (split on =&&=, =\vert\vert=, =;=, =\vert= outside quotes, with =NAME=value=, =sudo=, =env=, =time=, =nohup= taken off) |
+| =rule PATTERN [--verdict deny\vert ask] --why TEXT= | pack | argv law the hook and =policy= enforce: a glob, or a regular expression (=re:= or a =\\b=, =\\s= or =(a\vert b)= in it) anchored at the start, tried on the whole line and on each command it runs; [[*What a rule reads][What a rule reads]] lists which those are |
 | =consensus ID= | consensus, tracker | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged =broad= runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted |
 | =claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]= | claim graph | claim a session node. With =--next=, or with no id, it claims the first ready node in claimdag's order for the name, the way =claim ID= claims one; =--role= and =--slack= set the affinity and the depth slack. A busy refusal names what the name has still claimed |
 | =release ID [--assignee NAME]= | claim graph | hand the session node back unfinished: ready, generation moved |
@@ -215,6 +215,30 @@ stdin is an argv line and answered in plain lines.
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
 
+* What a rule reads
+
+A rule is tried on every command a line runs, the first and the rest. The
+line is split on =&&=, =\vert\vert=, =;=, =\vert=, =&= and new lines
+outside quotes, and each piece is read again inside: the bodies of
+=$(...)=, backticks, =<(...)=, =>(...)= and subshells; the script of
+=sh -c=, =eval=, =env -S=, =trap=, =alias=, =su -c=, =script -c=,
+=flock -c= and =nix-shell --run=; a here-string or here-document fed to a
+shell, and =echo= or =printf= piped into one; the commands of =find
+-exec=; and the line =ssh= runs on its host. Leading =NAME=value= words,
+wrappers (=sudo=, =doas=, =env=, =time=, =nohup=, =exec=, =command=,
+=nice=, =ionice=, =timeout=, =setsid=, =stdbuf=, =xargs=, =flock=,
+=chronic=, =unbuffer=, =watch=), =case= patterns and function
+definitions come off, and quotes, =$'...'= and escapes come off each
+word, so =git 'push'=, =$'git' push= and =git -c alias.p=push p= read as
+=git push=. A line nested more than eight deep is refused whole.
+
+A rule reads the line as written. It does not see a command whose name
+comes from a variable (=$g push=), a script run from a file, an alias or
+git alias defined in an earlier call, a recipe in a Makefile or justfile,
+or a call made from inside another language (=python -c=, =perl -e=). A
+rule stops an agent's mistakes; it is not a sandbox. For a push that
+must never happen, protect the branch on the forge.
+
 * Push checks
 
 An asked =git push= (a seat rule =git push*= with verdict =ask=) is checked
@@ -327,10 +351,16 @@ moves the anchor of every persona it refuted toward one by =1 - beta= of
 the gap: a persona that keeps being wrong listens more.
 
 A persona is a =persona= atom: a name, an anchor in [0, 1], a view, and the
-domains it speaks to. =consensus= passes every persona's anchor to both
-settles as =--susceptibility-of=; at 0 the persona never moves off its
+domains it speaks to. =consensus= passes the anchor of each persona on the
+ballot to both settles as =--susceptibility-of=, and gives every other voter
+on that ballot, the seat included, an anchor of 0.5. A ballot with no
+persona settles as plain DeGroot. At 0 a persona never moves off its
 ballot and pulls the rest toward it (Acemoglu, Como, Fagnani and Ozdaglar,
-doi:10.1287/moor.1120.0570), at 1 it is a plain voter.
+doi:10.1287/moor.1120.0570); at 1 it keeps none of its ballot. Before the
+default, the seat sat at 1, so any anchored persona took the whole settle.
+The settle prints in words: the shares, who leads and by how much,
+polarization, each voter's influence, and the share of its own ballot
+each voter keeps. =consensus ID --json= prints the model crate's JSON instead.
 
 Without an outcome, =calibrate= estimates each voter's accuracy from the
 project's issues with two or more ballots, by expectation maximisation

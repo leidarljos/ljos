@@ -88,8 +88,11 @@ jobs:
         run: |
           awk -v v="${TAG#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md
           test -s notes.md || echo "See CHANGELOG.md." > notes.md
+      # A run by hand fills in the archives a release lacks and keeps the
+      # ones already published, so their checksums stay as people saw them.
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           body_path: notes.md
           files: dist/*
+          overwrite_files: ${{ github.event_name != 'workflow_dispatch' }}

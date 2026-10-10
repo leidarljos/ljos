@@ -2143,7 +2143,12 @@ fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Re
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
     steps.push(env_step(&env_path_for(file, h), &h.name, dry));
-    steps.extend([pack_step(dry), host_key_step(dry)]);
+    steps.extend([
+        deed_store_step(dry),
+        tracker_step(dry),
+        pack_step(dry),
+        host_key_step(dry),
+    ]);
     Ok(steps)
 }
 
@@ -2235,7 +2240,12 @@ pub fn onboard_in(
     }
     let h = &h;
     let server = server_path()?;
-    let dependencies = [pack_step(dry), host_key_step(dry)];
+    let dependencies = [
+        deed_store_step(dry),
+        tracker_step(dry),
+        pack_step(dry),
+        host_key_step(dry),
+    ];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
@@ -5995,15 +6005,176 @@ fn pack_step(dry: bool) -> Step {
     }
 }
 
+/// `$XDG_DATA_HOME`, else `~/.local/share`.
+fn data_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+}
+
+/// `$XDG_CONFIG_HOME`, else `~/.config`.
+fn config_base() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+}
+
+fn named_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The deed store deedar uses when `DEEDAR_URL` is unset:
+/// `$XDG_DATA_HOME/deedar/store`. deedar refuses to make one on its own, so
+/// a fresh seat's first deed failed until someone made the directory.
+/// An empty directory is a store; the first deed writes
+/// its layout.
+fn deed_store_step(dry: bool) -> Step {
+    let step = |detail: String, ok: bool| Step {
+        what: "deed store".into(),
+        detail,
+        ok,
+    };
+    if let Some(url) = named_env("DEEDAR_URL") {
+        return step(format!("DEEDAR_URL={url} names the store"), true);
+    }
+    let Some(dir) = data_base().map(|b| b.join("deedar").join("store")) else {
+        return step(
+            "no home directory to keep a deed store in; set HOME, or DEEDAR_URL=file:///DIR".into(),
+            false,
+        );
+    };
+    if dir.is_dir() {
+        return step(format!("{} exists", dir.display()), true);
+    }
+    if dry {
+        return step(format!("would create {}", dir.display()), true);
+    }
+    let made = std::fs::create_dir_all(&dir).and_then(|()| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    });
+    match made {
+        Ok(()) => step(
+            format!(
+                "created {}; deedar uses it with DEEDAR_URL unset",
+                dir.display()
+            ),
+            true,
+        ),
+        Err(e) => step(format!("{}: {e}", dir.display()), false),
+    }
+}
+
+/// The tracker vissue uses when no variable names one. vissue falls back to
+/// `root` in `$XDG_CONFIG_HOME/vissue/config.toml`, then to the working
+/// directory, so a fresh seat filed into whichever directory it stood in or
+/// was refused. With neither a variable nor a configured
+/// root, this makes `$XDG_DATA_HOME/vissue/tracker` with its `Software`
+/// prefix directory and writes the config line that names it.
+fn tracker_step(dry: bool) -> Step {
+    let step = |detail: String, ok: bool| Step {
+        what: "tracker".into(),
+        detail,
+        ok,
+    };
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+        if let Some(root) = named_env(key) {
+            return step(format!("{key}={root} names the tracker"), true);
+        }
+    }
+    let (Some(cfg), Some(root)) = (
+        named_env("VISSUE_CONFIG")
+            .map(PathBuf::from)
+            .or_else(|| config_base().map(|b| b.join("vissue").join("config.toml"))),
+        data_base().map(|b| b.join("vissue").join("tracker")),
+    ) else {
+        return step(
+            "no home directory to keep a tracker in; set HOME, or VISSUE_ROOT=DIR".into(),
+            false,
+        );
+    };
+    let have = std::fs::read_to_string(&cfg).unwrap_or_default();
+    // `root` is a top-level key: one under a `[table]` is something else.
+    if let Some(line) = have
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .find(|l| l.split('=').next().is_some_and(|k| k.trim() == "root"))
+    {
+        return step(format!("{} sets {}", cfg.display(), line.trim()), true);
+    }
+    if dry {
+        return step(
+            format!(
+                "would create {} and name it in {}",
+                root.display(),
+                cfg.display()
+            ),
+            true,
+        );
+    }
+    // A TOML string, so a path with a quote, a backslash or a control
+    // character in it is still one value vissue reads back.
+    let line = format!(
+        "root = {}\n",
+        toml::Value::String(root.display().to_string())
+    );
+    if let Err(e) = std::fs::create_dir_all(root.join("Software")) {
+        return step(format!("{}: {e}", root.display()), false);
+    }
+    let made = cfg
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        // First, so it stays top-level above any table the file has.
+        .and_then(|()| std::fs::write(&cfg, format!("{line}{have}")));
+    match made {
+        Ok(()) => step(
+            format!(
+                "created {}; {} names it, so vissue needs no VISSUE_ROOT",
+                root.display(),
+                cfg.display()
+            ),
+            true,
+        ),
+        Err(e) => step(
+            format!(
+                "made {}, but {}: {e}; set VISSUE_ROOT={} instead",
+                root.display(),
+                cfg.display(),
+                root.display()
+            ),
+            false,
+        ),
+    }
+}
+
 /// Make the seat's host key at `~/.config/deedar/host.key` when there is
 /// none, so handovers go out signed from the first one. An existing key, or
 /// one named by `DEEDAR_HOST_SIGNING_KEY`, is left alone.
 fn host_key_step(dry: bool) -> Step {
     if let Some(path) = host_key_path() {
+        // A seat onboarded before the deed store listed the key gets it
+        // listed now, so running onboard again is the fix.
+        if dry {
+            return Step {
+                what: "host key".into(),
+                detail: format!(
+                    "{} exists; would list it as a signer in the deed store",
+                    path.display()
+                ),
+                ok: true,
+            };
+        }
+        let (listed, ok) = accept_host_key();
         return Step {
             what: "host key".into(),
-            detail: format!("{} exists", path.display()),
-            ok: true,
+            detail: format!("{} exists; {listed}", path.display()),
+            ok,
         };
     }
     if std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some_and(|r| r == "off") {
@@ -6043,16 +6214,62 @@ fn host_key_step(dry: bool) -> Step {
         Ok(())
     })();
     match made {
-        Ok(()) => Step {
-            what: "host key".into(),
-            detail: format!("wrote a 32-byte seed to {}", path.display()),
-            ok: true,
-        },
+        Ok(()) => {
+            // A deed store made before this key existed does not list it,
+            // so every deed the key signs would fail evidence. deedar adds
+            // it; a store made after this lists it on its own.
+            let (listed, ok) = accept_host_key();
+            Step {
+                what: "host key".into(),
+                detail: format!("wrote a 32-byte seed to {}; {listed}", path.display()),
+                ok,
+            }
+        }
         Err(e) => Step {
             what: "host key".into(),
             detail: format!("{}: {e}", path.display()),
             ok: false,
         },
+    }
+}
+
+/// Ask deedar to list the host key in the deed store's layout.
+fn accept_host_key() -> (String, bool) {
+    host_accept_detail(
+        run_captured("deedar", &["host", "accept"])
+            .map(|s| s.stdout)
+            .map_err(|e| e.to_string()),
+    )
+}
+
+/// What `deedar host accept` said about the key onboard just wrote, as a
+/// detail for the step and whether the seat can sign deeds evidence takes.
+fn host_accept_detail(said: std::result::Result<String, String>) -> (String, bool) {
+    match said {
+        Ok(out) => (out.lines().next().unwrap_or("").trim().to_string(), true),
+        Err(e) if e.contains("no store at") => (
+            "no deed store yet; the first deed makes one that lists this key".into(),
+            true,
+        ),
+        Err(e) if e.contains("not on PATH") => (
+            "deedar is not on PATH; install it before the first deed".into(),
+            false,
+        ),
+        // A deedar older than `host accept` answers with its status or does
+        // not know the verb at all.
+        Err(e) if e.contains("is not a signer") || e.contains("unknown command") => (
+            "this deedar has no `host accept`; `ljos doctor` names the signer line \
+             the deed store's layout needs"
+                .into(),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "deedar host accept: {}",
+                e.lines().next().unwrap_or("").trim()
+            ),
+            false,
+        ),
     }
 }
 
@@ -8318,24 +8535,386 @@ pub fn command_segments(line: &str) -> Vec<String> {
     command_segments_at(line, 0)
 }
 
-/// [`command_segments`], plus the commands of each `sh -c SCRIPT` (or
-/// `bash -lc`, under any prefix) and each `env -S STRING` read as a line of
-/// its own, down to a few levels. A rule on `git push*` then sees
-/// `sh -c "git push -f"`.
+/// [`command_segments`] over every line the shell runs for `line`: the
+/// line itself, the body of each `$(...)`, backtick, `<(...)`, `>(...)` and
+/// `( ... )` in it, each `sh -c SCRIPT`, `eval ARGS` and `env -S STRING`,
+/// and the substitutions an unquoted here-document expands. A rule on
+/// `git push*` then sees `echo $(git push -f)` and `sh -c "git push -f"`.
 fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for raw in raw_segments(line) {
-        let seg = strip_prefixes(&raw).join(" ");
-        if !seg.is_empty() {
-            out.push(seg);
-        }
-        if depth < 4 {
-            if let Some(script) = shell_c_script(&raw) {
-                out.extend(command_segments_at(&script, depth + 1));
+    for sub in nested_lines(line, depth) {
+        for raw in raw_segments(&sub) {
+            let seg = strip_prefixes(&raw).join(" ");
+            if !seg.is_empty() && !out.contains(&seg) {
+                out.push(seg);
+            }
+            if let Some(norm) = plain_command(&raw) {
+                if !out.contains(&norm) {
+                    out.push(norm);
+                }
             }
         }
     }
     out
+}
+
+/// How deep [`nested_lines`] reads substitutions and scripts inside one
+/// another. A real command never nests this far; a line that does is
+/// refused whole ([`nested_too_deep`]) rather than read part of the way.
+const NESTED_DEPTH: usize = 8;
+
+/// `line` and every line run inside it, outermost first: the bodies of its
+/// command substitutions, process substitutions and subshells, the scripts
+/// of `sh -c`, `eval` and `env -S`, the commands of `find -exec`, and the
+/// substitutions in an unquoted here-document body, each read the same way
+/// in turn.
+fn nested_lines(line: &str, depth: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    nested_walk(line, depth, &mut out);
+    out
+}
+
+/// Whether `line` nests past [`NESTED_DEPTH`], so some command in it was
+/// not read.
+fn nested_too_deep(line: &str) -> bool {
+    nested_walk(line, 0, &mut Vec::new())
+}
+
+/// [`nested_lines`] into `out`; true when a line at the depth limit still
+/// held something to read.
+fn nested_walk(line: &str, depth: usize, out: &mut Vec<String>) -> bool {
+    // A backslash before a new line joins the two lines into one word.
+    let line = line.replace("\\\n", "");
+    let mut bodies = Vec::new();
+    let segs = split_commands_with(&line, false, &mut bodies);
+    let mut inner: Vec<String> = Vec::new();
+    for (body, quoted, owner) in &bodies {
+        if raw_segments(owner).iter().any(|s| reads_script_on_stdin(s)) {
+            // A here-document fed to a shell is the shell's script.
+            inner.push(body.clone());
+        } else if !quoted {
+            inner.extend(substitutions(body, true));
+        }
+    }
+    for (k, raw) in segs.iter().enumerate() {
+        inner.extend(substitutions(raw, false));
+        inner.extend(shell_c_script(raw));
+        inner.extend(exec_commands(raw));
+        if k > 0 && reads_script_on_stdin(raw) {
+            inner.extend(echoed_text(&segs[k - 1]));
+        }
+    }
+    out.push(line);
+    if depth >= NESTED_DEPTH {
+        return !inner.is_empty();
+    }
+    let mut deep = false;
+    for l in inner {
+        deep |= nested_walk(&l, depth + 1, out);
+    }
+    deep
+}
+
+/// The shells a script can be handed to.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/// Whether a segment is a shell that reads its script from standard input:
+/// a shell with no `-c` and no script file, as in `echo CMD | sh` or
+/// `sh <<EOF`. A here-string is read by [`shell_c_script`].
+fn reads_script_on_stdin(segment: &str) -> bool {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let Some(shell) = words.get(at) else {
+        return false;
+    };
+    if !SHELLS.contains(&shell.rsplit('/').next().unwrap_or(shell)) {
+        return false;
+    }
+    words[at + 1..].iter().all(|w| {
+        (w.starts_with('-') && !w.starts_with("--") && !w[1..].contains('c'))
+            || w.starts_with("--")
+            || w.starts_with('<')
+            || w == ">"
+    })
+}
+
+/// The text an `echo` or `printf` segment writes, as a shell would read it
+/// from a pipe: `echo 'git push' | sh` runs `git push`.
+fn echoed_text(segment: &str) -> Option<String> {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let name = words.get(at)?;
+    let rest = &words[at + 1..];
+    match name.rsplit('/').next().unwrap_or(name) {
+        "echo" => {
+            let text: Vec<&str> = rest
+                .iter()
+                .map(String::as_str)
+                .skip_while(|w| matches!(*w, "-n" | "-e" | "-E" | "-ne" | "-en"))
+                .take_while(|w| *w != ">")
+                .collect();
+            Some(text.join(" ").replace("\\n", "\n"))
+        }
+        "printf" => {
+            let text: Vec<&str> = rest
+                .iter()
+                .map(String::as_str)
+                .take_while(|w| *w != ">")
+                .collect();
+            Some(text.join(" ").replace("\\n", "\n").replace("%s", ""))
+        }
+        _ => None,
+    }
+    .filter(|t| !t.trim().is_empty())
+}
+
+/// The end of the construct that opens at `chars[i]`: just past the
+/// backtick that closes one, or past the `)` that closes the first `(` at
+/// or after `i` (`$(`, `<(`, `>(`, `(`). Quotes, escapes and constructs
+/// nested inside count; an unclosed one runs to the end.
+fn nested_end(chars: &[char], i: usize) -> usize {
+    let n = chars.len();
+    if chars.get(i) == Some(&'`') {
+        let mut j = i + 1;
+        while j < n {
+            match chars[j] {
+                '\\' => j += 2,
+                '`' => return j + 1,
+                _ => j += 1,
+            }
+        }
+        return n;
+    }
+    let Some(open) = (i..n).find(|k| chars[*k] == '(') else {
+        return n;
+    };
+    let mut depth = 0usize;
+    let mut j = open;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '\'' => {
+                j = (j + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1);
+            }
+            '"' => j = double_end(chars, j),
+            '`' => j = nested_end(chars, j),
+            '(' => {
+                depth += 1;
+                j += 1;
+            }
+            ')' => {
+                depth -= 1;
+                j += 1;
+                if depth == 0 {
+                    return j;
+                }
+            }
+            _ => j += 1,
+        }
+    }
+    n
+}
+
+/// Just past the `"` that closes the double-quoted string opening at
+/// `chars[i]`, stepping over the substitutions inside it.
+fn double_end(chars: &[char], i: usize) -> usize {
+    let n = chars.len();
+    let mut j = i + 1;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '"' => return j + 1,
+            '$' if chars.get(j + 1) == Some(&'(') => j = nested_end(chars, j),
+            '`' => j = nested_end(chars, j),
+            _ => j += 1,
+        }
+    }
+    n
+}
+
+/// Whether a `(` at `chars[i]` opens a subshell: it starts a word, and is
+/// not an array (`x=(a b)`) or a function's `()`.
+fn opens_subshell(chars: &[char], i: usize) -> bool {
+    i == 0 || chars[i - 1].is_whitespace() || matches!(chars[i - 1], ';' | '&' | '|' | '(' | '!')
+}
+
+/// The lines the shell runs inside `text` one level down: the body of each
+/// `$(...)` (arithmetic `$((...))` too, which can hold one), each backtick
+/// pair with its escapes taken off, and, outside double quotes, each
+/// `<(...)`, `>(...)` and subshell `( ... )`. Nothing inside single quotes
+/// runs. `in_double` reads `text` as already inside double quotes, as an
+/// unquoted here-document body is.
+fn substitutions(text: &str, in_double: bool) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut double = in_double;
+    let mut i = 0;
+    let body = |from: usize, end: usize, close: bool| -> String {
+        let to = if close && end > from { end - 1 } else { end };
+        chars[from.min(to)..to].iter().collect()
+    };
+    while i < n {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match c {
+            '\\' => i += 2,
+            '\'' if !double => {
+                i = (i + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1);
+            }
+            '"' => {
+                double = !double;
+                i += 1;
+            }
+            '$' if next == Some('(') => {
+                let end = nested_end(&chars, i);
+                out.push(body(i + 2, end, chars.get(end - 1) == Some(&')')));
+                i = end;
+            }
+            '`' => {
+                let end = nested_end(&chars, i);
+                let inner = body(i + 1, end, end > i + 1 && chars[end - 1] == '`');
+                // Inside backticks `\``, `\\` and `\$` stand for the
+                // character itself, so a nested pair is written `\``.
+                out.push(
+                    inner
+                        .replace("\\\\", "\u{0}")
+                        .replace("\\`", "`")
+                        .replace("\\$", "$")
+                        .replace('\u{0}', "\\"),
+                );
+                i = end;
+            }
+            '<' | '>' if !double && next == Some('(') => {
+                let end = nested_end(&chars, i);
+                out.push(body(i + 2, end, chars.get(end - 1) == Some(&')')));
+                i = end;
+            }
+            '(' if !double && opens_subshell(&chars, i) => {
+                let end = nested_end(&chars, i);
+                out.push(body(i + 1, end, chars.get(end - 1) == Some(&')')));
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    out.retain(|b| !b.trim().is_empty());
+    out
+}
+
+/// The commands `find` runs for each file it finds: the words after each
+/// `-exec`, `-execdir`, `-ok` or `-okdir`, up to the `;` or `+` that ends
+/// them.
+fn exec_commands(segment: &str) -> Vec<String> {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let is_find = words
+        .get(at)
+        .is_some_and(|w| w.rsplit('/').next() == Some("find"));
+    if !is_find {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut it = words[at + 1..].iter();
+    while let Some(w) = it.next() {
+        if matches!(w.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            let cmd: Vec<&str> = it
+                .by_ref()
+                .map(String::as_str)
+                .take_while(|w| *w != ";" && *w != "+")
+                .collect();
+            if !cmd.is_empty() {
+                out.push(cmd.join(" "));
+            }
+        }
+    }
+    out
+}
+
+/// A segment's words past its prefixes, each with its quotes and escapes
+/// off, and the command name without its directory.
+fn plain_words(segment: &str) -> Vec<String> {
+    let words: Vec<String> = raw_words(segment)
+        .into_iter()
+        .map(|w| shell_words(w).join(" "))
+        .collect();
+    let (at, _) = prefix_end(&words);
+    let mut words = words[at..].to_vec();
+    if let Some(first) = words.first_mut() {
+        if let Some(base) = first.rsplit('/').next().filter(|b| !b.is_empty()) {
+            *first = base.to_string();
+        }
+    }
+    words
+}
+
+/// A segment's command as the shell resolves it, when that differs from
+/// how it is written: quotes and escapes off the command name (`'git'`,
+/// `\git`, `g"it"`), a path off it (`/usr/bin/git`), and git's own
+/// options before the subcommand (`git -C repo -c k=v push`). A rule on
+/// `git push*` then sees each of those as the push it is.
+fn plain_command(segment: &str) -> Option<String> {
+    let mut words: Vec<String> = strip_prefixes(segment)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let first = words.first_mut()?;
+    let name = shell_words(first).join(" ");
+    *first = name
+        .rsplit('/')
+        .next()
+        .filter(|b| !b.is_empty())
+        .unwrap_or(&name)
+        .to_string();
+    drop_git_options(&mut words);
+    if words.is_empty() {
+        return None;
+    }
+    let plain = words.join(" ");
+    (plain != strip_prefixes(segment).join(" ")).then_some(plain)
+}
+
+/// Git's own options before the subcommand off: `git -C repo -c k=v push`
+/// is `git push`.
+fn drop_git_options(words: &mut Vec<String>) {
+    if words.first().map(String::as_str) != Some("git") {
+        return;
+    }
+    let mut i = 1;
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    while let Some(w) = words.get(i) {
+        if matches!(
+            w.as_str(),
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+        ) {
+            if w == "-c" {
+                if let Some((name, value)) = words
+                    .get(i + 1)
+                    .and_then(|kv| kv.strip_prefix("alias."))
+                    .and_then(|kv| kv.split_once('='))
+                {
+                    aliases.push((name.to_string(), value.to_string()));
+                }
+            }
+            i += 2;
+        } else if w.starts_with('-') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    words.drain(1..i.min(words.len()));
+    // `git -c alias.p=push p` runs `git push`; a `!` alias is a shell line
+    // and is left as written.
+    if let Some(value) = words
+        .get(1)
+        .and_then(|sub| aliases.iter().rev().find(|(n, _)| n == sub))
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.starts_with('!'))
+    {
+        let expanded: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+        words.splice(1..2, expanded);
+    }
 }
 
 /// The script a segment hands to a shell: the word after a shell's `-c`
@@ -8347,14 +8926,76 @@ fn shell_c_script(segment: &str) -> Option<String> {
     if split.is_some() {
         return split;
     }
+    // A wrapper such as flock is taken off as a prefix too, so look for one
+    // anywhere up to the command.
+    let script_cmd = (0..=at.min(words.len().saturating_sub(1)))
+        .filter(|_| !words.is_empty())
+        .find_map(|j| {
+            let b = words[j].rsplit('/').next().unwrap_or(&words[j]);
+            SCRIPT_FLAGS.iter().find(|(n, _)| *n == b).map(|f| (j, f))
+        });
+    if let Some((j, (_, flags))) = script_cmd {
+        let rest = &words[j + 1..];
+        for (k, w) in rest.iter().enumerate() {
+            // `-c CMD`, or a group of short flags that ends in it (`-lc`).
+            let grouped =
+                w.len() > 2 && w.starts_with('-') && !w.starts_with("--") && w.ends_with('c');
+            if flags.contains(&w.as_str()) || (grouped && flags.contains(&"-c")) {
+                return rest.get(k + 1).cloned();
+            }
+            if let Some(v) = flags
+                .iter()
+                .filter(|f| f.starts_with("--"))
+                .find_map(|f| w.strip_prefix(&format!("{f}=")))
+            {
+                return Some(v.to_string());
+            }
+        }
+        return None;
+    }
     let shell = words.get(at)?;
     let base = shell.rsplit('/').next().unwrap_or(shell);
-    if !["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(&base) {
+    if base == "eval" {
+        // eval joins its words with spaces and runs the result as a line.
+        let script = words[at + 1..].join(" ");
+        return (!script.trim().is_empty()).then_some(script);
+    }
+    if base == "alias" {
+        // `alias p='git push -f'` makes `p` run that line; read it here,
+        // where the name is defined.
+        let script: Vec<&str> = words[at + 1..]
+            .iter()
+            .filter_map(|w| w.split_once('=').map(|(_, v)| v))
+            .collect();
+        return (!script.is_empty()).then(|| script.join("; "));
+    }
+    if base == "ssh" {
+        // ssh runs its last arguments as a line on the host.
+        let refs: Vec<&str> = words[at..].iter().map(String::as_str).collect();
+        return ssh_remote_command(&refs);
+    }
+    if base == "trap" {
+        // `trap 'CMD' SIGNAL` runs CMD when the signal comes.
+        return words[at + 1..]
+            .iter()
+            .find(|w| !w.starts_with('-'))
+            .filter(|w| !w.trim().is_empty())
+            .cloned();
+    }
+    if !SHELLS.contains(&base) {
         return None;
     }
     let mut it = words[at + 1..].iter().map(String::as_str);
     let mut takes = false;
     while let Some(w) = it.next() {
+        // A here-string is the script of a shell with no other.
+        if let Some(h) = w.strip_prefix("<<<") {
+            return if h.is_empty() {
+                it.next().map(str::to_string)
+            } else {
+                Some(h.to_string())
+            };
+        }
         if takes {
             if w == "--" {
                 continue;
@@ -8377,6 +9018,16 @@ fn shell_c_script(segment: &str) -> Option<String> {
     }
     None
 }
+
+/// Commands that hand the word after one of their flags to a shell:
+/// `su -c CMD`, `script -c CMD`, `nix-shell --run CMD`, `flock -c CMD`.
+const SCRIPT_FLAGS: &[(&str, &[&str])] = &[
+    ("su", &["-c", "--command"]),
+    ("runuser", &["-c", "--command"]),
+    ("script", &["-c", "--command"]),
+    ("flock", &["-c", "--command"]),
+    ("nix-shell", &["--run", "--command"]),
+];
 
 /// Words that run the command after them, taken off a segment's front,
 /// with the flags of each that take a separate value.
@@ -8413,6 +9064,36 @@ const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
     ("nice", &["-n", "--adjustment"]),
     ("timeout", &["-k", "--kill-after", "-s", "--signal"]),
     ("setsid", &[]),
+    ("chronic", &[]),
+    ("unbuffer", &[]),
+    (
+        "ionice",
+        &[
+            "-c",
+            "--class",
+            "-n",
+            "--classdata",
+            "-p",
+            "--pid",
+            "-P",
+            "--pgid",
+            "-u",
+            "--uid",
+        ],
+    ),
+    (
+        "flock",
+        &[
+            "-w",
+            "--wait",
+            "--timeout",
+            "-E",
+            "--conflict-exit-code",
+            "-c",
+            "--command",
+        ],
+    ),
+    ("watch", &["-n", "--interval", "-d", "--differences"]),
     ("stdbuf", &["-i", "-o", "-e"]),
     (
         "xargs",
@@ -8433,6 +9114,13 @@ const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Shell words that open or continue a compound command, so the command
+/// after them is the one that runs: `if git push`, `{ git push; }`,
+/// `! git push`, `then git push`, `coproc git push`.
+const SHELL_KEYWORDS: &[&str] = &[
+    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "coproc", "builtin",
+];
+
 /// Where the command starts in `words`: past leading `NAME=value` words and
 /// each prefix in [`SEGMENT_PREFIXES`] with its flags, the values of those
 /// flags, a `--`, and the duration `timeout` takes. `command -v` and
@@ -8445,10 +9133,46 @@ fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
             !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         })
     };
+    let is_name = |w: &str| {
+        !w.is_empty()
+            && w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
     let mut i = 0;
     while let Some(w) = words.get(i).map(AsRef::as_ref) {
-        if is_assign(w) {
+        if is_assign(w) || SHELL_KEYWORDS.contains(&w) {
             i += 1;
+            continue;
+        }
+        // `case WORD in`, and a branch's pattern `x)` or `a|b)` before the
+        // command it runs.
+        if w == "case" {
+            i += if words.get(i + 2).map(AsRef::as_ref) == Some("in") {
+                3
+            } else {
+                2
+            };
+            continue;
+        }
+        if w.ends_with(')') && w.matches(')').count() > w.matches('(').count() {
+            i += 1;
+            continue;
+        }
+        // A function's definition runs its body: `f() { ...; }`,
+        // `f () { ...; }`, `function f { ...; }`.
+        if w == "function" {
+            i += 2;
+            if words.get(i).map(AsRef::as_ref) == Some("()") {
+                i += 1;
+            }
+            continue;
+        }
+        if w.strip_suffix("()").is_some_and(is_name) {
+            i += 1;
+            continue;
+        }
+        if is_name(w) && words.get(i + 1).map(AsRef::as_ref) == Some("()") {
+            i += 2;
             continue;
         }
         let Some((name, valued)) = SEGMENT_PREFIXES.iter().find(|(n, _)| *n == w) else {
@@ -8483,7 +9207,8 @@ fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
                 break;
             }
         }
-        if *name == "timeout" && i < words.len() {
+        // timeout's duration and flock's lock file come before the command.
+        if matches!(*name, "timeout" | "flock") && i < words.len() {
             i += 1;
         }
     }
@@ -8491,16 +9216,55 @@ fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
 }
 
 /// A command's words with leading assignments and wrapper commands off.
+/// Words are split on blanks outside quotes and substitutions, and kept
+/// as written: `x=$(git push -f)` is one assignment, not `push -f)`.
 fn strip_prefixes(segment: &str) -> Vec<&str> {
-    let words: Vec<&str> = segment.split_whitespace().collect();
+    let words = raw_words(segment);
     let (at, _) = prefix_end(&words);
     words[at..].to_vec()
+}
+
+/// A segment's words as written, quotes kept, split on blanks outside
+/// quotes and outside `$(...)`, backticks and parentheses.
+fn raw_words(segment: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = segment.char_indices().collect();
+    let plain: Vec<char> = chars.iter().map(|(_, c)| *c).collect();
+    let byte = |k: usize| chars.get(k).map_or(segment.len(), |(b, _)| *b);
+    let mut words = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut k = 0;
+    while k < plain.len() {
+        let c = plain[k];
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                words.push(&segment[byte(s)..byte(k)]);
+            }
+            k += 1;
+            continue;
+        }
+        start.get_or_insert(k);
+        k = match c {
+            '\\' => k + 2,
+            '\'' => (k + 1..plain.len())
+                .find(|j| plain[*j] == '\'')
+                .map_or(plain.len(), |j| j + 1),
+            '"' => double_end(&plain, k),
+            '`' | '(' => nested_end(&plain, k),
+            '$' | '<' | '>' if plain.get(k + 1) == Some(&'(') => nested_end(&plain, k),
+            _ => k + 1,
+        }
+        .min(plain.len());
+    }
+    if let Some(s) = start {
+        words.push(&segment[byte(s)..]);
+    }
+    words
 }
 
 /// The word a here-document at `chars[i..]` (just past `<<`) ends at:
 /// `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`. `None` for a here-string
 /// (`<<<`) or no word.
-fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize)> {
+fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize, bool)> {
     if chars.get(i) == Some(&'<') {
         return None;
     }
@@ -8510,7 +9274,10 @@ fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize)> {
     while chars.get(i).is_some_and(|c| *c == ' ' || *c == '\t') {
         i += 1;
     }
-    let quote = chars.get(i).copied().filter(|c| *c == '\'' || *c == '"');
+    let quote = chars
+        .get(i)
+        .copied()
+        .filter(|c| *c == '\'' || *c == '"' || *c == '\\');
     if quote.is_some() {
         i += 1;
     }
@@ -8522,10 +9289,10 @@ fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize)> {
         i += 1;
     }
     let word: String = chars[start..i].iter().collect();
-    if quote.is_some() && chars.get(i) == quote.as_ref() {
+    if quote.is_some_and(|q| q != '\\') && chars.get(i) == quote.as_ref() {
         i += 1;
     }
-    (!word.is_empty()).then_some((word, i))
+    (!word.is_empty()).then_some((word, i, quote.is_some()))
 }
 
 /// The commands of a line as written, assignments kept, split outside
@@ -8543,17 +9310,33 @@ fn pipelines(line: &str) -> Vec<String> {
 }
 
 fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
+    split_commands_with(line, keep_pipes, &mut Vec::new())
+}
+
+/// A here-document's body, whether its word was quoted, and the line that
+/// opened it.
+type Heredoc = (String, bool, String);
+
+/// [`split_commands`], with the body of each here-document put in
+/// `bodies` beside whether its word was quoted and the line that opened
+/// it: the shell expands the substitutions in an unquoted body, and a
+/// shell on that line runs any body as its script. A
+/// `$(...)`, backtick pair, `<(...)`, `>(...)` or subshell is one piece of
+/// its command, never split, so the commands inside it are read on their
+/// own by [`nested_lines`].
+fn split_commands_with(line: &str, keep_pipes: bool, bodies: &mut Vec<Heredoc>) -> Vec<String> {
     let mut parts = Vec::new();
+    let mut line_start = 0;
     let mut cur = String::new();
     let (mut single, mut double) = (false, false);
     let chars: Vec<char> = line.chars().collect();
-    let mut heredocs: Vec<String> = Vec::new();
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         if c == '<' && !single && !double && chars.get(i + 1) == Some(&'<') {
-            if let Some((word, next)) = heredoc_word(&chars, i + 2) {
-                heredocs.push(word);
+            if let Some((word, next, quoted)) = heredoc_word(&chars, i + 2) {
+                heredocs.push((word, quoted));
                 cur.extend(&chars[i..next]);
                 i = next;
                 continue;
@@ -8562,8 +9345,10 @@ fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
         if c == '\n' && !single && !double && !heredocs.is_empty() {
             // Skip each pending body, line by line, to its closing word.
             parts.push(std::mem::take(&mut cur));
+            let owner: String = chars[line_start..i].iter().collect();
             let mut j = i + 1;
-            for word in std::mem::take(&mut heredocs) {
+            for (word, quoted) in std::mem::take(&mut heredocs) {
+                let mut body = String::new();
                 loop {
                     let end = chars[j..]
                         .iter()
@@ -8571,12 +9356,33 @@ fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
                         .map_or(chars.len(), |p| j + p);
                     let text: String = chars[j..end].iter().collect();
                     j = (end + 1).min(chars.len());
-                    if text.trim() == word || end >= chars.len() {
+                    if text.trim() == word {
+                        break;
+                    }
+                    body.push_str(&text);
+                    body.push('\n');
+                    if end >= chars.len() {
                         break;
                     }
                 }
+                bodies.push((body, quoted, owner.clone()));
             }
             i = j;
+            line_start = j;
+            continue;
+        }
+        let opens = !single
+            && match c {
+                '$' => chars.get(i + 1) == Some(&'('),
+                '`' => true,
+                '<' | '>' => !double && chars.get(i + 1) == Some(&'('),
+                '(' => !double && opens_subshell(&chars, i),
+                _ => false,
+            };
+        if opens {
+            let end = nested_end(&chars, i);
+            cur.extend(&chars[i..end]);
+            i = end;
             continue;
         }
         match c {
@@ -8605,6 +9411,9 @@ fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
             ';' | '|' | '&' | '\n' if !single && !double => {
                 // `&` alone sends a job to the background; `&&` and `||`
                 // join; each ends the command before it.
+                if c == '\n' {
+                    line_start = i + 1;
+                }
                 parts.push(std::mem::take(&mut cur));
                 while chars.get(i + 1).is_some_and(|n| *n == c) {
                     i += 1;
@@ -8634,12 +9443,13 @@ pub struct PushCall {
 #[must_use]
 pub fn push_call(line: &str) -> Option<PushCall> {
     let mut dir: Option<String> = None;
-    for seg in raw_segments(line) {
+    for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         let cite = seg.split_whitespace().find_map(|w| {
             w.strip_prefix("LJOS_CITE=")
                 .map(|v| v.trim_matches(|c| c == '"' || c == '\'').to_string())
         });
-        let words = strip_prefixes(&seg);
+        let plain = plain_words(&seg);
+        let words: Vec<&str> = plain.iter().map(String::as_str).collect();
         match words.first().copied() {
             Some("cd") => {
                 if let Some(d) = words.get(1) {
@@ -9084,6 +9894,7 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.config/opencode/plugins/ljos.ts",
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
+    "/ljos/approvals/",
 ];
 
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
@@ -9167,6 +9978,25 @@ fn shell_words(segment: &str) -> Vec<String> {
     let mut chars = segment.chars().peekable();
     while let Some(c) = chars.next() {
         match (quote, c) {
+            (None, '$') if chars.peek() == Some(&'\'') => {
+                // `$'...'` quotes with C escapes: `$'git'` is `git`.
+                chars.next();
+                started = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '\'' => break,
+                        '\\' => match chars.next() {
+                            Some('n') => word.push('\n'),
+                            Some('t') => word.push('\t'),
+                            Some(e) => word.push(e),
+                            None => {}
+                        },
+                        q => word.push(q),
+                    }
+                }
+            }
+            // `$"..."` is a double-quoted string looked up for translation.
+            (None, '$') if chars.peek() == Some(&'"') => {}
             (Some(q), c) if c == q => quote = None,
             (Some('"'), '\\') => {
                 if let Some(n) = chars.next() {
@@ -9229,21 +10059,31 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
     }
     };
     let is_path_word = |w: &str| !w.chars().any(char::is_whitespace) && is_seat_path(w);
-    for seg in raw_segments(line) {
-        let mut words = shell_words(&seg);
-        while let Some(w) = words.first() {
-            let assign = w.split_once('=').is_some_and(|(k, _)| {
-                !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            });
-            if assign || ["sudo", "env", "time", "nohup", "exec"].contains(&w.as_str()) {
-                words.remove(0);
-            } else {
-                break;
-            }
-        }
+    if nested_too_deep(line) {
+        return Some(too_deep_rule().clone());
+    }
+    for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
+        // Every wrapper off, as a rule sees it: `nice tmux send-keys` and
+        // `timeout 5 xdotool type` are the tools they run.
+        let words = shell_words(&seg);
+        let (at, _) = prefix_end(&words);
+        let words = words[at..].to_vec();
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
         if first == "ljos" {
+            // `ljos approve` is the person's, typed in a terminal of their
+            // own. Every line this guard sees is an agent's tool call, so
+            // the agent never runs it, however it detaches from the runner
+            // or finds a terminal.
+            if words.get(1).map(String::as_str) == Some("approve") {
+                return Some(Rule {
+                    pattern: "seat-guard".into(),
+                    verdict: "deny".into(),
+                    reason: "`ljos approve` records the person's consent, and only the person \
+                             runs it. Ask the person to approve in the chat themselves."
+                        .into(),
+                });
+            }
             continue;
         }
         // Consent given in the chat is what the person submits; keys an
@@ -9452,16 +10292,42 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
     // Each command as written, so a rule on a prefix still sees it, and
     // with its prefixes off; never the raw line, which carries heredoc
     // bodies and other data the shell does not run.
-    let mut cues: Vec<String> = raw_segments(line)
+    if !rules.is_empty() && nested_too_deep(line) {
+        return Some(too_deep_rule());
+    }
+    let raw: Vec<String> = nested_lines(line, 0)
         .iter()
-        .map(|s| s.trim().to_string())
+        .flat_map(|l| raw_segments(l))
         .collect();
+    let mut cues: Vec<String> = raw.iter().map(|s| s.trim().to_string()).collect();
+    // Every word with its quotes off too: `git 'push'` and `git pu''sh`
+    // are the push they run.
+    for seg in &raw {
+        let mut words = plain_words(seg);
+        cues.push(words.join(" "));
+        drop_git_options(&mut words);
+        cues.push(words.join(" "));
+    }
     cues.extend(command_segments(line));
     let fires = |r: &Rule| cues.iter().any(|c| rule_matches(&r.pattern, c));
     rules
         .iter()
         .find(|r| r.verdict == "deny" && fires(r))
         .or_else(|| rules.iter().find(|r| r.verdict == "ask" && fires(r)))
+}
+
+/// The refusal of a line nested past [`NESTED_DEPTH`]: it is not read to
+/// the bottom, so no rule can say it is clean.
+fn too_deep_rule() -> &'static Rule {
+    static RULE: std::sync::OnceLock<Rule> = std::sync::OnceLock::new();
+    RULE.get_or_init(|| Rule {
+        pattern: "nested-too-deep".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "this line nests substitutions or scripts more than {NESTED_DEPTH} deep, past what the \
+             seat reads. Run it in steps."
+        ),
+    })
 }
 
 /// Anchors as the settles take them: `{"name": anchor, ...}`.
@@ -14697,7 +15563,9 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     let mut answered = false;
     // Each pipeline whole, in shell words: a quoted sentence that names a
     // command is one word, and a download piped into a shell is one call.
-    for seg in pipelines(line) {
+    // The substitutions and scripts inside the line run too, so each of
+    // their pipelines is judged as well: `echo $(git push -f)` is a push.
+    for seg in nested_lines(line, 0).iter().flat_map(|l| pipelines(l)) {
         let argv = shell_words(&seg);
         if argv.is_empty() {
             continue;
@@ -14773,17 +15641,165 @@ pub fn settle_flags_for(tags: &[String]) -> Vec<String> {
     }
 }
 
-/// [`consensus_steps_anchored`] with the model flags the issue's tags ask
-/// for on the model crate's settle.
+/// The anchor a voter with none of its own settles under when a persona
+/// votes on the same issue: it moves halfway toward the others. Under
+/// Friedkin-Johnsen a voter at susceptibility 1 keeps none of its ballot,
+/// so with no anchor of its own the seat lost every settle to any
+/// anchored persona, however few held that view.
+pub const DEFAULT_ANCHOR: f64 = 0.5;
+
+/// The susceptibilities a settle runs under, by voter. Empty when no
+/// persona voted, so a ballot of seats alone stays plain DeGroot. When
+/// one did, each persona keeps its own anchor and every other voter on
+/// the ballot, the seat included, takes [`DEFAULT_ANCHOR`].
+#[must_use]
+pub fn settle_anchors(
+    personas: &[Persona],
+    voters: &[String],
+) -> std::collections::BTreeMap<String, f64> {
+    let anchor_of = |v: &str| personas.iter().find(|p| p.name == v).map(|p| p.anchor);
+    if !voters.iter().any(|v| anchor_of(v).is_some()) {
+        return std::collections::BTreeMap::new();
+    }
+    voters
+        .iter()
+        .map(|v| (v.clone(), anchor_of(v).unwrap_or(DEFAULT_ANCHOR)))
+        .collect()
+}
+
+/// Polarization above this is away from zero: the voters did not meet.
+const POLARIZED: f64 = 1e-3;
+
+/// The settle's JSON in words: the shares, who leads and by how much,
+/// each voter's influence, and what each anchor did. `None` when the text
+/// is not a settle's JSON.
+#[must_use]
+pub fn settle_in_words(
+    json: &str,
+    anchors: &std::collections::BTreeMap<String, f64>,
+) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let options: Vec<&str> = v["options"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let shares: Vec<f64> = v["shares"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_f64)
+        .collect();
+    if options.is_empty() || options.len() != shares.len() {
+        return None;
+    }
+    let mut ranked: Vec<(&str, f64)> = options
+        .iter()
+        .copied()
+        .zip(shares.iter().copied())
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let shares_line = ranked
+        .iter()
+        .map(|(o, s)| format!("{o} {s:.3}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let model = match v["engine"].as_str() {
+        Some(e) if e.starts_with("degroot") && !anchors.is_empty() => {
+            "Friedkin-Johnsen".to_string()
+        }
+        Some(e) if e.starts_with("degroot") => "DeGroot".to_string(),
+        Some(e) => e.to_string(),
+        None => "settle".to_string(),
+    };
+    let agents: Vec<&str> = v["agents"]
+        .as_array()
+        .map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_str).collect());
+    let influence: Vec<f64> = v["influence"]
+        .as_array()
+        .map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_f64).collect());
+    let mut out = format!("settle ({model}, {} voters): {shares_line}\n", agents.len());
+    let tie = v["tie"].as_bool().unwrap_or(false);
+    if tie || ranked.len() < 2 {
+        out.push_str("no option leads: the settle is a tie\n");
+    } else {
+        out.push_str(&format!(
+            "{} leads by {:.3}\n",
+            ranked[0].0,
+            ranked[0].1 - ranked[1].1
+        ));
+    }
+    if let (Some(pol), Some(dis)) = (v["polarization"].as_f64(), v["disagreement"].as_f64()) {
+        out.push_str(&format!("polarization {pol:.3}, disagreement {dis:.3}"));
+        if pol > POLARIZED && ranked.len() > 1 {
+            out.push_str(": voters still sit apart after listening, so the shares are not a position the group reached");
+        }
+        out.push('\n');
+    }
+    if v["settled"].as_bool() == Some(false) {
+        out.push_str("the iteration stopped before it settled; read the shares as a trend\n");
+    }
+    if agents.len() == influence.len() && !agents.is_empty() {
+        let line = agents
+            .iter()
+            .zip(&influence)
+            .map(|(a, i)| format!("{a} {i:.3}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("influence: {line}\n"));
+    }
+    if !anchors.is_empty() {
+        let mut held: Vec<(&String, &f64)> = anchors.iter().collect();
+        held.sort_by(|a, b| a.1.total_cmp(b.1).then(a.0.cmp(b.0)));
+        let line = held
+            .iter()
+            .map(|(n, a)| format!("{n} keeps {:.2}", 1.0 - **a))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "anchors, as the share of its own ballot each voter keeps: {line}. \
+             A voter with no anchor of its own keeps {:.2} when a persona votes. \
+             The voter that keeps the most moves least and pulls the settle hardest.\n",
+            1.0 - DEFAULT_ANCHOR
+        ));
+    }
+    Some(out)
+}
+
+/// The names on an issue's ballots, from `vissue vote ID --json`.
+#[must_use]
+pub fn ballot_voters(issue: &str) -> Vec<String> {
+    run_captured("vissue", &["vote", issue, "--json"])
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s.stdout).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r["agent"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The steps [`consensus_steps_anchored`] builds, under the anchors
+/// [`settle_anchors`] gives for these voters, with the model flags the
+/// issue's tags ask for on the model crate's settle.
 pub fn consensus_steps_for(
     id: &str,
     have_ljos: bool,
     have_vissue: bool,
     trust: &[Trust],
-    personas: &[Persona],
+    anchors: &std::collections::BTreeMap<String, f64>,
     tags: &[String],
 ) -> Result<Vec<ConsensusStep>> {
-    let mut steps = consensus_steps_anchored(id, have_ljos, have_vissue, trust, personas)?;
+    let held: Vec<Persona> = anchors
+        .iter()
+        .map(|(name, anchor)| Persona {
+            name: name.clone(),
+            anchor: *anchor,
+            view: String::new(),
+            entities: Vec::new(),
+            runner: None,
+        })
+        .collect();
+    let mut steps = consensus_steps_anchored(id, have_ljos, have_vissue, trust, &held)?;
     let flags = settle_flags_for(tags);
     if !flags.is_empty() {
         for step in steps.iter_mut().filter(|s| s.bin == "ljos-consensus") {
@@ -18248,8 +19264,9 @@ mod tests {
         // The kind of work sets the dynamics: a broad-audience issue runs
         // bounded confidence on the model crate, and the tracker verb, which
         // has no such model, is left as it was.
+        let anchors = settle_anchors(&got, &["reviewer".to_string()]);
         let broad =
-            consensus_steps_for("x-1", true, true, &[], &got, &["broad".to_string()]).unwrap();
+            consensus_steps_for("x-1", true, true, &[], &anchors, &["broad".to_string()]).unwrap();
         assert!(
             broad[0].args.contains(&"--epsilon".to_string()),
             "{:?}",
@@ -18261,6 +19278,71 @@ mod tests {
             broad[1]
         );
         assert!(settle_flags_for(&["feature".to_string()]).is_empty());
+    }
+
+    /// with a persona on the ballot, the seat and every other unanchored
+    /// voter take the default anchor, so an anchored persona no longer
+    /// takes the whole settle; a ballot of seats alone stays DeGroot, and
+    /// the settle prints what each anchor did in words.
+    #[test]
+    fn an_unanchored_voter_takes_the_default_anchor_when_a_persona_votes() {
+        let skeptic = Persona {
+            name: "skeptic".into(),
+            anchor: 0.3,
+            view: "Doubts the change.".into(),
+            entities: vec![],
+            runner: None,
+        };
+        let personas = vec![skeptic];
+        let voters = vec!["ljos-bot".to_string(), "skeptic".to_string()];
+        let anchors = settle_anchors(&personas, &voters);
+        assert_eq!(anchors.get("skeptic"), Some(&0.3));
+        assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
+        assert!(
+            settle_anchors(&personas, &["ljos-bot".to_string(), "acme".to_string()]).is_empty()
+        );
+        let steps = consensus_steps_for("x-1", true, true, &[], &anchors, &[]).unwrap();
+        for step in &steps {
+            let at = step
+                .args
+                .iter()
+                .position(|a| a == "--susceptibility-of")
+                .expect("anchors passed");
+            assert_eq!(step.args[at + 1], r#"{"ljos-bot":0.5,"skeptic":0.3}"#);
+        }
+        // `ljos-consensus settle` on this ballot with those anchors.
+        let json = r#"{"options":["combmnz","rrf"],"shares":[0.4166666670331706,0.5833333329668294],
+            "rounds":21,"settled":true,"engine":"degroot-fj","agents":["ljos-bot","skeptic"],
+            "influence":[0.4166666666666667,0.5833333333333334],"tie":false}"#;
+        let words = settle_in_words(json, &anchors).unwrap();
+        assert!(
+            words.starts_with("settle (Friedkin-Johnsen, 2 voters): rrf 0.583, combmnz 0.417\n"),
+            "{words}"
+        );
+        assert!(words.contains("rrf leads by 0.167"), "{words}");
+        let polar = json.replace(
+            "\"tie\":false",
+            "\"tie\":false,\"polarization\":0.34,\"disagreement\":0.68",
+        );
+        let said = settle_in_words(&polar, &anchors).unwrap();
+        assert!(
+            said.contains("polarization 0.340, disagreement 0.680: voters still sit apart"),
+            "{said}"
+        );
+        assert!(
+            words.contains("influence: ljos-bot 0.417, skeptic 0.583"),
+            "{words}"
+        );
+        assert!(
+            words.contains("skeptic keeps 0.70, ljos-bot keeps 0.50"),
+            "{words}"
+        );
+        let tie = r#"{"options":["a","b"],"shares":[0.5,0.5],"engine":"degroot-fj","agents":["x","y"],"influence":[0.5,0.5],"tie":true}"#;
+        let words = settle_in_words(tie, &Default::default()).unwrap();
+        assert!(words.starts_with("settle (DeGroot, 2 voters)"), "{words}");
+        assert!(words.contains("no option leads"), "{words}");
+        assert!(!words.contains("anchors"), "{words}");
+        assert!(settle_in_words("not json", &anchors).is_none());
     }
 
     /// Playbooks are kind playbook, latest per name, unreviewed; sitting
@@ -19227,6 +20309,27 @@ mod tests {
     #[test]
     fn onboarding_a_config_file_runner_writes_once() {
         let _g = env_guard();
+        // Named stores, so onboarding leaves the real home's alone.
+        // The host key step writes to the real config home and asks the
+        // real deedar; neither belongs in a test.
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
+            std::env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
+            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+        }
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                // SAFETY: still under the test's lock.
+                unsafe {
+                    std::env::remove_var("DEEDAR_URL");
+                    std::env::remove_var("VISSUE_ROOT");
+                    std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+                }
+            }
+        }
+        let _unset = Unset;
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
@@ -19307,6 +20410,10 @@ mod tests {
             // refusal says so and the rest of the check needs the binary.
             Err(e) => {
                 assert!(e.to_string().contains("ljos-mcp not on PATH"), "{e}");
+                // SAFETY: the lock above is still held.
+                unsafe {
+                    std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+                }
                 return;
             }
         };
@@ -19342,7 +20449,101 @@ mod tests {
             1,
             "the entry was appended twice"
         );
+        // SAFETY: the lock above is still held.
+        unsafe {
+            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// with no variable naming them, onboard makes the deed
+    /// store deedar falls back to and a tracker that vissue's config names,
+    /// and leaves both alone after.
+    #[test]
+    fn onboard_makes_the_default_deed_store_and_tracker() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config = dir.path().join("config");
+        let keys = [
+            "DEEDAR_URL",
+            "ISSUE_ROOT",
+            "VISSUE_ROOT",
+            "VISSUE_CONFIG",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_DATA_HOME", &data);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+        }
+        let store = data.join("deedar/store");
+        let root = data.join("vissue/tracker");
+        let cfg = config.join("vissue/config.toml");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, "[routes]\n").unwrap();
+
+        let dry = [super::deed_store_step(true), super::tracker_step(true)];
+        assert!(
+            dry.iter().all(|s| s.ok && s.detail.starts_with("would")),
+            "{dry:?}"
+        );
+        assert!(!store.exists() && !root.exists());
+
+        let made = [super::deed_store_step(false), super::tracker_step(false)];
+        assert!(
+            made.iter().all(|s| s.ok && s.detail.starts_with("created")),
+            "{made:?}"
+        );
+        assert!(store.is_dir());
+        assert!(root.join("Software").is_dir());
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        let parsed: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["root"].as_str(),
+            Some(root.display().to_string().as_str())
+        );
+        assert!(text.ends_with("\n[routes]\n"), "{text}");
+
+        let again = [super::deed_store_step(false), super::tracker_step(false)];
+        assert!(again[0].detail.ends_with("exists"), "{again:?}");
+        assert!(again[1].detail.contains("sets root"), "{again:?}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text, "written once");
+
+        // vissue itself, from another directory, resolves the new root.
+        if which::which("vissue").is_ok() {
+            let out = std::process::Command::new("vissue")
+                .arg("identity")
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(said.contains(&format!("root={}", root.display())), "{said}");
+        }
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", "/elsewhere");
+            std::env::set_var("DEEDAR_URL", "file:///elsewhere");
+        }
+        assert!(super::tracker_step(true)
+            .detail
+            .contains("VISSUE_ROOT=/elsewhere"));
+        assert!(super::deed_store_step(true).detail.contains("DEEDAR_URL="));
+        // SAFETY: as above.
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     /// a demo cast started from an agent's shell left hold
@@ -19532,8 +20733,71 @@ mod tests {
     }
 
     #[test]
+    fn onboard_reports_whether_the_deed_store_lists_the_new_host_key() {
+        let (said, ok) = super::host_accept_detail(Ok(
+            "host key: ed25519:ab, added as a signer to /s/layout\n".into(),
+        ));
+        assert!(ok && said == "host key: ed25519:ab, added as a signer to /s/layout");
+        let (said, ok) = super::host_accept_detail(Err(
+            "deedar: set DEEDAR_URL or pass --url; no store at /s".into(),
+        ));
+        assert!(ok && said.contains("first deed"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err(
+            "deedar: host key ed25519:ab is not a signer /s/layout lists".into(),
+        ));
+        assert!(!ok && said.contains("no `host accept`"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err("deedar: unknown command host".into()));
+        assert!(!ok && said.contains("no `host accept`"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err("deedar not on PATH".into()));
+        assert!(!ok && said.contains("not on PATH"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err("deedar: layout: bad\nmore".into()));
+        assert!(
+            !ok && said == "deedar host accept: deedar: layout: bad",
+            "{said}"
+        );
+    }
+
+    /// an existing host key is still offered to the deed store, so a seat
+    /// onboarded before the store listed it is fixed by onboarding again.
+    #[test]
+    fn onboard_offers_an_existing_host_key_to_the_deed_store() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("host.key");
+        std::fs::write(&key, [7u8; 32]).unwrap();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &key);
+        }
+        let step = super::host_key_step(true);
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+        }
+        assert!(step.ok, "{step:?}");
+        assert!(step.detail.contains("exists; would list it"), "{step:?}");
+    }
+
+    #[test]
     fn a_shell_runner_writes_the_skill_and_the_seat_env() {
         let _g = env_guard();
+        // Named stores, so onboarding leaves the real home's alone.
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
+            std::env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
+        }
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                // SAFETY: still under the test's lock.
+                unsafe {
+                    std::env::remove_var("DEEDAR_URL");
+                    std::env::remove_var("VISSUE_ROOT");
+                }
+            }
+        }
+        let _unset = Unset;
         // SAFETY: the lock above is the only environment this test touches.
         unsafe {
             std::env::set_var("PACKSET_URL", "off");
@@ -21396,6 +22660,191 @@ mod tests {
         ] {
             assert!(verdict_for(&rules, line).is_none(), "{line}");
         }
+    }
+
+    /// a command substitution, backticks, a process substitution, a subshell,
+    /// a compound command and `eval` all run commands, nested or not, so a
+    /// rule sees each; single quotes, an escaped `$` and a quoted heredoc
+    /// stay data.
+    #[test]
+    fn a_rule_sees_the_commands_inside_a_substitution() {
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        for line in [
+            "echo $(git push -f)",
+            "x=$(git push -f)",
+            "echo \"$(git push -f)\"",
+            "echo `git push -f`",
+            "echo `echo \\`git push -f\\``",
+            "echo $(echo $(echo $(git push -f)))",
+            "echo \"a $(echo \"b; $(git push -f)\")\"",
+            "echo $(cd r && git push -f)",
+            "echo $((1 + $(git push -f)))",
+            "cat <(git push -f)",
+            "tee >(git push -f) < /dev/null",
+            "(cd r; git push -f)",
+            "{ git push -f; }",
+            "if true; then git push -f; fi",
+            "while git push -f; do :; done",
+            "! git push -f",
+            "coproc git push -f",
+            "eval 'git push -f'",
+            "eval git push -f",
+            "sh -c 'echo $(git push -f)'",
+            "find . -maxdepth 0 -exec git push -f \\;",
+            "cat <<EOF\n$(git push -f)\nEOF",
+            "\\git push -f",
+            "'git' push -f",
+            "/usr/bin/git push -f",
+            "git -C repo -c core.x=1 push -f",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+            assert!(push_call(line).is_some(), "push gate: {line}");
+        }
+        for line in [
+            "echo '$(git push -f)'",
+            "echo \\$(git push -f)",
+            "echo \"(git push -f)\"",
+            "cat <<'EOF'\n$(git push -f)\nEOF",
+            "x=(git push -f)",
+            "git commit -m \"$(cat msg) git push\"",
+            "echo $(echo git push)",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
+        // A substitution is one piece of its command, so a `;` inside it
+        // does not cut the outer command in two.
+        assert_eq!(
+            command_segments("echo $(true; git push -f) done"),
+            ["echo $(true; git push -f) done", "true", "git push -f"]
+        );
+    }
+
+    /// The forms a line can take to run a command without writing it plain:
+    /// case branches, functions, ANSI-C quotes, quoted subcommands, line
+    /// continuations, wrappers, scripts handed over in flags, here-strings,
+    /// here-documents and pipes into a shell, aliases and ssh.
+    #[test]
+    fn a_rule_sees_a_command_however_the_line_hides_it() {
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        for line in [
+            "case x in x) git push -f;; esac",
+            "case x in\nx|y) git push -f;;\nesac",
+            "f() { git push -f; }; f",
+            "f () { git push -f; }",
+            "function f { git push -f; }; f",
+            "$'git' push -f",
+            "git $'push' -f",
+            "git 'push' -f",
+            "git pu''sh -f",
+            "git p\\ush -f",
+            "git \\\npush -f",
+            "flock /tmp/l git push -f",
+            "flock -w 5 /tmp/l git push -f",
+            "flock -c 'git push -f' /tmp/l",
+            "ionice -c3 git push -f",
+            "chronic git push -f",
+            "unbuffer git push -f",
+            "watch -n 5 git push -f",
+            "script -qc 'git push -f' /dev/null",
+            "su -c 'git push -f' bob",
+            "su -lc 'git push -f'",
+            "nix-shell --run 'git push -f'",
+            "trap 'git push -f' EXIT",
+            "bash <<< 'git push -f'",
+            "bash -s <<<'git push -f'",
+            "bash <<EOF\ngit push -f\nEOF",
+            "sh <<'EOF'\ngit push -f\nEOF",
+            "cat <<EOF | sh\ngit push -f\nEOF",
+            "echo 'git push -f' | sh",
+            "printf 'git push -f\\n' | bash",
+            "alias p='git push -f'; p",
+            "git -c alias.p=push p -f",
+            "ssh host git push -f",
+            "ssh -p 22 host 'cd r && git push -f'",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+        }
+        for line in [
+            "echo hi",
+            "git commit -m 'x; git push'",
+            "echo 'git push -f' > notes.txt",
+            "cat <<'EOF' > f\ngit push -f\nEOF",
+            "printf '%s' 'git push' > f",
+            "case $x in a) echo ok;; esac",
+            "git log --format='%h (x)'",
+            "git -c alias.p='!git push' p",
+            "ssh host",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
+    }
+
+    /// A line nested past what the seat reads is refused whole, by the
+    /// rules and by the seat guard, so depth is not a way past either.
+    #[test]
+    fn a_line_nested_too_deep_is_refused() {
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        let mut line = "git push -f".to_string();
+        for _ in 0..=NESTED_DEPTH {
+            line = format!("echo $({line})");
+        }
+        assert!(nested_too_deep(&line));
+        let r = verdict_for(&rules, &line).expect("refused");
+        assert_eq!(r.pattern, "nested-too-deep");
+        assert!(seat_guard(&line).is_some());
+        let mut shallow = "git status".to_string();
+        for _ in 0..NESTED_DEPTH {
+            shallow = format!("echo $({shallow})");
+        }
+        assert!(!nested_too_deep(&shallow));
+        assert!(verdict_for(&rules, &shallow).is_none());
+        assert!(
+            verdict_for(&[], &line).is_none(),
+            "no rules, nothing to refuse"
+        );
+    }
+
+    /// The seat guard takes every wrapper off before it looks for a tool
+    /// that types into a pane, as the rules do.
+    #[test]
+    fn the_seat_guard_sees_through_every_wrapper() {
+        for line in [
+            "tmux send-keys -t x approve Enter",
+            "nice tmux send-keys -t x approve Enter",
+            "timeout 5 xdotool type approve",
+            "command tmux send-keys approve",
+            "stdbuf -oL tmux send-keys approve",
+            "doas -u me tmux send-keys approve",
+            "f() { tmux send-keys approve; }; f",
+            "bash <<< 'tmux send-keys approve'",
+        ] {
+            assert!(seat_guard(line).is_some(), "{line}");
+        }
+        assert!(seat_guard("nice tmux list-panes").is_none());
+        // The person's consent verb, and the store it writes, are not the
+        // agent's to touch.
+        for line in [
+            "ljos approve 0123",
+            "setsid -f script -qc 'env -i ljos approve 0123' /dev/null",
+            "(sh -c 'sleep 1; ~/.cargo/bin/ljos approve 0123' &)",
+            "touch /run/user/1000/ljos/approvals/0123.json",
+        ] {
+            assert!(seat_guard(line).is_some(), "{line}");
+        }
+        assert!(seat_guard("ljos seat").is_none());
+        assert!(seat_guard("cat /run/user/1000/ljos/approvals/0123.json").is_none());
     }
 
     /// prefixes come off with their flags and the values those flags take,

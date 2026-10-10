@@ -158,8 +158,9 @@ rules still apply.
 
 For clients without form elicitation, reply `approve REQUEST_ID` in this
 conversation, or run `ljos approve REQUEST_ID` in your own terminal. The
-terminal command refuses to run under a coding runner. A chat message that
-does not name that id grants nothing.
+terminal command refuses to run under a coding runner, and the seat's guard
+refuses it in any command an agent runs. A chat message that does not name
+that id grants nothing.
 
 A client must load the tool before using it, so reconnect after upgrading
 from a version without `ljos_request_approval`. When other calls forward to an
@@ -190,9 +191,13 @@ seat. `ljos seat` prints both names and where they came from. `ljos onboard`
 prints the one MCP entry any runner takes, and `ljos protocol` prints the
 text an agent reads first.
 
-Nothing needs a variable set. `ljos remember` starts the writer when none is
-answering. The seat's memory is the one workspace `seat` from any directory,
-and every claim carries the seat that wrote it.
+Nothing needs a variable set. `ljos onboard` makes the deed store deedar
+falls back to (`~/.local/share/deedar/store`) and a tracker under
+`~/.local/share/vissue/tracker` that `~/.config/vissue/config.toml` names,
+unless `DEEDAR_URL` or `VISSUE_ROOT` already names one. `ljos remember`
+starts the writer when none is answering. The seat's memory is the one
+workspace `seat` from any directory, and every claim carries the seat that
+wrote it.
 
 ## Mail
 
@@ -249,7 +254,7 @@ ljos playbooks                                 # sit, arena, land, company-panel
 ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer
-ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it
+ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
