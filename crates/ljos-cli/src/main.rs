@@ -1481,6 +1481,9 @@ fn main() -> Result<()> {
                 // A session started from a compaction hears what it holds,
                 // where the runner takes SessionStart context.
                 "SessionStart" => {
+                    // A new session starts the encoder loading, so the first
+                    // prompt does not wait on it.
+                    let _ = ljos_cli::encoder_warming();
                     let compacted = serde_json::from_str::<serde_json::Value>(input.trim())
                         .ok()
                         .and_then(|v| {

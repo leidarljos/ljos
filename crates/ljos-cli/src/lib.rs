@@ -3934,6 +3934,19 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     if let Some(key) = due_key {
         pending.push(key);
     }
+    // While the encoder loads, a search waits on it past the hook's
+    // deadline and the answer is lost. The prompt hears that memory is
+    // starting, once a session, and the search waits for a later prompt.
+    if encoder_warming() {
+        if !seen_ids(call.session.as_deref()).contains(ENCODER_WARMING_KEY) {
+            if !nudge.is_empty() {
+                nudge.push('\n');
+            }
+            nudge.push_str(ENCODER_WARMING_NOTE);
+            pending.push(ENCODER_WARMING_KEY.to_string());
+        }
+        return (nudge, pending);
+    }
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
     // when it does not answer in time, the local path below runs.
@@ -5284,6 +5297,89 @@ pub fn subagent_stop_reason(
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
+/// What a prompt hears while the pack's encoder loads. On a new machine the
+/// first load downloads the model, which takes longer than a hook may.
+pub const ENCODER_WARMING_NOTE: &str = "ljos memory is starting: the pack is \
+loading its search model, which a new machine downloads first. Memories come \
+back on a later prompt; nothing needs doing.";
+
+/// The seen key that says the warming note went out in this session.
+const ENCODER_WARMING_KEY: &str = "encoder-warming";
+
+/// How long one warm-up stands before another may start.
+const ENCODER_WARM_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether the pack's encoder has not answered since packsetd started: it is
+/// on, its binary is there, and no dense call came back yet. A search then
+/// waits for the model to load, and on a new machine for its download. A
+/// status without the `answering` field, from an older packsetd, says nothing
+/// about it, and is not cold.
+#[must_use]
+pub fn encoder_cold(status: &Value) -> bool {
+    let embedder = &status["embedder"];
+    embedder["available"].as_bool().unwrap_or(false)
+        && embedder.get("answering").is_some_and(Value::is_null)
+}
+
+/// Whether a warm-up may start: no marker, or one older than
+/// [`ENCODER_WARM_EVERY`]. Taking it writes the marker, so a burst of hooks
+/// starts one.
+fn take_warm_turn(marker: &Path) -> bool {
+    let fresh = std::fs::metadata(marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < ENCODER_WARM_EVERY);
+    if fresh {
+        return false;
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(marker, "").is_ok()
+}
+
+/// The warm-up: one reranked search, run by `exe` in its own process group,
+/// so packsetd loads the encoder and the reranker off the hook's clock, and
+/// a runner that kills the hook's group does not stop it.
+#[must_use]
+pub fn warm_command(exe: &Path) -> std::process::Command {
+    use std::process::Stdio;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["search", "-n", "1", "--rerank", "the pack is open"])
+        .env_remove("LJOS_IN_HOOK")
+        .env_remove("PACKSET_TIMEOUT_MS")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+/// Whether the pack's encoder is still loading. When it is, a warm-up
+/// starts in the background, at most one per [`ENCODER_WARM_EVERY`]. The
+/// status call has half a second; a pack that does not answer in that time
+/// is not called cold, and the search goes on as before.
+pub fn encoder_warming() -> bool {
+    let cold = with_pack_timeout(500, || {
+        pack()
+            .ok()
+            .and_then(|client| client.status(None).ok())
+            .is_some_and(|status| encoder_cold(&status))
+    });
+    if cold && take_warm_turn(&runtime_dir().join("encoder-warming")) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = warm_command(&exe).spawn();
+        }
+    }
+    cold
+}
+
 /// Whether an identical call (event, session, text) started in the last 20
 /// seconds. A runner that loads another runner's hook file runs the same
 /// hook twice for one event, and both queue on the pack's one reranker.
@@ -5861,10 +5957,16 @@ pub fn shell_exit(fail_on_deny: bool, text: &str) -> i32 {
 /// `allow`. An `ask` that Cursor would not enforce is a deny that says
 /// so. Cursor gives context to the model as `additional_context` after a
 /// tool result, a failed one, or at session start. A held stop is a
-/// `followup_message`.
+/// `followup_message`. `beforeMCPExecution` and `beforeReadFile` are
+/// permission events too, and Cursor blocks the call when such a hook
+/// prints nothing and `failClosed` is set. The seat judges those calls on
+/// `preToolUse`, which Cursor fires for every tool, so here they allow.
 fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
+        "beforeMCPExecution" | "beforeReadFile" => {
+            out.insert("permission".into(), Value::String("allow".into()));
+        }
         "PreToolUse" => {
             let (permission, reason) = match verdict {
                 Some(r) if r.verdict == "ask" && !call.shape.asks() => (
@@ -11806,6 +11908,8 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("ljos-policyd", "ljos-policyd"),
     ("ljos-consensus", "ljos-consensus"),
     ("vissue", "vissue-cli"),
+    // The tracker server the vissue plugin runs; its own crate.
+    ("vissue-mcp", "vissue-mcp"),
     ("deedar", "deedar-cli"),
     ("claimdag", "claimdag-cli"),
     ("packset", "packset"),
@@ -22831,6 +22935,55 @@ mod tests {
         }
     }
 
+    /// A pack whose encoder never answered since it started is cold, so a
+    /// prompt does not wait on the model; one that answered, one whose
+    /// encoder failed, one without an encoder, and an older status without
+    /// the field are not.
+    #[test]
+    fn a_pack_is_cold_until_its_encoder_answers_once() {
+        let status = |embedder: Value| serde_json::json!({ "embedder": embedder });
+        assert!(super::encoder_cold(&status(serde_json::json!({
+            "enabled": true, "binary": "/x/packset-embed", "available": true, "answering": null
+        }))));
+        for warm in [
+            serde_json::json!({"enabled": true, "available": true, "answering": true}),
+            serde_json::json!({"enabled": true, "available": false, "answering": false}),
+            serde_json::json!({"enabled": true, "binary": null, "available": false, "answering": null}),
+            serde_json::json!({"enabled": true, "available": true}),
+        ] {
+            assert!(!super::encoder_cold(&status(warm.clone())), "{warm}");
+        }
+        assert!(!super::encoder_cold(&serde_json::json!({})));
+    }
+
+    /// One warm-up per window: the first hook takes the turn and writes the
+    /// marker, the next one inside the window does not, and the warm-up is a
+    /// reranked search that does not inherit the hook's clock.
+    #[test]
+    fn a_burst_of_hooks_starts_one_warm_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("run/encoder-warming");
+        assert!(super::take_warm_turn(&marker));
+        assert!(marker.exists());
+        assert!(!super::take_warm_turn(&marker));
+        let command = super::warm_command(std::path::Path::new("/opt/ljos"));
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["search", "-n", "1", "--rerank", "the pack is open"]);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.contains(&"LJOS_IN_HOOK".to_string()), "{removed:?}");
+        assert!(
+            removed.contains(&"PACKSET_TIMEOUT_MS".to_string()),
+            "{removed:?}"
+        );
+    }
+
     /// Cursor is read off its payload, whichever file registered the hook,
     /// and answered in its contract ([`cursor_output`]).
     #[test]
@@ -22873,6 +23026,24 @@ mod tests {
             hook_output_ruled(&post, "a note", None),
             "{\"additional_context\":\"a note\"}\n"
         );
+        for gate in [
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/README.md","content":"x"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_search","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#,
+        ] {
+            // Registered with failClosed, so an empty answer would block
+            // every file read and MCP call.
+            let call = hook_call(gate);
+            assert_eq!(
+                hook_output_ruled(&call, "", None),
+                "{\"permission\":\"allow\"}\n",
+                "{gate}"
+            );
+            assert_eq!(
+                hook_output_ruled(&call, "", Some(&ask)),
+                "{\"permission\":\"allow\"}\n",
+                "{gate}"
+            );
+        }
         let failed = r#"{"cursor_version":"2.4.0","hook_event_name":"postToolUseFailure","error_message":"exit 2"}"#;
         assert_eq!(hook_call(failed).event, "PostToolUseFailure");
         assert_eq!(tool_error(failed), "exit 2");
@@ -25285,6 +25456,25 @@ mod tests {
             vissue_entry["mcpServers"]["vissue"]["command"],
             "vissue-mcp"
         );
+        // The server the vissue plugin runs is its own crate, so every
+        // install line names it and the doctor knows where it comes from.
+        assert!(super::SEAT_BINS.contains(&("vissue-mcp", "vissue-mcp")));
+        for file in [
+            "README.md",
+            "bin/ljos-plugin",
+            "skills/ljos-setup/SKILL.md",
+            "docs/source/getting-started.rst",
+            "docs/source/index.rst",
+            "docs/orgmode/getting-started.org",
+            "docs/orgmode/index.org",
+        ] {
+            let text = read(file);
+            let line = text
+                .lines()
+                .find(|l| l.contains("binstall --locked ljos"))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            assert!(line.contains(" vissue-mcp "), "{file}: {line}");
+        }
 
         let command = plugin["mcpServers"]["ljos"]["command"].as_str().unwrap();
         assert_eq!(plugin["mcpServers"]["ljos"]["args"][0], "ljos-mcp");
@@ -25313,6 +25503,117 @@ mod tests {
                 "{rel} contains a home directory path"
             );
             assert!(!text.contains("HaoZeke"), "{rel} names a fork");
+        }
+    }
+
+    /// The same tree is a Cursor plugin: `.cursor-plugin/plugin.json` names
+    /// the seat's version and repository, every path it declares exists and
+    /// stays inside the tree, `mcp.json` starts `ljos-mcp` through the
+    /// launcher, and `hooks/cursor.json` takes the seat's Cursor events in
+    /// Cursor's flat shape. `beforeMCPExecution` and `beforeReadFile` are
+    /// left to `preToolUse`, which Cursor fires for every tool, so an older
+    /// binary that prints nothing on them cannot block a read. The plugin
+    /// adds `sessionStart`, where a missing seat says how to install it.
+    /// Claude's hooks stay in `hooks/hooks.json`, which Cursor does not read
+    /// because the manifest names its own file.
+    #[test]
+    fn the_cursor_plugin_ships_the_seat() {
+        use serde_json::Value;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        let plugin: Value = serde_json::from_str(&read(".cursor-plugin/plugin.json")).unwrap();
+        let claude: Value = serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
+        assert_eq!(plugin["name"], "ljos");
+        assert_eq!(plugin["version"], claude["version"]);
+        assert_eq!(plugin["repository"], claude["repository"]);
+        assert_eq!(plugin["license"], claude["license"]);
+        for key in [
+            "skills",
+            "rules",
+            "agents",
+            "commands",
+            "hooks",
+            "mcpServers",
+            "logo",
+        ] {
+            let rel = plugin[key].as_str().unwrap_or_else(|| panic!("{key}"));
+            assert!(
+                !rel.starts_with('/') && !rel.contains(".."),
+                "{key}: {rel} leaves the tree"
+            );
+            assert!(root.join(rel).exists(), "{key}: {rel} is missing");
+        }
+        assert_eq!(plugin["hooks"], "./hooks/cursor.json");
+
+        let mcp: Value = serde_json::from_str(&read("mcp.json")).unwrap();
+        let server = &mcp["mcpServers"]["ljos"];
+        assert_eq!(server["command"], "${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin");
+        assert_eq!(server["args"][0], "ljos-mcp");
+
+        let hooks: Value = serde_json::from_str(&read("hooks/cursor.json")).unwrap();
+        assert_eq!(hooks["version"], 1);
+        let left_to_pre_tool_use = ["beforeMCPExecution", "beforeReadFile"];
+        let mut want: Vec<(&str, u64)> = vec![("sessionStart", 5)];
+        want.extend(
+            super::CURSOR_HOOK_EVENTS
+                .iter()
+                .filter(|(e, _)| !left_to_pre_tool_use.contains(e))
+                .copied(),
+        );
+        let obj = hooks["hooks"].as_object().expect("hooks object");
+        let mut have: Vec<&str> = obj.keys().map(String::as_str).collect();
+        let mut named: Vec<&str> = want.iter().map(|(e, _)| *e).collect();
+        have.sort_unstable();
+        named.sort_unstable();
+        assert_eq!(have, named);
+        for (event, timeout) in &want {
+            let entries = obj[*event].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{event}");
+            let entry = &entries[0];
+            assert_eq!(
+                entry["command"], "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+                "{event}"
+            );
+            assert_eq!(entry["timeout"], *timeout, "{event}");
+            assert_eq!(
+                entry["failClosed"].as_bool().unwrap_or(false),
+                super::CURSOR_FAIL_CLOSED.contains(event),
+                "{event}"
+            );
+        }
+
+        let front = |rel: &str| {
+            let text = read(rel);
+            let parts: Vec<&str> = text.splitn(3, "---\n").collect();
+            assert!(
+                parts.len() == 3 && parts[0].is_empty(),
+                "{rel} has no front matter"
+            );
+            parts[1].to_string()
+        };
+        for dir in ["skills", "agents", "commands", "rules"] {
+            for e in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+                let rel = if dir == "skills" {
+                    format!("skills/{}/SKILL.md", e.file_name().to_string_lossy())
+                } else {
+                    format!("{dir}/{}", e.file_name().to_string_lossy())
+                };
+                let head = front(&rel);
+                assert!(head.contains("description:"), "{rel}");
+                if dir == "skills" {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    assert!(head.contains(&format!("name: {name}\n")), "{rel}");
+                } else if dir == "rules" {
+                    assert!(head.contains("alwaysApply:"), "{rel}");
+                } else {
+                    assert!(head.contains("name: "), "{rel}");
+                }
+                let text = read(&rel);
+                assert!(!text.contains("/home/"), "{rel} names a home directory");
+                assert!(!text.contains("HaoZeke"), "{rel} names a fork");
+            }
         }
     }
 

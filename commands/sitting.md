@@ -1,4 +1,5 @@
 ---
+name: sitting
 description: Open a sitting on one issue
 argument-hint: <issue-id>
 allowed-tools: Bash(ljos:*)
