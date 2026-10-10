@@ -1592,7 +1592,8 @@ fn main() -> Result<()> {
             // A persona on the ballot settles under its anchor, and every
             // other voter, the seat too, under the default one; a ballot
             // of seats alone stays plain DeGroot.
-            let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::ballot_voters(&id));
+            let ballots = ljos_cli::ballot_rows(&id);
+            let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
             let mut steps = consensus_steps_for(
                 &id,
                 on_path("ljos-consensus"),
@@ -1618,6 +1619,10 @@ fn main() -> Result<()> {
                 match ljos_cli::settle_in_words(&said.stdout, &anchors) {
                     Some(words) => print!("{words}"),
                     None => print!("{}", said.stdout),
+                }
+                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
+                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
+                    print!("{split}");
                 }
             }
             // Beside the settle: the surprisingly popular answer when two

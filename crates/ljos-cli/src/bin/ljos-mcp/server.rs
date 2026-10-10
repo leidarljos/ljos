@@ -1450,7 +1450,8 @@ impl LjosServer {
             .unwrap_or_default();
         // As the CLI: a persona on the ballot settles under its anchor and
         // every other voter under the default one.
-        let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::ballot_voters(&args.issue));
+        let ballots = ljos_cli::ballot_rows(&args.issue);
+        let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         let mut steps = consensus_steps_for(
             &args.issue,
             on_path("ljos-consensus"),
@@ -1479,6 +1480,13 @@ impl LjosServer {
                 if let Some(words) = ljos_cli::settle_in_words(&said.text, &anchors) {
                     out.push(Said {
                         text: words,
+                        aside: None,
+                    });
+                }
+                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
+                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
+                    out.push(Said {
+                        text: split,
                         aside: None,
                     });
                 }
