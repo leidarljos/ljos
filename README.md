@@ -18,7 +18,7 @@ opencode, omp, hermes and Antigravity's `agy`.
 ## Five minutes
 
 ```
-curl -fsSL https://raw.githubusercontent.com/leidarljos/ljos/main/scripts/install.sh | sh
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
@@ -31,7 +31,12 @@ packset (memory), vissue (the tracker), deedar (records of work), claimdag
 (who works on what), ljos-policyd (the command check) and ljos-consensus
 (voting). `--with-embed` adds `packset-embed`, the optional encoder for
 meaning-based search; without it search matches words, and nothing needs ONNX
-Runtime. `ljos doctor` names any part that is missing. To install by hand:
+Runtime. `ljos doctor` names any part that is missing.
+
+Each ljos release attaches the script as `install.sh`, starting with the
+first release after 0.28.0. Until that release is out the link is a 404, and
+the hand install below works. Read the script before you run it; it is
+`scripts/install.sh` in this repository. To install by hand:
 
 ```
 cargo binstall --locked ljos packset vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
