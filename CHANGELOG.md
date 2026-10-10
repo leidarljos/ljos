@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `cargo binstall ljos` builds from source on a target with no release tarball. The `compile` strategy was off, so binstall failed on x86_64 macOS, aarch64 Linux and Windows. cargo-quickinstall stays off, since its build has `ljos` without `ljos-mcp`.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)
