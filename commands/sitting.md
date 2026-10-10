@@ -1,6 +1,6 @@
 ---
 description: Open a sitting on one issue
-argument-hint: ISSUE
+argument-hint: <issue-id>
 allowed-tools: Bash(ljos:*)
 ---
 

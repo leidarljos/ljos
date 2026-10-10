@@ -1,6 +1,8 @@
 ---
 description: Close a sitting and record its lesson
-argument-hint: ISSUE --lesson "..."
+# proseguard:off rgoswami.EmDashInText
+argument-hint: <issue-id> --lesson <text>
+# proseguard:on rgoswami.EmDashInText
 allowed-tools: Bash(ljos:*)
 ---
 

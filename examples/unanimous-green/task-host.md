@@ -27,12 +27,12 @@ name on every vote.
 3. Apply one tree into the checkout. Prefer the independently correct
    implementation.
 4. `vissue tree <id>` and `vissue children <id>`. Any TODO, STARTED,
-   or BLOCKED descendant is not GREEN. Descend those children first.
+   or BLOCKED descendant is not green. Descend those children first.
 5. Four voters, `VISSUE_AGENT` set. Each:
-   - reads the shipped files
+   - reads the files in the applied tree
    - files every defect as a child before voting
    - `ljos vote <id> --for accept` or `--for reject`
-6. Host reads `ljos consensus <id>`. GREEN only when it holds accept
+6. Host reads `ljos consensus <id>`. Green only when it reports accept
    at 1.000 and all four seats are in the drawer. A count is not the
    model.
 7. `ljos complete` on the session node. Do not mark the ticket DONE

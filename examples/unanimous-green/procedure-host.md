@@ -24,12 +24,12 @@ name on every vote.
    `ljos deed <id> --add <accession>`.
 3. Apply one tree. Conventional commit if you commit.
 4. `vissue tree <id>` and `vissue children <id>`. Open descendants
-   are not GREEN.
+   are not green.
 5. Four voters. Each: `VISSUE_AGENT=<seat> ljos vote <id> --for accept|reject`.
 6. `ljos consensus <id>` must hold accept at 1.000 with all four
    seats present. Do not report a vote count as consensus.
 7. `ljos complete` on the session node. Completing does not close
    the ticket.
 
-Point the host procedure file at this page. Do not put the loop in a
-public repository as process narration.
+Each session runs from the host procedure file, which points at this
+page. Do not put the loop in a public repository as process narration.
