@@ -3721,10 +3721,58 @@ fn cue_content_words(text: &str) -> Vec<String> {
     words
 }
 
+/// Three-letter words that sit in most sentences, prompts and lessons
+/// alike. Tool names of three letters (`npm`, `pip`, `git`, `sql`) are
+/// not on it: a prompt names its tool, and so does the preference about
+/// that tool.
+const CUE_STOP_SHORT: &[&str] = &[
+    "add", "all", "and", "any", "are", "but", "can", "did", "few", "for", "get", "got", "had",
+    "has", "her", "him", "his", "how", "its", "let", "may", "new", "not", "now", "off", "old",
+    "one", "our", "out", "own", "put", "run", "say", "see", "set", "she", "the", "too", "try",
+    "two", "use", "via", "was", "way", "who", "why", "yes", "yet", "you",
+];
+
+/// A word with a plural `s` taken off: `migrations` reads as
+/// `migration`, `dependencies` as `dependency`. `class` and `status`
+/// keep theirs.
+fn singular(w: &str) -> String {
+    if w.len() > 4 && w.ends_with("ies") {
+        return format!("{}y", &w[..w.len() - 3]);
+    }
+    if w.len() > 3
+        && w.ends_with('s')
+        && !w.ends_with("ss")
+        && !w.ends_with("us")
+        && !w.ends_with("is")
+    {
+        return w[..w.len() - 1].to_string();
+    }
+    w.to_string()
+}
+
+/// The words a prompt and a claim are matched on: three letters or
+/// more, singular, not a stop word. A prompt says `npm` or `migration`
+/// where the preference says `npm` or `migrations`.
+fn prompt_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| !CUE_STOP.contains(&w.as_str()) && !CUE_STOP_SHORT.contains(&w.as_str()))
+        .map(|w| singular(&w))
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
 /// Whether a lesson names something the cue names.
 /// A high search score on a vague sentence is not that.
 fn names_the_cue(text: &str, cue: &str) -> bool {
-    shared_cue_words(text, cue) > 0
+    let have = prompt_words(text);
+    prompt_words(cue)
+        .iter()
+        .any(|w| have.binary_search(w).is_ok())
 }
 
 /// How many content words a lesson and a cue share.
@@ -7866,7 +7914,7 @@ pub fn seat_panel(
     }
     let through_island: Vec<Persona> = all
         .iter()
-        .filter(|p| by_domain(p, island) && names_the_cue(&p.view, title))
+        .filter(|p| by_domain(p, island) && shared_cue_words(&p.view, title) > 0)
         .cloned()
         .collect();
     if !through_island.is_empty() {
@@ -18879,6 +18927,37 @@ mod tests {
             &serde_json::json!({"live": 5, "closed": 0, "applied": true, "pairs": []}),
         );
         assert_eq!(applied, "0 of 5 live memories closed\n");
+    }
+
+    #[test]
+    fn a_prompt_names_a_short_tool_or_a_plural() {
+        assert!(names_the_cue(
+            "Use pnpm, never npm, in this repo.",
+            "add lodash with npm"
+        ));
+        assert!(names_the_cue(
+            "Use uv instead of pip for Python packages.",
+            "pip install requests"
+        ));
+        assert!(names_the_cue(
+            "Run the SQL migrations with sqlx, not by hand.",
+            "write the migration for the users table"
+        ));
+        assert!(names_the_cue(
+            "Pin the dependencies in Cargo.lock.",
+            "bump a dependency"
+        ));
+        assert!(!names_the_cue(
+            "The CI cache key must include Cargo.lock or builds go stale.",
+            "add a new SQL migration"
+        ));
+        assert!(!names_the_cue(
+            "Use pnpm, never npm, in this repo.",
+            "how do you set the new one up for all of them"
+        ));
+        assert_eq!(singular("status"), "status");
+        assert_eq!(singular("class"), "class");
+        assert_eq!(singular("tags"), "tag");
     }
 
     #[test]
