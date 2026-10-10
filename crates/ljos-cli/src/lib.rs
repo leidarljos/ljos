@@ -13357,30 +13357,63 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
     }
     // The issue is the sixth line: a subagent reads what its parent holds
     // from here, since asking the tracker takes longer than a hook may run.
+    // The seventh names the claim graph, since every graph on the host
+    // shares this directory.
     let _ = std::fs::write(
         path,
         format!(
-            "{assignee}\n{}\n{pid}\n{comm}\n{}\n{node}\n",
+            "{assignee}\n{}\n{pid}\n{comm}\n{}\n{node}\n{}\n",
             seat_name(),
-            now_utc()
+            now_utc(),
+            claim_graph_scope()
         ),
     );
+}
+
+/// The claim graph a hold record belongs to: `CLAIMDAG_DIR`, or `-` for
+/// claimdag's runtime default. Two graphs on one host (a demo, a test
+/// seat) write their holds to the same runtime directory.
+fn claim_graph_scope() -> String {
+    graph_scope_of(std::env::var("CLAIMDAG_DIR").ok().as_deref())
+}
+
+/// [`claim_graph_scope`] for one value. A directory that exists is named by
+/// its canonical path, so `claims`, `./claims/` and the absolute path from
+/// another working directory are one graph.
+fn graph_scope_of(dir: Option<&str>) -> String {
+    let Some(d) = dir.map(str::trim).filter(|d| !d.is_empty()) else {
+        return "-".to_string();
+    };
+    std::fs::canonicalize(d).map_or_else(
+        |_| d.trim_end_matches('/').to_string(),
+        |p| p.display().to_string(),
+    )
 }
 
 /// The issue the newest hold record of this conversation names: a record
 /// whose holder is one of `holders`, or whose conversation process is an
 /// ancestor of this one. File reads only, so a hook can afford it.
 fn held_from_records(holders: &[String]) -> Option<String> {
-    held_from_records_in(holders, &runtime_dir(), &own_ancestry())
+    let seat = seat_name();
+    let graph = claim_graph_scope();
+    held_from_records_in(holders, &runtime_dir(), &own_ancestry(), &seat, &graph)
 }
 
 /// [`held_from_records`] over one directory and one chain of ancestors. A
 /// record whose process is a session process names every conversation
 /// under that multiplexer, so it names none of them.
+///
+/// A process match also needs the record's seat to be `seat`: runners that
+/// share a parent process (a demo started from an agent's shell, several
+/// seats under one daemon) leave records with the same pid, and each one
+/// is another conversation. A record that names a claim graph other than
+/// `graph` is never this conversation's.
 fn held_from_records_in(
     holders: &[String],
     dir: &std::path::Path,
     chain: &[(u32, String)],
+    seat: &str,
+    graph: &str,
 ) -> Option<String> {
     let pids: Vec<String> = chain.iter().map(|(p, _)| p.to_string()).collect();
     let mut best: Option<(String, String)> = None;
@@ -13392,8 +13425,9 @@ fn held_from_records_in(
             continue;
         };
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
-        let (Some(holder), Some(pid), Some(comm), Some(at), Some(node)) = (
+        let (Some(holder), Some(record_seat), Some(pid), Some(comm), Some(at), Some(node)) = (
             lines.first(),
+            lines.get(1),
             lines.get(2),
             lines.get(3),
             lines.get(4),
@@ -13401,7 +13435,11 @@ fn held_from_records_in(
         ) else {
             continue;
         };
-        let by_process = !is_session(comm) && pids.iter().any(|p| p == pid);
+        // A record written before the seventh line existed names no graph.
+        if lines.get(6).is_some_and(|g| !g.is_empty() && *g != graph) {
+            continue;
+        }
+        let by_process = !is_session(comm) && *record_seat == seat && pids.iter().any(|p| p == pid);
         let ours = holders.iter().any(|h| h == holder) || by_process;
         if ours && !node.is_empty() && best.as_ref().is_none_or(|(t, _)| *at > t.as_str()) {
             best = Some(((*at).to_string(), (*node).to_string()));
@@ -18968,18 +19006,51 @@ mod tests {
             (4901, "acme".to_string()),
         ];
         assert_eq!(
-            held_from_records_in(&[], dir.path(), &chain).as_deref(),
+            held_from_records_in(&[], dir.path(), &chain, "seat", "-").as_deref(),
             Some("brio-k6yq"),
             "the runner's own record, not the multiplexer's"
         );
         let under_herdr = [(9001, "ljos".to_string()), (3142, "herdr".to_string())];
-        assert_eq!(held_from_records_in(&[], dir.path(), &under_herdr), None);
         assert_eq!(
-            held_from_records_in(&["sess-other".to_string()], dir.path(), &under_herdr).as_deref(),
+            held_from_records_in(&[], dir.path(), &under_herdr, "seat", "-"),
+            None
+        );
+        assert_eq!(
+            held_from_records_in(
+                &["sess-other".to_string()],
+                dir.path(),
+                &under_herdr,
+                "seat",
+                "-"
+            )
+            .as_deref(),
             Some("acme-5i5r"),
             "a holder named outright still matches"
         );
         assert!(is_session("herdr") && is_session("tmux: server") && !is_session("acme"));
+    }
+
+    /// one graph directory, named three ways, is one scope.
+    #[test]
+    fn a_graph_directory_is_one_scope_however_it_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let claims = dir.path().join("claims");
+        std::fs::create_dir(&claims).unwrap();
+        let abs = super::graph_scope_of(claims.to_str());
+        assert_eq!(
+            super::graph_scope_of(Some(&format!("{}/", claims.display()))),
+            abs
+        );
+        assert_eq!(
+            super::graph_scope_of(Some(&format!("{}/../claims", claims.display()))),
+            abs
+        );
+        assert_eq!(super::graph_scope_of(None), "-");
+        assert_eq!(super::graph_scope_of(Some("  ")), "-");
+        assert_eq!(
+            super::graph_scope_of(Some("/no/such/claims/")),
+            "/no/such/claims"
+        );
     }
 
     #[test]
@@ -19203,6 +19274,112 @@ mod tests {
             "the entry was appended twice"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// a demo cast started from an agent's shell left hold
+    /// records under that agent's runner pid. `ljos file` then took the
+    /// demo's newest held issue as its parent.
+    #[test]
+    fn a_hold_from_another_seat_under_the_same_runner_is_not_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let hold = |name: &str, lines: &[&str]| {
+            let mut text = lines.join("\n");
+            text.push('\n');
+            std::fs::write(dir.path().join(format!("hold-{name}")), text).unwrap();
+        };
+        let graph = "/home/u/claimdag";
+        hold(
+            "inky",
+            &[
+                "inky-holder",
+                "inky",
+                "4086",
+                "node",
+                "2026-10-09T20:00:00Z",
+                "acme-ls53",
+                graph,
+            ],
+        );
+        // The demo: other seats, another claim graph, the same runner pid,
+        // and newer than the agent's own hold.
+        hold(
+            "demo",
+            &[
+                "demo-holder",
+                "alice",
+                "4086",
+                "node",
+                "2026-10-10T08:00:00Z",
+                "demo-u64h",
+                "/tmp/demo/claims",
+            ],
+        );
+        // Same seat name, another graph: still not this conversation's.
+        hold(
+            "twin",
+            &[
+                "twin-holder",
+                "inky",
+                "4086",
+                "node",
+                "2026-10-10T09:00:00Z",
+                "twin-a1b2",
+                "/tmp/twin/claims",
+            ],
+        );
+        // A seat that shares the runner and the graph but has its own seat
+        // name, written before the seventh line existed.
+        hold(
+            "old",
+            &[
+                "old-holder",
+                "bob",
+                "4086",
+                "node",
+                "2026-10-10T10:00:00Z",
+                "acme-bob1",
+            ],
+        );
+        let chain = [
+            (9001, "ljos".to_string()),
+            (9000, "bash".to_string()),
+            (4086, "node".to_string()),
+        ];
+        assert_eq!(
+            held_from_records_in(
+                &["inky-holder".to_string()],
+                dir.path(),
+                &chain,
+                "inky",
+                graph
+            )
+            .as_deref(),
+            Some("acme-ls53"),
+            "the agent's own hold, not the demo's"
+        );
+        // A subagent of the same runner holds under another name but the
+        // same seat and graph, and still finds its parent's issue.
+        assert_eq!(
+            held_from_records_in(
+                &["sub-holder".to_string()],
+                dir.path(),
+                &chain,
+                "inky",
+                graph
+            )
+            .as_deref(),
+            Some("acme-ls53")
+        );
+        // The demo's own seat, in its own graph, finds the demo's issue.
+        assert_eq!(
+            held_from_records_in(&[], dir.path(), &chain, "alice", "/tmp/demo/claims").as_deref(),
+            Some("demo-u64h")
+        );
+        // An old record without a graph line still matches its own seat.
+        assert_eq!(
+            held_from_records_in(&[], dir.path(), &chain, "bob", graph).as_deref(),
+            Some("acme-bob1")
+        );
     }
 
     /// two shells that source a shell runner's env file hold

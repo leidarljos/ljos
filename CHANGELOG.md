@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos file` and the hooks no longer take another seat's held issue as their own. A hold record matched on the runner process alone, so a demo started from an agent's shell made that agent file under the demo's issue. A process match now needs the same seat, and a hold record names its claim graph, so a record from another graph never matches.
 - A shell runner's env file sets `LJOS_SESSION_ID` (kept when the runner already set one), so every shell it opens claims under one holder. Before, each shell hashed its own process into a new holder, and `ljos finish` from a second shell was refused as `not assignee`. That refusal now names the holder, from the hold record or the tracker, and the `--assignee` that finishes under it.
 - The doctor requires `packset-embed`. The install line now has it in the README, on the getting-started page and in the docs index, so a seat that follows one of them passes the doctor on day one. A missing binary names its `cargo install` line with or without an answer from crates.io. A seat binary the doctor lists but does not require (`ljos-hud`, `ljos-consensus`, `packset-mcp`) shows `info` when absent instead of `no`, matching the exit code it already gave.
 - `cargo binstall ljos` builds from source on a target with no release tarball. The `compile` strategy was off, so binstall failed on x86_64 macOS, aarch64 Linux and Windows. cargo-quickinstall stays off, since its build has `ljos` without `ljos-mcp`.
