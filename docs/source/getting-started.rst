@@ -10,10 +10,10 @@ Install the binaries once:
 
 .. code:: console
 
-   $ cargo binstall --locked ljos packset packset-embed deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
+   $ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
 
 They provide ``ljos``, ``ljos-mcp``, ``ljos-policyd``, ``ljos-consensus``, ``packset``,
-``packsetd``, ``packset-embed``, ``deedar``, ``claimdag`` and ``vissue``. ``VISSUE_ROOT`` must name an existing
+``packsetd``, ``deedar``, ``claimdag`` and ``vissue``. ``VISSUE_ROOT`` must name an existing
 directory with a prefix directory inside it, and ``packset ensure`` starts the
 pack writer. ``mktemp -d`` gives a directory only you own: a fixed ``/tmp`` path can be
 another user's or left from an earlier run. The tracker commits each change,
