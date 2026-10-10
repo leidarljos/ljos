@@ -8318,24 +8318,277 @@ pub fn command_segments(line: &str) -> Vec<String> {
     command_segments_at(line, 0)
 }
 
-/// [`command_segments`], plus the commands of each `sh -c SCRIPT` (or
-/// `bash -lc`, under any prefix) and each `env -S STRING` read as a line of
-/// its own, down to a few levels. A rule on `git push*` then sees
-/// `sh -c "git push -f"`.
+/// [`command_segments`] over every line the shell runs for `line`: the
+/// line itself, the body of each `$(...)`, backtick, `<(...)`, `>(...)` and
+/// `( ... )` in it, each `sh -c SCRIPT`, `eval ARGS` and `env -S STRING`,
+/// and the substitutions an unquoted here-document expands. A rule on
+/// `git push*` then sees `echo $(git push -f)` and `sh -c "git push -f"`.
 fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for raw in raw_segments(line) {
-        let seg = strip_prefixes(&raw).join(" ");
-        if !seg.is_empty() {
-            out.push(seg);
-        }
-        if depth < 4 {
-            if let Some(script) = shell_c_script(&raw) {
-                out.extend(command_segments_at(&script, depth + 1));
+    for sub in nested_lines(line, depth) {
+        for raw in raw_segments(&sub) {
+            let seg = strip_prefixes(&raw).join(" ");
+            if !seg.is_empty() && !out.contains(&seg) {
+                out.push(seg);
+            }
+            if let Some(norm) = plain_command(&raw) {
+                if !out.contains(&norm) {
+                    out.push(norm);
+                }
             }
         }
     }
     out
+}
+
+/// How deep [`nested_lines`] reads substitutions and scripts inside one
+/// another. Past this a line is refused by nothing; a real command never
+/// nests this far.
+const NESTED_DEPTH: usize = 8;
+
+/// `line` and every line run inside it, outermost first: the bodies of its
+/// command substitutions, process substitutions and subshells, the scripts
+/// of `sh -c`, `eval` and `env -S`, the commands of `find -exec`, and the
+/// substitutions in an unquoted here-document body, each read the same way
+/// in turn.
+fn nested_lines(line: &str, depth: usize) -> Vec<String> {
+    let mut out = vec![line.to_string()];
+    if depth >= NESTED_DEPTH {
+        return out;
+    }
+    let mut bodies = Vec::new();
+    let segs = split_commands_with(line, false, &mut bodies);
+    let mut inner: Vec<String> = bodies.iter().flat_map(|b| substitutions(b, true)).collect();
+    for raw in &segs {
+        inner.extend(substitutions(raw, false));
+        inner.extend(shell_c_script(raw));
+        inner.extend(exec_commands(raw));
+    }
+    for l in inner {
+        out.extend(nested_lines(&l, depth + 1));
+    }
+    out
+}
+
+/// The end of the construct that opens at `chars[i]`: just past the
+/// backtick that closes one, or past the `)` that closes the first `(` at
+/// or after `i` (`$(`, `<(`, `>(`, `(`). Quotes, escapes and constructs
+/// nested inside count; an unclosed one runs to the end.
+fn nested_end(chars: &[char], i: usize) -> usize {
+    let n = chars.len();
+    if chars.get(i) == Some(&'`') {
+        let mut j = i + 1;
+        while j < n {
+            match chars[j] {
+                '\\' => j += 2,
+                '`' => return j + 1,
+                _ => j += 1,
+            }
+        }
+        return n;
+    }
+    let Some(open) = (i..n).find(|k| chars[*k] == '(') else {
+        return n;
+    };
+    let mut depth = 0usize;
+    let mut j = open;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '\'' => {
+                j = (j + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1);
+            }
+            '"' => j = double_end(chars, j),
+            '`' => j = nested_end(chars, j),
+            '(' => {
+                depth += 1;
+                j += 1;
+            }
+            ')' => {
+                depth -= 1;
+                j += 1;
+                if depth == 0 {
+                    return j;
+                }
+            }
+            _ => j += 1,
+        }
+    }
+    n
+}
+
+/// Just past the `"` that closes the double-quoted string opening at
+/// `chars[i]`, stepping over the substitutions inside it.
+fn double_end(chars: &[char], i: usize) -> usize {
+    let n = chars.len();
+    let mut j = i + 1;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '"' => return j + 1,
+            '$' if chars.get(j + 1) == Some(&'(') => j = nested_end(chars, j),
+            '`' => j = nested_end(chars, j),
+            _ => j += 1,
+        }
+    }
+    n
+}
+
+/// Whether a `(` at `chars[i]` opens a subshell: it starts a word, and is
+/// not an array (`x=(a b)`) or a function's `()`.
+fn opens_subshell(chars: &[char], i: usize) -> bool {
+    i == 0 || chars[i - 1].is_whitespace() || matches!(chars[i - 1], ';' | '&' | '|' | '(' | '!')
+}
+
+/// The lines the shell runs inside `text` one level down: the body of each
+/// `$(...)` (arithmetic `$((...))` too, which can hold one), each backtick
+/// pair with its escapes taken off, and, outside double quotes, each
+/// `<(...)`, `>(...)` and subshell `( ... )`. Nothing inside single quotes
+/// runs. `in_double` reads `text` as already inside double quotes, as an
+/// unquoted here-document body is.
+fn substitutions(text: &str, in_double: bool) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut double = in_double;
+    let mut i = 0;
+    let body = |from: usize, end: usize, close: bool| -> String {
+        let to = if close && end > from { end - 1 } else { end };
+        chars[from.min(to)..to].iter().collect()
+    };
+    while i < n {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match c {
+            '\\' => i += 2,
+            '\'' if !double => {
+                i = (i + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1);
+            }
+            '"' => {
+                double = !double;
+                i += 1;
+            }
+            '$' if next == Some('(') => {
+                let end = nested_end(&chars, i);
+                out.push(body(i + 2, end, chars.get(end - 1) == Some(&')')));
+                i = end;
+            }
+            '`' => {
+                let end = nested_end(&chars, i);
+                let inner = body(i + 1, end, end > i + 1 && chars[end - 1] == '`');
+                // Inside backticks `\``, `\\` and `\$` stand for the
+                // character itself, so a nested pair is written `\``.
+                out.push(
+                    inner
+                        .replace("\\\\", "\u{0}")
+                        .replace("\\`", "`")
+                        .replace("\\$", "$")
+                        .replace('\u{0}', "\\"),
+                );
+                i = end;
+            }
+            '<' | '>' if !double && next == Some('(') => {
+                let end = nested_end(&chars, i);
+                out.push(body(i + 2, end, chars.get(end - 1) == Some(&')')));
+                i = end;
+            }
+            '(' if !double && opens_subshell(&chars, i) => {
+                let end = nested_end(&chars, i);
+                out.push(body(i + 1, end, chars.get(end - 1) == Some(&')')));
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    out.retain(|b| !b.trim().is_empty());
+    out
+}
+
+/// The commands `find` runs for each file it finds: the words after each
+/// `-exec`, `-execdir`, `-ok` or `-okdir`, up to the `;` or `+` that ends
+/// them.
+fn exec_commands(segment: &str) -> Vec<String> {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let is_find = words
+        .get(at)
+        .is_some_and(|w| w.rsplit('/').next() == Some("find"));
+    if !is_find {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut it = words[at + 1..].iter();
+    while let Some(w) = it.next() {
+        if matches!(w.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            let cmd: Vec<&str> = it
+                .by_ref()
+                .map(String::as_str)
+                .take_while(|w| *w != ";" && *w != "+")
+                .collect();
+            if !cmd.is_empty() {
+                out.push(cmd.join(" "));
+            }
+        }
+    }
+    out
+}
+
+/// A segment's words past its prefixes, each with its quotes and escapes
+/// off, and the command name without its directory.
+fn plain_words(segment: &str) -> Vec<String> {
+    let words: Vec<String> = raw_words(segment)
+        .into_iter()
+        .map(|w| shell_words(w).join(" "))
+        .collect();
+    let (at, _) = prefix_end(&words);
+    let mut words = words[at..].to_vec();
+    if let Some(first) = words.first_mut() {
+        if let Some(base) = first.rsplit('/').next().filter(|b| !b.is_empty()) {
+            *first = base.to_string();
+        }
+    }
+    words
+}
+
+/// A segment's command as the shell resolves it, when that differs from
+/// how it is written: quotes and escapes off the command name (`'git'`,
+/// `\git`, `g"it"`), a path off it (`/usr/bin/git`), and git's own
+/// options before the subcommand (`git -C repo -c k=v push`). A rule on
+/// `git push*` then sees each of those as the push it is.
+fn plain_command(segment: &str) -> Option<String> {
+    let mut words: Vec<String> = strip_prefixes(segment)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let first = words.first_mut()?;
+    let name = shell_words(first).join(" ");
+    *first = name
+        .rsplit('/')
+        .next()
+        .filter(|b| !b.is_empty())
+        .unwrap_or(&name)
+        .to_string();
+    if words.first().map(String::as_str) == Some("git") {
+        let mut i = 1;
+        while let Some(w) = words.get(i) {
+            if matches!(
+                w.as_str(),
+                "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            ) {
+                i += 2;
+            } else if w.starts_with('-') {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        words.drain(1..i.min(words.len()));
+    }
+    if words.is_empty() {
+        return None;
+    }
+    let plain = words.join(" ");
+    (plain != strip_prefixes(segment).join(" ")).then_some(plain)
 }
 
 /// The script a segment hands to a shell: the word after a shell's `-c`
@@ -8349,6 +8602,11 @@ fn shell_c_script(segment: &str) -> Option<String> {
     }
     let shell = words.get(at)?;
     let base = shell.rsplit('/').next().unwrap_or(shell);
+    if base == "eval" {
+        // eval joins its words with spaces and runs the result as a line.
+        let script = words[at + 1..].join(" ");
+        return (!script.trim().is_empty()).then_some(script);
+    }
     if !["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(&base) {
         return None;
     }
@@ -8433,6 +8691,13 @@ const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Shell words that open or continue a compound command, so the command
+/// after them is the one that runs: `if git push`, `{ git push; }`,
+/// `! git push`, `then git push`, `coproc git push`.
+const SHELL_KEYWORDS: &[&str] = &[
+    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "coproc", "builtin",
+];
+
 /// Where the command starts in `words`: past leading `NAME=value` words and
 /// each prefix in [`SEGMENT_PREFIXES`] with its flags, the values of those
 /// flags, a `--`, and the duration `timeout` takes. `command -v` and
@@ -8447,7 +8712,7 @@ fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
     };
     let mut i = 0;
     while let Some(w) = words.get(i).map(AsRef::as_ref) {
-        if is_assign(w) {
+        if is_assign(w) || SHELL_KEYWORDS.contains(&w) {
             i += 1;
             continue;
         }
@@ -8491,16 +8756,55 @@ fn prefix_end<S: AsRef<str>>(words: &[S]) -> (usize, Option<String>) {
 }
 
 /// A command's words with leading assignments and wrapper commands off.
+/// Words are split on blanks outside quotes and substitutions, and kept
+/// as written: `x=$(git push -f)` is one assignment, not `push -f)`.
 fn strip_prefixes(segment: &str) -> Vec<&str> {
-    let words: Vec<&str> = segment.split_whitespace().collect();
+    let words = raw_words(segment);
     let (at, _) = prefix_end(&words);
     words[at..].to_vec()
+}
+
+/// A segment's words as written, quotes kept, split on blanks outside
+/// quotes and outside `$(...)`, backticks and parentheses.
+fn raw_words(segment: &str) -> Vec<&str> {
+    let chars: Vec<(usize, char)> = segment.char_indices().collect();
+    let plain: Vec<char> = chars.iter().map(|(_, c)| *c).collect();
+    let byte = |k: usize| chars.get(k).map_or(segment.len(), |(b, _)| *b);
+    let mut words = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut k = 0;
+    while k < plain.len() {
+        let c = plain[k];
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                words.push(&segment[byte(s)..byte(k)]);
+            }
+            k += 1;
+            continue;
+        }
+        start.get_or_insert(k);
+        k = match c {
+            '\\' => k + 2,
+            '\'' => (k + 1..plain.len())
+                .find(|j| plain[*j] == '\'')
+                .map_or(plain.len(), |j| j + 1),
+            '"' => double_end(&plain, k),
+            '`' | '(' => nested_end(&plain, k),
+            '$' | '<' | '>' if plain.get(k + 1) == Some(&'(') => nested_end(&plain, k),
+            _ => k + 1,
+        }
+        .min(plain.len());
+    }
+    if let Some(s) = start {
+        words.push(&segment[byte(s)..]);
+    }
+    words
 }
 
 /// The word a here-document at `chars[i..]` (just past `<<`) ends at:
 /// `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`. `None` for a here-string
 /// (`<<<`) or no word.
-fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize)> {
+fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize, bool)> {
     if chars.get(i) == Some(&'<') {
         return None;
     }
@@ -8510,7 +8814,10 @@ fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize)> {
     while chars.get(i).is_some_and(|c| *c == ' ' || *c == '\t') {
         i += 1;
     }
-    let quote = chars.get(i).copied().filter(|c| *c == '\'' || *c == '"');
+    let quote = chars
+        .get(i)
+        .copied()
+        .filter(|c| *c == '\'' || *c == '"' || *c == '\\');
     if quote.is_some() {
         i += 1;
     }
@@ -8522,10 +8829,10 @@ fn heredoc_word(chars: &[char], mut i: usize) -> Option<(String, usize)> {
         i += 1;
     }
     let word: String = chars[start..i].iter().collect();
-    if quote.is_some() && chars.get(i) == quote.as_ref() {
+    if quote.is_some_and(|q| q != '\\') && chars.get(i) == quote.as_ref() {
         i += 1;
     }
-    (!word.is_empty()).then_some((word, i))
+    (!word.is_empty()).then_some((word, i, quote.is_some()))
 }
 
 /// The commands of a line as written, assignments kept, split outside
@@ -8543,17 +8850,26 @@ fn pipelines(line: &str) -> Vec<String> {
 }
 
 fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
+    split_commands_with(line, keep_pipes, &mut Vec::new())
+}
+
+/// [`split_commands`], with the body of each unquoted here-document put in
+/// `bodies`: the shell expands the substitutions in such a body. A
+/// `$(...)`, backtick pair, `<(...)`, `>(...)` or subshell is one piece of
+/// its command, never split, so the commands inside it are read on their
+/// own by [`nested_lines`].
+fn split_commands_with(line: &str, keep_pipes: bool, bodies: &mut Vec<String>) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let (mut single, mut double) = (false, false);
     let chars: Vec<char> = line.chars().collect();
-    let mut heredocs: Vec<String> = Vec::new();
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         if c == '<' && !single && !double && chars.get(i + 1) == Some(&'<') {
-            if let Some((word, next)) = heredoc_word(&chars, i + 2) {
-                heredocs.push(word);
+            if let Some((word, next, quoted)) = heredoc_word(&chars, i + 2) {
+                heredocs.push((word, quoted));
                 cur.extend(&chars[i..next]);
                 i = next;
                 continue;
@@ -8563,7 +8879,8 @@ fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
             // Skip each pending body, line by line, to its closing word.
             parts.push(std::mem::take(&mut cur));
             let mut j = i + 1;
-            for word in std::mem::take(&mut heredocs) {
+            for (word, quoted) in std::mem::take(&mut heredocs) {
+                let mut body = String::new();
                 loop {
                     let end = chars[j..]
                         .iter()
@@ -8571,12 +8888,34 @@ fn split_commands(line: &str, keep_pipes: bool) -> Vec<String> {
                         .map_or(chars.len(), |p| j + p);
                     let text: String = chars[j..end].iter().collect();
                     j = (end + 1).min(chars.len());
-                    if text.trim() == word || end >= chars.len() {
+                    if text.trim() == word {
+                        break;
+                    }
+                    body.push_str(&text);
+                    body.push('\n');
+                    if end >= chars.len() {
                         break;
                     }
                 }
+                if !quoted {
+                    bodies.push(body);
+                }
             }
             i = j;
+            continue;
+        }
+        let opens = !single
+            && match c {
+                '$' => chars.get(i + 1) == Some(&'('),
+                '`' => true,
+                '<' | '>' => !double && chars.get(i + 1) == Some(&'('),
+                '(' => !double && opens_subshell(&chars, i),
+                _ => false,
+            };
+        if opens {
+            let end = nested_end(&chars, i);
+            cur.extend(&chars[i..end]);
+            i = end;
             continue;
         }
         match c {
@@ -8634,12 +8973,13 @@ pub struct PushCall {
 #[must_use]
 pub fn push_call(line: &str) -> Option<PushCall> {
     let mut dir: Option<String> = None;
-    for seg in raw_segments(line) {
+    for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         let cite = seg.split_whitespace().find_map(|w| {
             w.strip_prefix("LJOS_CITE=")
                 .map(|v| v.trim_matches(|c| c == '"' || c == '\'').to_string())
         });
-        let words = strip_prefixes(&seg);
+        let plain = plain_words(&seg);
+        let words: Vec<&str> = plain.iter().map(String::as_str).collect();
         match words.first().copied() {
             Some("cd") => {
                 if let Some(d) = words.get(1) {
@@ -9229,7 +9569,7 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
     }
     };
     let is_path_word = |w: &str| !w.chars().any(char::is_whitespace) && is_seat_path(w);
-    for seg in raw_segments(line) {
+    for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         let mut words = shell_words(&seg);
         while let Some(w) = words.first() {
             let assign = w.split_once('=').is_some_and(|(k, _)| {
@@ -9452,8 +9792,9 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
     // Each command as written, so a rule on a prefix still sees it, and
     // with its prefixes off; never the raw line, which carries heredoc
     // bodies and other data the shell does not run.
-    let mut cues: Vec<String> = raw_segments(line)
+    let mut cues: Vec<String> = nested_lines(line, 0)
         .iter()
+        .flat_map(|l| raw_segments(l))
         .map(|s| s.trim().to_string())
         .collect();
     cues.extend(command_segments(line));
@@ -14697,7 +15038,9 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     let mut answered = false;
     // Each pipeline whole, in shell words: a quoted sentence that names a
     // command is one word, and a download piped into a shell is one call.
-    for seg in pipelines(line) {
+    // The substitutions and scripts inside the line run too, so each of
+    // their pipelines is judged as well: `echo $(git push -f)` is a push.
+    for seg in nested_lines(line, 0).iter().flat_map(|l| pipelines(l)) {
         let argv = shell_words(&seg);
         if argv.is_empty() {
             continue;
@@ -21327,6 +21670,67 @@ mod tests {
         ] {
             assert!(verdict_for(&rules, line).is_none(), "{line}");
         }
+    }
+
+    /// a command substitution, backticks, a process substitution, a subshell,
+    /// a compound command and `eval` all run commands, nested or not, so a
+    /// rule sees each; single quotes, an escaped `$` and a quoted heredoc
+    /// stay data.
+    #[test]
+    fn a_rule_sees_the_commands_inside_a_substitution() {
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        for line in [
+            "echo $(git push -f)",
+            "x=$(git push -f)",
+            "echo \"$(git push -f)\"",
+            "echo `git push -f`",
+            "echo `echo \\`git push -f\\``",
+            "echo $(echo $(echo $(git push -f)))",
+            "echo \"a $(echo \"b; $(git push -f)\")\"",
+            "echo $(cd r && git push -f)",
+            "echo $((1 + $(git push -f)))",
+            "cat <(git push -f)",
+            "tee >(git push -f) < /dev/null",
+            "(cd r; git push -f)",
+            "{ git push -f; }",
+            "if true; then git push -f; fi",
+            "while git push -f; do :; done",
+            "! git push -f",
+            "coproc git push -f",
+            "eval 'git push -f'",
+            "eval git push -f",
+            "sh -c 'echo $(git push -f)'",
+            "find . -maxdepth 0 -exec git push -f \\;",
+            "cat <<EOF\n$(git push -f)\nEOF",
+            "\\git push -f",
+            "'git' push -f",
+            "/usr/bin/git push -f",
+            "git -C repo -c core.x=1 push -f",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+            assert!(push_call(line).is_some(), "push gate: {line}");
+        }
+        for line in [
+            "echo '$(git push -f)'",
+            "echo \\$(git push -f)",
+            "echo \"(git push -f)\"",
+            "cat <<'EOF'\n$(git push -f)\nEOF",
+            "x=(git push -f)",
+            "git commit -m \"$(cat msg) git push\"",
+            "echo $(echo git push)",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
+        // A substitution is one piece of its command, so a `;` inside it
+        // does not cut the outer command in two.
+        assert_eq!(
+            command_segments("echo $(true; git push -f) done"),
+            ["echo $(true; git push -f) done", "true", "git push -f"]
+        );
     }
 
     /// prefixes come off with their flags and the values those flags take,
