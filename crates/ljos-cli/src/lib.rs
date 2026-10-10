@@ -5976,9 +5976,6 @@ fn pack_step(dry: bool) -> Step {
     }
 }
 
-/// Make the seat's host key at `~/.config/deedar/host.key` when there is
-/// none, so handovers go out signed from the first one. An existing key, or
-/// one named by `DEEDAR_HOST_SIGNING_KEY`, is left alone.
 /// `$XDG_DATA_HOME`, else `~/.local/share`.
 fn data_base() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
@@ -6014,7 +6011,10 @@ fn deed_store_step(dry: bool) -> Step {
         return step(format!("DEEDAR_URL={url} names the store"), true);
     }
     let Some(dir) = data_base().map(|b| b.join("deedar").join("store")) else {
-        return step("no home directory to keep a deed store in".into(), false);
+        return step(
+            "no home directory to keep a deed store in; set HOME, or DEEDAR_URL=file:///DIR".into(),
+            false,
+        );
     };
     if dir.is_dir() {
         return step(format!("{} exists", dir.display()), true);
@@ -6065,7 +6065,10 @@ fn tracker_step(dry: bool) -> Step {
             .or_else(|| config_base().map(|b| b.join("vissue").join("config.toml"))),
         data_base().map(|b| b.join("vissue").join("tracker")),
     ) else {
-        return step("no home directory to keep a tracker in".into(), false);
+        return step(
+            "no home directory to keep a tracker in; set HOME, or VISSUE_ROOT=DIR".into(),
+            false,
+        );
     };
     let have = std::fs::read_to_string(&cfg).unwrap_or_default();
     // `root` is a top-level key: one under a `[table]` is something else.
@@ -6086,14 +6089,20 @@ fn tracker_step(dry: bool) -> Step {
             true,
         );
     }
-    let line = format!("root = {:?}\n", root.display().to_string());
-    let made = std::fs::create_dir_all(root.join("Software")).and_then(|()| {
-        if let Some(dir) = cfg.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+    // A TOML string, so a path with a quote, a backslash or a control
+    // character in it is still one value vissue reads back.
+    let line = format!(
+        "root = {}\n",
+        toml::Value::String(root.display().to_string())
+    );
+    if let Err(e) = std::fs::create_dir_all(root.join("Software")) {
+        return step(format!("{}: {e}", root.display()), false);
+    }
+    let made = cfg
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
         // First, so it stays top-level above any table the file has.
-        std::fs::write(&cfg, format!("{line}{have}"))
-    });
+        .and_then(|()| std::fs::write(&cfg, format!("{line}{have}")));
     match made {
         Ok(()) => step(
             format!(
@@ -6103,10 +6112,21 @@ fn tracker_step(dry: bool) -> Step {
             ),
             true,
         ),
-        Err(e) => step(format!("{}: {e}", root.display()), false),
+        Err(e) => step(
+            format!(
+                "made {}, but {}: {e}; set VISSUE_ROOT={} instead",
+                root.display(),
+                cfg.display(),
+                root.display()
+            ),
+            false,
+        ),
     }
 }
 
+/// Make the seat's host key at `~/.config/deedar/host.key` when there is
+/// none, so handovers go out signed from the first one. An existing key, or
+/// one named by `DEEDAR_HOST_SIGNING_KEY`, is left alone.
 fn host_key_step(dry: bool) -> Step {
     if let Some(path) = host_key_path() {
         return Step {
@@ -19084,10 +19104,12 @@ mod tests {
         assert!(store.is_dir());
         assert!(root.join("Software").is_dir());
         let text = std::fs::read_to_string(&cfg).unwrap();
+        let parsed: toml::Table = toml::from_str(&text).unwrap();
         assert_eq!(
-            text,
-            format!("root = {:?}\n[routes]\n", root.display().to_string())
+            parsed["root"].as_str(),
+            Some(root.display().to_string().as_str())
         );
+        assert!(text.ends_with("\n[routes]\n"), "{text}");
 
         let again = [super::deed_store_step(false), super::tracker_step(false)];
         assert!(again[0].detail.ends_with("exists"), "{again:?}");
