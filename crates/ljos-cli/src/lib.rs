@@ -11990,6 +11990,12 @@ fn panes_row() -> Habitat {
 /// version and which law it runs (`phronesis`, or the `host table` built
 /// into it). Without the binary nothing judges them unless
 /// `POLICYD_REQUIRED` refuses every command instead.
+/// What the policy row says of an `ljos-policyd` built without phronesis.
+/// The seat runs on it, and the doctor marks the row `warn`: the table
+/// alone refuses less than the table with phronesis after it.
+const POLICY_TABLE_ONLY: &str =
+    "phronesis is not linked; install an ljos-policyd release built with it";
+
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
@@ -12011,11 +12017,11 @@ fn policy_row() -> Habitat {
                         bin.display()
                     ),
                     Some(_) => format!(
-                        "{line} at {}: each pipeline is judged by its built-in table; phronesis is not linked",
+                        "{line} at {}: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}",
                         bin.display()
                     ),
                     None => format!(
-                        "{line} at {}: this version does not name its backend; 0.2.5 and later do",
+                        "{line} at {}: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}",
                         bin.display()
                     ),
                 })
@@ -12836,11 +12842,14 @@ fn optional_bin(name: &str) -> bool {
     SEAT_BINS.iter().any(|(bin, _)| *bin == name) && !REQUIRED.contains(&name)
 }
 
-/// `ok` when the row answers, `info` when it is optional and absent,
-/// `no` when a required row failed.
+/// `ok` when the row answers, `warn` when the policy row names an
+/// `ljos-policyd` without phronesis, `info` when the row is optional and
+/// absent, `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
-    if row.ok {
+    if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
+        "warn"
+    } else if row.ok {
         "ok"
     } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
@@ -17936,6 +17945,29 @@ mod tests {
             .collect();
         assert!(off.contains(&"quick-install"), "{off:?}");
         assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
+    #[test]
+    fn doctor_warns_on_a_policyd_without_phronesis() {
+        let row = |state: String| Habitat {
+            name: "policy",
+            state,
+            ok: true,
+        };
+        let table = row(format!(
+            "ljos-policyd 0.3.0 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
+        ));
+        let old = row(format!(
+            "ljos-policyd 0.2.0 at /bin/ljos-policyd: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}"
+        ));
+        let linked = row(
+            "ljos-policyd 0.4.0 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
+        );
+        assert_eq!(doctor_word(&table), "warn");
+        assert_eq!(doctor_word(&old), "warn");
+        assert_eq!(doctor_word(&linked), "ok");
+        // A warning does not fail the doctor.
+        assert!(healthy(&[table, old]));
     }
 
     #[test]
