@@ -5,6 +5,8 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos send` and `ljos reply` carry a message longer than 500 characters. The pack refuses an atom whose text passes 500, so a long message bounced with `atom text exceeds soft cap 500`. The atom's text now carries the envelope and the start of the body, cut with an ellipsis, and the whole body rides in the atom's `body` field, which `ljos inbox` shows. The prompt hook still shows the first 160 characters, and now says how long the body is and that `ljos inbox --all` shows it. A body past 16,000 characters is refused before anything is sent, with the `deedar create file` line that sends it as a deed.
+
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
 - The prompt hook no longer waits on the search model. On a new machine packsetd downloads the model on the first search, and the first prompt used to spend its whole 8 s deadline on it and say nothing. When the pack reports an encoder that has not answered yet, the hook starts one search in the background, skips its own, and says once a session that memory is starting. Session start does the same, so the model is usually loaded by the first prompt.
