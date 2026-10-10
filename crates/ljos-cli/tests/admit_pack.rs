@@ -28,13 +28,12 @@ impl Daemon {
         let port = free_port();
         let log = Arc::new(Mutex::new(String::new()));
         let captured = Arc::clone(&log);
+        let home_path = home.path().to_str().expect("home is utf-8");
+        // Real token support in ljos's client comes with the coordinated packset 0.14 release.
         let mut child = Command::new(&bin)
-            .args([
-                "--port",
-                &port.to_string(),
-                "--home",
-                home.path().to_str().expect("home is utf-8"),
-            ])
+            .args(["--port", &port.to_string(), "--home", home_path])
+            .env("PACKSET_AUTH", "off")
+            .env("PACKSET_HOME", home_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
