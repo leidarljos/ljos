@@ -8581,6 +8581,84 @@ pub fn rules_from_pack() -> Result<Vec<Rule>> {
     Ok(rules_of(&atoms))
 }
 
+/// The rules a gate judges by. A read from the pack is kept on disk, and
+/// when the pack is down, slow or switched off the last rules read stand:
+/// a deny the person wrote does not lapse because a server did.
+#[must_use]
+pub fn rules_for_gate() -> Vec<Rule> {
+    let kept = rules_cache_path();
+    match rules_from_pack() {
+        Ok(rules) => {
+            if let Some(path) = &kept {
+                keep_rules(path, &rules);
+            }
+            rules
+        }
+        Err(_) => kept.map(|p| kept_rules(&p)).unwrap_or_default(),
+    }
+}
+
+/// `$XDG_DATA_HOME/ljos/rules-<workspace>.json`: one file per workspace,
+/// so a seat's rules never stand in for another's.
+fn rules_cache_path() -> Option<PathBuf> {
+    load_seat_env();
+    let workspace = std::env::var("PACKSET_WORKSPACE")
+        .ok()
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
+    let safe: String = workspace
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    Some(data_base()?.join("ljos").join(format!("rules-{safe}.json")))
+}
+
+/// Write the rules when they changed, through a temporary file so a gate
+/// reading at the same time sees the old rules or the new, never half.
+pub fn keep_rules(path: &Path, rules: &[Rule]) {
+    let body = Value::Array(
+        rules
+            .iter()
+            .map(|r| serde_json::json!([r.pattern, r.verdict, r.reason]))
+            .collect(),
+    )
+    .to_string();
+    if std::fs::read_to_string(path).is_ok_and(|old| old == body) {
+        return;
+    }
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = dir.join(format!(".rules-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The rules last kept at `path`; none when there is no file or it does
+/// not parse.
+#[must_use]
+pub fn kept_rules(path: &Path) -> Vec<Rule> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let field = |i: usize| row.get(i).and_then(Value::as_str).map(String::from);
+            Some(Rule {
+                pattern: field(0)?,
+                verdict: field(1)?,
+                reason: field(2).unwrap_or_default(),
+            })
+        })
+        .filter(|r| matches!(r.verdict.as_str(), "deny" | "ask"))
+        .collect()
+}
+
 /// Whether a rule's pattern is a regular expression rather than a glob:
 /// it says so with `re:`, or it carries a class (`\b`, `\s`, `\d`, `\w`)
 /// or an alternation group, which a glob would read as literal text and
@@ -15853,7 +15931,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let context = hook_context(&call, 5);
     // The rules are the law's memory: a deny or an ask fires before the
     // context, so a reader sees the verdict first.
-    let rules = rules_from_pack().unwrap_or_default();
+    let rules = rules_for_gate();
     let cwd = std::env::current_dir()
         .ok()
         .map(|d| d.display().to_string());
@@ -15926,18 +16004,63 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     })
 }
 
-/// One line from `ljos-policyd check -- argv`. None if the binary is absent
-/// or failed to start. Absence is not a deny.
+/// How long the TCB has to answer before the line is refused. A runner
+/// times a hook out after seconds and most then run the tool, so the
+/// check must give its own answer first.
+pub const POLICYD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One line from `ljos-policyd check -- argv`. None only when there is no
+/// binary to ask: absence is not a deny unless `POLICYD_REQUIRED` says so.
+/// A binary that is there and fails to start, crashes, hangs past
+/// [`POLICYD_DEADLINE`], or prints something that is not a verdict gets a
+/// deny, because the check it was meant to make did not happen.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
     let bin = policyd_bin()?;
-    let out = std::process::Command::new(bin)
+    Some(tcb_answer(&bin, argv, POLICYD_DEADLINE))
+}
+
+/// What `bin check -- argv` says within `deadline`, as a verdict line.
+#[must_use]
+pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
+    use std::io::Read as _;
+    let refused = |why: &str| format!("deny\tljos-policyd {why}, so the line is refused");
+    let child = std::process::Command::new(bin)
         .arg("check")
         .arg("--")
         .args(argv)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return refused("did not start");
+    };
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return refused("did not answer in time");
+            }
+        }
+    };
+    let mut out = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut out);
+    }
+    let text = out.trim().to_string();
+    // `check` prints `allow` and exits 0, or prints `deny` and exits 2.
+    let first = text.split(['\t', ' ', '\n']).next().unwrap_or("");
+    match (first, status.success()) {
+        ("deny", _) => text,
+        ("allow", true) => text,
+        _ => refused("gave no verdict"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23024,6 +23147,77 @@ mod tests {
             2,
             "rules still see each command"
         );
+    }
+
+    /// A fake `ljos-policyd`: a shell script that does what `body` says.
+    fn fake_policyd(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_tcb_that_is_there_but_fails_refuses_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = vec!["git".to_string(), "status".to_string()];
+        let quick = std::time::Duration::from_millis(500);
+        let answer = |name: &str, body: &str| {
+            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick)
+        };
+        assert_eq!(answer("allows", "echo allow"), "allow");
+        assert_eq!(
+            answer("denies", "printf 'deny\\tforce push\\n'; exit 2"),
+            "deny\tforce push"
+        );
+        for (name, body) in [
+            ("crashes", "kill -SEGV $$"),
+            ("fails", "echo oops; exit 1"),
+            ("garbage", "echo ok"),
+            ("silent", "exit 0"),
+            ("allows-then-fails", "echo allow; exit 3"),
+            ("hangs", "sleep 30"),
+        ] {
+            let said = answer(name, body);
+            assert!(said.starts_with("deny\t"), "{name}: {said}");
+        }
+        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick);
+        assert!(gone.starts_with("deny\t"), "{gone}");
+    }
+
+    #[test]
+    fn the_rules_last_read_stand_when_the_pack_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ljos").join("rules-seat.json");
+        assert!(kept_rules(&path).is_empty(), "no file, no rules");
+        let rules = vec![
+            Rule {
+                pattern: "terraform destroy*".into(),
+                verdict: "deny".into(),
+                reason: "never tear down the stack".into(),
+            },
+            Rule {
+                pattern: "re:^kubectl delete ns".into(),
+                verdict: "ask".into(),
+                reason: String::new(),
+            },
+        ];
+        keep_rules(&path, &rules);
+        assert_eq!(kept_rules(&path), rules);
+        keep_rules(&path, &[]);
+        assert!(kept_rules(&path).is_empty(), "a rule taken back is gone");
+        std::fs::write(&path, r#"[["x*","allow","not a verdict"],["y*","deny"]]"#).unwrap();
+        assert_eq!(
+            kept_rules(&path),
+            vec![Rule {
+                pattern: "y*".into(),
+                verdict: "deny".into(),
+                reason: String::new(),
+            }]
+        );
+        std::fs::write(&path, "not json").unwrap();
+        assert!(kept_rules(&path).is_empty());
     }
 
     #[test]
