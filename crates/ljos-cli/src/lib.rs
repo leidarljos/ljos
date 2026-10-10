@@ -12787,7 +12787,17 @@ pub fn enclose(needs: Vec<String>, cited: &str) -> Vec<String> {
 
 /// Pack a slice of the seat into `out`: the tracker's satchel, the pack's
 /// atoms, the deeds both cite, sealed, and signed when a host key is set.
-pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Vec<String>> {
+///
+/// `since_size` is the log size the receiver kept from the last handover
+/// (the `size=` in the head file `ljos receive --keep` wrote). With it the
+/// bag carries `data/deeds/bridge.txt`, the consistency path from that size
+/// to the head in this bag, which `ljos receive --since` checks.
+pub fn handover(
+    out: &Path,
+    projects: &[String],
+    issues: &[String],
+    since_size: Option<u64>,
+) -> Result<Vec<String>> {
     if projects.is_empty() && issues.is_empty() {
         bail!("handover: name a project or an issue");
     }
@@ -12835,6 +12845,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     let deeds = enclose(needs_of(&description)?, &cited);
     if deeds.is_empty() {
         lines.push("no deeds cited".into());
+        if since_size.is_some() {
+            lines.push("no bridge: no deeds travel, so there is no log to bridge".into());
+        }
     } else {
         let deeds_dir = out.join("data").join("deeds");
         let said = run_fed(
@@ -12850,6 +12863,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
             ),
         )?;
         lines.push(said.stdout.trim_end().to_string());
+        if let Some(size) = since_size {
+            lines.push(write_bridge(&deeds_dir, size)?);
+        }
     }
 
     lines.push(
@@ -12877,9 +12893,35 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     Ok(lines)
 }
 
+/// Put the bridge from a log of `size` entries to this store's head into
+/// `deeds_dir/bridge.txt`, where `deedar check` looks for it.
+fn write_bridge(deeds_dir: &Path, size: u64) -> Result<String> {
+    let bridge =
+        run_captured("deedar", &["log", "bridge", &size.to_string()]).with_context(|| {
+            format!("handover: deedar could not bridge from a log of {size} entries")
+        })?;
+    let path = deeds_dir.join("bridge.txt");
+    std::fs::write(&path, &bridge.stdout)
+        .with_context(|| format!("handover: writing {}", path.display()))?;
+    Ok(format!(
+        "bridge from {size} entries in {}; the receiver passes the head it kept to `ljos receive --since`",
+        path.display()
+    ))
+}
+
 /// Check a satchel that arrived: manifest, deed receipts, signature, and what
 /// the atoms hold; with `import`, POST the atoms into this seat's pack.
-pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<String>> {
+///
+/// `since` is the head this seat kept from the last handover by the same
+/// sender, as `keep` wrote it. deedar then needs the bridge in the bag to
+/// start at that head and end at the bag's own, so a sender who rewrote the
+/// log is caught. `keep` writes the bag's head for next time.
+pub fn receive(
+    dir: &Path,
+    since: Option<&Path>,
+    keep: Option<&Path>,
+    import: bool,
+) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     lines.push(
         run_captured(
@@ -12892,9 +12934,13 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
     );
     if dir.join("data").join("deeds").is_dir() {
         let mut args = vec!["check".to_string(), dir.display().to_string()];
-        if let Some(bridge) = since {
+        if let Some(kept) = since {
             args.push("--since".into());
-            args.push(bridge.display().to_string());
+            args.push(kept.display().to_string());
+        }
+        if let Some(path) = keep {
+            args.push("--keep".into());
+            args.push(path.display().to_string());
         }
         lines.push(run_captured("deedar", &args)?.stdout.trim_end().to_string());
     } else {
@@ -24871,6 +24917,62 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         log
+    }
+
+    /// A fake `deedar` that logs its arguments and prints a bridge.
+    fn fake_deedar(dir: &std::path::Path) -> std::path::PathBuf {
+        let log = dir.join("deedar.log");
+        let script = format!(
+            "#!/bin/sh\necho \"deedar $*\" >> '{}'\ncase \"$1\" in\n  log) echo 'from size=3 root=aa'; echo 'to size=5 root=bb' ;;\n  check) echo '2 deeds proven against a log of 5 entries, root bb' ;;\nesac\nexit 0\n",
+            log.display()
+        );
+        let path = dir.join("deedar");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        log
+    }
+
+    #[test]
+    fn handover_writes_the_bridge_from_the_kept_size() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = fake_deedar(dir.path());
+        let deeds = dir.path().join("bag").join("data").join("deeds");
+        std::fs::create_dir_all(&deeds).unwrap();
+        let said = with_fake_on_path(dir.path(), || write_bridge(&deeds, 3)).unwrap();
+        assert!(said.contains("bridge from 3 entries"), "{said}");
+        let bridge = std::fs::read_to_string(deeds.join("bridge.txt")).unwrap();
+        assert!(bridge.starts_with("from size=3"), "{bridge}");
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("deedar log bridge 3"), "{calls}");
+    }
+
+    #[test]
+    fn receive_hands_the_kept_head_and_keep_to_deedar() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _tracker = fake_vissue(dir.path(), true, true);
+        let log = fake_deedar(dir.path());
+        let bag = dir.path().join("bag");
+        std::fs::create_dir_all(bag.join("data").join("deeds")).unwrap();
+        let kept = dir.path().join("peer.head");
+        let next = dir.path().join("peer.next");
+        // Whatever the rest of the bag says, the deed check comes first.
+        let _ = with_fake_on_path(dir.path(), || {
+            receive(&bag, Some(&kept), Some(&next), false)
+        });
+        let calls = std::fs::read_to_string(log).unwrap();
+        let want = format!(
+            "deedar check {} --since {} --keep {}",
+            bag.display(),
+            kept.display(),
+            next.display()
+        );
+        assert!(calls.contains(&want), "{calls}");
     }
 
     /// Run `f` with `dir` first on PATH, then put PATH back.

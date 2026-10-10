@@ -568,13 +568,19 @@ enum Cmd {
         /// Copy the sealed satchel to another seat over ssh, as `user@host:path`; the receiver runs `ljos receive`.
         #[arg(long)]
         to: Option<String>,
+        /// The log size the receiver kept last time (`size=` in its kept head): the bag then carries the bridge from it.
+        #[arg(long)]
+        since_size: Option<u64>,
     },
     /// Check a satchel that arrived; --import puts its atoms in this seat's pack.
     Receive {
         dir: PathBuf,
-        /// A bridge file from the last handover by the same sender.
+        /// The head file `--keep` wrote at the last receive from the same sender.
         #[arg(long)]
         since: Option<PathBuf>,
+        /// Write this bag's log head here, for `--since` next time.
+        #[arg(long)]
+        keep: Option<PathBuf>,
         #[arg(long)]
         import: bool,
     },
@@ -1694,8 +1700,9 @@ fn main() -> Result<()> {
             project,
             issue,
             to,
+            since_size,
         } => {
-            for line in handover(&out, &project, &issue)? {
+            for line in handover(&out, &project, &issue, since_size)? {
                 println!("{line}");
             }
             if let Some(dest) = to {
@@ -1710,8 +1717,13 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Receive { dir, since, import } => {
-            for line in receive(&dir, since.as_deref(), import)? {
+        Cmd::Receive {
+            dir,
+            since,
+            keep,
+            import,
+        } => {
+            for line in receive(&dir, since.as_deref(), keep.as_deref(), import)? {
                 println!("{line}");
             }
         }
