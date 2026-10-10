@@ -7,15 +7,18 @@ Command line
 | ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway]``                                                            | all                       | open a sitting: doctor, cards, due, island, playbook, recall, timeline, claim; stops at the first store down; the name defaults to this conversation's holder (``ljos seat``);         |
 |                                                                                                                                           |                           | ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``; the name is a tracker ``playbook:`` note until finish or release                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``                         | all                       | close a sitting: remember, fire the island, complete, learn; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder    |
-|                                                                                                                                           |                           | (absent, this conversation's holder); ``--close`` closes the ticket only when the work is accepted, else the ticket stays. ``--lesson`` is a proposal                                  |
+| ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``                         | all                       | close a sitting: file ``--lesson`` as a proposal with origin ``agent-derived``, fire the island, complete, learn; ``ljos accept ID`` writes the lesson; ``--gen`` names the claim's    |
+|                                                                                                                                           |                           | generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); ``--close`` closes the ticket only when the work is   |
+|                                                                                                                                           |                           | accepted, else the ticket stays                                                                                                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``calibrate -p PROJECT [--rounds N]``                                                                                                     | consensus, pack           | trust rows from the project's voting history (Dawid-Skene accuracy)                                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``remember TEXT [--as PERSONA] [--transient\vert--standing]``                                                                             | pack                      | one lesson, stored as written; as a persona, it carries that persona's entity and opens its next brief; ``--transient`` (the default) stores an episode that is kept and is not a      |
-|                                                                                                                                           |                           | refresher; ``--standing`` stores a standing rule at once, with no review                                                                                                               |
+| ``remember TEXT [--as PERSONA] [--transient\vert--standing]``                                                                             | pack                      | one lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; ``--transient`` (the default) stores an episode that |
+|                                                                                                                                           |                           | is kept and is not a refresher; ``--standing`` stores a standing rule at once, with no review                                                                                          |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``prefer TEXT``                                                                                                                           | pack                      | one standing preference                                                                                                                                                                |
+| ``prefer TEXT``                                                                                                                           | pack                      | one standing preference, origin ``user-declared``                                                                                                                                      |
++-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``accept ID``                                                                                                                             | pack                      | write one open proposal into the pack; a proposal the same text already wrote with ``remember`` or ``prefer`` is not written again                                                     |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``forget ID [--why DEED]``                                                                                                                | pack                      | tombstone a claim, naming the deed that withdrew it                                                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -36,8 +39,8 @@ Command line
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``hud [--foreground] [--toggle\vert--show\vert--hide] [--install-desktop]``                                                               | none                      | exec sibling ``ljos-hud``; missing is 127, hide-miss is 0; the musl CLI never links iced                                                                                               |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]``                                                                             | pack                      | with a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list the habits as they stand with the change since the  |
-|                                                                                                                                           |                           | last reading                                                                                                                                                                           |
+| ``habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]``                                                                             | pack                      | with a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list each habit's latest reading with the change since   |
+|                                                                                                                                           |                           | the one before                                                                                                                                                                         |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``graded ID [--lapsed]``                                                                                                                  | pack                      | one review graded                                                                                                                                                                      |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -51,8 +54,8 @@ Command line
 | ``agents [--harness NAME] [--dry-run]``                                                                                                   | pack, runner              | every persona as an agent definition, ``ljos-NAME.md``, in each runner's ``agents`` directory (or one runner's): a subagent the runner spawns by name that briefs, casts one ballot    |
 |                                                                                                                                           |                           | before reading the others, notes why and stops; definitions whose persona left the pack are removed                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``statusline``                                                                                                                            | pack                      | one line for a runner's status bar (Grok's ``[ui.status_line]``, Claude Code's ``statusLine``): the seat, the issue this conversation holds, the claims due; reads the runner's status |
-|                                                                                                                                           |                           | JSON on stdin; each session's line is cached for fifteen seconds                                                                                                                       |
+| ``statusline``                                                                                                                            | pack                      | one line for a runner's status bar (Grok's ``[ui.status_line]``, Claude Code's ``statusLine``): the seat, the issue this conversation has claimed, the claims due; reads the runner's  |
+|                                                                                                                                           |                           | status JSON on stdin; each session's line is cached for fifteen seconds                                                                                                                |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``ask NAME TEXT``                                                                                                                         | persona session           | hands the persona a question or a task in its own pane, opening it (and resuming its session) when it is closed                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -61,7 +64,7 @@ Command line
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``playbook ISSUE NAME``                                                                                                                   | pack                      | bind a recipe to the issue and copy its full body; the name is a tracker ``playbook:`` note until finish or release                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``playbooks``                                                                                                                             | pack                      | the closed set sit, arena, land, company-panel, overnight; pack latest per name, shipped seed when missing                                                                             |
+| ``playbooks``                                                                                                                             | pack                      | the closed set sit, arena, land, company-panel, overnight; pack latest per name, the built-in seed when missing                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``brief NAME ISSUE``                                                                                                                      | pack, tracker             | what a subagent playing the persona starts from: view, the bound playbook's full recipe, five named principles, the arena rubric, what the seat knows on its domains, the working set  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -78,9 +81,21 @@ Command line
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``note ID TEXT...``                                                                                                                       | tracker                   | a dated progress note on the issue, committed                                                                                                                                          |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``deed ID [--add ACCESSION]...``                                                                                                          | tracker                   | cite one or more deeds on a node (repeat ``--add``), or list citations                                                                                                                 |
+| ``send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]``                                                                           | pack                      | write to one seat, or with ``--group`` to the other members of that group; ``--interrupt`` leads the next prompt; ``--issue`` threads the message on that vissue issue and the atom    |
+|                                                                                                                                           |                           | takes the issue's scope, so ``ljos sync`` carries it in that repository's sealed log                                                                                                   |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``claims [ARGS]``                                                                                                                         | tracker                   | who holds what: ``vissue claims`` with its flags (``--by NAME``, ``--json``)                                                                                                           |
+| ``inbox [--all]``                                                                                                                         | pack                      | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; ``ljos hook --prompt`` writes a receipt for each message it shows; a |
+|                                                                                                                                           |                           | pack that does not answer is an error; ``--all`` includes mail already read                                                                                                            |
++-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``read ID``                                                                                                                               | pack                      | write a read receipt for one message; a second read writes nothing                                                                                                                     |
++-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``reply ID TEXT... [--interrupt]``                                                                                                        | pack                      | answer the sender, keep the issue, and carry ``reply:ID``                                                                                                                              |
++-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``group NAME [--add SEAT]... [--remove SEAT]...``                                                                                         | pack                      | list a group, or add and drop members; membership is atoms and travels in the sealed log                                                                                               |
++-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``deed ID [--add ACCESSION]...`` / ``--remove ACCESSION --ticket ID``                                                                     | tracker                   | cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten                                                                |
++-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ``claims [ARGS]``                                                                                                                         | tracker                   | who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``)                                                                                                     |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``recall ID``                                                                                                                             | tracker                   | the working set                                                                                                                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -88,7 +103,7 @@ Command line
 |                                                                                                                                           |                           | and is required with ``--for``; ``--expect`` records the forecast of the others on the same command; ``--withdraw`` takes back the ballot and its forecast, and the logbook keeps what |
 |                                                                                                                                           |                           | it was. ``--as NAME --jev`` asks Jev for the persona's ballot: cast with the option's probability and a forecast at confidence 0.8 or above, noted and left for a subagent under it    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``predict ID --expect OPTION\vert JSON [--as PERSONA]``                                                                                   | pack                      | forecast the others' shares; two or more and ``consensus`` names the surprisingly popular answer                                                                                       |
+| ``predict ID --expect OPTION\vert JSON [--as PERSONA]``                                                                                   | pack                      | forecast the others' shares; two or more and ``consensus`` names the answer more popular than forecast (Prelec, doi:10.1038/nature21054)                                               |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``rule PATTERN [--verdict deny\vert ask] --why TEXT``                                                                                     | pack                      | argv law the hook and ``policy`` enforce: a glob, or a regular expression (``re:`` or a ``\\b``, ``\\s`` or ``(a\vert b)`` in it) anchored at the start, tried on the whole line and   |
 |                                                                                                                                           |                           | on each command it runs (split on ``&&``, ``\vert\vert``, ``;``, ``\vert`` outside quotes, with ``NAME=value``, ``sudo``, ``env``, ``time``, ``nohup`` taken off)                      |
@@ -97,7 +112,7 @@ Command line
 |                                                                                                                                           |                           | to err together are discounted                                                                                                                                                         |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]``                                                                       | claim graph               | a session node. With ``--next``, or with no id, claimdag picks and claims the next ready node; ``--role`` and ``--slack`` are the affinity and the depth slack. A busy refusal names   |
-|                                                                                                                                           |                           | what the name still holds                                                                                                                                                              |
+|                                                                                                                                           |                           | what the name has still claimed                                                                                                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``release ID [--assignee NAME]``                                                                                                          | claim graph               | hand the session node back unfinished: ready, generation moved                                                                                                                         |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -107,25 +122,26 @@ Command line
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``approve REQUEST_ID``                                                                                                                    | runtime                   | record explicit consent for one pending hook request; one matching attempt, fifteen-minute lifetime, deny rules still apply                                                            |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``policy ARGV...``                                                                                                                        | policy, pack              | the line as it would run, the TCB verdict if ``ljos-policyd`` answered, then a matching pack rule, then what the pack knows that bears on it                                           |
+| ``policy [--fail-on-deny] ARGV...``                                                                                                       | policy, pack              | the line as it would run, the trusted computing base (TCB) verdict if ``ljos-policyd`` answered, then a matching pack rule, then what the pack knows that bears on it;                 |
+|                                                                                                                                           |                           | ``--fail-on-deny`` exits 1 on a deny, and without the flag the exit stays 0                                                                                                            |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``hook [--limit N]``                                                                                                                      | policy, pack              | hook JSON or argv on stdin; on ``PreToolUse`` the TCB and pack rules, a deny is ``permissionDecision``; on a prompt the hits scoring at least 0.6 of the best that two scorers named,  |
-|                                                                                                                                           |                           | preferences first then lessons oldest first, each with its age, five at most, each once between compactions; on a failed tool, up to three that share at least two content words with  |
-|                                                                                                                                           |                           | the command and its error                                                                                                                                                              |
+| ``hook [--limit N] [--prompt] [--fail-on-deny]``                                                                                          | policy, pack              | hook JSON or argv on stdin; ``--prompt`` reads stdin as the prompt; on ``PreToolUse`` the TCB and pack rules, a deny is ``permissionDecision``; ``--fail-on-deny`` exits 1 on a deny   |
+|                                                                                                                                           |                           | and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that two scorers named, preferences first then lessons oldest first, each with its age,   |
+|                                                                                                                                           |                           | five at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]``                                                                  | tracker                   | one child issue per module the bundle's lock builds, under ``I``, blocked by the modules built before it along the SBOM's edges; ids are a hash of module and generation, so a rerun   |
-|                                                                                                                                           |                           | holds what exists and adds what is missing; ``--dry-run`` prints the rows                                                                                                              |
+| ``bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]``                                                                  | tracker                   | one child issue per module the bundle's lock builds, under ``I``, blocked by the modules built before it along the edges of its software bill of materials; ids are a hash of module   |
+|                                                                                                                                           |                           | and generation, so a rerun keeps what exists and adds what is missing; ``--dry-run`` prints the rows                                                                                   |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``findings STATE [--remember] [--all] [--issue I]``                                                                                       | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` writes one lesson per finding a   |
-|                                                                                                                                           |                           | person or a seat resolved (recipe, step, error line, fix), under the recipe's name, its package and the class; ``--all`` takes the ones a later attempt superseded too; ``--issue``    |
-|                                                                                                                                           |                           | cites the state file as a deed on the issue                                                                                                                                            |
+| ``findings STATE [--remember] [--all] [--issue I]``                                                                                       | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` files one lesson per finding a    |
+|                                                                                                                                           |                           | person or a seat resolved (recipe, step, error line, fix), origin ``agent-derived``, under the recipe's name, its package and the class; ``ljos accept ID`` writes it; ``--all`` takes |
+|                                                                                                                                           |                           | the ones a later attempt superseded too; ``--issue`` cites the state file as a deed on the issue                                                                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``sync [--key] [--import] [--export]``                                                                                                    | tracker, pack             | share the seat's memory across machines through the tracker repository: pull and take other machines' sealed logs, then write and push this machine's; ``--key`` prints this machine's |
 |                                                                                                                                           |                           | age public key (made on first use) and stops; ``--import`` only pulls; ``--export`` only writes and pushes                                                                             |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``handover --out DIR [--project P]... [--issue I]... [--to user@host:path]``                                                              | all                       | pack, seal, sign; ``--to`` copies the bag to another seat over ssh                                                                                                                     |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``receive DIR [--since BRIDGE] [--import]``                                                                                               | all                       | check, and import the atoms                                                                                                                                                            |
+| ``receive DIR [--since BRIDGE] [--import]``                                                                                               | all                       | check, and import the atoms with origin ``peer``                                                                                                                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``doctor``                                                                                                                                | all                       | which habitats answer, who is sitting, and whether the runners named in the runners file are onboarded; a ``panes`` row naming the tool that opens persona panes; with ``jev.toml``    |
 |                                                                                                                                           |                           | present, a ``jev`` row with the month's calls, cached answers and spend                                                                                                                |
@@ -134,8 +150,9 @@ Command line
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``protocol``                                                                                                                              | none                      | print the sitting protocol                                                                                                                                                             |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``onboard [--harness NAME] [--dry-run] [--example]``                                                                                      | runner                    | alone, print the one ``mcpServers`` entry any runner takes; with a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its       |
-|                                                                                                                                           |                           | skill, and write the personas into its ``agents`` directory                                                                                                                            |
+| ``onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]``                                                                       | runner                    | alone, print the one ``mcpServers`` entry any runner takes; with a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its       |
+|                                                                                                                                           |                           | skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``grokbot``, or ``shell``) writes the skill and an env file and registers no server and |
+|                                                                                                                                           |                           | no hook                                                                                                                                                                                |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 ``send SEAT TEXT`` writes to one seat. ``send --group NAME TEXT`` writes to
@@ -149,8 +166,7 @@ a member. ``ljos hook --prompt`` writes a receipt for each message it
 shows. When the pack does not answer, the hook prints ``mail could not be checked``
 and still exits 0. A shell seat polls ``ljos inbox``.
 
-``ljos deed --remove ACCESSION --ticket ID`` drops that citation. The
-removal is appended to the ticket. The heading is not rewritten.
+``ljos deed --remove ACCESSION --ticket ID`` drops that citation. The removal is appended to the ticket. The heading is not rewritten.
 
 ``remember`` and ``prefer`` write origin ``user-declared``. ``finish --lesson``
 and ``findings --remember`` file origin ``agent-derived`` and do not write
@@ -160,11 +176,13 @@ as ``user-declared`` and satisfies the proposal, and the held proposal is
 closed. An atom taken by ``receive --import`` or by ``sync`` has origin
 ``peer``, whatever origin the sender wrote.
 
-A tracker id maps to one claim-graph node (FNV-1a 128 of the id) and a name
-to one actor; a 32-hex id passes through.
+The claim graph records the held ticket too: a tracker id maps to one node
+(FNV-1a 128 of the id) and a name to one actor; a 32-hex id passes through.
 
-Model Context Protocol (MCP) tools
-==================================
+MCP tools
+=========
+
+The seat serves these over the Model Context Protocol (MCP).
 
 Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_request_approval``, ``ljos_claim``,
@@ -193,10 +211,10 @@ Variable                                                    Read by
 ``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org`` without pushing; ``off`` skips the commit and push; unset, commit and push
 ``LJOS_TRACKER_PUSH_WAIT``                                  seconds the tracker push after a claim or finish waits; 5 when unset
 ``XDG_CONFIG_HOME``                                         where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset
-``LJOS_PANE_TOOL``                                          the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the shipped herdr and tmux shapes that answers
+``LJOS_PANE_TOOL``                                          the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers
 ``LJOS_PANEL_RUNNER``                                       the runner a decision panel's members run on, through its ``headless`` argv; unset, the seat's own runner, else Grok
-``LJOS_PANEL_CONCURRENCY``                                  how many decision-panel members start at once; unset, parallelism clamped to 4; ``0`` starts all; ``LJOS_MAX_PARALLEL`` is the same knob
-``XDG_STATE_HOME``, ``XDG_CACHE_HOME``, ``XDG_RUNTIME_DIR`` where the Jev state, cache and runtime key live (see Jev settings); ``XDG_RUNTIME_DIR`` also holds the hud socket and the seat records
+``LJOS_PANEL_CONCURRENCY``                                  how many decision-panel members start at once; unset, the machine's parallelism clamped to 4; ``0`` starts every member; ``LJOS_MAX_PARALLEL`` is the same knob
+``XDG_STATE_HOME``, ``XDG_CACHE_HOME``, ``XDG_RUNTIME_DIR`` where the Jev state, cache and runtime key live (see Jev settings); ``XDG_RUNTIME_DIR`` also keeps the hud socket and the seat records
 =========================================================== ================================================================================================================================================================================
 
 ``~/.config/ljos/env`` is loaded for the keys above that the shell leaves unset.
@@ -206,8 +224,8 @@ a session in a persona's home and resume the latest one there; a
 persona whose ``--runner`` is that table's name reasons in that session
 (``ljos ask``, ``vote --jev``). ``hooks_named`` names the key a hooks file of
 named hooks takes the seat's hooks under, each command told its event
-with ``ljos hook --event``. A steps runner denies a tool gate that omits
-``decision``. The seat answers ``allow`` when no rule matches.
+with ``ljos hook --event``. A steps runner reads a permission answer that omits
+``decision`` as a deny. The seat answers ``allow`` when no rule matches.
 
 The pane script resumes a runner that exits non-zero, at most three times
 a minute, and leaves one that exits 0. ``agents`` names the directory the
@@ -218,7 +236,7 @@ when it is empty, the member runs ``grok`` with the seat's fallback flags.
 
 ``hooks_format = "cursor"`` writes ``hooks`` in Cursor's flat shape: ``version``
 1, and one ``{command, timeout}`` entry an event. The seat registers the
-gate, the prompt, both tool results, compaction, stop and session end
+permission check, the prompt, both tool results, compaction, stop and session end
 there. Events ``~/.claude/settings.json`` already runs stay in that file.
 ``beforeShellExecution``, ``preToolUse``, ``beforeMCPExecution``,
 ``beforeReadFile`` and ``postToolUseFailure`` are still written here, and
@@ -228,10 +246,10 @@ hook installed when those five are present and Claude's file carries
 the seat hook, or when Cursor's file carries every event.
 
 The hook reads a Cursor call off ``cursor_version`` in its stdin and answers
-in Cursor's fields: ``permission`` at the gate, with ``user_message`` and
+in Cursor's fields: ``permission`` on a permission check, with ``user_message`` and
 ``agent_message``; ``additional_context`` on a tool result; ``followup_message``
 on a held stop. It still answers ``allow`` when there is no verdict, since
-Cursor blocks the command when a gate's answer is not JSON. An ask on
+Cursor blocks the command when the answer to a permission check is not JSON. An ask on
 ``preToolUse``, which Cursor does not enforce, becomes a deny.
 The IDE and the ``agent`` CLI read the same ``~/.cursor/mcp.json``.
 
@@ -276,45 +294,44 @@ hook fires the memories it injected during the session together and clears
 the session's record. The hook reads the runner's JSON on stdin
 (``hook_event_name``, ``tool_input.command``, ``prompt``) and answers
 ``{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}``,
-or nothing when the pack holds nothing on the cue. On ``PreToolUse`` a TCB
+or nothing when the pack has nothing on the cue. On ``PreToolUse`` a TCB
 or pack deny is ``permissionDecision`` ``deny`` and blocks. Plain text on
 stdin is an argv line and answered in plain lines.
 
-====================== =====================================================================================================================================================================================================================================================
+====================== =======================================================================================================================================================================================================================================================
 Event                  The hook does
-====================== =====================================================================================================================================================================================================================================================
+====================== =======================================================================================================================================================================================================================================================
 ``UserPromptSubmit``   answers with the memories the prompt activates, preferences first, each once between compactions; with Jev on, asks which claims bear on the prompt and whether it corrects the agent or puts a choice
 ``SessionEnd``         fires the memories injected during the session together and clears the session's record
-``PostToolUse``        emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok delivers this event)
+``PostToolUse``        emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok sends this event)
 ``PostToolUseFailure`` searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions
-``PreCompact``         fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and holds a note naming the issue the conversation still holds for the next delivery
+``PreCompact``         fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery
 ``SessionStart``       after a compaction (``source`` ``compact``), on a runner that takes its context, answers with that note
 ``PreToolUse``         applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit``); a deny blocks
-``Stop``               speaks only when the turn ran no tool; holds one turn that was asked for a decision and cast no ballot; with no issue held, holds one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript
-``SubagentStop``       names the issue the subagent's conversation holds and asks for the ballot on a decision; with Jev on, audits the turn once
-====================== =====================================================================================================================================================================================================================================================
+``Stop``               speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript
+``SubagentStop``       names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once
+====================== =======================================================================================================================================================================================================================================================
 
-Push gate
-=========
+Push checks
+===========
 
-An asked ``git push`` (a seat rule ``git push*`` with verdict ``ask``) is gated
+An asked ``git push`` (a seat rule ``git push*`` with verdict ``ask``) is checked
 by where it goes; a deny stays a deny. The forge says whose the remote
 is: for GitHub, ``gh api`` reports the person's push permission, whether
-the owner is their own account, the collaborators and the releases. On a forge the seat cannot ask, a
-personal namespace that carries the person's GitHub name counts as
-theirs. What ``gh`` says is remembered in the pack as a standing claim on
+the owner is their own account, the collaborators and the releases. On a forge the seat cannot ask, the seat counts a personal namespace
+that carries the person's GitHub name as theirs. What ``gh`` says is remembered in the pack as a standing claim on
 the entity ``repo:OWNER/REPO``, so the next push reads the pack and not
 the forge, the hook raises the claim when a command names the
 repository, and the review clock brings it back. A wrong claim is
 forgotten with ``ljos forget ID``, and the next push asks the forge again.
 
-=================================================================================================================== ==============================================================================================================================================================================
+=================================================================================================================== ======================================================================================================================================================================================
 Push                                                                                                                Needs
-=================================================================================================================== ==============================================================================================================================================================================
+=================================================================================================================== ======================================================================================================================================================================================
 a branch, to the person's own account, no other collaborator, no releases or tags                                   nothing; it runs
-a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name ``LJOS_CITE=ISSUE`` where ISSUE settles (``vissue consensus ISSUE --gate``) or closed as a decision, or ``LJOS_CITE=ACCESSION`` for a current deed; the pass is noted on ISSUE
+a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name ``LJOS_CITE=ISSUE`` where ``ISSUE`` settles (``vissue consensus ISSUE --gate``) or closed as a decision, or ``LJOS_CITE=ACCESSION`` for a current deed; the pass is noted on ``ISSUE``
 a remote the person cannot push to, ``--tags``, ``--follow-tags``, ``--mirror``, ``--all``, ``refs/tags/``, a force the person runs it
-=================================================================================================================== ==============================================================================================================================================================================
+=================================================================================================================== ======================================================================================================================================================================================
 
 The remote is the one the command names, else the branch's upstream,
 else ``origin``, read in the directory a ``cd`` or ``git -C`` before the push
@@ -324,7 +341,7 @@ Sync files
 ==========
 
 =============================================== ==================================================================================================================
-File                                            Holds
+File                                            Contents
 =============================================== ==================================================================================================================
 ``.ljos/sync.toml`` (in the tracker repository) the repository's scope and its age recipients; a ``[projects]`` table sends one project's lessons to another scope
 ``.ljos/atoms/``                                one sealed log per machine
@@ -349,7 +366,7 @@ Key                 Default                                  Meaning
 ``monthly_usd``     4.0                                      the month's spend in US dollars past which the hook stops asking
 ``min_words``       4                                        a prompt with fewer words is skipped
 ``min_candidates``  2                                        fewer candidate claims than this is skipped
-``usd_per_mtok_in`` 0.042                                    US dollars per million input tokens, for an API whose answer carries no cost
+``usd_per_mtok_in`` 0.042 on ``jev``, required on ``chat``   US dollars per million input tokens, for an API whose answer carries no cost. A ``chat`` judge with no price is not asked
 ``bears_at``        0.5                                      probability at which a claim bears on the prompt
 ``cue_at``          0.5                                      probability at which the prompt counts as a correction or a choice
 ``escalate_below``  0.8                                      a persona ballot under this confidence goes to a subagent
@@ -359,28 +376,16 @@ Key                 Default                                  Meaning
 ``[route]``         every decision to ``default``            which judges answer each decision: ``prompt``, ``ballot``, ``audit``, ``review``, each a list of judge names; ``default`` is the judge the top-level keys describe
 =================== ======================================== =============================================================================================================================================================================================================
 
-====================================== =======================================================================================
-Path                                   Holds
-====================================== =======================================================================================
+====================================== ========================================================================================================================================
+Path                                   Contents
+====================================== ========================================================================================================================================
 ``$XDG_STATE_HOME/ljos/jev-cost.toml`` the month's calls and spend
-``$XDG_STATE_HOME/ljos/jev-log.jsonl`` every Jev answer
-``$XDG_CACHE_HOME/ljos/jev``           the answer cache
+``$XDG_STATE_HOME/ljos/jev-log.jsonl`` every Jev answer: claim ids, a prompt hash, latency, timeout or failure, backend and model. ``ljos judge-score`` joins it with outcomes
+``$XDG_CACHE_HOME/ljos/jev``           the answer cache: a hash of the request and the reply, directory mode 0700, file mode 0600. The prompt and the claim text are not stored
 ``$XDG_RUNTIME_DIR/ljos/jev-key``      the default judge's key from ``key_cmd``, mode 0600; ``jev-key-NAME`` for a named judge
-====================================== =======================================================================================
+====================================== ========================================================================================================================================
 
-The four routes are ``prompt``, ``ballot``, ``audit`` and ``review``.
-``backend = jev`` posts to ``endpoint`` (TypeSafe's API, or OpenRouter at
-``https://openrouter.ai/api/alpha/decisions`` with model ``typesafe/jev-1.13``).
-``backend = chat`` posts one JSON-mode completion to ``endpoint`` plus
-``/chat/completions`` and must set ``usd_per_mtok_in``; without that price
-the judge is not asked. With ``backend = command``, the request stays on
-the machine. TypeSafe's terms say they will not train on customer data. They
-keep a perpetual licence to derive telemetry from inputs. Zero data
-retention needs an enterprise agreement and is off by default. This seat does not train
-on Jev's answers. The cache stores a hash of the request and the reply,
-directory mode 0700, file mode 0600, and not the prompt. ``ljos judge-score``
-joins the log with outcomes. A judge ballot is a trust row with ``to``
-``judge:MODEL``, and ``learn`` updates it.
+The four routes are ``prompt``, ``ballot``, ``audit`` and ``review``. ``backend = jev`` posts to ``endpoint`` (TypeSafe's API, or OpenRouter at ``https://openrouter.ai/api/alpha/decisions`` with model ``typesafe/jev-1.13``). ``backend = chat`` posts one JSON-mode completion to ``endpoint`` plus ``/chat/completions`` and must set ``usd_per_mtok_in``. With ``backend = command``, the request stays on the machine. TypeSafe's terms say they will not train on customer data. They keep a perpetual licence to derive telemetry from inputs. Zero data retention needs an enterprise agreement and is off by default. This seat does not train on Jev's answers. A judge ballot is a trust row with ``to`` ``judge:MODEL``, and ``learn`` updates it.
 
 The learning rules
 ==================
@@ -411,9 +416,9 @@ the voters share their mistakes. A pair counts only when its correlation
 passes the one-sided test of independence at five percent. A voter's
 inbound weight in the settle is multiplied by
 ``1 / (1 + the sum of its counted correlations)`` (``settle --discount-of``);
-exact clones count as one voice under it if their record holds a hit and a
+exact clones count as one voice under it if their record has a hit and a
 miss, and a looser cluster as more than one. A line before the settle
-names the outcomes read, the independent voices the panel holds and each
+names the outcomes read, the independent voices the panel has and each
 voter discounted. Nothing is passed or printed when no pair counts.
 
 A row carries the domains it is scoped to. An unscoped row applies to
@@ -422,11 +427,11 @@ issue's title. ``learn`` writes its rows scoped to the entities of the island
 the issue's title activates, eight at most, so a voter refuted on one topic
 keeps its standing on the rest; a scoped learn starts from the unscoped row
 when it has none of its own and leaves the unscoped row standing. When
-both apply, the scoped row is the one the settle sees. With ``--share S``
-every row then moves toward one by ``S`` of the gap, the fixed-share rule
-of Herbster and Warmuth (doi:10.1023/A:1007424614876), so a voter refuted
-long ago is not held down forever and the best voter can change; the
-default is zero, plain Hedge. An outcome also
+both apply, the scoped row is the one the settle sees. ``--share S`` then lifts
+every row by ``S`` of its distance to one, the fixed-share rule of Herbster
+and Warmuth (doi:10.1023/A:1007424614876). A voter refuted long ago is not
+held down forever, and the best voter can change. The default is zero,
+plain Hedge. An outcome also
 moves the anchor of every persona it refuted toward one by ``1 - beta`` of
 the gap: a persona that keeps being wrong listens more.
 
@@ -440,7 +445,7 @@ Without an outcome, ``calibrate`` estimates each voter's accuracy from the
 project's issues with two or more ballots, by expectation maximisation
 over the items' hidden answers (Dawid and Skene, doi:10.2307/2346806). It
 then writes the log odds of each accuracy as the weight every other voter
-gives that voter. The most reliable voter stands at one, and no weight
+gives that voter. The most reliable voter weighs one, and no weight
 falls below 0.01.
 
 Crates

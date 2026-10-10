@@ -1,0 +1,5 @@
+# Proper names the acronym rule would ask to spell out
+MIRIX
+BEAM
+GNU
+TOML

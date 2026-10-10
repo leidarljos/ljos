@@ -31,7 +31,9 @@ fails, run `doctor` before drawing any conclusion.
 One verb runs the whole opening in order and stops at the first store that
 does not answer:
 
-    ljos sitting ISSUE --assignee NAME [--playbook NAME]
+```
+ljos sitting ISSUE --assignee NAME [--playbook NAME]
+```
 
 It prints nine sections, and each one is a step you would otherwise run by
 hand. Each answers something the next one needs. Between the island and the
@@ -48,22 +50,22 @@ tracker as a `playbook:` note until `finish` or `release`.
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
 2. `ljos cards`. What the human froze. Read, never write.
 3. `ljos due`. What is due for review: the soonest eight and the total.
-   The verb prints a page; it does not grade. After the sitting, check a
-   shown claim against the work and `ljos graded ID` (`--lapsed` when it
-   no longer holds). `graded` takes only a claim a due page showed in the
+   The verb prints a page; it does not grade. Grade it after the sitting:
+   check a shown claim against the work, then run `ljos graded ID`
+   (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the
    last hour, so a saved list cannot be graded unread; `ljos due --all`
    lists everything to read and puts none of it up. The review clock
    moves only when you grade, and a backlog is left due, not drained.
 4. `ljos island` on the issue's title. The sitting takes the strongest
-   eight. The number on a row is spread along links, not a rank.
+   eight. The number on a row is the activation spread along links.
    `--as NAME` walks that persona's weights. `--fire` after the island
    was used rewrites those weights, and the next walk follows them. A
    weak island does not fire. `ljos search TOPIC` and a full
    `ljos island TASK` are during the work, not this opening.
 5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
-   five shipped recipes are `sit`, `arena`, `land`, `company-panel`,
+   five built-in recipes are `sit`, `arena`, `land`, `company-panel`,
    `overnight`. Kind `playbook`, weighed not recalled. Pack latest per
-   name is the copy; shipped bodies seed only when the pack has no live
+   name is the copy; built-in bodies seed only when the pack has no live
    atom of that name. Write, list, bind, and copy refuse any other name.
    `ljos playbooks` lists the five. Absent a name, the sitting matches
    the title or binds `sit`. Mid-sitting turns re-read the same note; a
@@ -75,9 +77,9 @@ tracker as a `playbook:` note until `finish` or `release`.
    stores; `ljos timeline` without a sitting prints them all.
 8. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
    two conversations hold two tickets. The same issue is still one
-   holder. `busy` on a named worker means that name still holds another
+   holder. `busy` on a named worker means that name still has another
    node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
-   `vissue claims` answers who holds it; a tracker that refuses the name
+   `vissue claims` answers who has it; a tracker that refuses the name
    refuses the sitting, and `ljos release` frees the claim graph.
 
 A decision is handed to the panel by the sitting. An issue tagged
@@ -142,7 +144,7 @@ Every piece of work has an issue before it has a claim.
   doi:10.1080/01621459.1974.10480137). Omit it and the ballot is not a
   forecast. `--used` is the deeds the ballot drew on, or `none`
   (Buneman, Khanna and Tan 2001, doi:10.1007/3-540-44503-X_20). The
-  line it prints is a count, not the settle. When an outcome is named,
+  line it prints is a count; the settle comes from `ljos consensus`. When an outcome is named,
   a stated probability is scored by the quadratic score `(p - o)^2`
   (Brier 1950; Gneiting and Raftery 2007,
   doi:10.1198/016214506000001437). The logarithmic score is `-ln` of the
@@ -166,8 +168,8 @@ Every piece of work has an issue before it has a claim.
   who voted. On a hard question the ballot carries the private forecast
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
   still records one on its own. With two or more forecasts
-  the settle also names the surprisingly popular answer, the option whose
-  actual share most exceeds its forecast, and shows each voter's standing.
+  the settle also names the option whose actual share most exceeds its
+  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows each voter's standing.
   When the world says which option was right, `ljos finish ISSUE
   --outcome OPTION` (or `ljos learn`) writes every voter's record of
   outcomes as its weight, so the next settle weighs a voter by what it
@@ -176,12 +178,12 @@ Every piece of work has an issue before it has a claim.
   settle discounts voters who err together.
 - When the work has shown that a kind of command must never run, or must
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
-  deny|ask --why "..."`. The hook stops or asks at the point of action and
+  deny|ask --why "..."`. The hook stops or asks before the command runs, and
   `ljos policy` says the same; the rule is memory and travels in handovers.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
-  `ljos personas` prints the roster the pack holds. Then
+  `ljos personas` prints the roster in the pack. Then
   `ljos vote ISSUE --for OPTION --as NAME` casts as it. The anchor in
   `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
@@ -236,7 +238,7 @@ Every piece of work has an issue before it has a claim.
   names another parent and `--top` none. A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.
-- At a usage limit the hook holds the turn once. Spend it on the record and
+- At a usage limit the hook keeps the turn open once. Spend it on the record and
   nothing else: `ljos note` the held issue with what is done and left,
   `ljos file` each item left, `ljos remember` each lesson, then stop.
 - Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
@@ -249,8 +251,8 @@ A toolchain or version bump with eb-stack is one sitting on the ticket
 and one island per recipe. Before a recipe is touched, `ljos island
 "<name> <version> <toolchain>"` (the MCP `ljos_island` with that cue):
 what the last bump of it taught, the patch it needed, the step it failed
-in. Then the ladder in order, each rung its own claim with its own
-artifact: `eb_recipe_check`, `eb_package_bump` (the lock under
+in. Climb the ladder next, in order. Each rung is its own claim with its
+own artifact: `eb_recipe_check`, `eb_package_bump` (the lock under
 `out/locks` is `resolves`), `eb_recipe_lint`, `eb_target_doctor`,
 `eb_campaign_run` and `eb_campaign_status` (`builds`,
 `binary-verified`). Say a rung only when its artifact exists.
@@ -259,7 +261,8 @@ A generation bump is many modules under one ticket, and the tracker's
 graph is how a herd shares them: `ljos bump-plan out --project P
 --parent TICKET` (over MCP, the tool `bump_plan`) puts every module the
 bundle's lock builds on the tracker as a child issue, blocked by the
-modules built before it along the SBOM's edges, with the same ids on
+modules built before it along the edges of the software bill of
+materials (SBOM), with the same ids on
 every run. `vissue ready -p P` is then the buildable frontier, each seat
 sits on one module, and a sitting on a module whose blockers are open
 is refused. Resolve each finding through eb-stack's `campaign finding
@@ -282,12 +285,12 @@ lock exists before proceeding": the next seat cannot act on that.
   own. What it finds joins the parent's issue. A judgement between
   options is `ljos vote ISSUE --for OPTION --as NAME`. A lesson still
   true next time is `ljos remember "..." --as NAME`, and a finding is
-  `ljos note ISSUE "..."`. NAME is its persona, else its subagent
+  `ljos note ISSUE "..."`. `NAME` is its persona, else its subagent
   type. On a runner that fires subagent events, the hook names the
   parent's issue on the subagent's first tool result. It keeps the
   subagent working once at its stop while that issue is open.
 
-- Tracker and sync commits queue under `ljos-commit.lock` in the git
+- A tracker or sync commit queues under `ljos-commit.lock` in the git
   directory, and a commit waits out another git process's `index.lock`.
   Never wrap a verb in a lock of your own, and never stash, reset or
   check out files another seat is editing to get a commit through.
@@ -296,7 +299,9 @@ lock exists before proceeding": the next seat cannot act on that.
 
 One verb closes the sitting:
 
-    ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
+```
+ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
+```
 
 It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
 writes that lesson into the pack and records that the person accepted it.
@@ -317,11 +322,12 @@ same four steps are:
 4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter's record takes the outcome; the record moves a
    voter's weight once it sets the voter apart from the panel, which a first
-   outcome cannot. A persona it refuted holds its next ballot less firmly.
+   outcome cannot. A persona it refuted weighs less on its next ballot.
 
-When the tracker is a git checkout, `sitting` after its claim and `finish`
-at the end commit the ticket's `issues.org` (that file alone) and push it,
-and print a `tracker git:` line. A claim or a closure that stays in one
+Whatever the outcome, the claim and the finish commit the ticket when the
+tracker is a git checkout. `sitting` commits after its claim and `finish` at the end of the work.
+Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a
+`tracker git:` line. A claim or a closure that stays in one
 working tree does not exist for any other host. `LJOS_TRACKER_GIT=commit`
 keeps it local; `=off` skips it. A refused push is reported, not raised:
 push the tracker yourself before you leave. `ljos doctor` names how many
@@ -345,7 +351,7 @@ under equal weights is a count; under calibrated rows it is not.
 
 ## Refusals worth knowing
 
-- `claim: assignee busy HEX`: that name still holds that node.
+- `claim: assignee busy HEX`: that name still has that node.
   `ljos release HEX --assignee NAME` hands it back, `ljos complete HEX`
   finishes it. Occupancy is per issue, so a second ticket does not take
   this path.
@@ -368,13 +374,13 @@ under equal weights is a count; under calibrated rows it is not.
   the tracker root is private to your working directory (often a
   `VISSUE_ROOT` that kept a literal `~`). Anything filed there is invisible
   to every other seat. Fix the root before filing.
-- `no tracker ... N unpushed` in `doctor`: the tracker checkout holds
+- `no tracker ... N unpushed` in `doctor`: the tracker checkout has
   commits origin does not. Closures on this host are invisible everywhere
   else. Push the tracker. A leftover `tracker-push-*.log` names the last
   refusal when the push was refused. The name is the ljos process. The push
   shell's pid is the sibling `tracker-push-*.child`, and the row stays
   healthy while that shell or a git child of it is alive. The row also fails when another remote
-  of the tracker holds a different head of the branch, as of the last fetch;
+  of the tracker has a different head of the branch, as of the last fetch;
   seats that push to different remotes never see each other's claims.
 - `deedar: warning: this deed is signed by ed25519:...`: the host key is
   not a signer the store's `layout` lists, and `evidence` will refuse the
@@ -397,7 +403,7 @@ under equal weights is a count; under calibrated rows it is not.
   ends, the memories it injected fire together, so what served one sitting
   is wired for the next. `ljos onboard`
   installs it on the runner's tool-call and prompt events, so the seat's
-  memory reaches the agent at the point of action without being asked.
+  memory reaches the agent just before it acts, without being asked.
 
 ## Mail between seats
 
@@ -406,7 +412,7 @@ SEAT TEXT` writes to one named seat. `ljos send --group NAME TEXT` writes
 to the other members of that group. `--interrupt` adds `priority:interrupt`
 and the next prompt shows that message first. `--issue ID` adds `issue:ID`
 and the atom takes that issue's scope, so `ljos sync` carries it in the
-sealed log of the repository that holds the issue. A message with no issue
+sealed log of the repository that has the issue. A message with no issue
 travels in the machine's default scope, the same way an unscoped lesson does.
 
 `ljos inbox` lists what this seat has not read. Listing does not write a
@@ -424,7 +430,7 @@ and does not block the prompt. A shell seat has no hook. It polls
 `ljos inbox` and writes a receipt with `ljos read`.
 
 The text of a message carries its id. Two messages with the same words stay
-two messages when a sealed log is imported. The same holds for a receipt
+two messages when a sealed log is imported. The same is true of a receipt
 and for a group membership.
 
 ## Identity and environment
@@ -437,13 +443,13 @@ graph live in the user's state directories, the tracker at the root
 when it exists. The seat is the program that connected: `ljos-mcp` names
 it after the client that initialised it, and a shell the same runner opens
 finds the same name through the process tree, so a runner's tools and its
-command-line verbs claim and vote as one. Two names come from that: the
-seat (`acme-cli`), which memory, ballots and trust rows accrue to across
-every conversation of that runner, and the holder (`acme-cli-39u`),
-which this conversation's claims are held under; any `*_SESSION_ID` the
-runner stamped is the holder ahead of the process tag, and occupancy is
-`{holder}:{issue}`, so two conversations of one runner hold two tickets and
-a second sitting does not release the first. `ljos seat` prints both names
+command-line verbs claim and vote as one. Two names come from that. The
+seat (`acme-cli`) collects memory, ballots and trust rows across every
+conversation of that runner. The holder (`acme-cli-39u`) owns this
+conversation's claims. Any `*_SESSION_ID` the runner wrote is the holder
+ahead of the process tag. Occupancy is `{holder}:{issue}`, so two
+conversations of one runner hold two tickets, and a second sitting does not
+release the first. `ljos seat` prints both names
 and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
 names the holder. `VISSUE_AGENT` is
 the tracker's own name for the same thing; `--as` names a persona over

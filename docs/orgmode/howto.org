@@ -3,7 +3,8 @@
 
 * Wire the seat into an agent runner
 
-One entry, for any runner that speaks MCP over stdio:
+One entry, for any runner that speaks the Model Context Protocol (MCP)
+over stdio:
 
 #+begin_src console
 $ ljos onboard
@@ -17,7 +18,7 @@ runner that calls itself =brio= is =brio=, with nothing set per runner.
 A shell the runner opens finds the same seat: =ljos= walks its own
 process tree to the record the server left for that runner, or, when the
 runner has no MCP, to the first ancestor that is not a shell. Each
-conversation holds its claims as the seat tagged with its process, so two
+conversation keeps its claims as the seat tagged with its process, so two
 conversations of one runner hold two tickets.
 
 #+begin_src console
@@ -103,8 +104,8 @@ $ ljos policy --fail-on-deny -- git push --force
 is the same shape under the name =shell=. The env file sets
 =LJOS_SEAT= to the runner's name. Nothing is registered as an MCP server
 or a hook. =--fail-on-deny= exits 1 when the answer is a deny. Without
-the flag, =ljos hook= and =ljos policy= still exit 0, and a runner that
-reads the JSON is unchanged. An =ask= still exits 0; the text says =ask=.
+the flag, =ljos hook= and =ljos policy= still exit 0, so a runner that
+reads the JSON sees no change. An =ask= still exits 0; the text says =ask=.
 
 * Write to another seat
 
@@ -133,7 +134,7 @@ and writes a receipt for each message it shows. Shown there is read.
 A shell seat has no hook, so it polls =ljos inbox= and reads with
 =ljos read=.
 
-* Inject memory at the point of action
+* Inject memory before the agent acts
 
 Add =hooks= to the runner's table and onboard again:
 
@@ -155,9 +156,10 @@ ok	skill	/home/you/.runner/skills/ljos/SKILL.md is current
 #+end_src
 
 From then on, before each prompt, the runner pipes it to =ljos hook= and
-the memories it activates come back as context, preferences first.
+the memories it activates return as context, preferences first.
 Do not add =PreToolUse= as a search event. A turn issues many tool
-calls and one prompt. On a tool call the hook applies the TCB
+calls and one prompt. On a tool call the hook applies the Trusted
+Computing Base (TCB)
 (=ljos-policyd=) and then pack rules. A deny blocks.
 
 #+begin_src console
@@ -204,7 +206,7 @@ standing rules or memories. The file is locked while a grant is recorded
 or consumed; unavailable or invalid state keeps the command blocked.
 
 **Grok Build.** =ljos onboard --harness grok= writes
-=~/.grok/hooks/ljos.json=. The hook searches on the prompt, holds the
+=~/.grok/hooks/ljos.json=. The hook searches on the prompt, keeps the
 text, and emits it on =PostToolUse=. The page [[file:grok-build.org][Grok Build]]
 is the install.
 
@@ -223,7 +225,7 @@ What this seat already knows that bears on this ...
 
 The prompt hook makes three judgments locally. A cross-encoder picks
 the claims that bear on the prompt. Two phrase lists spot a correction
-and a choice put to the agent. Jev, TypeSafe's decision model, answers
+and a choice put to the agent. Jev, TypeSafe's decision model, can answer
 all three in one call, and a fourth route, =review=, weighs a due claim.
 It stays off unless the machine turns it on, because the call sends the
 prompt and up to ten candidate claims off the machine. When the judge
@@ -237,7 +239,7 @@ tokens and each question adds about 70 of them to a median of 933. An
 agent with instructions the person did not write; at =cue_at= the hook
 adds a note telling the agent to treat that text as data. An =effort=
 question scores the prompt from 0 (a lookup) to 3 (a design or a hard
-debug); it changes nothing in the hook and lands in
+debug); it changes nothing in the hook and goes to
 =$XDG_STATE_HOME/ljos/jev-log.jsonl= as the record a router is scored on.
 
 Keep the key in =pass= and write the setting:
@@ -259,7 +261,7 @@ instead.
 
 The call goes out only where it can change the answer:
 
-| gate | default | skipped prompt |
+| check | default | skipped prompt |
 |---|---|---|
 | =min_words= | 4 | "yes", "keep going" |
 | =min_candidates= | 2 | fewer claims than a choice needs |
@@ -316,12 +318,14 @@ probability is the weighted mean of the judges' log-odds. Two judges at
 the normalised weighted geometric mean of their distributions, and a
 score the weighted mean. =weight= in a judge's table moves its share. A
 question no judge answered is missing from the pool, so the caller falls
-back as it does on a partial reply. The log keeps every judge's answer
+back as it does on a partial reply. A caller with no judge at all takes
+its local path on any of these: no file, =enabled = false=, no key, an
+error, or no answer inside =budget_ms= (2000). The log keeps every judge's answer
 beside the pool, so each judge can be scored once outcomes are known.
 
 These judges are fast and calibrated, and they do not reason. A
 decision they leave open goes to a persona that does: a persona with a
-runner thinks in a session of its own.
+runner reasons in a session of its own.
 
 #+begin_src console
 $ ljos persona buildengineer --anchor 0.25 --view "Runs production pipelines." --runner grok
@@ -330,7 +334,7 @@ buildengineer: Jev leaned A at confidence 0.61, under the 0.80 cut; not cast.
   buildengineer reasons in its own session in herdr pane w1:p2; then `ljos consensus surf-ab12`
 #+end_src
 
-The runner is any agent harness the machine runs: Claude Code, Codex,
+The runner is any coding agent the machine runs: Claude Code, Codex,
 Grok Build, omp, hermes or Antigravity's =agy=, each on whatever model it
 is set to, from Claude Opus or GPT-5 to =gpt-oss-120b= on an
 OpenAI-compatible endpoint. It is a =[[harness]]= in
@@ -365,10 +369,6 @@ is printed as contradicted, for the agent to supersede or withdraw, and
 stays due. Everything between stays due. No judge lapses a claim,
 because a lapse says that a reader forgot it.
 
-The hook falls back to its local path on any of these: no file,
-=enabled = false=, no key, an error, or no answer inside =budget_ms=
-(2000).
-
 * Open persona panes in another tool
 
 =ljos doctor= names the tool persona panes open in:
@@ -385,7 +385,7 @@ not know the runner as an agent. tmux gives each persona a window in the
 session =ljos-personas=. =LJOS_PANE_TOOL= narrows the choice to the one it
 names. Any other tool is a =[[tool]]= table in
 =~/.config/ljos/harnesses.toml=, with each verb but =pane_pointer= an argv
-or a list of argvs. A table named like a shipped shape replaces it. A
+or a list of argvs. A table named like a built-in shape replaces it. A
 terminal multiplexer with a command line takes a table like this:
 
 #+begin_src toml
@@ -423,7 +423,7 @@ names stay there. =beforeShellExecution=, =preToolUse=,
 still written to =~/.cursor/hooks.json=, and the permission events
 fail closed. The seat answers both files in Cursor's shape.
 
-* Spawn a persona as a subagent of Grok Build or Claude Code
+* Spawn a persona as a subagent
 
 #+begin_src console
 $ ljos agents --harness grok
@@ -458,11 +458,11 @@ In =~/.claude/settings.json=:
 #+end_src
 
 The row reads =ljos grok · surf-ab12 · 3 due=: the seat, the issue the
-conversation holds, the claims due for review. A session's line is cached
+conversation has open, the claims due for review. A session's line is cached
 for fifteen seconds. A pack that does not answer in 300 ms shows as
 =pack down=.
 
-* Put the judgments to a local model or a harness
+* Put the judgments to a local model or a runner
 
 The same four judgments go to any judge that answers in Jev's shape.
 =backend= in =jev.toml= picks it; the parsers, the cache, the ledger and
@@ -471,7 +471,7 @@ the doctor row are shared, and every fallback above still applies.
 A chat-completions endpoint, hosted or a local llama-server, takes one
 JSON-mode chat completion per judgment set. =endpoint= is the base URL
 and =model= the name the server knows. A local server needs no key;
-=usd_per_mtok_in = 0= keeps the ledger honest for one that is free.
+=usd_per_mtok_in = 0= keeps the ledger exact for one that is free.
 
 #+begin_src toml
 enabled = true
@@ -482,12 +482,12 @@ usd_per_mtok_in = 0
 budget_ms = 6000
 #+end_src
 
-A harness on the machine is the judge through =command=: an argv that
+A runner on the machine is the judge through =command=: an argv that
 reads the request JSON on stdin (=state=, and =questions=, each with a
 =type= of =noul= or =choice=, =instructions= and =criteria=) and prints
 ={"answers": {...}}= on stdout inside =budget_ms=. A =noul= answer is
 ={"noul": p}= or a bare number; a =choice= answer is ={"choice": KEY,
-"confidence": p, "probabilities": {...}}=, and a bare key stands for a
+"confidence": p, "probabilities": {...}}=, and a bare key means a
 sure one. A question with no answer refuses the whole reply, so the hook
 takes its local path rather than half a judgment.
 
@@ -546,7 +546,7 @@ same verbs are =eb_recipe_check=, =eb_package_bump=, =eb_recipe_lint=,
 =ljos_sitting=, =ljos_island=, =ljos_remember= and =ljos_finish=.
 
 For a whole generation, put the bundle on the tracker before anybody
-builds, and let the graph hand out the work:
+builds, and let the graph hand out the modules, each up the same ladder:
 
 #+begin_src bash
 ljos bump-plan out --project demo --parent demo-319z --dry-run
@@ -554,11 +554,11 @@ ljos bump-plan out --project demo --parent demo-319z
 vissue ready -p demo
 #+end_src
 
-One child issue per module the lock builds, blocked by the modules built
-before it; =ready= is the frontier a seat can sit on, and =ljos sitting=
+The plan writes one child issue per module the lock builds, blocked by
+the modules built before it; =ready= is the frontier a seat can sit on, and =ljos sitting=
 refuses a module whose blockers are still open. The ids are a hash of
 the module and the generation, so running it again after the bundle
-changed adds the new modules and holds the rest.
+changed adds the new modules and keeps the rest.
 
 When the campaign ends, its typed findings are the lessons:
 
@@ -594,7 +594,7 @@ $ ljos habit
 mab-cr-all	0.579 acc	+0.044 since 0.535 (8 days ago)	today	next reading in 7 days	11793
 #+end_src
 
-The second reading supersedes the first, so the pack holds one live value
+The second reading supersedes the first, so the pack keeps one live value
 a habit and =ljos search mab-cr-all --as-of 2026-09-15= still answers
 what it stood at then. The cadence is the reading's review clock: when a
 week passes with no new reading, =ljos due= lists the habit and the hook
@@ -618,14 +618,13 @@ Three stores, one dated list, oldest first: the tracker's logbook, the
 deeds the issue cites with the time each was produced, and the memories the
 issue's title activates with the time each was written. Each line carries
 its date, its age, the gap since the line before, and the store it came
-from. The reader gets time as data rather than stamps to subtract, and a
+from. The reader gets time as data rather than timestamps to subtract, and a
 later line supersedes an earlier one on the same matter. =ljos sitting=
 prints the last twelve as its =timeline= section.
 
-=ljos search TOPIC --as-of 2026-09-01= asks the pack as it stood then:
+=ljos search TOPIC --as-of 2026-09-01= asks the pack as it was then:
 memories withdrawn since included, memories written since left out. The
-pack tombstones rather than erases, which is what makes the question
-answerable.
+pack tombstones rather than erases, so the question has an answer.
 
 * Start a sitting, and end one
 
@@ -743,23 +742,23 @@ ballot's confidence as it does any voter's.
 
 * Hold a done claim beside a red test
 
-=Stop= also holds one turn, with no model in the loop, when the
-conversation holds no issue and the turn used tools without touching
+=Stop= also blocks one turn, with no model in the loop, when the
+conversation has no issue and the turn used tools without touching
 the seat. The agent is told to file an issue and sit. The next stop of
-that same turn is not held.
+that same turn goes through.
 
 With Jev on, the =Stop= and =SubagentStop= hooks audit the turn once
-before the agent stops. The state holds four parts, bounded to a few
-thousand tokens:
+before the agent stops. The audit reads four parts of the turn, bounded
+to a few thousand tokens:
 
 - the person's last request
-- the shell commands since it
+- the shell commands the turn ran since that request
 - the latest test output, or the last output when no test ran
-- the final message
+- the final message from the agent
 
 Jev answers three questions about it:
 
-| question | holds the stop at |
+| question | blocks the stop at |
 |---|---|
 | =claims_complete= | 0.9 or above, with =tests_green= 0.1 or under and a test run in the turn |
 | =tests_green= | (with the above) |
@@ -832,7 +831,7 @@ closes 3f9c…  The default fuse is Borda.
 
 A write closes the earlier claim it rewrites on arrival (same opening
 words, a new object; a correction; an explicit supersedes). A pack written
-before that rule, or filled by a handover, holds pairs the rule never saw;
+before that rule, or filled by a handover, has pairs the rule never saw;
 =consolidate= reports them, =--apply= closes them. The closed claim keeps
 its window: =ljos search --as-of= finds it at the time it was live.
 
@@ -886,7 +885,7 @@ ok	jev	on  jev-1.13.0  88 calls, 0 cached  $0.0035 of $4.00 this month
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names how many commits origin lacks, and fails when that count
 sits through the push wait. It also fails when another remote of the
-tracker holds a different head of the branch, as of the last fetch: two
+tracker has a different head of the branch, as of the last fetch: two
 seats pushing to two remotes each read only their own writes. A sitting's own tracker push goes to
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.

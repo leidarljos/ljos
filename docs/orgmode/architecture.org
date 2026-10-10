@@ -7,7 +7,8 @@ process does not share that pane's address space.
 
 * One writer
 
-The pack is one daemon and one LMDB file. The claim graph has one mutator,
+The pack is one daemon and one Lightning Memory-Mapped Database (LMDB)
+file. The claim graph has one mutator,
 the host. Deed appends take a file lock, so two processes minting at once
 write whole lines. The packset README records the hammer: zero errors at
 32 clients, and a herd of 32 writing 6400 distinct claims into one
@@ -22,13 +23,13 @@ markdown file under =inbox/= and types one line into the pane.
 =hand_actor= writes the same file with an =ActorMessage= kept in a
 comment. The message is one of =cast=, =call=, =event= or =exit=.
 
-The pane opens through the =[[tool]]= table in
+A persona's pane opens through the =[[tool]]= table in
 =crates/ljos-cli/src/persona_session.rs=. Herdr is up when =herdr= is on
 =PATH= and =herdr workspace list= exits 0. =herdr agent get persona-NAME=
 is how the seat reads that agent's status. When herdr is down the pane
 falls back to tmux. =ljos doctor= has a =panes= row for which tool opened.
 
-=ljos supervise= reads one harness exit and prints =restart=, =stop= or
+=ljos supervise= reads one runner exit and prints =restart=, =stop= or
 =give-up=. A restart line is =herdr agent start persona-NAME=. The command
 prints the line and does not run it. The pane the persona already has is
 the one =persona_session= opened.
@@ -44,7 +45,8 @@ Each runner names its own events. Claude registers seven, including
 prompt stdout, so the note is held until the first tool result. The
 [[file:grok-build.org][Grok Build]] page is that path in full.
 
-The MCP server and the HUD use Tokio. =ljos onboard --harness grok= bumps
+The Model Context Protocol (MCP) server and the Heads-Up Display (HUD)
+use Tokio. =ljos onboard --harness grok= bumps
 =LJOS_MCP_GENERATION= in =~/.grok/config.toml= when the crate version
 moved, and Grok respawns the server. The changelog records a prompt
 hook median of 38 ms on the bench it names. That is the latency the seat

@@ -165,7 +165,8 @@ one contended ticket.
    $ ljos onboard
    { "mcpServers": { "ljos": { "type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {} } } }
 
-That entry goes into any runner, where it keeps its MCP servers. The
+That entry goes into any runner, where it keeps its
+Model Context Protocol (MCP) servers. The
 ``env`` is empty on purpose: the server names the seat after the client
 that connects, and ``ljos`` in a shell the runner opens finds the same name
 through the process tree, so nothing is set per runner. A shell-only
