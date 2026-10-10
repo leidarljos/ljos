@@ -60,7 +60,17 @@ jobs:
       - name: Build tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libwayland-dev
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p ljos -p ljos-hud
+      # rustc 1.89.0 takes SIGSEGV in LLVM BranchProbabilityInfo::calculate
+      # while optimizing packset-core at opt-level 3 for aarch64. The
+      # faulting instruction loads through a null register, and raising
+      # RUST_MIN_STACK still crashes. The same crate compiles at opt-level 2.
+      - name: Build
+        run: |
+          set -eu
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL=2
+          fi
+          cargo build --locked --release --target "${{ matrix.target }}" -p ljos -p ljos-hud
       - run: |
           set -eu
           name="ljos-${TAG}-${{ matrix.target }}"
