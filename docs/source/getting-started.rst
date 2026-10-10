@@ -105,6 +105,8 @@ superseded, and travel in a handover. A person can also set one by hand:
    2 due; 0 scheduled
    == island: Ship the fuse change?
    1.000   seed    ... CombMNZ over RRF for fusing two ballots.
+   == reclaim
+   no claim quiet longer than 900s
    == claim
    gen=2
    $ echo 'fn main() {}' > patch.rs

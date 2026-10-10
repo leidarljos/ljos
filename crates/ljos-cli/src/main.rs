@@ -637,7 +637,7 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
