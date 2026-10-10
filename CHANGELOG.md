@@ -23,6 +23,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - A seat rule also sees a command behind a `case` pattern or in a function body, a word in `$'...'` quotes or with quotes inside it (`git 'push'`, `git pu''sh`), a line continued with a backslash, the wrappers `ionice`, `flock`, `chronic`, `unbuffer` and `watch`, the scripts of `trap`, `alias`, `su -c`, `script -c`, `flock -c` and `nix-shell --run`, a here-string, here-document or `echo` piped into a shell, a `git -c alias.NAME=VALUE` alias, and the line `ssh` runs on its host. A line nested past eight levels is refused whole instead of read part of the way. The reference lists what a rule reads and what it does not.
 - The seat guard takes every wrapper off before it looks, as the rules do, so `nice tmux send-keys` and `timeout 5 xdotool type` no longer pass it. It refuses `ljos approve` in any command an agent runs, and a write to a file under the approvals directory, where it had guarded only the directory.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
+- `ljos hook --runner NAME` denies when the hook it runs crashes, exits non-zero without an answer, or runs past 12 seconds. Before, the relay answered such a failure as an allow, and the runner ran the command.
 
 ## 0.28.0 (2026-10-10)
 

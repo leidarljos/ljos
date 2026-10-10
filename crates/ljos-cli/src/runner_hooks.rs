@@ -293,28 +293,116 @@ pub fn raw_event(input: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Run the seat's hook for a runner: `ljos hook` on the normalized
-/// payload, its answer put in the runner's contract. Returns the exit
-/// code the runner reads.
-pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
-    use std::io::Write;
-    let normalized = normalize_input(runner, input);
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("hook").arg("--limit").arg(limit.to_string());
-    if let Some(e) = event {
-        cmd.arg("--event").arg(e);
-    }
-    let mut child = cmd
+/// How long the inner `ljos hook` may run before the relay kills it and
+/// denies. Each runner's own timeout is 15 or 20 seconds, and several of
+/// them let the call run when it lapses, so the relay answers first.
+pub const INNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// A deny in the Claude Code shape the inner hook prints, for an inner
+/// hook that gave no answer: `what` says how it failed.
+fn failed_closed(event: &str, what: &str) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+            "permissionDecision": "deny",
+            "permissionDecisionReason": format!(
+                "the ljos guard hook {what}, so this call is refused unchecked. \
+                 Run `ljos doctor` and fix the hook; retrying returns this same refusal."
+            ),
+        }
+    })
+    .to_string()
+}
+
+/// Run `cmd` as the inner hook with `stdin` as its input, and give back
+/// what it printed, or a deny when it did not finish cleanly: a spawn
+/// error, a kill by signal, a non-zero exit, or no exit within `timeout`.
+/// A non-zero exit that still printed a deny or an ask keeps it.
+#[must_use]
+pub fn run_inner(
+    mut cmd: std::process::Command,
+    stdin: &str,
+    event: &str,
+    timeout: std::time::Duration,
+) -> String {
+    use std::io::{Read, Write};
+    let spawned = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(normalized.as_bytes())?;
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => return failed_closed(event, &format!("did not start ({e})")),
+    };
+    // Feed and drain on their own threads, so a hook that reads nothing or
+    // prints a lot cannot stall the clock below.
+    let input = stdin.to_string();
+    // The writer is never joined: a child that left a grandchild holding
+    // its stdin could block it, and the process exits soon after.
+    if let Some(mut pipe) = child.stdin.take() {
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(input.as_bytes());
+        });
     }
-    let output = child.wait_with_output()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let (out, err, code) = answer(runner, &raw_event(input), &text);
+    let reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!("gave no answer within {} s", timeout.as_secs_f32()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => break Err(format!("could not be waited on ({e})")),
+        }
+    };
+    let status = match status {
+        Ok(status) => status,
+        // A killed hook's children may still hold the pipe; do not wait
+        // for the reader.
+        Err(what) => return failed_closed(event, &what),
+    };
+    let out = reader
+        .and_then(|r| r.join().ok())
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    if status.success() || read_answer(&out).decision.is_some() {
+        return out;
+    }
+    let what = match status.code() {
+        Some(code) => format!("exited with status {code}"),
+        None => "was killed by a signal".to_string(),
+    };
+    failed_closed(event, &what)
+}
+
+/// Run the seat's hook for a runner: `ljos hook` on the normalized
+/// payload, its answer put in the runner's contract. Returns the exit
+/// code the runner reads. An inner hook that crashes, exits non-zero
+/// without a decision, or runs past [`INNER_TIMEOUT`] is a deny.
+pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
+    let normalized = normalize_input(runner, input);
+    let raw = raw_event(input);
+    let text = match std::env::current_exe() {
+        Ok(exe) => {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("hook").arg("--limit").arg(limit.to_string());
+            if let Some(e) = event {
+                cmd.arg("--event").arg(e);
+            }
+            run_inner(cmd, &normalized, &raw, INNER_TIMEOUT)
+        }
+        Err(e) => failed_closed(&raw, &format!("could not find its own binary ({e})")),
+    };
+    let (out, err, code) = answer(runner, &raw, &text);
     print!("{out}");
     eprint!("{err}");
     Ok(code)
@@ -780,6 +868,81 @@ mod tests {
         );
         let (out, _, _) = answer("cline", "UserPromptSubmit", NOTE);
         assert!(out.contains("contextModification"));
+    }
+
+    #[cfg(unix)]
+    fn sh(script: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(script);
+        cmd
+    }
+
+    #[cfg(unix)]
+    fn inner(script: &str, timeout_ms: u64) -> String {
+        run_inner(
+            sh(script),
+            r#"{"tool_name":"Bash"}"#,
+            "PreToolUse",
+            std::time::Duration::from_millis(timeout_ms),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_inner_hook_that_fails_is_a_deny_in_every_runner() {
+        let cases = [
+            ("cat >/dev/null; exit 3", "exited with status 3"),
+            ("cat >/dev/null; kill -SEGV $$", "killed by a signal"),
+            ("sleep 5", "no answer within"),
+        ];
+        for (script, why) in cases {
+            let out = inner(script, 300);
+            assert_eq!(
+                read_answer(&out).decision.as_deref(),
+                Some("deny"),
+                "{script}"
+            );
+            assert!(out.contains(why), "{script}: {out}");
+            for runner in RUNNERS {
+                let (stdout, stderr, code) = answer(runner, "PreToolUse", &out);
+                let said = format!("{stdout}{stderr}");
+                assert!(
+                    said.contains("refused unchecked")
+                        && (code == 2 || said.contains("deny") || said.contains("\"cancel\":true")),
+                    "{runner} on {script}: {said} exit {code}"
+                );
+            }
+        }
+        let missing = run_inner(
+            std::process::Command::new("/nonexistent/ljos"),
+            "{}",
+            "PreToolUse",
+            std::time::Duration::from_secs(1),
+        );
+        assert!(missing.contains("did not start"), "{missing}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_inner_hook_that_answers_keeps_its_answer() {
+        assert_eq!(inner("cat >/dev/null", 2_000), "", "a clean allow");
+        assert_eq!(
+            inner(&format!("cat >/dev/null; printf '%s' '{DENY}'"), 2_000),
+            DENY
+        );
+        assert_eq!(
+            inner(
+                &format!("cat >/dev/null; printf '%s' '{DENY}'; exit 1"),
+                2_000
+            ),
+            DENY,
+            "a deny printed before a non-zero exit stands"
+        );
+        let note = inner(
+            &format!("cat >/dev/null; printf '%s' '{NOTE}'; exit 1"),
+            2_000,
+        );
+        assert_eq!(read_answer(&note).decision.as_deref(), Some("deny"));
     }
 
     #[test]

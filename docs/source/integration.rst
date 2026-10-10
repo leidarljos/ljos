@@ -129,6 +129,9 @@ same everywhere and the envelope differs:
 The runners from Copilot down call ``ljos hook --runner NAME``. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
+The relay denies when the inner hook crashes, exits non-zero without
+an answer, or runs past 12 seconds. The reason names the failure and
+says to run ``ljos doctor``.
 
 Two rules hold on every runner. First, the seat guard refuses a command
 that writes the seat's own files (its binaries, its hook entries,
