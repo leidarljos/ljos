@@ -1684,6 +1684,14 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let steps = onboard_to(&harness, dry_run, skills.as_deref())?;
+            // With no runner named, the entry is for pasting: print the
+            // JSON alone, so it parses as it stands.
+            if harness == "json" {
+                for s in &steps {
+                    println!("{}", s.detail);
+                }
+                return Ok(());
+            }
             print!("{}", format_steps(&steps));
             if steps.iter().any(|s| !s.ok) {
                 std::process::exit(1);
