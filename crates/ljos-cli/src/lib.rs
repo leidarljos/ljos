@@ -9894,7 +9894,8 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 
 /// Whether a cite stands: a deed accession `deedar current` takes, or an
 /// issue whose ballots settle (`vissue consensus --gate`) or that closed
-/// as a decision. The text says what it stood on.
+/// as a decision, either one backed by a seat other than the one
+/// pushing. The text says what it stood on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     let ok = |bin: &str, args: &[&str]| {
         std::process::Command::new(bin)
@@ -9907,10 +9908,12 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     };
     if let Ok(v) = tracker_show_json(cite) {
         if ok("vissue", &["consensus", cite, "--gate"]) {
+            settled_by_seats(cite)?;
             return Ok(format!("{cite} settles"));
         }
         if v["state"].as_str() == Some("DONE") && is_decision(&v) {
-            return Ok(format!("{cite} closed as a decision"));
+            let choice = decided_on_tracker(cite)?;
+            return Ok(format!("{cite} closed as a decision on {choice}"));
         }
         return Err(format!(
             "{cite} neither settles (`vissue consensus {cite} --gate`) nor closed as a decision"
@@ -9922,6 +9925,156 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     Err(format!(
         "{cite} is neither a tracker issue nor a current deed"
     ))
+}
+
+/// The option an issue settled on, from `vissue consensus --json`: the
+/// choice the consensus weighs most.
+#[must_use]
+pub fn settled_choice(consensus: &Value) -> Option<String> {
+    let choices = consensus["choices"].as_array()?;
+    let weights = consensus["consensus"].as_array()?;
+    let (i, _) = weights
+        .iter()
+        .filter_map(Value::as_f64)
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    choices.get(i)?.as_str().map(str::to_string)
+}
+
+/// The ballots that count toward a push cite, as `(agent, choice)`. A
+/// persona's ballot, or a Jev ballot (`judge:MODEL`) cast for one, is
+/// left out: a seat can write personas and have them vote with it.
+fn seat_ballots<'a>(
+    ballots: &'a [Value],
+    personas: &std::collections::BTreeSet<String>,
+) -> Vec<(&'a str, &'a str)> {
+    ballots
+        .iter()
+        .filter_map(|b| Some((b["agent"].as_str()?.trim(), b["choice"].as_str()?)))
+        .filter(|(agent, _)| !personas.contains(*agent) && !agent.starts_with("judge:"))
+        .collect()
+}
+
+/// Whether a cite's settle stands on seat ballots alone, persona and Jev
+/// ballots left out (see [`seat_ballots`]). What is left has to hold at
+/// least one ballot from a seat other than `pusher`, the seat asking to
+/// push, and every one of them for `choice`. A seat that votes alone on
+/// its own issue has not been checked by anyone.
+///
+/// # Errors
+///
+/// The refusal, naming the ballots it looked at.
+pub fn settles_on_seats(
+    cite: &str,
+    ballots: &[Value],
+    choice: &str,
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+) -> std::result::Result<(), String> {
+    let seats = seat_ballots(ballots, personas);
+    if seats.is_empty() {
+        return Err(format!(
+            "{cite} settles on persona ballots alone, and those do not count toward a push cite; \
+             a seat has to vote {choice}"
+        ));
+    }
+    let against: Vec<String> = seats
+        .iter()
+        .filter(|(_, c)| *c != choice)
+        .map(|(a, c)| format!("{a} for {c}"))
+        .collect();
+    if !against.is_empty() {
+        return Err(format!(
+            "without its persona ballots {cite} does not settle on {choice}: {}",
+            against.join(", ")
+        ));
+    }
+    if seats.iter().all(|(a, _)| *a == pusher) {
+        return Err(format!(
+            "{cite} settles on the ballot of {pusher}, the seat pushing, alone; \
+             another seat votes {choice}, or the person approves this push"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an issue closed as a decision stands as a push cite. The
+/// tracker does not record who closed an issue, so the close alone says
+/// nothing: the pushing seat, or a persona it wrote, could have closed
+/// it. It stands when a seat other than `pusher` voted on it and every
+/// seat ballot names the same option, persona and Jev ballots left out.
+/// The person backs a push by approving it, or by voting.
+///
+/// # Errors
+///
+/// The refusal, naming the ballots it looked at.
+pub fn decided_by_another_seat(
+    cite: &str,
+    ballots: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+) -> std::result::Result<String, String> {
+    let seats = seat_ballots(ballots, personas);
+    let Some(&(by, choice)) = seats.iter().find(|(a, _)| *a != pusher) else {
+        return Err(format!(
+            "{cite} closed as a decision, but no seat other than {pusher} voted on it, \
+             and a close does not say who made it; another seat votes, \
+             or the person approves this push"
+        ));
+    };
+    let against: Vec<String> = seats
+        .iter()
+        .filter(|(_, c)| *c != choice)
+        .map(|(a, c)| format!("{a} for {c}"))
+        .collect();
+    if !against.is_empty() {
+        return Err(format!(
+            "{cite} closed as a decision, but its seats split: {by} for {choice}, {}",
+            against.join(", ")
+        ));
+    }
+    Ok(choice.to_string())
+}
+
+/// [`settles_on_seats`] for an issue on the tracker. A count or a roster
+/// that cannot be read does not stand.
+fn settled_by_seats(cite: &str) -> std::result::Result<(), String> {
+    let consensus = vissue_json(&["consensus", cite, "--json"])
+        .map_err(|e| format!("{cite}: the settle is not readable: {e}"))?;
+    let choice =
+        settled_choice(&consensus).ok_or_else(|| format!("{cite}: the settle names no option"))?;
+    let (ballots, personas) = cite_ballots(cite)?;
+    settles_on_seats(cite, &ballots, &choice, &personas, &seat_name())
+}
+
+/// [`decided_by_another_seat`] for an issue on the tracker. Ballots or a
+/// roster that cannot be read do not stand.
+fn decided_on_tracker(cite: &str) -> std::result::Result<String, String> {
+    let (ballots, personas) = cite_ballots(cite)?;
+    decided_by_another_seat(cite, &ballots, &personas, &seat_name())
+}
+
+fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
+    let said = run_captured("vissue", args).map_err(|e| format!("{e:#}"))?;
+    serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
+}
+
+/// An issue's ballots and the persona names to leave out of them.
+fn cite_ballots(
+    cite: &str,
+) -> std::result::Result<(Vec<Value>, std::collections::BTreeSet<String>), String> {
+    let ballots = vissue_json(&["vote", cite, "--json"])
+        .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
+    let personas = personas_from_pack()
+        .map_err(|e| {
+            format!(
+                "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
+            )
+        })?
+        .into_iter()
+        .map(|p| p.name.trim().to_string())
+        .collect();
+    Ok((ballots.as_array().cloned().unwrap_or_default(), personas))
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -10320,7 +10473,7 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
             None => Some(ruled(format!(
                 "{why}, so the push cites the decision behind it: run it as `LJOS_CITE=ISSUE {}`, \
                  where ISSUE settles (`vissue consensus ISSUE --gate`) or closed as a decision, \
-                 or LJOS_CITE=ACCESSION for a current deed",
+                 with a ballot from another seat, or LJOS_CITE=ACCESSION for a current deed",
                 line.trim()
             ))),
         },
@@ -16698,6 +16851,63 @@ mod tests {
     /// cargo runs tests on threads, and one process has one environment.
     /// The runner session the test process inherited is dropped first, so a
     /// test that sets one session id sees that one alone.
+    /// A home, data and config directory of the test's own, no pack and no
+    /// deed store or tracker named, for a dry onboard whose steps would
+    /// otherwise read the machine: packset on PATH, a writer up, a host key.
+    /// Hold [`env_guard`] for as long as this lives; dropping it restores
+    /// the environment.
+    struct HermeticSeat {
+        _dir: tempfile::TempDir,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl HermeticSeat {
+        const KEYS: [&'static str; 9] = [
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "PACKSET_URL",
+            "DEEDAR_URL",
+            "DEEDAR_HOST_SIGNING_KEY",
+            "ISSUE_ROOT",
+            "VISSUE_ROOT",
+            "VISSUE_CONFIG",
+        ];
+
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let saved = Self::KEYS
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+            // SAFETY: the caller holds env_guard.
+            unsafe {
+                for k in Self::KEYS {
+                    std::env::remove_var(k);
+                }
+                std::env::set_var("HOME", dir.path());
+                std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
+                std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+                std::env::set_var("PACKSET_URL", "off");
+            }
+            Self { _dir: dir, saved }
+        }
+    }
+
+    impl Drop for HermeticSeat {
+        fn drop(&mut self) {
+            // SAFETY: the caller still holds env_guard.
+            unsafe {
+                for (k, v) in &self.saved {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -21025,6 +21235,8 @@ mod tests {
 
     #[test]
     fn grok_onboard_names_the_frozen_hook_file() {
+        let _g = env_guard();
+        let _seat = HermeticSeat::new();
         let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
         let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
         assert!(steps[0].ok, "{steps:?}");
@@ -21084,6 +21296,8 @@ mod tests {
 
     #[test]
     fn grok_onboard_ends_with_the_shared_dependencies() {
+        let _g = env_guard();
+        let _seat = HermeticSeat::new();
         let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
         let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
@@ -21719,6 +21933,18 @@ mod tests {
     #[test]
     fn a_persona_votes_through_the_seat_under_its_own_name() {
         let _g = env_guard();
+        // The runners file is this test's own, not the machine's: a
+        // persona's runner must be a [[harness]] there.
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(config.path().join("ljos")).unwrap();
+        std::fs::write(
+            config.path().join("ljos/harnesses.toml"),
+            "[[harness]]\nname = \"grok\"\n\n[[harness]]\nname = \"shell\"\nshell = true\n",
+        )
+        .unwrap();
+        let saved = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", config.path()) };
         let task = persona_ballot_task("BRIEF", "buildengineer", "surf-ab12");
         assert!(task.starts_with("BRIEF"));
         assert!(
@@ -21740,6 +21966,85 @@ mod tests {
             "text": "Reads pipelines.", "runner": "grok", "ts": "2026-10-02T00:00:00Z"
         })]);
         assert_eq!(back.pop().unwrap().runner.as_deref(), Some("grok"));
+        // A runner the file does not name is refused, and says which it names.
+        let stray = Persona {
+            runner: Some("nowhere".into()),
+            ..p
+        };
+        let err = persona_atom(&stray, "seat").unwrap_err().to_string();
+        assert!(err.contains("grok, shell"), "{err}");
+        // SAFETY: as above.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn persona_ballots_do_not_settle_a_push_cite() {
+        let consensus = serde_json::json!({
+            "choices": ["hold", "ship"], "consensus": [0.2, 0.8]
+        });
+        assert_eq!(settled_choice(&consensus).as_deref(), Some("ship"));
+        let personas: std::collections::BTreeSet<String> =
+            ["reviewer".to_string(), "reader".to_string()].into();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let only = [
+            ballot("reviewer", "ship"),
+            ballot("reader", "ship"),
+            ballot("judge:grok-4", "ship"),
+        ];
+        let err = settles_on_seats("surf-ab12", &only, "ship", &personas, "grok").unwrap_err();
+        assert!(err.contains("persona ballots alone"), "{err}");
+        let mut seat = only.to_vec();
+        seat.push(ballot("grok", "ship"));
+        assert!(settles_on_seats("surf-ab12", &seat, "ship", &personas, "codex").is_ok());
+        let mut split = seat.clone();
+        split.push(ballot("codex", "hold"));
+        let err = settles_on_seats("surf-ab12", &split, "ship", &personas, "grok").unwrap_err();
+        assert!(err.contains("codex for hold"), "{err}");
+    }
+
+    #[test]
+    fn the_pushing_seat_does_not_back_its_own_cite() {
+        let personas: std::collections::BTreeSet<String> = ["reviewer".to_string()].into();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let own = [ballot("grok", "ship"), ballot("reviewer", "ship")];
+        let err = settles_on_seats("surf-ab12", &own, "ship", &personas, "grok").unwrap_err();
+        assert!(err.contains("the seat pushing, alone"), "{err}");
+        let mut seen = own.to_vec();
+        seen.push(ballot("codex", "ship"));
+        assert!(settles_on_seats("surf-ab12", &seen, "ship", &personas, "grok").is_ok());
+    }
+
+    #[test]
+    fn a_closed_decision_stands_on_another_seats_ballot() {
+        let personas: std::collections::BTreeSet<String> = ["reviewer".to_string()].into();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let err = decided_by_another_seat("surf-ab12", &[], &personas, "grok").unwrap_err();
+        assert!(err.contains("no seat other than grok"), "{err}");
+        let own = [
+            ballot("grok", "ship"),
+            ballot("reviewer", "ship"),
+            ballot("judge:grok-4", "ship"),
+        ];
+        let err = decided_by_another_seat("surf-ab12", &own, &personas, "grok").unwrap_err();
+        assert!(err.contains("no seat other than grok"), "{err}");
+        let mut seen = own.to_vec();
+        seen.push(ballot("rgoswami", "ship"));
+        assert_eq!(
+            decided_by_another_seat("surf-ab12", &seen, &personas, "grok").as_deref(),
+            Ok("ship")
+        );
+        let mut split = seen.clone();
+        split.push(ballot("codex", "hold"));
+        let err = decided_by_another_seat("surf-ab12", &split, &personas, "grok").unwrap_err();
+        assert!(err.contains("codex for hold"), "{err}");
     }
 
     #[test]
