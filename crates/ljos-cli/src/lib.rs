@@ -13173,11 +13173,20 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
 /// claimdag's runtime default. Two graphs on one host (a demo, a test
 /// seat) write their holds to the same runtime directory.
 fn claim_graph_scope() -> String {
-    std::env::var("CLAIMDAG_DIR")
-        .ok()
-        .map(|d| d.trim().trim_end_matches('/').to_string())
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "-".to_string())
+    graph_scope_of(std::env::var("CLAIMDAG_DIR").ok().as_deref())
+}
+
+/// [`claim_graph_scope`] for one value. A directory that exists is named by
+/// its canonical path, so `claims`, `./claims/` and the absolute path from
+/// another working directory are one graph.
+fn graph_scope_of(dir: Option<&str>) -> String {
+    let Some(d) = dir.map(str::trim).filter(|d| !d.is_empty()) else {
+        return "-".to_string();
+    };
+    std::fs::canonicalize(d).map_or_else(
+        |_| d.trim_end_matches('/').to_string(),
+        |p| p.display().to_string(),
+    )
 }
 
 /// The issue the newest hold record of this conversation names: a record
@@ -18698,6 +18707,29 @@ mod tests {
         assert!(is_session("herdr") && is_session("tmux: server") && !is_session("acme"));
     }
 
+    /// one graph directory, named three ways, is one scope.
+    #[test]
+    fn a_graph_directory_is_one_scope_however_it_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let claims = dir.path().join("claims");
+        std::fs::create_dir(&claims).unwrap();
+        let abs = super::graph_scope_of(claims.to_str());
+        assert_eq!(
+            super::graph_scope_of(Some(&format!("{}/", claims.display()))),
+            abs
+        );
+        assert_eq!(
+            super::graph_scope_of(Some(&format!("{}/../claims", claims.display()))),
+            abs
+        );
+        assert_eq!(super::graph_scope_of(None), "-");
+        assert_eq!(super::graph_scope_of(Some("  ")), "-");
+        assert_eq!(
+            super::graph_scope_of(Some("/no/such/claims/")),
+            "/no/such/claims"
+        );
+    }
+
     #[test]
     fn a_generic_domain_gives_way_to_a_specific_one() {
         let persona = |name: &str, about: &[&str]| Persona {
@@ -18941,7 +18973,7 @@ mod tests {
                 "4086",
                 "node",
                 "2026-10-09T20:00:00Z",
-                "Software-ls53",
+                "acme-ls53",
                 graph,
             ],
         );
@@ -18982,7 +19014,7 @@ mod tests {
                 "4086",
                 "node",
                 "2026-10-10T10:00:00Z",
-                "Software-bob1",
+                "acme-bob1",
             ],
         );
         let chain = [
@@ -18999,7 +19031,7 @@ mod tests {
                 graph
             )
             .as_deref(),
-            Some("Software-ls53"),
+            Some("acme-ls53"),
             "the agent's own hold, not the demo's"
         );
         // A subagent of the same runner holds under another name but the
@@ -19013,7 +19045,7 @@ mod tests {
                 graph
             )
             .as_deref(),
-            Some("Software-ls53")
+            Some("acme-ls53")
         );
         // The demo's own seat, in its own graph, finds the demo's issue.
         assert_eq!(
@@ -19023,7 +19055,7 @@ mod tests {
         // An old record without a graph line still matches its own seat.
         assert_eq!(
             held_from_records_in(&[], dir.path(), &chain, "bob", graph).as_deref(),
-            Some("Software-bob1")
+            Some("acme-bob1")
         );
     }
 
