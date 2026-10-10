@@ -67,7 +67,8 @@ id=$(vissue create -p demo "Ship the fuse change?" -q | tail -1)
 VISSUE_AGENT=alice ljos vote "$id" --for ship --used none >/dev/null
 VISSUE_AGENT=bob ljos vote "$id" --for ship --used none >/dev/null
 VISSUE_AGENT=carol ljos vote "$id" --for hold --used none >/dev/null
-ljos consensus "$id" | grep -q '"engine": "degroot-fj"' || fail consensus
+ljos consensus "$id" --json | grep -q '"engine": "degroot-fj"' || fail consensus
+ljos consensus "$id" | grep -q '^settle (DeGroot, 3 voters): ship 0.667, hold 0.333' || fail "consensus in words"
 learned=$(ljos learn "$id" --outcome hold 2>&1 || true)
 echo "$learned" | grep -q 'weighs' || { echo "$learned"; ljos seat; vissue vote "$id" 2>&1 | head -8; fail learn; }
 
@@ -214,7 +215,7 @@ brio ljos vote "$tid" --for ship --used none >/dev/null
 echo "two-seat: brio voted ship"
 acme ljos vote "$tid" --for ship --used none >/dev/null
 echo "two-seat: acme voted ship"
-cons=$(brio ljos consensus "$tid")
+cons=$(brio ljos consensus "$tid" --json)
 echo "$cons" | grep -q '"engine": "degroot-fj"' || fail "two-seat: consensus"
 echo "$cons" | grep '"engine"'
 fin=$(brio ljos finish "$tid" --lesson "Two seats handed one ticket. The tracker kept the line." --close)

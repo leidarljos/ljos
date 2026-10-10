@@ -14773,17 +14773,165 @@ pub fn settle_flags_for(tags: &[String]) -> Vec<String> {
     }
 }
 
-/// [`consensus_steps_anchored`] with the model flags the issue's tags ask
-/// for on the model crate's settle.
+/// The anchor a voter with none of its own settles under when a persona
+/// votes on the same issue: it moves halfway toward the others. Under
+/// Friedkin-Johnsen a voter at susceptibility 1 keeps none of its ballot,
+/// so with no anchor of its own the seat lost every settle to any
+/// anchored persona, however few held that view.
+pub const DEFAULT_ANCHOR: f64 = 0.5;
+
+/// The susceptibilities a settle runs under, by voter. Empty when no
+/// persona voted, so a ballot of seats alone stays plain DeGroot. When
+/// one did, each persona keeps its own anchor and every other voter on
+/// the ballot, the seat included, takes [`DEFAULT_ANCHOR`].
+#[must_use]
+pub fn settle_anchors(
+    personas: &[Persona],
+    voters: &[String],
+) -> std::collections::BTreeMap<String, f64> {
+    let anchor_of = |v: &str| personas.iter().find(|p| p.name == v).map(|p| p.anchor);
+    if !voters.iter().any(|v| anchor_of(v).is_some()) {
+        return std::collections::BTreeMap::new();
+    }
+    voters
+        .iter()
+        .map(|v| (v.clone(), anchor_of(v).unwrap_or(DEFAULT_ANCHOR)))
+        .collect()
+}
+
+/// Polarization above this is away from zero: the voters did not meet.
+const POLARIZED: f64 = 1e-3;
+
+/// The settle's JSON in words: the shares, who leads and by how much,
+/// each voter's influence, and what each anchor did. `None` when the text
+/// is not a settle's JSON.
+#[must_use]
+pub fn settle_in_words(
+    json: &str,
+    anchors: &std::collections::BTreeMap<String, f64>,
+) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let options: Vec<&str> = v["options"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let shares: Vec<f64> = v["shares"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_f64)
+        .collect();
+    if options.is_empty() || options.len() != shares.len() {
+        return None;
+    }
+    let mut ranked: Vec<(&str, f64)> = options
+        .iter()
+        .copied()
+        .zip(shares.iter().copied())
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let shares_line = ranked
+        .iter()
+        .map(|(o, s)| format!("{o} {s:.3}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let model = match v["engine"].as_str() {
+        Some(e) if e.starts_with("degroot") && !anchors.is_empty() => {
+            "Friedkin-Johnsen".to_string()
+        }
+        Some(e) if e.starts_with("degroot") => "DeGroot".to_string(),
+        Some(e) => e.to_string(),
+        None => "settle".to_string(),
+    };
+    let agents: Vec<&str> = v["agents"]
+        .as_array()
+        .map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_str).collect());
+    let influence: Vec<f64> = v["influence"]
+        .as_array()
+        .map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_f64).collect());
+    let mut out = format!("settle ({model}, {} voters): {shares_line}\n", agents.len());
+    let tie = v["tie"].as_bool().unwrap_or(false);
+    if tie || ranked.len() < 2 {
+        out.push_str("no option leads: the settle is a tie\n");
+    } else {
+        out.push_str(&format!(
+            "{} leads by {:.3}\n",
+            ranked[0].0,
+            ranked[0].1 - ranked[1].1
+        ));
+    }
+    if let (Some(pol), Some(dis)) = (v["polarization"].as_f64(), v["disagreement"].as_f64()) {
+        out.push_str(&format!("polarization {pol:.3}, disagreement {dis:.3}"));
+        if pol > POLARIZED && ranked.len() > 1 {
+            out.push_str(": voters still sit apart after listening, so the shares are not a position the group reached");
+        }
+        out.push('\n');
+    }
+    if v["settled"].as_bool() == Some(false) {
+        out.push_str("the iteration stopped before it settled; read the shares as a trend\n");
+    }
+    if agents.len() == influence.len() && !agents.is_empty() {
+        let line = agents
+            .iter()
+            .zip(&influence)
+            .map(|(a, i)| format!("{a} {i:.3}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("influence: {line}\n"));
+    }
+    if !anchors.is_empty() {
+        let mut held: Vec<(&String, &f64)> = anchors.iter().collect();
+        held.sort_by(|a, b| a.1.total_cmp(b.1).then(a.0.cmp(b.0)));
+        let line = held
+            .iter()
+            .map(|(n, a)| format!("{n} keeps {:.2}", 1.0 - **a))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "anchors, as the share of its own ballot each voter keeps: {line}. \
+             A voter with no anchor of its own keeps {:.2} when a persona votes. \
+             The voter that keeps the most moves least and pulls the settle hardest.\n",
+            1.0 - DEFAULT_ANCHOR
+        ));
+    }
+    Some(out)
+}
+
+/// The names on an issue's ballots, from `vissue vote ID --json`.
+#[must_use]
+pub fn ballot_voters(issue: &str) -> Vec<String> {
+    run_captured("vissue", &["vote", issue, "--json"])
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s.stdout).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r["agent"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The steps [`consensus_steps_anchored`] builds, under the anchors
+/// [`settle_anchors`] gives for these voters, with the model flags the
+/// issue's tags ask for on the model crate's settle.
 pub fn consensus_steps_for(
     id: &str,
     have_ljos: bool,
     have_vissue: bool,
     trust: &[Trust],
-    personas: &[Persona],
+    anchors: &std::collections::BTreeMap<String, f64>,
     tags: &[String],
 ) -> Result<Vec<ConsensusStep>> {
-    let mut steps = consensus_steps_anchored(id, have_ljos, have_vissue, trust, personas)?;
+    let held: Vec<Persona> = anchors
+        .iter()
+        .map(|(name, anchor)| Persona {
+            name: name.clone(),
+            anchor: *anchor,
+            view: String::new(),
+            entities: Vec::new(),
+            runner: None,
+        })
+        .collect();
+    let mut steps = consensus_steps_anchored(id, have_ljos, have_vissue, trust, &held)?;
     let flags = settle_flags_for(tags);
     if !flags.is_empty() {
         for step in steps.iter_mut().filter(|s| s.bin == "ljos-consensus") {
@@ -18179,8 +18327,9 @@ mod tests {
         // The kind of work sets the dynamics: a broad-audience issue runs
         // bounded confidence on the model crate, and the tracker verb, which
         // has no such model, is left as it was.
+        let anchors = settle_anchors(&got, &["reviewer".to_string()]);
         let broad =
-            consensus_steps_for("x-1", true, true, &[], &got, &["broad".to_string()]).unwrap();
+            consensus_steps_for("x-1", true, true, &[], &anchors, &["broad".to_string()]).unwrap();
         assert!(
             broad[0].args.contains(&"--epsilon".to_string()),
             "{:?}",
@@ -18192,6 +18341,71 @@ mod tests {
             broad[1]
         );
         assert!(settle_flags_for(&["feature".to_string()]).is_empty());
+    }
+
+    /// with a persona on the ballot, the seat and every other unanchored
+    /// voter take the default anchor, so an anchored persona no longer
+    /// takes the whole settle; a ballot of seats alone stays DeGroot, and
+    /// the settle prints what each anchor did in words.
+    #[test]
+    fn an_unanchored_voter_takes_the_default_anchor_when_a_persona_votes() {
+        let skeptic = Persona {
+            name: "skeptic".into(),
+            anchor: 0.3,
+            view: "Doubts the change.".into(),
+            entities: vec![],
+            runner: None,
+        };
+        let personas = vec![skeptic];
+        let voters = vec!["ljos-bot".to_string(), "skeptic".to_string()];
+        let anchors = settle_anchors(&personas, &voters);
+        assert_eq!(anchors.get("skeptic"), Some(&0.3));
+        assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
+        assert!(
+            settle_anchors(&personas, &["ljos-bot".to_string(), "acme".to_string()]).is_empty()
+        );
+        let steps = consensus_steps_for("x-1", true, true, &[], &anchors, &[]).unwrap();
+        for step in &steps {
+            let at = step
+                .args
+                .iter()
+                .position(|a| a == "--susceptibility-of")
+                .expect("anchors passed");
+            assert_eq!(step.args[at + 1], r#"{"ljos-bot":0.5,"skeptic":0.3}"#);
+        }
+        // `ljos-consensus settle` on this ballot with those anchors.
+        let json = r#"{"options":["combmnz","rrf"],"shares":[0.4166666670331706,0.5833333329668294],
+            "rounds":21,"settled":true,"engine":"degroot-fj","agents":["ljos-bot","skeptic"],
+            "influence":[0.4166666666666667,0.5833333333333334],"tie":false}"#;
+        let words = settle_in_words(json, &anchors).unwrap();
+        assert!(
+            words.starts_with("settle (Friedkin-Johnsen, 2 voters): rrf 0.583, combmnz 0.417\n"),
+            "{words}"
+        );
+        assert!(words.contains("rrf leads by 0.167"), "{words}");
+        let polar = json.replace(
+            "\"tie\":false",
+            "\"tie\":false,\"polarization\":0.34,\"disagreement\":0.68",
+        );
+        let said = settle_in_words(&polar, &anchors).unwrap();
+        assert!(
+            said.contains("polarization 0.340, disagreement 0.680: voters still sit apart"),
+            "{said}"
+        );
+        assert!(
+            words.contains("influence: ljos-bot 0.417, skeptic 0.583"),
+            "{words}"
+        );
+        assert!(
+            words.contains("skeptic keeps 0.70, ljos-bot keeps 0.50"),
+            "{words}"
+        );
+        let tie = r#"{"options":["a","b"],"shares":[0.5,0.5],"engine":"degroot-fj","agents":["x","y"],"influence":[0.5,0.5],"tie":true}"#;
+        let words = settle_in_words(tie, &Default::default()).unwrap();
+        assert!(words.starts_with("settle (DeGroot, 2 voters)"), "{words}");
+        assert!(words.contains("no option leads"), "{words}");
+        assert!(!words.contains("anchors"), "{words}");
+        assert!(settle_in_words("not json", &anchors).is_none());
     }
 
     /// Playbooks are kind playbook, latest per name, unreviewed; sitting
