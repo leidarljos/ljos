@@ -275,16 +275,7 @@ accept, and it runs on a model the seat does not bundle. Measured on the
 public benchmarks with one small reader, the seat's retrieval finds the
 right session first nine times in ten on LongMemEval
 (doi:10.48550/arXiv.2410.10813), answers within a few points of the
-labelled-session ceiling where retrieval decides. On MemoryAgentBench
-(doi:10.48550/arXiv.2507.05257), scored as its paper scores it (each
-source on its own metric, then the mean of four), lexical retrieval with
-that small reader answers 0.568 of the accurate-retrieval questions (95%
-CI 0.530 to 0.605), below the published 0.605 for BM25 and 0.651 for
-HippoRAG-v2 with a hosted GPT-4o-mini reader. On conflict resolution at
-262K the replacement rule with fused retrieval reaches 0.395 (CI 0.350
-to 0.440) against their 0.255 and 0.295. The readers differ, so neither
-row is a like-for-like win. The compare page on the org site carries
-these rows, and the reproduction package regenerates them.
+labelled-session ceiling where retrieval decides.
 
 * Agreement that learns
 
