@@ -11699,6 +11699,8 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("ljos-policyd", "ljos-policyd"),
     ("ljos-consensus", "ljos-consensus"),
     ("vissue", "vissue-cli"),
+    // The tracker server the vissue plugin runs; its own crate.
+    ("vissue-mcp", "vissue-mcp"),
     ("deedar", "deedar-cli"),
     ("claimdag", "claimdag-cli"),
     ("packset", "packset"),
@@ -24977,6 +24979,25 @@ mod tests {
             vissue_entry["mcpServers"]["vissue"]["command"],
             "vissue-mcp"
         );
+        // The server the vissue plugin runs is its own crate, so every
+        // install line names it and the doctor knows where it comes from.
+        assert!(super::SEAT_BINS.contains(&("vissue-mcp", "vissue-mcp")));
+        for file in [
+            "README.md",
+            "bin/ljos-plugin",
+            "skills/ljos-setup/SKILL.md",
+            "docs/source/getting-started.rst",
+            "docs/source/index.rst",
+            "docs/orgmode/getting-started.org",
+            "docs/orgmode/index.org",
+        ] {
+            let text = read(file);
+            let line = text
+                .lines()
+                .find(|l| l.contains("binstall --locked ljos"))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            assert!(line.contains(" vissue-mcp "), "{file}: {line}");
+        }
 
         let command = plugin["mcpServers"]["ljos"]["command"].as_str().unwrap();
         assert_eq!(plugin["mcpServers"]["ljos"]["args"][0], "ljos-mcp");

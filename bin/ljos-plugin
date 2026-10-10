@@ -18,7 +18,7 @@ fi
 # The binary is missing. Say how to install it, in words a person and an
 # agent can both act on, and keep the agent working: a missing seat is no
 # guard, not a reason to stop every shell command.
-hint="ljos plugin: $name is not installed, so the ljos memory and command guard are off. Install with: cargo binstall --locked ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus (or ask the agent to use the ljos-setup skill). Then run: ljos doctor"
+hint="ljos plugin: $name is not installed, so the ljos memory and command guard are off. Install with: cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus (or ask the agent to use the ljos-setup skill). Then run: ljos doctor"
 printf '%s\n' "$hint" >&2
 if [ "$name" = ljos ] && [ "${1:-}" = hook ]; then
   input=$(cat)
