@@ -244,6 +244,9 @@ Every piece of work has an issue before it has a claim.
 - Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
   report is `vissue append ISSUE "..."` (or `--file F`); a tag is
   `vissue update ISSUE -t TAG`.
+- An issue another seat sits on refuses your sitting. To help, `ljos
+  note ISSUE "..."` adds an assist to its logbook, and the note names
+  the seat that has it; `ljos send SEAT "..."` reaches that seat now.
 
 ### A bump, and a build campaign
 

@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos note` on an issue another seat sits on names that seat and says the note is an assist the holder reads in the logbook, with `ljos send SEAT` to reach the holder now. A sitting refused on such an issue names the same two ways to help. Before, the sitting was refused and the note went in without a word, so the two verbs seemed to disagree.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
 - The prompt hook no longer waits on the search model. On a new machine packsetd downloads the model on the first search, and the first prompt used to spend its whole 8 s deadline on it and say nothing. When the pack reports an encoder that has not answered yet, the hook starts one search in the background, skips its own, and says once a session that memory is starting. Session start does the same, so the model is usually loaded by the first prompt.
