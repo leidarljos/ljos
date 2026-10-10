@@ -700,7 +700,8 @@ Vote with personas
 
 Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor: the reviewer at 0.2 barely moves off ``hold``, the
-reader at 0.8 is nearly a plain voter. A trust row scoped with ``--about
+reader at 0.8 moves most of the way toward the others, and every other
+voter on the ballot, the seat too, settles at 0.5. A trust row scoped with ``--about
 docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
 also what seats a persona: ``ljos panel ISSUE`` and the ``run_a_panel``
 prompt brief only the personas whose domains the issue's title or its

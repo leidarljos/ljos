@@ -1448,12 +1448,15 @@ impl LjosServer {
                 ljos_cli::atoms_lean(&c, &c.workspace()).context("consensus: GET /v1/atoms failed")
             })
             .unwrap_or_default();
+        // As the CLI: a persona on the ballot settles under its anchor and
+        // every other voter under the default one.
+        let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::ballot_voters(&args.issue));
         let mut steps = consensus_steps_for(
             &args.issue,
             on_path("ljos-consensus"),
             on_path("vissue"),
             &trust,
-            &personas,
+            &anchors,
             &tags,
         )
         .map_err(refused)?;
@@ -1469,7 +1472,18 @@ impl LjosServer {
         }
         for step in steps {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
-            out.push(habitat(step.bin, &args)?.0);
+            let said = habitat(step.bin, &args)?.0;
+            // The settle's words first, then its JSON for a caller that
+            // reads the numbers.
+            if args.first() == Some(&"settle") {
+                if let Some(words) = ljos_cli::settle_in_words(&said.text, &anchors) {
+                    out.push(Said {
+                        text: words,
+                        aside: None,
+                    });
+                }
+            }
+            out.push(said);
         }
         // Beside the settle, as the CLI: the surprisingly popular answer
         // when two or more voters forecast, and the voters' standing when
