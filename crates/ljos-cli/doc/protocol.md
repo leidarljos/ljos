@@ -90,7 +90,9 @@ whose `.ljos/sync.toml` names a scope and its age recipients carries one
 sealed log per machine under `.ljos/atoms/`. The sitting pulls and takes
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `ljos sync --key` prints this machine's public key
-for a scope's recipients, and `ljos sync` runs the pull and the push by hand. An
+for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
+A repository with no `.ljos/sync.toml` is not synced, and the sitting and
+finish say nothing about it; only `ljos sync` names the missing file. An
 atom goes to the scope its `scope:NAME` entity names, else the machine's
 `default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
 takes the scope of the repository its issue lives in, and a
