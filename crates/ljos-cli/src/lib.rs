@@ -15862,14 +15862,24 @@ pub const DEFAULT_ANCHOR: f64 = 0.5;
 
 /// The susceptibilities a settle runs under, by voter. Empty when no
 /// persona voted, so a ballot of seats alone stays plain DeGroot. When
-/// one did, each persona keeps its own anchor and every other voter on
-/// the ballot, the seat included, takes [`DEFAULT_ANCHOR`].
+/// one did, every voter that is not a persona, the seat included, takes
+/// [`DEFAULT_ANCHOR`], and each persona its own anchor but never one
+/// below it. Under Friedkin-Johnsen with equal trust the share of its
+/// ballot a voter keeps is its weight in the settle, so a persona written
+/// at 0 would count as two seats and tie a 2-to-1 vote on its own. A
+/// persona can move more than a seat does, never less. Trust rows still
+/// weigh voters as they say.
 #[must_use]
 pub fn settle_anchors(
     personas: &[Persona],
     voters: &[String],
 ) -> std::collections::BTreeMap<String, f64> {
-    let anchor_of = |v: &str| personas.iter().find(|p| p.name == v).map(|p| p.anchor);
+    let anchor_of = |v: &str| {
+        personas
+            .iter()
+            .find(|p| p.name == v)
+            .map(|p| p.anchor.max(DEFAULT_ANCHOR))
+    };
     if !voters.iter().any(|v| anchor_of(v).is_some()) {
         return std::collections::BTreeMap::new();
     }
@@ -15969,25 +15979,91 @@ pub fn settle_in_words(
             .join(", ");
         out.push_str(&format!(
             "anchors, as the share of its own ballot each voter keeps: {line}. \
-             A voter with no anchor of its own keeps {:.2} when a persona votes. \
+             A voter with no anchor of its own keeps {keep:.2} when a persona votes, \
+             and a persona keeps at most {keep:.2}, so its anchor alone cannot outweigh a seat; \
+             trust rows can, and the influence line shows what they did. \
              The voter that keeps the most moves least and pulls the settle hardest.\n",
-            1.0 - DEFAULT_ANCHOR
+            keep = 1.0 - DEFAULT_ANCHOR
         ));
     }
     Some(out)
 }
 
-/// The names on an issue's ballots, from `vissue vote ID --json`.
+/// An issue's ballots as `vissue vote ID --json` prints them; empty when
+/// the tracker does not answer.
 #[must_use]
-pub fn ballot_voters(issue: &str) -> Vec<String> {
+pub fn ballot_rows(issue: &str) -> Vec<Value> {
     run_captured("vissue", &["vote", issue, "--json"])
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s.stdout).ok())
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
-        .iter()
+}
+
+/// The names on an issue's ballots, from `vissue vote ID --json`.
+#[must_use]
+pub fn ballot_voters(issue: &str) -> Vec<String> {
+    voters_of(&ballot_rows(issue))
+}
+
+/// The names on these ballot rows.
+#[must_use]
+pub fn voters_of(rows: &[Value]) -> Vec<String> {
+    rows.iter()
         .filter_map(|r| r["agent"].as_str().map(str::to_string))
         .collect()
+}
+
+/// The count split the way a push cite reads it: seat ballots, which are
+/// all `LJOS_CITE` counts, then persona and Jev (`judge:`) ballots, which
+/// are advice. `None` when there are no ballots or no persona voted, so
+/// the count the tracker prints already says it all.
+#[must_use]
+pub fn seat_count_in_words(
+    rows: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let mut seats: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    let mut advice: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    for r in rows {
+        let (Some(agent), Some(choice)) = (r["agent"].as_str(), r["choice"].as_str()) else {
+            continue;
+        };
+        let agent = agent.trim();
+        let side = if personas.contains(agent) || agent.starts_with("judge:") {
+            &mut advice
+        } else {
+            &mut seats
+        };
+        side.entry(choice).or_default().push(agent);
+    }
+    if advice.is_empty() {
+        return None;
+    }
+    let line = |m: &std::collections::BTreeMap<&str, Vec<&str>>| {
+        let mut rows: Vec<(&&str, &Vec<&str>)> = m.iter().collect();
+        rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        rows.iter()
+            .map(|(c, who)| format!("{c} {} ({})", who.len(), who.join(", ")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = String::new();
+    if seats.is_empty() {
+        out.push_str(
+            "seats: none voted, so no push can cite this issue; persona ballots are advice\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "seats, the only ballots a push cite counts: {}\n",
+            line(&seats)
+        ));
+    }
+    out.push_str(&format!(
+        "personas and judges, advice that does not settle a push cite: {}\n",
+        line(&advice)
+    ));
+    Some(out)
 }
 
 /// The steps [`consensus_steps_anchored`] builds, under the anchors
@@ -19557,7 +19633,7 @@ mod tests {
     fn an_unanchored_voter_takes_the_default_anchor_when_a_persona_votes() {
         let skeptic = Persona {
             name: "skeptic".into(),
-            anchor: 0.3,
+            anchor: 0.8,
             view: "Doubts the change.".into(),
             entities: vec![],
             runner: None,
@@ -19565,7 +19641,7 @@ mod tests {
         let personas = vec![skeptic];
         let voters = vec!["ljos-bot".to_string(), "skeptic".to_string()];
         let anchors = settle_anchors(&personas, &voters);
-        assert_eq!(anchors.get("skeptic"), Some(&0.3));
+        assert_eq!(anchors.get("skeptic"), Some(&0.8));
         assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
         assert!(
             settle_anchors(&personas, &["ljos-bot".to_string(), "acme".to_string()]).is_empty()
@@ -19577,18 +19653,18 @@ mod tests {
                 .iter()
                 .position(|a| a == "--susceptibility-of")
                 .expect("anchors passed");
-            assert_eq!(step.args[at + 1], r#"{"ljos-bot":0.5,"skeptic":0.3}"#);
+            assert_eq!(step.args[at + 1], r#"{"ljos-bot":0.5,"skeptic":0.8}"#);
         }
         // `ljos-consensus settle` on this ballot with those anchors.
-        let json = r#"{"options":["combmnz","rrf"],"shares":[0.4166666670331706,0.5833333329668294],
-            "rounds":21,"settled":true,"engine":"degroot-fj","agents":["ljos-bot","skeptic"],
-            "influence":[0.4166666666666667,0.5833333333333334],"tie":false}"#;
+        let json = r#"{"options":["combmnz","rrf"],"shares":[0.7142857139406334,0.2857142860593666],
+            "rounds":47,"settled":true,"engine":"degroot-fj","agents":["ljos-bot","skeptic"],
+            "influence":[0.7142857142857142,0.28571428571428564],"tie":false}"#;
         let words = settle_in_words(json, &anchors).unwrap();
         assert!(
-            words.starts_with("settle (Friedkin-Johnsen, 2 voters): rrf 0.583, combmnz 0.417\n"),
+            words.starts_with("settle (Friedkin-Johnsen, 2 voters): combmnz 0.714, rrf 0.286\n"),
             "{words}"
         );
-        assert!(words.contains("rrf leads by 0.167"), "{words}");
+        assert!(words.contains("combmnz leads by 0.429"), "{words}");
         let polar = json.replace(
             "\"tie\":false",
             "\"tie\":false,\"polarization\":0.34,\"disagreement\":0.68",
@@ -19599,11 +19675,17 @@ mod tests {
             "{said}"
         );
         assert!(
-            words.contains("influence: ljos-bot 0.417, skeptic 0.583"),
+            words.contains("influence: ljos-bot 0.714, skeptic 0.286"),
             "{words}"
         );
         assert!(
-            words.contains("skeptic keeps 0.70, ljos-bot keeps 0.50"),
+            words.contains("ljos-bot keeps 0.50, skeptic keeps 0.20"),
+            "{words}"
+        );
+        assert!(
+            words.contains(
+                "a persona keeps at most 0.50, so its anchor alone cannot outweigh a seat"
+            ),
             "{words}"
         );
         let tie = r#"{"options":["a","b"],"shares":[0.5,0.5],"engine":"degroot-fj","agents":["x","y"],"influence":[0.5,0.5],"tie":true}"#;
@@ -19612,6 +19694,61 @@ mod tests {
         assert!(words.contains("no option leads"), "{words}");
         assert!(!words.contains("anchors"), "{words}");
         assert!(settle_in_words("not json", &anchors).is_none());
+    }
+
+    /// Under Friedkin-Johnsen the share of its ballot a voter keeps is its
+    /// weight. A persona written at 0 kept all of it beside two seats at
+    /// 0.5 and tied their 2-to-1 vote alone (`ljos-consensus settle`:
+    /// 0.500 to 0.500). It now settles at the seat's anchor, never below.
+    #[test]
+    fn a_persona_never_keeps_more_of_its_ballot_than_a_seat() {
+        let rock = Persona {
+            name: "rock".into(),
+            anchor: 0.0,
+            view: "Never moves.".into(),
+            entities: vec![],
+            runner: None,
+        };
+        let voters: Vec<String> = ["ljos-bot", "inky", "rock"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let anchors = settle_anchors(&[rock], &voters);
+        assert_eq!(anchors.get("rock"), Some(&DEFAULT_ANCHOR));
+        assert_eq!(anchors.get("inky"), Some(&DEFAULT_ANCHOR));
+        assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
+    }
+
+    /// The count a push cite reads is printed beside the settle: seat
+    /// ballots, then persona and judge ballots as advice. A ballot of
+    /// seats alone adds nothing, and one of personas alone says no push
+    /// can cite it.
+    #[test]
+    fn the_settle_names_which_ballots_a_push_cite_counts() {
+        let rows: Vec<Value> = serde_json::from_str(
+            r#"[{"agent":"ljos-bot","choice":"guard-fix"},{"agent":"hn-skeptic","choice":"guard-fix"},
+                {"agent":"agent-daily-user","choice":"install"},{"agent":"judge:qwen","choice":"install"}]"#,
+        )
+        .unwrap();
+        let personas: std::collections::BTreeSet<String> = ["hn-skeptic", "agent-daily-user"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let said = seat_count_in_words(&rows, &personas).unwrap();
+        assert_eq!(
+            said,
+            "seats, the only ballots a push cite counts: guard-fix 1 (ljos-bot)\n\
+             personas and judges, advice that does not settle a push cite: \
+             install 2 (agent-daily-user, judge:qwen), guard-fix 1 (hn-skeptic)\n"
+        );
+        assert_eq!(voters_of(&rows).len(), 4);
+        assert!(seat_count_in_words(&rows[..1], &personas).is_none());
+        assert!(seat_count_in_words(&[], &personas).is_none());
+        let alone = seat_count_in_words(&rows[1..3], &personas).unwrap();
+        assert!(
+            alone.starts_with("seats: none voted, so no push can cite this issue"),
+            "{alone}"
+        );
     }
 
     /// Playbooks are kind playbook, latest per name, unreviewed; sitting
