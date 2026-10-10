@@ -21720,6 +21720,18 @@ mod tests {
     #[test]
     fn a_persona_votes_through_the_seat_under_its_own_name() {
         let _g = env_guard();
+        // The runners file is this test's own, not the machine's: a
+        // persona's runner must be a [[harness]] there.
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(config.path().join("ljos")).unwrap();
+        std::fs::write(
+            config.path().join("ljos/harnesses.toml"),
+            "[[harness]]\nname = \"grok\"\n\n[[harness]]\nname = \"shell\"\nshell = true\n",
+        )
+        .unwrap();
+        let saved = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", config.path()) };
         let task = persona_ballot_task("BRIEF", "buildengineer", "surf-ab12");
         assert!(task.starts_with("BRIEF"));
         assert!(
@@ -21741,6 +21753,20 @@ mod tests {
             "text": "Reads pipelines.", "runner": "grok", "ts": "2026-10-02T00:00:00Z"
         })]);
         assert_eq!(back.pop().unwrap().runner.as_deref(), Some("grok"));
+        // A runner the file does not name is refused, and says which it names.
+        let stray = Persona {
+            runner: Some("nowhere".into()),
+            ..p
+        };
+        let err = persona_atom(&stray, "seat").unwrap_err().to_string();
+        assert!(err.contains("grok, shell"), "{err}");
+        // SAFETY: as above.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
     }
 
     #[test]
