@@ -4407,37 +4407,22 @@ pub fn panel_concurrency() -> usize {
         })
 }
 
-fn spawn_member_pool(
-    members: &[(&Path, Vec<String>)],
-    concurrency: usize,
-    pool_script: &Path,
-) -> Result<()> {
-    let mut script = String::from("#!/bin/sh\n# Load-balanced panel member runner\n");
-    script.push_str(&format!("MAX_JOBS={concurrency}\n"));
-    script.push_str(
-        "run_job() {\n    log=\"$1\"\n    shift\n    \"$@\" >> \"$log\" 2>&1\n}\n\nwait_slot() {\n    while [ \"$(jobs -p | wc -l)\" -ge \"$MAX_JOBS\" ]; do\n        sleep 0.15\n    done\n}\n\n",
-    );
-    for (member_log, argv) in members {
-        script.push_str("wait_slot\n");
-        let quoted_args: Vec<String> = argv.iter().map(|a| tools::sh_quote(a)).collect();
-        script.push_str(&format!(
-            "run_job {} {} &\n",
-            tools::sh_quote(&member_log.display().to_string()),
-            quoted_args.join(" ")
-        ));
+/// Start each member once fewer than `at_once` are running. The opener counts
+/// its own children rather than leaving the count to a shell: under dash,
+/// `jobs` inside a command substitution lists none.
+fn start_members(members: &[(PathBuf, Vec<String>)], at_once: usize) -> Result<()> {
+    let mut running: Vec<std::process::Child> = Vec::new();
+    for (log, argv) in members {
+        loop {
+            running.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+            if running.len() < at_once.max(1) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        running.push(spawn_member(argv, log)?);
     }
-    script.push_str("\nwait\n");
-    std::fs::write(pool_script, &script)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(pool_script, std::fs::Permissions::from_mode(0o755));
-    }
-
-    let pool_log = pool_script.with_extension("log");
-    let pool_argv = vec!["sh".to_string(), pool_script.display().to_string()];
-    spawn_member(&pool_argv, &pool_log)
+    Ok(())
 }
 
 /// File a yes-or-no decision for `prompt` when nothing open is already one,
@@ -4487,19 +4472,11 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         members.push((member_log, argv));
     }
     let n = members.len();
-    let concurrency = panel_concurrency();
-    if concurrency == 0 || n <= concurrency {
-        for (member_log, argv) in &members {
-            spawn_member(argv, member_log)?;
-        }
-    } else {
-        let pool_script = briefs.join("run_pool.sh");
-        let refs: Vec<(&Path, Vec<String>)> = members
-            .iter()
-            .map(|(l, a)| (l.as_path(), a.clone()))
-            .collect();
-        spawn_member_pool(&refs, concurrency, &pool_script)?;
-    }
+    let at_once = match panel_concurrency() {
+        0 => usize::MAX,
+        bound => bound,
+    };
+    start_members(&members, at_once)?;
     let line = format!("opened {n} members on {issue}\n");
     append_log(log, &line);
     Ok(line)
@@ -4578,7 +4555,10 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     Ok(id)
 }
 
-fn spawn_member(argv: &[String], log: &Path) -> Result<()> {
+/// One member, in a session of its own where `setsid` is on `PATH`.
+/// `setsid` forks only when it starts as a process group leader, which a
+/// spawned child is not, so the handle returned is the member's own.
+fn spawn_member(argv: &[String], log: &Path) -> Result<std::process::Child> {
     if argv.is_empty() {
         bail!("panel member has no argv");
     }
@@ -4589,7 +4569,7 @@ fn spawn_member(argv: &[String], log: &Path) -> Result<()> {
     let err = file.try_clone()?;
     let mut cmd = if which::which("setsid").is_ok() {
         let mut c = std::process::Command::new("setsid");
-        c.arg("--fork").args(argv);
+        c.args(argv);
         c
     } else {
         let mut c = std::process::Command::new(&argv[0]);
@@ -4601,8 +4581,7 @@ fn spawn_member(argv: &[String], log: &Path) -> Result<()> {
         .stdout(file)
         .stderr(err)
         .spawn()
-        .with_context(|| format!("start {}", argv[0]))?;
-    Ok(())
+        .with_context(|| format!("start {}", argv[0]))
 }
 
 fn note_ballot(turn: &mut StopTurn, text: &str) {
@@ -22442,35 +22421,41 @@ mod tests {
         }
     }
 
+    /// Five members, two at a time.
     #[test]
-    fn spawn_member_pool_generates_bounded_script() {
+    fn a_panel_runs_no_more_members_at_once_than_its_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("run_pool.sh");
-        let log1 = dir.path().join("m1.log");
-        let log2 = dir.path().join("m2.log");
-        let members = vec![
-            (log1.as_path(), vec!["echo".to_string(), "m1".into()]),
-            (log2.as_path(), vec!["echo".to_string(), "m2".into()]),
-        ];
-        let mut text = String::from("#!/bin/sh\nMAX_JOBS=2\n");
-        text.push_str("run_job() {\n    log=\"$1\"\n    shift\n    \"$@\" >> \"$log\" 2>&1\n}\n\n");
-        text.push_str("wait_slot() {\n    while [ \"$(jobs -p | wc -l)\" -ge \"$MAX_JOBS\" ]; do\n        sleep 0.15\n    done\n}\n\n");
-        for (log, argv) in &members {
-            text.push_str("wait_slot\n");
-            let quoted: Vec<String> = argv.iter().map(|a| tools::sh_quote(a)).collect();
-            text.push_str(&format!(
-                "run_job {} {} &\n",
-                tools::sh_quote(&log.display().to_string()),
-                quoted.join(" ")
-            ));
+        let ledger = dir.path().join("ledger");
+        let members: Vec<(PathBuf, Vec<String>)> = (0..5)
+            .map(|n| {
+                let run = format!(
+                    "echo + >> '{0}'; sleep 0.3; echo - >> '{0}'",
+                    ledger.display()
+                );
+                (
+                    dir.path().join(format!("m{n}.log")),
+                    vec!["sh".into(), "-c".into(), run],
+                )
+            })
+            .collect();
+        start_members(&members, 2).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut seen = String::new();
+        while std::time::Instant::now() < until {
+            seen = std::fs::read_to_string(&ledger).unwrap_or_default();
+            if seen.lines().count() == 10 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        text.push_str("\nwait\n");
-        std::fs::write(&script, &text).unwrap();
-
-        let read_back = std::fs::read_to_string(&script).unwrap();
-        assert!(read_back.contains("MAX_JOBS=2"));
-        assert!(read_back.contains("run_job"));
-        assert!(read_back.contains("wait_slot"));
-        assert!(read_back.contains("'echo' 'm1'"));
+        assert_eq!(seen.lines().count(), 10, "{seen}");
+        let peak = seen
+            .lines()
+            .scan(0i32, |running, mark| {
+                *running += if mark == "+" { 1 } else { -1 };
+                Some(*running)
+            })
+            .max();
+        assert_eq!(peak, Some(2), "{seen}");
     }
 }
