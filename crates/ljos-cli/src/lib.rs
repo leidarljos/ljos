@@ -10951,7 +10951,12 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 ),
                 false,
             ),
-            (None, _, None) => ("not on PATH".into(), false),
+            // No crates.io answer (offline, or the lookup failed): the
+            // install line still names the crate.
+            (None, _, None) => (
+                format!("not on PATH; cargo install --locked {crate_name}"),
+                false,
+            ),
             (Some(path), have, Some(cr)) => bin_health(&path.display().to_string(), have, Some(cr)),
             (Some(path), have, None) => {
                 let ver = have.unwrap_or("?");
@@ -11624,13 +11629,21 @@ pub fn failing_for_sitting<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
 /// and they do not fail `ljos doctor`.
 const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
 
+/// A seat binary doctor lists but the seat runs without (`ljos-hud`,
+/// `ljos-consensus`, `packset-mcp`): absent, its row is `info`, the same
+/// as [`healthy`] already treated it. It said `no` before, beside an exit
+/// of 0.
+fn optional_bin(name: &str) -> bool {
+    SEAT_BINS.iter().any(|(bin, _)| *bin == name) && !REQUIRED.contains(&name)
+}
+
 /// `ok` when the row answers, `info` when it is optional and absent,
 /// `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.ok {
         "ok"
-    } else if OPTIONAL_ROWS.contains(&row.name) {
+    } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
     } else {
         "no"
@@ -16342,6 +16355,53 @@ mod tests {
             .iter()
             .any(|(n, c)| *n == "ljos-hud" && *c == "ljos-hud"));
         assert!(!REQUIRED.contains(&"ljos-hud"));
+        let hud = Habitat {
+            name: "ljos-hud",
+            state: "not on PATH".into(),
+            ok: false,
+        };
+        let embed = Habitat {
+            name: "packset-embed",
+            state: "not on PATH".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&hud), "info");
+        assert!(healthy(std::slice::from_ref(&hud)));
+        assert_eq!(doctor_word(&embed), "no");
+        assert!(!healthy(&[embed]));
+    }
+
+    /// every install line the README and the docs print installs every
+    /// binary the doctor requires, so a seat that follows one is not red on
+    /// day one.
+    #[test]
+    fn every_install_line_covers_every_required_binary() {
+        // These sit at the repository root, outside a packaged crate.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for file in [
+            "README.md",
+            "docs/orgmode/getting-started.org",
+            "docs/source/getting-started.rst",
+            "docs/orgmode/index.org",
+            "docs/source/index.rst",
+        ] {
+            let Ok(text) = std::fs::read_to_string(root.join(file)) else {
+                continue;
+            };
+            let line = text
+                .lines()
+                .map(|l| l.trim_start().trim_start_matches("$ "))
+                .find(|l| l.starts_with("cargo binstall ljos "))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            for (bin, crate_name) in SEAT_BINS {
+                if REQUIRED.contains(bin) {
+                    assert!(
+                        line.split_whitespace().any(|w| w == *crate_name),
+                        "{file}: {bin} ({crate_name}) is required and not in: {line}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
