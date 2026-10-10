@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos file` and the hooks no longer take another seat's held issue as their own. A hold record matched on the runner process alone, so a demo started from an agent's shell made that agent file under the demo's issue. A process match now needs the same seat, and a hold record names its claim graph, so a record from another graph never matches.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)
