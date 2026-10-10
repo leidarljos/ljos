@@ -492,6 +492,10 @@ enum Cmd {
         /// so a runner that reads the JSON is unchanged.
         #[arg(long)]
         fail_on_deny: bool,
+        /// Read the payload and answer in this runner's hook contract: copilot,
+        /// gemini, windsurf, factory, kiro, cline, qwen or crush.
+        #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
+        runner: Option<String>,
     },
     /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
     /// The settle prints in words: shares, who leads, influence, and what
@@ -1257,10 +1261,21 @@ fn main() -> Result<()> {
             event,
             prompt,
             fail_on_deny,
+            runner,
         } => {
             use std::io::Read;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
+            if let Some(runner) = runner.as_deref() {
+                if !ljos_cli::runner_hooks::is_runner(runner) {
+                    anyhow::bail!(
+                        "hook: no runner {runner:?}; --runner takes {}",
+                        ljos_cli::runner_hooks::RUNNERS.join(", ")
+                    );
+                }
+                let code = ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())?;
+                std::process::exit(code);
+            }
             let call = if prompt {
                 ljos_cli::prompt_call(&input)
             } else {

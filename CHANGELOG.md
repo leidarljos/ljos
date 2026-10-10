@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos onboard --harness` takes `copilot`, `factory`, `qwen`, `crush` and `cline`, and `gemini`, `windsurf` and `kiro` now get the guard hook beside their MCP entry. Each hook runs `ljos hook --runner NAME`, which turns the runner's payload into the one the seat reads and answers in the runner's own shape: Copilot CLI's `permissionDecision`, Gemini CLI's `decision`, exit 2 for Windsurf and Kiro, Cline's `cancel`, and Crush's `decision`. Factory and Qwen Code read the Claude shape. Where a runner cannot ask, an ask is a deny.
 - A here-document fed to `python3 -`, `node -`, `perl` or `ruby` goes to `ljos-policyd` as that interpreter's program, so `python3 - <<EOF` with `shutil.rmtree` in it meets the same refusal as `python3 -c`. Seat rules still read the body as data.
 - The README's first run shows the deny a seat prints. `ljos-policyd` answers a force push first, with its own rule name, so the example now quotes that answer in the runner's full JSON, and the seat's own rule is shown on a command only it covers.
 - Persona ballots no longer count toward an `LJOS_CITE` issue in the push check. The issue has to settle on seat ballots alone: at least one, all for the option the settle names. A persona's ballot and a Jev ballot cast for a persona are left out, and a roster that cannot be read leaves the cite standing on nothing. Before, a seat could vote with personas it wrote on its own issue and cite the result for its own push. Personas still count in every other settle.
@@ -23,6 +24,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - A seat rule also sees a command behind a `case` pattern or in a function body, a word in `$'...'` quotes or with quotes inside it (`git 'push'`, `git pu''sh`), a line continued with a backslash, the wrappers `ionice`, `flock`, `chronic`, `unbuffer` and `watch`, the scripts of `trap`, `alias`, `su -c`, `script -c`, `flock -c` and `nix-shell --run`, a here-string, here-document or `echo` piped into a shell, a `git -c alias.NAME=VALUE` alias, and the line `ssh` runs on its host. A line nested past eight levels is refused whole instead of read part of the way. The reference lists what a rule reads and what it does not.
 - The seat guard takes every wrapper off before it looks, as the rules do, so `nice tmux send-keys` and `timeout 5 xdotool type` no longer pass it. It refuses `ljos approve` in any command an agent runs, and a write to a file under the approvals directory, where it had guarded only the directory.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
+- `ljos hook --runner NAME` denies when the hook it runs crashes, exits non-zero without an answer, or runs past 12 seconds. Before, the relay answered such a failure as an allow, and the runner ran the command.
 
 ## 0.28.0 (2026-10-10)
 

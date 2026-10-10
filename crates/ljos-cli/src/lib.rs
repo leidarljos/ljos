@@ -17,6 +17,7 @@ pub mod jev;
 pub mod mail;
 pub mod persona_session;
 pub mod plugin;
+pub mod runner_hooks;
 pub mod sync;
 pub mod tools;
 pub mod upgrade;
@@ -664,10 +665,14 @@ skills = "~/.agents/skills"
 
 [[harness]]
 name = "windsurf"
+# Windsurf, now Devin Desktop. Its pre_run_command hook blocks on exit 2;
+# a hook that errors any other way lets the command run.
 config_json = "~/.codeium/windsurf/mcp_config.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.codeium/windsurf/skills"
+hooks = "~/.codeium/windsurf/hooks.json"
+hooks_format = "windsurf"
 
 [[harness]]
 name = "zed"
@@ -694,10 +699,14 @@ skills = "~/.config/Claude/skills"
 [[harness]]
 name = "gemini"
 # The Gemini CLI. Antigravity's agy keeps its own file under ~/.gemini/config.
+# BeforeTool gates shell commands and BeforeAgent takes the prompt note.
+# Gemini reads a hook answer that is not JSON as an allow.
 config_json = "~/.gemini/settings.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": [], "env": {"LJOS_SEAT": "{name}"}}'
 skills = "~/.gemini/skills"
+hooks = "~/.gemini/settings.json"
+hooks_format = "gemini"
 
 [[harness]]
 name = "amazonq"
@@ -708,10 +717,69 @@ skills = "~/.aws/amazonq/skills"
 
 [[harness]]
 name = "kiro"
+# Kiro CLI V3 and IDE 1.0 load global hooks from ~/.kiro/hooks. A
+# PreToolUse command that exits non-zero blocks the tool.
 config_json = "~/.kiro/settings/mcp.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.kiro/skills"
+hooks = "~/.kiro/hooks/ljos.json"
+hooks_format = "kiro"
+
+[[harness]]
+name = "copilot"
+# GitHub Copilot CLI. A preToolUse command hook denies when it exits
+# non-zero, and lets the call run when it times out. The same file under
+# a repository's .github/hooks reaches Copilot's cloud agent.
+config_json = "~/.copilot/mcp-config.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "local", "command": "{server}", "args": [], "tools": ["*"]}'
+skills = "~/.copilot/skills"
+hooks = "~/.copilot/hooks/ljos.json"
+hooks_format = "copilot"
+
+[[harness]]
+name = "factory"
+# Factory's droid. Its hooks.json is keyed by event at the top level;
+# Execute is the shell tool.
+config_json = "~/.factory/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.factory/skills"
+hooks = "~/.factory/hooks.json"
+hooks_format = "factory"
+
+[[harness]]
+name = "qwen"
+# Qwen Code takes Claude Code's hook answer; run_shell_command is the shell.
+config_json = "~/.qwen/settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.qwen/skills"
+hooks = "~/.qwen/settings.json"
+hooks_format = "qwen"
+
+[[harness]]
+name = "crush"
+# Charm's Crush. Only PreToolUse fires so far, on the top-level agent.
+config_json = "~/.config/crush/crush.json"
+json_pointer = "/mcp/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.config/crush/skills"
+hooks = "~/.config/crush/crush.json"
+hooks_format = "crush"
+
+[[harness]]
+name = "cline"
+# Cline runs an executable named after the event from its hooks
+# directory, on macOS and Linux. The MCP file is the VS Code extension's
+# on Linux.
+config_json = "~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": [], "disabled": false}'
+skills = "~/.cline/skills"
+hooks = "~/Documents/Cline/Hooks"
+hooks_format = "cline"
 
 # Goose reads YAML. A snippet appended to a file that already has
 # `extensions:` is a second key, so this shape is an example to copy,
@@ -2301,6 +2369,9 @@ pub fn onboard_in(
             (Some(name), _) => named_hook_step(&expand(file), name, dry),
             (None, Some("cursor")) => {
                 cursor_hook_step(&expand(file), &expand("~/.claude/settings.json"), dry)
+            }
+            (None, Some(runner)) if runner_hooks::is_runner(runner) => {
+                runner_hooks::hook_step(runner, &expand(file), &hook_command(), dry)
             }
             (None, _) => hook_step(&expand(file), &hook_events_of(h), dry),
         });
@@ -20657,7 +20728,7 @@ mod tests {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
-        assert_eq!(all.harness.len(), 20);
+        assert_eq!(all.harness.len(), 25);
         assert!(all.harness[3..].iter().all(|h| h.shell
             || h.register.len()
                 + usize::from(h.config.is_some())
