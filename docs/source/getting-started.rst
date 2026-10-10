@@ -182,6 +182,17 @@ a command of its own can be described once in
 ``~/.config/ljos/harnesses.toml`` and onboarded with ``ljos onboard --harness
 NAME``; the :doc:`how-to <howto>` shows the file.
 
+Clean up
+========
+
+The scratch seat is one directory and the pack writer started in step 0.
+Stop the writer and remove the directory, and the next run starts clean on
+the same port:
+
+.. code:: console
+
+   $ kill %1 && rm -rf "$seat"
+
 Where next
 ==========
 

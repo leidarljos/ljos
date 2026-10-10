@@ -179,6 +179,16 @@ a command of its own can be described once in
 =~/.config/ljos/harnesses.toml= and onboarded with =ljos onboard --harness
 NAME=; the [[file:howto.org][how-to]] shows the file.
 
+* Clean up
+
+The scratch seat is one directory and the pack writer started in step 0.
+Stop the writer and remove the directory, and the next run starts clean on
+the same port:
+
+#+begin_src console
+$ kill %1 && rm -rf "$seat"
+#+end_src
+
 * Where next
 
 - [[file:howto.org][How-to]]: wire the server into an agent runner, sign handovers, read the cards.
