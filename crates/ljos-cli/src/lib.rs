@@ -107,6 +107,12 @@ pub struct Harness {
     /// and one prompt. `["UserPromptSubmit", "PreToolUse"]` injects on both.
     #[serde(default)]
     pub hook_events: Vec<String>,
+    /// The events on which the runner is told to stop the action when the
+    /// seat's hook fails, times out or cannot start (`"onFailure":
+    /// "block"` in Claude Code). Without it a crashed gate lets the tool
+    /// run.
+    #[serde(default)]
+    pub hook_fail_closed: Vec<String>,
     /// Where a runner whose hooks are code loads a plugin from, for a
     /// runner with no hooks file: the plugin carries the memory hook and
     /// argv law and shells to `ljos hook`.
@@ -582,6 +588,8 @@ registered = ["claude", "mcp", "get", "ljos"]
 skills = "~/.claude/skills"
 hooks = "~/.claude/settings.json"
 hook_events = ["UserPromptSubmit", "SessionEnd", "PostToolUse", "PreToolUse", "SubagentStop", "PreCompact", "SessionStart"]
+# A tool call waits on the gate: a hook that fails or times out blocks it.
+hook_fail_closed = ["PreToolUse"]
 clients = ["claude-code"]
 resume = ["claude", "--continue"]
 agents = "~/.claude/agents"
@@ -2373,7 +2381,7 @@ pub fn onboard_in(
             (None, Some(runner)) if runner_hooks::is_runner(runner) => {
                 runner_hooks::hook_step(runner, &expand(file), &hook_command(), dry)
             }
-            (None, _) => hook_step(&expand(file), &hook_events_of(h), dry),
+            (None, _) => hook_step(&expand(file), &hook_events_of(h), &h.hook_fail_closed, dry),
         });
     }
     if let Some(dest) = &h.plugin {
@@ -2540,8 +2548,9 @@ fn hook_command() -> String {
 /// Merge the seat's memory hook into a runner's hooks file, once per event.
 /// The file is JSON with a `hooks` object of event name to matcher groups;
 /// a group whose command is the seat's is left alone, so the step is
-/// idempotent.
-fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
+/// idempotent. On the `fail_closed` events the seat's hook carries
+/// `"onFailure": "block"`, added to a hook written before it was asked for.
+fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) -> Step {
     let what = "hook".to_string();
     let mut root: Value = match std::fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
@@ -2576,6 +2585,7 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     // other, and every group that is not the seat's is left alone.
     let mut added = Vec::new();
     let mut removed = Vec::new();
+    let mut closed = Vec::new();
     for event in events {
         let groups = hooks
             .entry(event.clone())
@@ -2583,19 +2593,34 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
-        let present = groups.iter().any(|g| {
-            g["hooks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(is_seat_hook)
-        });
+        let block = fail_closed.contains(event);
+        let mut present = false;
+        let mut shut = false;
+        for hook in groups
+            .iter_mut()
+            .filter_map(|g| g["hooks"].as_array_mut())
+            .flatten()
+            .filter(|h| is_seat_hook(h))
+        {
+            present = true;
+            if block && hook["onFailure"] != "block" {
+                hook["onFailure"] = "block".into();
+                shut = true;
+            }
+        }
+        if shut {
+            closed.push(event.clone());
+        }
         if present {
             continue;
         }
+        let mut hook = serde_json::json!({"type": "command", "command": command, "timeout": 20});
+        if block {
+            hook["onFailure"] = "block".into();
+        }
         groups.push(serde_json::json!({
             "matcher": hook_matcher(event),
-            "hooks": [{"type": "command", "command": command, "timeout": 20}]
+            "hooks": [hook]
         }));
         added.push(event.clone());
     }
@@ -2618,7 +2643,7 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
             removed.push(event.clone());
         }
     }
-    if added.is_empty() && removed.is_empty() {
+    if added.is_empty() && removed.is_empty() && closed.is_empty() {
         return Step {
             what,
             detail: format!(
@@ -2638,6 +2663,10 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     if !removed.is_empty() {
         change.push(format!("drop it from {}", removed.join(", ")));
         done.push(format!("dropped from {}", removed.join(", ")));
+    }
+    if !closed.is_empty() {
+        change.push(format!("block on its failure on {}", closed.join(", ")));
+        done.push(format!("blocks on failure on {}", closed.join(", ")));
     }
     let change = change.join(" and ");
     let done = done.join(" and ");
@@ -19515,15 +19544,15 @@ mod tests {
             "the panel's default, and the session end that wires what it used"
         );
         assert!(!hook_installed(&file, &both));
-        let dry = hook_step(&file, &both, true);
+        let dry = hook_step(&file, &both, &[], true);
         assert!(
             dry.ok && dry.detail.starts_with("would add it on"),
             "{dry:?}"
         );
-        let step = hook_step(&file, &both, false);
+        let step = hook_step(&file, &both, &[], false);
         assert!(step.ok, "{step:?}");
         assert!(hook_installed(&file, &both));
-        let again = hook_step(&file, &both, false);
+        let again = hook_step(&file, &both, &[], false);
         assert!(
             again.detail.contains("carries the memory hook on"),
             "{again:?}"
@@ -19538,7 +19567,7 @@ mod tests {
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         // Narrowing to the default drops the seat's tool-call group and
         // leaves the other tool's group alone.
-        let narrowed = hook_step(&file, &prompts, false);
+        let narrowed = hook_step(&file, &prompts, &[], false);
         assert!(
             narrowed.detail.contains("dropped from PreToolUse"),
             "{narrowed:?}"
@@ -19548,6 +19577,49 @@ mod tests {
         assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "other");
         assert!(hook_installed(&file, &prompts));
         assert!(!hook_installed(&file, &both));
+        assert!(
+            v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["onFailure"].is_null(),
+            "a prompt hook that fails lets the prompt through"
+        );
+        // A gate on tool calls blocks when it fails, and a hook written
+        // before that was asked for is brought up to it.
+        let gate: Vec<String> = vec!["PreToolUse".into()];
+        let dry = hook_step(&file, &both, &gate, true);
+        assert!(dry.detail.contains("would add it on PreToolUse"), "{dry:?}");
+        let step = hook_step(&file, &both, &gate, false);
+        assert!(step.ok, "{step:?}");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"],
+            "block"
+        );
+        assert!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"].is_null(),
+            "not ours"
+        );
+        assert!(v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["onFailure"].is_null());
+        let mut old = v.clone();
+        old["hooks"]["PreToolUse"][1]["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("onFailure");
+        std::fs::write(&file, old.to_string()).unwrap();
+        let upgraded = hook_step(&file, &both, &gate, false);
+        assert!(
+            upgraded.detail.contains("blocks on failure on PreToolUse"),
+            "{upgraded:?}"
+        );
+        let again = hook_step(&file, &both, &gate, false);
+        assert!(
+            again.detail.contains("carries the memory hook on"),
+            "{again:?}"
+        );
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"],
+            "block"
+        );
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -22085,6 +22157,7 @@ mod tests {
             hooks_named: None,
             hooks_format: None,
             hook_events: Vec::new(),
+            hook_fail_closed: Vec::new(),
             plugin: None,
             plugin_template: None,
             probe: Vec::new(),

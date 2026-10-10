@@ -194,7 +194,11 @@ file of the shape
 =onboard= merges =ljos hook= into it on the prompt and session-end events
 (matcher =*=) by default, or on the events the table's =hook_events= lists
 (=PreToolUse= takes the matcher =Bash|Edit|Write|MultiEdit|NotebookEdit=),
-once each, and drops it from events no longer listed. On =SessionEnd= the
+once each, and drops it from events no longer listed. On the events
+=hook_fail_closed= lists, the hook carries ="onFailure": "block"=, so the
+runner stops the action when the hook fails, times out or cannot start;
+the shipped =claude= table lists =PreToolUse=, and =onboard= adds the field
+to a hook written before. Claude Code reads it from v2.1.295. On =SessionEnd= the
 hook fires the memories it injected during the session together and clears
 the session's record. The hook reads the runner's JSON on stdin
 (=hook_event_name=, =tool_input.command=, =prompt=) and answers
