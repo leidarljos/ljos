@@ -7055,7 +7055,7 @@ pub const RUBRIC: &str = "\
 const SIT_BODY: &str = "\
 A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
 
-1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, claim.
+1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, reclaim, claim.
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Lessons are `ljos remember` in two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
@@ -14996,10 +14996,123 @@ pub fn sitting_gated(
     // timeline` prints them all.
     out.push_str("== timeline\n");
     out.push_str(&timeline(issue, SITTING_TIMELINE)?);
+    // A lease runs out only when somebody hands it back, and nothing else
+    // in the seat does, so the sitting does it before it takes work.
+    out.push_str("== reclaim\n");
+    out.push_str(&reclaim_expired(lease_secs()));
     out.push_str("== claim\n");
     out.push_str(&claim(issue, assignee)?);
     out.push_str(&persist_tracker(issue, "claimed"));
     Ok(out)
+}
+
+/// The lease a sitting applies before it claims: `LJOS_LEASE_SECS`, else
+/// claimdag's default of 900 seconds. Zero turns the step off.
+fn lease_secs() -> u64 {
+    std::env::var("LJOS_LEASE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(900)
+}
+
+/// A claim on the graph that has been quiet longer than the lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expired {
+    /// The node, 32 hex.
+    pub id: String,
+    /// The actor holding it, 32 hex.
+    pub holder: String,
+    /// The node's summary: the tracker id for a node a sitting minted.
+    pub summary: String,
+    /// Seconds since the claim last moved.
+    pub quiet: u64,
+}
+
+/// The claimed or running nodes in a `claimdag list --json` answer that
+/// have been quiet for at least `lease` seconds at `now`, oldest first.
+#[must_use]
+pub fn expired_claims(rows: &[Value], now: u64, lease: u64) -> Vec<Expired> {
+    let mut out: Vec<Expired> = rows
+        .iter()
+        .filter(|r| matches!(r["status"].as_str(), Some("claimed" | "running")))
+        .filter_map(|r| {
+            let id = r["id"].as_str()?.to_string();
+            let holder = r["assignee"].as_str()?.to_string();
+            if holder.len() != 32 || holder.bytes().all(|b| b == b'0') {
+                return None;
+            }
+            let quiet = now.saturating_sub(r["updated_unix"].as_u64()?);
+            (quiet >= lease).then(|| Expired {
+                id,
+                holder,
+                summary: r["summary"].as_str().unwrap_or("").trim().to_string(),
+                quiet,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.id.cmp(&b.id)));
+    out
+}
+
+/// Hand back every claim past `lease` whose conversation is not running.
+///
+/// A claim whose hold record on this host names a runner that is still
+/// alive is kept: ljos does not renew a lease while a conversation works,
+/// so quiet is not the same as gone. A claim whose runner is gone, or that
+/// no record on this host names, goes back to ready under its holder's own
+/// actor, which moves the generation and fences a holder that comes back.
+/// The report is one line per node; a graph that does not answer is said
+/// and never stops the sitting.
+fn reclaim_expired(lease: u64) -> String {
+    if lease == 0 {
+        return "off (LJOS_LEASE_SECS=0)\n".to_string();
+    }
+    let listed = match run_captured("claimdag", &["list", "--json"]) {
+        Ok(said) => said.stdout,
+        Err(e) => return format!("skipped: the claim graph did not list: {e:#}\n"),
+    };
+    let rows: Vec<Value> = serde_json::from_str(listed.trim()).unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let expired = expired_claims(&rows, now, lease);
+    if expired.is_empty() {
+        return format!("no claim quiet longer than {lease}s\n");
+    }
+    let mut out = String::new();
+    for e in expired {
+        let name = if e.summary.is_empty() {
+            &e.id
+        } else {
+            &e.summary
+        };
+        let hold = read_hold(&e.holder);
+        let why = match &hold {
+            Some(h) if hold_alive(h) => {
+                out.push_str(&format!(
+                    "kept {name}: quiet {}s, but {} (seat {}) is still running\n",
+                    e.quiet, h.assignee, h.seat
+                ));
+                continue;
+            }
+            Some(h) => format!("{} (seat {}) is gone", h.assignee, h.seat),
+            None => "no conversation on this host holds it".to_string(),
+        };
+        match run_captured("claimdag", &["release", &e.id, "--actor", &e.holder]) {
+            Ok(said) => {
+                if hold.is_some() {
+                    drop_hold(&e.holder);
+                }
+                out.push_str(&format!(
+                    "handed back {name}: quiet {}s and {why}; {}\n",
+                    e.quiet,
+                    said.stdout.trim()
+                ));
+            }
+            Err(err) => out.push_str(&format!("could not hand back {name}: {err:#}\n")),
+        }
+    }
+    out
 }
 
 /// Close a sitting: remember the lesson when there is one, fire the island
@@ -25030,6 +25143,96 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no completion: {calls}"));
         assert_eq!(held, finished, "{calls}");
+    }
+
+    #[test]
+    fn only_claims_past_the_lease_are_expired() {
+        let holder = "a".repeat(32);
+        let rows: Vec<Value> = serde_json::from_value(serde_json::json!([
+            {"id": "1".repeat(32), "status": "claimed", "assignee": holder, "updated_unix": 100, "summary": "proj-old"},
+            {"id": "2".repeat(32), "status": "running", "assignee": holder, "updated_unix": 950, "summary": "proj-new"},
+            {"id": "3".repeat(32), "status": "ready", "assignee": "0".repeat(32), "updated_unix": 0, "summary": ""},
+            {"id": "4".repeat(32), "status": "claimed", "assignee": "0".repeat(32), "updated_unix": 0, "summary": ""},
+            {"id": "5".repeat(32), "status": "running", "assignee": holder, "updated_unix": 50, "summary": ""}
+        ]))
+        .unwrap();
+        let got = expired_claims(&rows, 1000, 900);
+        let ids: Vec<&str> = got.iter().map(|e| e.summary.as_str()).collect();
+        assert_eq!(ids, ["", "proj-old"], "{got:?}");
+        assert_eq!(got[0].quiet, 950);
+        assert!(expired_claims(&rows, 1000, 5000).is_empty());
+    }
+
+    /// Three claims past the lease: one whose runner is this test (alive),
+    /// one whose runner is gone, one no record names. Only the first stays.
+    #[test]
+    fn a_sitting_hands_back_expired_claims_whose_runner_is_gone() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (alive, gone, orphan) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        let log = dir.path().join("claimdag.log");
+        let script = format!(
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  list) echo '[{{\"id\":\"{n1}\",\"status\":\"claimed\",\"assignee\":\"{alive}\",\"updated_unix\":1,\"summary\":\"proj-live\"}},{{\"id\":\"{n2}\",\"status\":\"claimed\",\"assignee\":\"{gone}\",\"updated_unix\":1,\"summary\":\"proj-dead\"}},{{\"id\":\"{n3}\",\"status\":\"running\",\"assignee\":\"{orphan}\",\"updated_unix\":1,\"summary\":\"proj-none\"}}]' ;;\n  release) echo gen=3 ;;\nesac\n",
+            log = log.display(),
+            n1 = "1".repeat(32),
+            n2 = "2".repeat(32),
+            n3 = "3".repeat(32),
+        );
+        let fake = dir.path().join("claimdag");
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let holds = dir.path().join("ljos");
+        std::fs::create_dir_all(&holds).unwrap();
+        let me = std::process::id();
+        let my_comm = parent_and_comm(me).map(|(_, c)| c).unwrap_or_default();
+        std::fs::write(
+            holds.join(format!("hold-{alive}")),
+            format!("alice\nljos-bot\n{me}\n{my_comm}\n2026-10-10T00:00:00Z\nproj-live\n-\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            holds.join(format!("hold-{gone}")),
+            "bob\nljos-bot\n4194303\nno-such-runner\n2026-10-10T00:00:00Z\nproj-dead\n-\n",
+        )
+        .unwrap();
+        let said = with_fake_on_path(dir.path(), || reclaim_expired(900));
+        let gone_hold_left = holds.join(format!("hold-{gone}")).exists();
+        let alive_hold_left = holds.join(format!("hold-{alive}")).exists();
+        unsafe {
+            match runtime {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+        if cfg!(target_os = "linux") {
+            assert!(said.contains("kept proj-live"), "{said}");
+            assert!(alive_hold_left, "the live conversation's hold was dropped");
+        }
+        assert!(said.contains("handed back proj-dead"), "{said}");
+        assert!(said.contains("bob (seat ljos-bot) is gone"), "{said}");
+        assert!(said.contains("handed back proj-none"), "{said}");
+        assert!(!gone_hold_left, "the gone conversation's hold was kept");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!("release {} --actor {gone}", "2".repeat(32))),
+            "{calls}"
+        );
+        assert!(
+            calls.contains(&format!("release {} --actor {orphan}", "3".repeat(32))),
+            "{calls}"
+        );
+        assert!(!calls.contains(&format!("--actor {alive}")), "{calls}");
+    }
+
+    #[test]
+    fn a_zero_lease_turns_the_reclaim_off() {
+        assert!(reclaim_expired(0).starts_with("off"));
     }
 
     /// The Claude Code plugin in the repository root is the seat onboard
