@@ -5971,10 +5971,23 @@ fn pack_step(dry: bool) -> Step {
 /// one named by `DEEDAR_HOST_SIGNING_KEY`, is left alone.
 fn host_key_step(dry: bool) -> Step {
     if let Some(path) = host_key_path() {
+        // A seat onboarded before the deed store listed the key gets it
+        // listed now, so running onboard again is the fix.
+        if dry {
+            return Step {
+                what: "host key".into(),
+                detail: format!(
+                    "{} exists; would list it as a signer in the deed store",
+                    path.display()
+                ),
+                ok: true,
+            };
+        }
+        let (listed, ok) = accept_host_key();
         return Step {
             what: "host key".into(),
-            detail: format!("{} exists", path.display()),
-            ok: true,
+            detail: format!("{} exists; {listed}", path.display()),
+            ok,
         };
     }
     if std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some_and(|r| r == "off") {
@@ -6018,10 +6031,7 @@ fn host_key_step(dry: bool) -> Step {
             // A deed store made before this key existed does not list it,
             // so every deed the key signs would fail evidence. deedar adds
             // it; a store made after this lists it on its own.
-            let said = run_captured("deedar", &["host", "accept"])
-                .map(|s| s.stdout)
-                .map_err(|e| e.to_string());
-            let (listed, ok) = host_accept_detail(said);
+            let (listed, ok) = accept_host_key();
             Step {
                 what: "host key".into(),
                 detail: format!("wrote a 32-byte seed to {}; {listed}", path.display()),
@@ -6034,6 +6044,15 @@ fn host_key_step(dry: bool) -> Step {
             ok: false,
         },
     }
+}
+
+/// Ask deedar to list the host key in the deed store's layout.
+fn accept_host_key() -> (String, bool) {
+    host_accept_detail(
+        run_captured("deedar", &["host", "accept"])
+            .map(|s| s.stdout)
+            .map_err(|e| e.to_string()),
+    )
 }
 
 /// What `deedar host accept` said about the key onboard just wrote, as a
@@ -18959,6 +18978,27 @@ mod tests {
             !ok && said == "deedar host accept: deedar: layout: bad",
             "{said}"
         );
+    }
+
+    /// an existing host key is still offered to the deed store, so a seat
+    /// onboarded before the store listed it is fixed by onboarding again.
+    #[test]
+    fn onboard_offers_an_existing_host_key_to_the_deed_store() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("host.key");
+        std::fs::write(&key, [7u8; 32]).unwrap();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &key);
+        }
+        let step = super::host_key_step(true);
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+        }
+        assert!(step.ok, "{step:?}");
+        assert!(step.detail.contains("exists; would list it"), "{step:?}");
     }
 
     #[test]
