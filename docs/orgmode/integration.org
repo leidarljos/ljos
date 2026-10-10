@@ -70,9 +70,10 @@ integration; each runner registers the events its table names.
 
 =ljos onboard --harness NAME= registers the MCP server, the hooks and the
 skill for one runner. =NAME= takes =claude=, =codex=, =grok=, =cursor=,
-=antigravity=, =opencode=, =omp=, =hermes=, =windsurf=, =zed=, =vscode=,
-=claude-desktop=, =gemini=, =amazonq=, =kiro=, =grokbot= or =shell=. The
-contract is the same everywhere and the envelope differs:
+=antigravity=, =opencode=, =omp=, =hermes=, =copilot=, =gemini=,
+=windsurf=, =factory=, =kiro=, =cline=, =qwen=, =crush=, =zed=, =vscode=,
+=claude-desktop=, =amazonq=, =grokbot= or =shell=. The contract is the
+same everywhere and the envelope differs:
 
 | Runner | Memory injection | Shell check | Ask | Notes |
 |---+---+---+---+---|
@@ -84,7 +85,19 @@ contract is the same everywhere and the envelope differs:
 | omp | =assets/omp/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
 | hermes | MCP server list plus hooks | hook deny blocks | =ljos approve= | nothing leaves the machine unless a remote judge is turned on |
 | Cursor | prompt note on the first tool result; skill; =~/.cursor/agents= | =beforeShellExecution= and =preToolUse=, fail closed | Cursor's permission prompt on a shell command | the IDE and the =agent= CLI share =~/.cursor/mcp.json= and =~/.cursor/hooks.json= |
+| GitHub Copilot CLI | skill; no prompt note, since Copilot drops a command hook's prompt output | =PreToolUse= in =~/.copilot/hooks/ljos.json=, =permissionDecision= | Copilot's permission prompt | the same file in a repository's =.github/hooks= reaches Copilot's cloud agent |
+| Gemini CLI | =BeforeAgent= =additionalContext= | =BeforeTool= on =run_shell_command=, =decision: deny= | none: an ask is a deny that says so | hooks and MCP server share =~/.gemini/settings.json=; timeouts there are milliseconds |
+| Windsurf (Devin Desktop) | skill | =pre_run_command=, exit 2 with the reason on stderr | none | =~/.codeium/windsurf/hooks.json= |
+| Factory droid | =UserPromptSubmit= context | =PreToolUse= on =Execute=, =permissionDecision= | droid's permission prompt | =~/.factory/hooks.json=, keyed by event at the top level |
+| Kiro | skill | =PreToolUse= on the =shell= tools, exit 2 with the reason on stderr | none | =~/.kiro/hooks/ljos.json=, Kiro CLI V3 and IDE 1.0 |
+| Cline | =UserPromptSubmit= =contextModification= | =PreToolUse=, =cancel: true= | none | two scripts in =~/Documents/Cline/Hooks=, macOS and Linux |
+| Qwen Code | =UserPromptSubmit= context | =PreToolUse= on =run_shell_command=, =permissionDecision= | Qwen's confirmation | =~/.qwen/settings.json= |
+| Crush | skill | =PreToolUse= on =bash=, =decision: deny= | none | =~/.config/crush/crush.json=; Crush fires only =PreToolUse= so far |
 | Grok Bot | the skill, then =ljos hook --prompt= | =ljos policy --fail-on-deny= exits 1 | the person runs the command | no MCP server and no hook file; source the env file =onboard= writes |
+
+The runners from Copilot down call =ljos hook --runner NAME=. That
+command reads the runner's payload as Claude Code's, runs the same hook,
+and writes the answer back in the runner's field names and exit code.
 
 Two rules hold on every runner. First, the seat guard refuses a command
 that writes the seat's own files (its binaries, its hook entries,
