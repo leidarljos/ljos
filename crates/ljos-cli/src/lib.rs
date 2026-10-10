@@ -8286,12 +8286,60 @@ pub fn glob_matches(pattern: &str, line: &str) -> bool {
 /// a commit message naming a command is not that command.
 #[must_use]
 pub fn command_segments(line: &str) -> Vec<String> {
-    raw_segments(line)
-        .iter()
-        .map(|p| strip_prefixes(p).join(" "))
-        .filter(|p| !p.is_empty())
-        .collect()
+    command_segments_at(line, 0)
 }
+
+/// [`command_segments`], plus the commands of each `sh -c SCRIPT` (or
+/// `bash -lc`, under any prefix) read as a line of its own, down to a few
+/// levels. A rule on `git push*` then sees `sh -c "git push -f"`.
+fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in raw_segments(line) {
+        let seg = strip_prefixes(&raw).join(" ");
+        if seg.is_empty() {
+            continue;
+        }
+        out.push(seg);
+        if depth < 4 {
+            if let Some(script) = shell_c_script(&raw) {
+                out.extend(command_segments_at(&script, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// The script a command runs with a shell's `-c` flag, past any leading
+/// assignments and wrapper words.
+fn shell_c_script(segment: &str) -> Option<String> {
+    let words = shell_words(segment);
+    let mut it = words.iter().map(String::as_str).skip_while(|w| {
+        let assign = w.split_once('=').is_some_and(|(k, _)| {
+            !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        assign || SEGMENT_PREFIXES.contains(w) || w.starts_with('-')
+    });
+    let shell = it.next()?;
+    let base = shell.rsplit('/').next().unwrap_or(shell);
+    if !["sh", "bash", "zsh", "dash", "ksh", "fish"].contains(&base) {
+        return None;
+    }
+    let mut takes = false;
+    for w in it {
+        if takes {
+            return Some(w.to_string());
+        }
+        if w.starts_with('-') && !w.starts_with("--") && w[1..].contains('c') {
+            takes = true;
+        } else if !w.starts_with('-') {
+            return None;
+        }
+    }
+    None
+}
+
+/// Words that run the command after them, taken off a segment's front.
+const SEGMENT_PREFIXES: &[&str] = &["sudo", "env", "time", "nohup", "exec", "command"];
 
 /// A command's words with leading assignments and wrapper commands off.
 fn strip_prefixes(segment: &str) -> Vec<&str> {
@@ -8300,7 +8348,7 @@ fn strip_prefixes(segment: &str) -> Vec<&str> {
         let assign = w.split_once('=').is_some_and(|(k, _)| {
             !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         });
-        if assign || ["sudo", "env", "time", "nohup", "exec"].contains(w) {
+        if assign || SEGMENT_PREFIXES.contains(w) {
             words.remove(0);
         } else {
             break;
@@ -20700,6 +20748,35 @@ mod tests {
             command_segments("run &> out & wait"),
             ["run &> out", "wait"]
         );
+    }
+
+    /// a shell's `-c` script is commands, so a rule sees
+    /// the push inside it; quoted text under any other command stays data.
+    #[test]
+    fn a_rule_sees_the_commands_of_a_shell_c_script() {
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        for line in [
+            "sh -c \"git push -f origin main\"",
+            "env git push -f origin main",
+            "command git push -f",
+            "bash -lc 'cd repo && git push --force'",
+            "FOO=1 env sh -c 'env git push -f'",
+            "bash -c \"sh -c 'git push -f'\"",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+        }
+        for line in [
+            "echo 'sh -c \"git push -f\"'",
+            "git commit -m 'sh -c git push'",
+            "sh script.sh -c 'git push -f'",
+            "bash -c 'echo git push'",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
     }
 
     #[test]
