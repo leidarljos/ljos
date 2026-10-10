@@ -2057,16 +2057,45 @@ fn export_assignment(name: &str) -> String {
 
 /// What a shell runner sources. `LJOS_SEAT` is the harness name, because
 /// this agent has no MCP client and the process tree is not its seat.
+/// `LJOS_SESSION_ID` gives every shell the runner opens one holder, unless
+/// the runner stamps its own; without it each shell hashed its own process
+/// into a new holder, and `ljos finish` in a second shell was refused as
+/// not the assignee.
 fn seat_env_text(name: &str) -> String {
     format!(
         "# Source this in the shell that runs the agent's commands.\n\
          # This runner has no MCP client, so the process tree is not its seat.\n\
          # LJOS_SEAT is the name memory, ballots and trust use.\n\
+         # LJOS_SESSION_ID is the holder every shell of this runner claims under.\n\
          # Before a prompt: ljos hook --prompt\n\
          # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
+         {}\n\
          {}\n",
-        export_assignment(name)
+        export_assignment(name),
+        session_assignment(name)
     )
+}
+
+/// `export LJOS_SESSION_ID="${{LJOS_SESSION_ID:-NAME-shell}}"`: a holder
+/// that stays the same across the runner's shells, kept when the runner
+/// already set one. Padded to the eight characters a session id needs.
+fn session_assignment(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut id = format!("{safe}-shell");
+    while id.len() < 8 {
+        id.push('-');
+        id.push_str("seat");
+    }
+    format!("export LJOS_SESSION_ID=\"${{LJOS_SESSION_ID:-{id}}}\"")
 }
 
 fn env_step(path: &Path, name: &str, dry: bool) -> Step {
@@ -13722,10 +13751,68 @@ pub fn complete(
         args.push("--status");
         args.push(s);
     }
-    let said = run_captured("claimdag", &args)?;
+    let said = match run_captured("claimdag", &args) {
+        Ok(said) => said,
+        Err(e) if e.to_string().contains("not assignee") => {
+            let hold = run_captured("claimdag", &["get", id.as_str()])
+                .ok()
+                .and_then(|g| holder_of(&g.stdout))
+                .and_then(|h| read_hold(&h));
+            let tracker = tracker_show_json(node).ok().and_then(|v| {
+                v["claimed_by"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+            bail!(
+                "{}",
+                not_assignee_message(node, assignee, hold.as_ref(), tracker.as_deref())
+            );
+        }
+        Err(e) => return Err(e),
+    };
     drop_hold(&actor);
     drop_playbook(node);
     Ok(said.stdout)
+}
+
+/// Refusal when this shell's holder is not the name that holds the node:
+/// names the holder from the hold record, else from the tracker, and the
+/// `--assignee` that finishes under it. A shell runner without a session id
+/// gets a new holder per shell, which is the usual cause.
+#[must_use]
+pub fn not_assignee_message(
+    node: &str,
+    assignee: &str,
+    hold: Option<&Hold>,
+    tracker: Option<&str>,
+) -> String {
+    let unscoped = |n: &str| {
+        n.strip_suffix(&format!(":{}", node.trim()))
+            .unwrap_or(n)
+            .to_string()
+    };
+    let named = hold
+        .map(|h| {
+            (
+                unscoped(&h.assignee),
+                format!(" (seat {}, since {})", h.seat, h.since),
+            )
+        })
+        .or_else(|| tracker.map(|t| (unscoped(t), " (the tracker's claim)".to_string())));
+    let mine = unscoped(assignee);
+    let fix = "A shell runner's env file sets LJOS_SESSION_ID so every shell holds under one name; `ljos onboard` writes it";
+    match named {
+        Some((name, whence)) => format!(
+            "complete: {node} is held by {name}{whence}, not by {mine}, this shell's holder (`ljos seat` says where it came from). \
+             Run it again with `--assignee {name}` to finish under the name that holds it. {fix}"
+        ),
+        None => format!(
+            "complete: {node} is not held by {mine}, this shell's holder (`ljos seat` says where it came from), and no record on this host names the holder. \
+             Pass `--assignee NAME` with the name it was claimed under. {fix}"
+        ),
+    }
 }
 
 #[expect(
@@ -18882,6 +18969,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// two shells that source a shell runner's env file hold
+    /// under one name, and a runner's own session id is kept.
+    #[test]
+    fn every_shell_of_a_shell_runner_holds_under_one_name() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let env = dir.path().join("grokbot.env");
+        std::fs::write(&env, super::seat_env_text("grokbot")).unwrap();
+        let holder_in_a_new_shell = |pre: &str| {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "{pre} . '{}' && printf %s \"$LJOS_SESSION_ID\"",
+                    env.display()
+                ))
+                .env_remove("LJOS_SESSION_ID")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(holder_in_a_new_shell(""), "grokbot-shell");
+        assert_eq!(holder_in_a_new_shell(""), holder_in_a_new_shell(""));
+        assert_eq!(
+            holder_in_a_new_shell("export LJOS_SESSION_ID=runner-own-id;"),
+            "runner-own-id"
+        );
+        assert_eq!(
+            super::session_assignment("a"),
+            "export LJOS_SESSION_ID=\"${LJOS_SESSION_ID:-a-shell-seat}\""
+        );
+        // Other runners' ids in this test's own environment would join the
+        // holder, so they are set aside while it reads.
+        let others: Vec<(String, String)> = std::env::vars()
+            .filter(|(k, v)| super::runner_session_var(k, v))
+            .collect();
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            for (k, _) in &others {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("LJOS_SESSION_ID", "grokbot-shell");
+        }
+        let held = super::whoami().holder;
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("LJOS_SESSION_ID");
+            for (k, v) in &others {
+                std::env::set_var(k, v);
+            }
+        }
+        assert_eq!(held, "grokbot-shell");
+    }
+
+    /// a finish refused as not the assignee names the holder
+    /// and the `--assignee` that finishes under it.
+    #[test]
+    fn not_the_assignee_names_the_holder_and_the_flag() {
+        let hold = super::Hold {
+            assignee: "grokbot-ppyr:demo-dlnj".into(),
+            seat: "grokbot".into(),
+            pid: 1,
+            comm: "bash".into(),
+            since: "2026-10-10T06:00:00".into(),
+        };
+        let said =
+            super::not_assignee_message("demo-dlnj", "grokbot-pqxm:demo-dlnj", Some(&hold), None);
+        assert!(
+            said.contains("held by grokbot-ppyr (seat grokbot"),
+            "{said}"
+        );
+        assert!(said.contains("not by grokbot-pqxm,"), "{said}");
+        assert!(said.contains("`--assignee grokbot-ppyr`"), "{said}");
+        assert!(said.contains("LJOS_SESSION_ID"), "{said}");
+        let said =
+            super::not_assignee_message("demo-dlnj", "grokbot-pqxm", None, Some("grokbot-ppyr"));
+        assert!(said.contains("`--assignee grokbot-ppyr`"), "{said}");
+        let said = super::not_assignee_message("demo-dlnj", "grokbot-pqxm", None, None);
+        assert!(said.contains("--assignee NAME"), "{said}");
+    }
+
     #[test]
     fn a_shell_runner_writes_the_skill_and_the_seat_env() {
         let _g = env_guard();
@@ -18916,6 +19083,10 @@ mod tests {
         let env = std::fs::read_to_string(dir.join("grokbot.env")).unwrap();
         assert!(env.contains("export LJOS_SEAT=grokbot\n"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
+        assert!(
+            env.contains("export LJOS_SESSION_ID=\"${LJOS_SESSION_ID:-grokbot-shell}\"\n"),
+            "{env}"
+        );
         let saved = std::fs::read_to_string(&file).unwrap();
         assert!(saved.contains("shell = true"), "{saved}");
         assert!(saved.contains(&skills.display().to_string()), "{saved}");

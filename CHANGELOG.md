@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- A shell runner's env file sets `LJOS_SESSION_ID` (kept when the runner already set one), so every shell it opens claims under one holder. Before, each shell hashed its own process into a new holder, and `ljos finish` from a second shell was refused as `not assignee`. That refusal now names the holder, from the hold record or the tracker, and the `--assignee` that finishes under it.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)
