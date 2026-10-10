@@ -1,6 +1,7 @@
 #!/bin/sh
 # Find a seat binary and run it. The first argument is the binary name.
 # Remaining arguments are its argv. Standard input is passed through.
+# Claude Code and Cursor both start the seat through this file.
 name=${1:?binary name}
 shift
 if command -v "$name" >/dev/null 2>&1; then
@@ -14,5 +15,30 @@ if [ -n "$home" ]; then
     fi
   done
 fi
-printf '%s\n' "ljos plugin: $name is not installed" >&2
+# The binary is missing. Say how to install it, in words a person and an
+# agent can both act on, and keep the agent working: a missing seat is no
+# guard, not a reason to stop every shell command.
+hint="ljos plugin: $name is not installed, so the ljos memory and command guard are off. Install with: cargo binstall --locked ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus (or ask the agent to use the ljos-setup skill). Then run: ljos doctor"
+printf '%s\n' "$hint" >&2
+if [ "$name" = ljos ] && [ "${1:-}" = hook ]; then
+  input=$(cat)
+  event=$(printf '%s' "$input" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([A-Za-z_]*\)".*/\1/p' | head -n 1)
+  case $input in
+    *'"cursor_version"'*)
+      case $event in
+        beforeShellExecution | preToolUse | beforeMCPExecution | beforeReadFile)
+          printf '{"permission":"allow","user_message":"%s"}\n' "$hint"
+          ;;
+        sessionStart)
+          printf '{"additional_context":"%s"}\n' "$hint"
+          ;;
+      esac
+      exit 0
+      ;;
+  esac
+  if [ "$event" = SessionStart ]; then
+    printf '%s\n' "$hint"
+    exit 0
+  fi
+fi
 exit 1

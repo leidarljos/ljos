@@ -1,0 +1,23 @@
+{
+  "name": "ljos",
+  "displayName": "ljos",
+  "version": "0.28.0",
+  "description": "Tell your coding agent a rule once. ljos remembers it, brings it back when it matters, and stops the shell commands you ruled out, such as a force push. Local memory, a work tracker and a command guard, shared with Claude Code, Codex and other agents on the same machine.",
+  "author": {
+    "name": "Rohit Goswami",
+    "email": "rgoswami@ieee.org"
+  },
+  "homepage": "https://leidarljos.github.io",
+  "repository": "https://github.com/leidarljos/ljos",
+  "license": "MIT",
+  "logo": "assets/logo.svg",
+  "keywords": ["memory", "guardrails", "hooks", "mcp", "tracker", "agents"],
+  "category": "developer-tools",
+  "tags": ["memory", "safety", "hooks", "mcp", "workflow"],
+  "skills": "./skills/",
+  "rules": "./rules/",
+  "agents": "./agents/",
+  "commands": "./commands/",
+  "hooks": "./hooks/cursor.json",
+  "mcpServers": "./mcp.json"
+}
