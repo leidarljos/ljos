@@ -1,6 +1,7 @@
 # Changelog
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
+Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), heads-up display (HUD), software bill of materials (SBOM), European Environment for Scientific Software Installations (EESSI).
 
 ## Unreleased
 
@@ -13,9 +14,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - Seats message each other through the pack. `ljos send` writes to a seat or a group. `--interrupt` leads the next prompt. `--issue` threads the message on a vissue issue. `ljos inbox` lists unread mail. `ljos read` writes the receipt. `ljos reply` answers the sender and keeps the issue. The prompt hook prints unread mail. A shell seat polls `ljos inbox`. `ljos sync` carries the atoms in the sealed log.
 - A shell-only runner (`ljos onboard --harness grokbot`, or `shell`) writes the skill and an env file that sets `LJOS_SEAT`. It registers no MCP server and no hook. `ljos hook --prompt` reads stdin as the prompt. `ljos hook --fail-on-deny` and `ljos policy --fail-on-deny` exit 1 on a deny. Without the flag the exit stays 0.
 - Runners now include Windsurf, Zed, VS Code, Claude Desktop, the Gemini CLI, Amazon Q and Kiro. Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
-- `ljos supervise` reads one harness exit and prints `restart`, `stop`, or `give-up`. Permanent restarts either way, transient only on a crash, temporary never. Three restarts inside the window give up. A restart prints `herdr agent start persona-NAME`. The command does not start the child.
-- `approve ID` in the chat grants the request when the prompt names the same conversation under a longer session string. A different conversation still grants nothing.
-- A hook's pack listing fails at 2s so the local gate can still refuse the command. The tool gate does not exit on a clock. An empty exit would allow it.
+- `ljos supervise` reads one runner exit and prints `restart`, `stop`, or `give-up`. Permanent restarts either way, transient only on a crash, temporary never. Three restarts inside the window give up. A restart prints `herdr agent start persona-NAME`. The command does not start the child.
+- `approve ID` in the chat grants the request when the prompt carries the same conversation under a longer session string. A different conversation still grants nothing.
+- A hook's pack listing fails at 2 s so the local permission check can still refuse the command. The permission hook does not exit on a clock. An empty exit would allow it.
 - A tracker that keeps one file per issue is read and committed as that file. `ljos` follows vissue 0.20: when `issues/.ledger` is present, a sitting finds the issue there, and the tracker commit names `issues/<id>.org` rather than the project board.
 - A persona hand can carry an actor message (`cast`, `call`, `event`, or `exit`). The inbox file is still the markdown `hand` writes. Herdr is up when `herdr workspace list` exits 0.
 - `docs/orgmode/integration.org` places the seat among the memory systems it learns from and names the events each runner registers. `docs/orgmode/architecture.org` says how a persona pane, the actor message and `ljos supervise` fit together.
@@ -33,25 +34,25 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.26.0 (2026-10-09)
 
 - An ask a runner cannot show as its own prompt is granted by the client's consent form (`ljos_request_approval`), by replying `approve ID` in the same conversation, or by `ljos approve ID` in a terminal.
-- Persona panes open through `[[tool]]` adapters declared in harnesses.toml beside the runners; herdr and tmux ship as shapes, and `ljos doctor` has a `panes` row. Half the herdr calls the seat made had gone stale against herdr 0.9. Every pane fell back to tmux without a warning. The pane resumes a runner that exits non-zero, at most three times a minute. `examples/runtime-panel` has the vote that picked them.
+- Persona panes open through `[[tool]]` adapters, which `harnesses.toml` declares beside the runners. Herdr and tmux come as shapes, and `ljos doctor` has a `panes` row. Half the herdr calls the seat made had gone stale against herdr 0.9. Every pane fell back to tmux without a warning. The pane resumes a runner that exits non-zero, at most three times a minute. `examples/runtime-panel` has the vote that picked them.
 - Among the multiplexers, the pane-typing guard knew only tmux's `send-keys` and herdr's old `send`. It now also refuses an approval sent through herdr's `agent prompt`, `send-keys`, `send-text`, `pane run` or a `terminal session control` fed on stdin. It knows tmux's `paste-buffer` and `pipe-pane -I` too, zellij's `write-chars`, wezterm's and kitty's `send-text`, and screen's `stuff` and `paste`.
 - A runner that reports a failed tool (Grok Build's `PostToolUseFailure`) gets up to three standing claims back. Each shares two or more content words with the command and its error.
-- A compaction takes every memory handed over so far off the session's record, so a later prompt can bring it back; if two or more were handed over, up to eight of them fire first. The next delivery names the issue the conversation still holds. The claude shape and the plugin's hooks now register `PreCompact` and `SessionStart`, so Claude Code hears that issue as the session resumes.
+- A compaction takes every memory handed over so far off the session's record, so a later prompt can bring it back; if two or more were handed over, up to eight of them fire first. The next delivery names the issue the conversation still has claimed. The claude shape now registers `PreCompact` and `SessionStart`, and so do the plugin's hooks; Claude Code hears that issue as the session resumes.
 - `ljos agents` and `onboard` write each persona as an agent definition: `~/.grok/agents/ljos-NAME.md`, or a file in `~/.claude/agents` or `~/.cursor/agents`. A runner spawns one by name. It briefs, casts one ballot before reading the others, notes why and stops. Grok Build's own parser, `AgentDefinition::parse` in `xai-grok-agent`, accepts every file.
 - `ljos statusline` prints a status-bar line for Grok and Claude Code.
-- A panel's members run on the seat's own runner through its table's `headless` argv, where the shape has one.
+- Where the shape has a `headless` argv, a panel's members run through it on the seat's own runner.
 - A brief tells a persona to cast before reading another ballot, and names the issue in its ballot line where it printed `{issue}`.
-- Cursor is a shipped runner. `ljos onboard --harness cursor` registers the server, the skill, the agents, and a flat Cursor hooks file. Events Claude's settings already run stay there. `beforeShellExecution`, `preToolUse`, `beforeMCPExecution`, `beforeReadFile` and `postToolUseFailure` are still written, and the permission events fail closed. The hook reads Cursor off its payload and answers in Cursor's fields: `permission`, `user_message`, `agent_message`, `additional_context`, and `followup_message`. A paste into a pane is refused even when that segment does not spell approve. Grok onboard ends with the pack and the host key.
-- Claude Code gets the shell gate. The shipped claude shape and the plugin's hooks register `PreToolUse` on `Bash`, `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`. The deny rule the README's Five minutes section writes now refuses a force push in Claude Code; onboarding had registered only the prompt, tool-result, session-end, and subagent events.
+- Cursor is a built-in runner. `ljos onboard --harness cursor` registers the server, the skill, the agents, and a flat Cursor hooks file. Events Claude's settings already run stay there. `beforeShellExecution`, `preToolUse`, `beforeMCPExecution`, `beforeReadFile` and `postToolUseFailure` are still written, and the permission events fail closed. The hook reads Cursor off its payload and answers in Cursor's fields: `permission`, `user_message`, `agent_message`, `additional_context`, and `followup_message`. A paste into a pane is refused even when that segment does not spell approve. Grok onboard ends with the pack and the host key.
+- Claude Code gets the shell check. The built-in claude shape and the plugin's hooks register `PreToolUse` on `Bash`, `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`. The deny rule the README's Five minutes section writes now refuses a force push in Claude Code; onboarding had registered only the prompt, tool-result, session-end, and subagent events.
 - A runner started on an entry script (`node pkg/dist/index.js`) takes its seat name from `pkg`, not from `index` or `dist`.
 - The smoke and the unit tests keep a runner session the shell inherited (`*_THREAD_ID`, `*_CONVERSATION_ID`) and a named `LJOS_SEAT` out of their scripted seats. The smoke's quiet greps read their whole input under pipefail.
 - The prompt hook's median answer fell from 239 ms to 38 ms over eight prompts: it runs the cross-encoder only when the first stage's top twenty hold a claim it could hand over. A prompt that gets claims pays 50 to 90 ms more. The answers did not change: `diff -r` over two `scripts/hook-bench.sh` runs found them the same byte for byte.
 - `learn` shrinks each voter's accuracy toward the panel's pooled accuracy by empirical Bayes before it weighs the voter. The first outcome leaves the voters alike; a long record keeps the differences it shows. Plug-in log odds lost to a plain count by 6.4 points on seven similar voters at three outcomes, and shrunk ones by 1.2 (the consensus crate's `correlation_history`).
-- `learn` keeps the option each issue closed on, as a pack `outcome`. `consensus` discounts the voters those outcomes show erring together once five issues have one; it names how many outcomes it read and how many independent voices remain. Five clones of one judge beside four voters then settle right 0.780 of the time at five outcomes and 0.813 at a hundred. Plug-in log odds reach 0.719 and 0.708, the gated discount alone 0.736 and 0.805.
+- `learn` keeps the option each issue closed on, as a pack `outcome`. `consensus` discounts the voters those outcomes show erring together once five issues have one; it names how many outcomes it read and how many independent voices remain. Five clones of one judge beside four voters then settle right 0.780 of the time at five outcomes and 0.813 at a hundred. Plug-in log odds reach 0.719 and 0.708, the significance-tested discount alone 0.736 and 0.805.
 
 ## 0.25.5 (2026-10-06)
 
-- A subagent is told the issue its parent holds and asked to vote or note on it even when the task omits the id. The first tool of a turn that holds nothing says to file, sit, and start subagents that record on the filed issue.
+- A subagent is told the issue its parent has claimed and asked to vote or note on it even when the task omits the id. The first tool of a turn with nothing claimed says to file, sit, and start subagents that record on the filed issue.
 - A background tracker push stays visible to doctor after ljos exits. The log name remains the ljos pid. The push shell pid is written beside it, and the row stays healthy while that shell or a git child of it is alive.
 - An ignored tracker file is reported with the ignore rule that keeps it out of the commit. A clean tracked file still reports nothing to commit.
 - Grok Build receives an ask rule as `ask` on `decision` and `permissionDecision`, and shows its in-chat permission prompt. A runner that cannot ask still has the ask rewritten to a deny, with a one-use request id.
@@ -71,12 +72,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.25.1 (2026-10-06)
 
-- A prompt that asks which answer is right is held until the turn sits or votes. The first tool result says so, and `Stop` holds the turn once if it picks an answer with no ballot.
+- A prompt that asks which answer is right is held until the turn sits or votes. The first tool result says so, and `Stop` blocks the turn once if it picks an answer with no ballot.
 
 ## 0.25.0 (2026-10-06)
 
-- A conversation that holds no issue is told to file one and sit on the first tool result. A conversation that already holds an issue still waits forty tool calls before the reminder to record the work.
-- `Stop` holds that open conversation once when the turn used tools and never touched the seat. The transcript reader takes a top-level `tool_calls` list as well as `message.content` blocks.
+- A conversation with no issue claimed is told to file one and sit on the first tool result. A conversation that has already claimed an issue still waits forty tool calls before the reminder to record the work.
+- `Stop` blocks that open conversation once when the turn used tools and never touched the seat. The transcript reader takes a top-level `tool_calls` list as well as `message.content` blocks.
 - An issue that lives only in `issues/<id>.org` is the issue the seat reads. The seat links vissue-core 0.20, which folds that ledger.
 
 ## 0.24.3 (2026-10-04)
@@ -96,14 +97,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.24.0 (2026-10-03)
 
 - `ljos vote --as NAME --jev` no longer casts a ballot and then fails: the forecast's claim text names the expected option and its share instead of the whole distribution, which passed the pack's 500-character cap, and the forecast is written before the ballot.
-- At a usage limit the Stop hook holds the turn once per notice and names what to record first: a note on the held issue with what is done and left, `ljos file` for each item left, `ljos remember` for each lesson.
+- At a usage limit the Stop hook blocks the turn once per notice and names what to record first: a note on the held issue with what is done and left, `ljos file` for each item left, `ljos remember` for each lesson.
 - `ljos file TITLE` files work found while sitting as a child of the held issue, in its project, and commits the tracker; `ljos note ISSUE TEXT` notes progress and commits. The protocol, the work nudge and the panel briefs name them in place of the bare tracker verbs.
 - The seat guard reads shell words: a quoted sentence that names a seat path is data, and a path word or a redirection outside quotes into one is still refused.
 
 ## 0.23.3 (2026-10-03)
 
 - `ljos onboard --harness NAME` works with no runners file: a runner the
-  seat ships a shape for (claude, codex, grok, antigravity, opencode, omp,
+  seat has a built-in shape for (claude, codex, grok, antigravity, opencode, omp,
   hermes) is onboarded from that shape, which is added to
   `~/.config/ljos/harnesses.toml` so the doctor and persona sessions know
   it.
@@ -126,7 +127,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   had seated five physics and course reviewers through the island and
   through views that say "change". A panel with nobody to seat says how
   to write the voters it needs.
-- `ljos persona --about` takes several domains after one flag as well as
+- `ljos persona --about` takes two or more domains after one flag as well as
   a comma list or the flag repeated.
 - The protocol teaches the judge verbs (`vote --jev`, `panel --jev`,
   `due --judge`), persona sessions and `ljos ask`, and the tracker forms
@@ -172,17 +173,17 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.22.1 (2026-10-02)
 
-- `ljos doctor`'s host row fails while the kernel's OOM count rises and
-  for a day after, then says how many since boot with none in the last
-  day. The counter is cumulative since boot, so one old kill had kept
+- `ljos doctor`'s host row fails while the kernel's out-of-memory kill
+  count rises, and for a day after. With none in the last day, the row
+  says how many since boot. The counter is cumulative since boot, so one old kill had kept
   the row red until the next reboot.
 - The prompt's due line counts what came due this week, with the
   backlog's size beside it, and says nothing when nothing new came due.
   A seat with 1263 due claims had been told so every session; the
   count only grew, and a runner had once tried to drain it unread.
-- Claude Code's tool gate covers its file tools: the `PreToolUse`
+- Claude Code's permission hook covers its file tools: the `PreToolUse`
   matcher is `Bash|Edit|Write|MultiEdit|NotebookEdit`, and a file
-  tool's cue is the tool and the path it writes, not the file's text, so
+  tool's cue is the tool and the path it writes, and leaves out the file's text, so
   the seat's guard refuses a write to a seat path and a doc that names
   one passes.
 - Two signals before the prompt hook speaks. A claim Jev says bears on
@@ -213,7 +214,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   tool aimed at one, is refused as the person's to change; reading
   them is not. An agy session had replaced `~/.local/bin/ljos` with a
   script that allowed every command, and its answer broke every other
-  runner's prompt hook. agy's gate now sees every tool, and a file
+  runner's prompt hook. agy's permission hook now sees every tool, and a file
   tool names the path it writes.
 - `ljos doctor` fails a `seat binary` row when the `ljos` the hooks run
   is not a binary or not the one running the doctor.
@@ -231,8 +232,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A seat rule's trailing `*` straight after a word continues only past
   a word boundary: `vissue claim*` meets `vissue claim X` and no longer
   refuses the read-only `vissue claims`.
-- The docs and the example runners file name the harnesses and models a
-  persona reasons through; the example ships the `claude` and `codex`
+- The docs and the example runners file name the runners and models a
+  persona reasons through; the example includes the `claude` and `codex`
   shapes with their `resume` argv.
 - Thinkers are personas. `ljos persona NAME --runner RUNNER` gives a
   persona a runner, a `[[harness]]` whose new `start` and `resume` argv
@@ -248,14 +249,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   (`[escalate]`, `escalate_band`, `command_mode = "prompt"`, `surface`,
   `PERSONA-THINKER` voters) is gone, and so is the review hand-off from
   `due --judge`.
-- Repository facts are pack claims. The push gate asks `gh` once per
+- Repository facts are pack claims. The push check asks `gh` once per
   repository and remembers the answer as a standing claim on
   `repo:OWNER/REPO`; later pushes read the pack. The runtime cache and
   `push.toml` are gone.
 
 ## 0.20.1 (2026-10-02)
 
-- The push gate counts a version tag (`v1.2`, `0.3.0`) as a release and
+- The push check counts a version tag (`v1.2`, `0.3.0`) as a release and
   a bookmark tag as nothing; a notes repository with one
   `campaign-sent` tag had asked for a cite on every push.
 
@@ -270,13 +271,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `due --judge` hand off; each hand-off is noted with its pane. The
   0.19.0 inline escalation, which pooled thinkers' JSON inside the
   judge, is gone.
-- The push gate asks the forge whose a remote is, so no file is needed:
+- The push check asks the forge whose a remote is, so no file is needed:
   `gh api` gives the person's push permission, whether the owner is
   their own account, the collaborators and the releases, kept a day. A
   branch push to the person's own unshared, unreleased repository runs;
   a shared, organisation or released one needs a cite; one they cannot
-  push to is theirs to run. On a forge the seat cannot ask, their own
-  namespace under their GitHub name counts as theirs. `push.toml`
+  push to is theirs to run. On a forge the seat cannot ask, the seat counts
+  their own namespace under their GitHub name as theirs. `push.toml`
   remains an override.
 
 ## 0.19.0 (2026-10-02)
@@ -294,8 +295,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   prompt mode, each answering with a short `why` that the log keeps.
   Every answer is pooled. A hook never escalates. A thinker runs with
   `LJOS_JUDGE=1`, under which the seat's hook injects nothing and the
-  argv law still holds.
-- An asked `git push` is gated by where it goes. With
+  argv law still applies.
+- An asked `git push` is checked by where it goes. With
   `~/.config/ljos/push.toml` naming `owners`, a branch push to an
   unreleased repository of theirs runs; a push to one with tags, or one
   `shared` names, runs when it cites the decision behind it,
@@ -305,13 +306,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   remote, tags, a mirror or a force stay the person's. With no file no
   push is free. Grok had refused 102 pushes in 13 sessions to
   the agents' own repositories under the blanket `git push*` ask.
-- A seat rule is tried on every command a shell line runs, not only on
-  the line's start: `cd repo && git push` and `FOO=1 git push` meet the
+- A seat rule is tried on every command a shell line runs, past the
+  line's start as well: `cd repo && git push` and `FOO=1 git push` meet the
   `git push*` rule. The line splits on `&&`, `||`, `;`, `|` and `&`
   outside quotes, so a commit message naming a command is not that
-  command. A pattern written as a regular expression (`re:`, or a `\b`,
-  `\s`, `\d`, `\w` or an alternation group in it) is matched as one,
-  anchored at the command's start; the three search-from-root rules in
+  command. The seat matches a regular expression as one, anchored at the
+  command's start: a pattern with `re:`, or with a `\b`, `\s`, `\d`,
+  `\w` or an alternation group in it; the three search-from-root rules in
   the seat's pack were regexes read as globs and had never fired.
 - Judging is a decision layer over named judges. `[judges.NAME]` tables
   in `jev.toml` each name a backend, model, key (`key_file`, `key_cmd`,
@@ -321,10 +322,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   Judges on one decision are asked at once and pooled (log-odds mean,
   geometric mean of distributions, score mean); the log keeps every
   judge's answer beside the pool. `command_mode = "prompt"` lets a
-  harness's one-shot mode judge: the questions as its last argument,
+  runner's one-shot mode judge: the questions as its last argument,
   the first JSON object it prints as the answer.
-- `ljos due --judge`: the review judges weigh each claim on the due
-  page against the pack's newer claims on it. A claim that holds at 0.9
+- `ljos due --judge`: the review judges weigh each due claim against
+  the pack's newer claims on it. A claim the judges put at 0.9
   is graded recalled, a contradicted one (0.1) is named to supersede or
   withdraw, and the rest stay due; a judge never lapses a claim.
 - Antigravity's `agy` is a runner: `ljos onboard --harness antigravity`
@@ -335,7 +336,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `run_command` answers `allow`, `deny` or a real `ask`; the first model
   call of a turn reads the prompt from the transcript and injects the
   note as an ephemeral step, later calls carry the tool-result notes;
-  `Stop` holds a turn with `decision: continue`. `hooks_named` in
+  `Stop` blocks a turn with `decision: continue`. `hooks_named` in
   `harnesses.toml` names a hook file of that shape.
 - `graded` takes only a claim a due page (`ljos due`, `ljos_due`, a
   sitting) showed in the last hour. A codex seat saved the 1281-row
@@ -362,7 +363,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `jev` (the default), `chat` (one JSON-mode chat completion on any
   chat-completions endpoint, hosted or a local llama-server) or
   `command` (an argv given the request on stdin, answering on stdout,
-  so a harness on the machine can judge). The three request shapes, the
+  so a runner on the machine can judge). The three request shapes, the
   parsers, the cache, the cost ledger and the callers are shared; a chat
   reply is read into Jev's shape, and a question left unanswered refuses
   the reply. `ljos doctor` prints the backend before the model.
@@ -378,10 +379,10 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   up for review, agents graded it, and a forecast withdrawn or replaced
   first failed with a raw pack error. `ljos graded` on an atom that is
   no longer current now says so.
-- `ljos deed ISSUE --add A --add B` cites several deeds at once, and
+- `ljos deed ISSUE --add A --add B` cites many deeds at once, and
   `ljos claims` runs `vissue claims` with its flags.
 
-- A subagent's stop hook names only the issue its own conversation holds.
+- A subagent's stop hook names only the issue its own conversation has claimed.
   A hold written from a shell whose runner the process tree had lost
   recorded the multiplexer (herdr) as its conversation, and every subagent
   under that multiplexer then matched it and was asked for a ballot on
@@ -390,14 +391,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   session process matches nobody.
 - `ljos vote ISSUE --withdraw [--as NAME]` (MCP `withdraw`) takes back a
   ballot and its forecast. The tracker's logbook keeps what the ballot
-  was, and the settle and the surprisingly popular reading drop both.
+  was, and the settle and the Prelec forecast reading drop both.
 
 ## 0.17.0 (2026-09-29)
 
 - With Jev on, `Stop` and `SubagentStop` audit the turn once from the
-  runner's transcript. A final message that claims done beside a red
-  test run, or that puts asked work off with no named block, holds the
-  agent for one more round with the reason. Whether a test ran is read
+  runner's transcript. The audit sends the agent back for one more round, with the
+  reason, when the final message claims done beside a red test run or
+  puts asked work off with no named block. Whether a test ran is read
   from the commands in code; the second stop is never audited.
 
 - `ljos vote ISSUE --as NAME --jev` and `ljos panel ISSUE --jev` ask Jev
@@ -422,11 +423,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   the month's calls and spend. `bears_at` and `cue_at` (0.5) set the
   probability each judgment needs.
 
-- A prompt or tool-result hook answers inside 8 s, with no context rather
-  than being cut off by its runner; an identical call started in the last
+- A prompt or tool-result hook answers inside 8 s. It answers with no
+  context before its runner can cut it off; an identical call started in the last
   20 s returns at once, so a hook file two runners load runs once per
   event. The reranked prompt search gets 2.5 s, then the lexical search
-  answers. Tool gates are exempt from both.
+  answers. Permission hooks are exempt from both.
 
 - A lesson is stored as an episode (`horizon:transient`). It is kept
   and it is not a refresher. A recalled review promotes it to
@@ -436,19 +437,19 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   cross-encoder and injects standing claims only. A lesson with no
   horizon tag is an episode.
 
-- A panel matches personas on topic domains. A `sync:` scope stamped on
+- A panel matches personas on topic domains. A `sync:` scope written on
   the roster is not a topic, so it does not seat everyone who carries it.
 
 - `ljos vote --expect` records the private forecast of the others on the
   same command as the ballot. Briefs, the company-panel recipe, and the
   subagent stop line name that flag. `ljos predict` still records a
   forecast on its own. Two or more forecasts and `ljos consensus` names
-  the surprisingly popular answer.
+  the answer more popular than forecast.
 
 - A runner that discards prompt-hook stdout still receives the pack note,
   on the first tool result. `Stop` speaks only when the turn ran no tool,
   because its feedback would start another round. An empty later prompt
-  does not erase a note that has not been delivered. Memory ids and the
+  does not erase a note that has not been shown. Memory ids and the
   correction, decision, and due nudges are marked seen only once that
   note is emitted.
 
@@ -459,7 +460,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   island, and finish writes this one's. A `[projects]` table sends one
   project's lessons to another scope, and a finish lesson takes the scope
   of the repository its issue lives in. An import skips texts it already
-  holds, and a clone another host pushed past merges instead of sticking.
+  has, and a clone another host pushed past merges instead of sticking.
 
 - A finish lesson names the issue it was learned on (`issue:ID`), and every
   claim ljos writes carries `source`: the runner, the conversation, the host
@@ -472,12 +473,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - A conversation is one holder across nested runners and threads, a
   runner's client names (for example `claude` and `claude-code`) are one
-  seat through the harness `clients` list, and a library's default client
+  seat through the runner table's `clients` list, and a library's default client
   name is no seat.
 
-- A subagent is told, on its first tool result, the issue its parent holds
+- A subagent is told, on its first tool result, the issue its parent has claimed
   and how its result joins it: a ballot `--as` its role, a lesson or a
-  note. grok's `SubagentStop` holds it once while that issue is open, and
+  note. grok's `SubagentStop` blocks it once while that issue is open, and
   asks for the ballot on a decision. The parent's issue is found under the
   holder the runner's server recorded.
 
@@ -502,11 +503,11 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   and tracker-row failures for remotes that disagree and for a clone that
   lacks the merge driver its `.gitattributes` names.
 
-- The sitting's due list puts the claims its island holds first, unless the
+- The sitting's due list puts the claims in its island first, unless the
   island is weak. The timeline reads every store on the reader's local
   day, and the pack is read without its vectors.
 
-- The doctor's tracker row names how many commits the checkout holds that
+- The doctor's tracker row names how many commits the checkout has that
   origin does not. A count that has sat through the push wait fails the
   row; a leftover `tracker-push-*.log` from a refused push is named on it.
   A live background push, or commits younger than the wait, stay healthy.
@@ -531,17 +532,17 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A seat record carries the conversation ids its writer held, and a shell
   refuses a record written under an id it shares with another
   conversation. Two conversations started from one terminal share the line
-  editor's session id, and a shell could take the other conversation's
-  holder and then fail to finish its own claim.
+  editor's session id. A shell could take the other conversation's
+  holder, and then could not finish its own claim.
 
 - `ljos` and `ljos-mcp` expand a leading `~` in `ISSUE_ROOT` and
-  `VISSUE_ROOT` at start. The linked tracker crate took such a root as
+  `VISSUE_ROOT` at start. The linked tracker crate had read such a root
   relative to the working directory, so `ljos finish` could not find a
   ticket `vissue` itself resolved.
 
-- `ljos sitting` after its claim and `ljos finish` at the end commit the
-  ticket's tracker file (that file only) and push it, when the tracker is a
-  git checkout. A closure that stayed in one working tree was lost to every
+- When the tracker is a git checkout, `ljos sitting` commits and pushes
+  the ticket's tracker file (that file only) after its claim, and
+  `ljos finish` does the same at the end. A closure that stayed in one working tree was lost to every
   other host. `LJOS_TRACKER_GIT=commit` commits without pushing; `=off`
   skips it. A refused push is reported and does not fail the verb.
 
@@ -559,7 +560,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - Forecast scoring accepts the decimal strings emitted by the tracker as
   well as JSON numbers. Invalid probabilities are reported instead of being
-  silently treated as absent forecasts.
+  treated as absent forecasts without a word.
 
 - Doctor checks that the installed tracker accepts evidence citations and
   forecast confidence on ballots. An incompatible vote command fails the
@@ -577,7 +578,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   ISSUE --playbook NAME` (MCP `playbook`) prints `== playbook` with that
   body before recall; absent a name, a closed-set token in the title else
   `sit`, so a sitting always binds one of the five before claim. Pack
-  latest per name is the copy source; shipped bodies seed only when the
+  latest per name is the copy source; built-in bodies seed only when the
   pack has no live atom of that name. Write, list, bind, and copy refuse
   names outside the five.
 - The unscoped inbound floor a persona is owed is the seat's own row
@@ -596,7 +597,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 - `ljos hud` execs sibling `ljos-hud` (`LJOS_HUD_BIN`, same directory, then
   PATH). Missing is 127; `--hide` with nothing running is 0. The `ljos`
-  crate does not link iced. Dist ships the HUD on
+  crate does not link iced. The release builds the HUD for
   `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu` only.
 - `ljos-hud` is a long-lived icedtea daemon: summon socket
   (`LJOS_HUD_SOCKET`, `$XDG_RUNTIME_DIR/ljos/hud.sock`), overlay
@@ -614,12 +615,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `(1 - anchor)`, missing persona a hollow disk, dashed when scoped),
   island (`packset_search` plus `packset_island(cue, false)`; idle until
   enter; `format_island` weak/dense banners; search-down is a banner), and a deed
-  rail (`ljos_cli::timeline_events` → `Vec<Event>`; idle until the
+  rail (`ljos_cli::timeline_events` to `Vec<Event>`; idle until the
   operator enters an issue; tracker rows from
   `vissue_core::agent::show_json`, not `vissue show --json`). Skip chips sit in
   the layout in key order 1-5 (due, claims, graph, island, deeds). Watch
-  `work.bin` plus pack `last_write_ts` (Snap stamps both; a missing
-  `pack_ts` is boot, not a load); the 50 ms tick is chrome. A
+  `work.bin` plus pack `last_write_ts` (Snap writes both; a missing
+  `pack_ts` means boot, and no load yet); the 50 ms tick is chrome. A
   habitat that is down is an icedtea banner and a status page; pack-down
   and honest-empty differ, and a claims banner does not blank an up-empty
   graph. HUD sources never call `graded` / `post_atom` / `sweep` /
@@ -637,16 +638,16 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `--gen` on `ljos finish` and `ljos complete` (and `gen` over MCP) is
   optional: absent, the live generation is read off the claim graph. An
   explicit stale generation is still refused.
-- `ljos claim`, and so a sitting, stamps the tracker as well as the claim
+- `ljos claim`, and so a sitting, marks the tracker as well as the claim
   graph: `vissue claim ISSUE` runs under the assignee's name, so the issue
-  reads STARTED and `vissue claims` names who holds it. A tracker that
+  reads STARTED and `vissue claims` names who has claimed it. A tracker that
   refuses the name fails the claim with `ljos release` named as the way
   out; a node the tracker does not know is left alone.
 
 ## 0.16.2 (2026-09-22)
 
 - Doctor compares the `ljos-mcp` binary to the `ljos` crate. That crate
-  ships the binary; the crates.io name `ljos-mcp` stopped at 0.14.0.
+  builds the binary; the crates.io name `ljos-mcp` stopped at 0.14.0.
 - A sitting sweeps the review clock before it prints the due prefix, the
   same sweep `ljos due` already ran.
 - `ljos_due` returns the soonest eight claims, the total due, and the
@@ -655,7 +656,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   domain. It does not seat every specialist in the pack.
 - `ljos vote` prints a count and says so. The settle stays `ljos consensus`.
 - An island prints whose weights it walked, and whether fire rewrote them.
-  Activation is spread along links, not a rank. A persona brief says to
+  Activation spreads along links; it is no rank. A persona brief says to
   walk its own island and to fire only after that island was used.
 - A search score is a rank from the scorers, named as such. Learn names
   the rows it rewrote and says the call is not a settle. Finish names
@@ -680,7 +681,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `ljos bump-plan BUNDLE --project P --parent I` puts an eb-stack bundle
   on the tracker: one child issue per module the lock builds, blocked by
   the modules built before it along the SBOM's dependency edges, with ids
-  that are a hash of module and generation so a rerun holds what exists.
+  that are a hash of module and generation so a rerun keeps what exists.
   `vissue ready` is then the buildable frontier and a sitting refuses the
   rest. `ljos_bump_plan` over MCP; `--dry-run` prints the rows.
 
@@ -706,7 +707,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.14.1 (2026-09-20)
 
 - A finding names the module whose build failed (`GCCcore-15.2.0` for
-  `eOn-2.17.10-foss-2026.1`), read from EasyBuild's own line, not only
+  `eOn-2.17.10-foss-2026.1`), read from EasyBuild's own line, as well as
   the recipe the campaign drives; the lesson and its entities carry both.
   A finding a later attempt got past says so in its second sentence
   instead of quoting the campaign's automatic resolution.
@@ -724,8 +725,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   its typed findings; `--remember` writes one lesson per finding a person
   or a seat resolved (the recipe, the step, the error line, the fix) under
   the recipe's name, its package and the failure class; `--issue` cites
-  the state file as a deed. `ljos_findings` over MCP. The protocol and
-  the how-to carry the bump: one island per recipe before it is touched,
+  the state file as a deed. `ljos_findings` over MCP. The bump is in
+  the protocol and the how-to: one island per recipe before it is touched,
   the ladder rung by rung, the findings remembered after.
 - A claim leaves a hold record beside the claim graph: the name it is
   held under, the seat, the runner process and when. A sitting that finds
@@ -744,24 +745,24 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.13.8 (2026-09-20)
 
 - A conversation's holder does not move when a second `*_SESSION_ID`
-  appears: the first resolution leaves a record under every stamped id,
+  appears: the first resolution leaves a record under every id set then,
   and a later process carrying one of them and more finds the holder by
   the shared id. A sitting opened under one id is finished under it when
-  a line editor has stamped another since.
-- `ljos doctor` says where a registry answer came from (`crates.io
-  (cached)` when read from the day cache) and labels a binary ahead of it
+  a line editor has set another since.
+- `ljos doctor` says where a registry answer came from: `crates.io
+  (cached)` when read from the day cache. It labels a binary ahead of it
   as well as one behind; a cached answer the binary on `PATH` is already
   ahead of is asked again.
 - `ljos_policy` returns what `ljos policy` prints: the TCB verdict, the
   rule that fired and the memories the line activates, under `ruling`.
-  `ljos_consensus` runs the surprisingly popular answer and the voters'
+  `ljos_consensus` runs the Prelec forecast reading and the voters'
   standing beside the settle, as `ljos consensus` does.
 - The `ljos-mcp` crate page carries the README.
 
 ## 0.13.7 (2026-09-20)
 
 - `ljos onboard` registers into a runner's JSON config by pointer: a
-  harness names `config_json`, `json_pointer` and a `json_entry` template
+  runner table names `config_json`, `json_pointer` and a `json_entry` template
   (opencode's `mcp` object, for one), and registered means the pointer
   resolves.
 
@@ -780,8 +781,8 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.13.5 (2026-09-20)
 
-- A finish says when the island fired already this hour (the pack holds
-  a second fire of the same claims for an hour, so several seats or
+- A finish says when the island fired already this hour (the pack drops
+  a second fire of the same claims for an hour, so many seats or
   personas closing sittings on one issue tighten its links once).
   `scripts/herd.sh` runs eight sittings from four seats at once, contends
   one ticket between two seats, and closes all eight in parallel.
@@ -792,14 +793,14 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   (`packset-client` 0.9.17), not every atom in the workspace.
 - `ljos doctor` has a memory row: the live count against the cap and
   the claims forgotten, by reason (packset 0.9.17 counts them).
-- Writing a persona that the pack already holds supersedes its previous
+- Writing a persona that the pack already has supersedes its previous
   atom, so moving an anchor or a view leaves one live persona of that
   name; the roster showed one, the pack kept both.
 
 ## 0.13.3 (2026-09-19)
 
 - `ljos personas` and the `ljos_personas` tool print the roster the pack
-  holds: name, anchor, the domains each speaks to, its view. The only
+  keeps: name, anchor, the domains each speaks to, its view. The only
   way to see it was the panel prompt.
 - `ljos due` sweeps the pack first and says what the sweep did: reviews
   left due past twice their interval lapse, never-recalled claims missed
@@ -811,7 +812,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - A panel seats only the personas whose domains the issue speaks to,
   read from its title's words and the island it activates; every persona
   sits when none speaks to it. The `ljos panel` brief and the
-  `run_a_panel` prompt agree on the roster, and the prompt says how many
+  `run_a_panel` prompt agree on the roster, and the prompt counts how many
   of the pack it seated.
 - `ljos onboard --harness grok` bumps `LJOS_MCP_GENERATION` in the runner
   config when the crate version moved, so Grok's watcher respawns
@@ -828,9 +829,9 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   hands the work out again. Failed or cancelled leaves the ticket where
   it is. Completing a node alone still does not close a ticket.
 - The server's seat record is also kept under each conversation id the
-  runner stamped, and a shell reads it by any id it shares with the
-  server. A line editor that stamps a session id of its own into the
-  shell no longer makes that shell a second holder.
+  runner set, and a shell reads it by any id it shares with the
+  server. A shell no longer becomes a second holder when a line editor
+  writes a session id of its own into it.
 - Every write names the seat that wrote it (`seat:<name>` first among
   the entities; a persona's, a habit's or a trust row's entities join it,
   a trust row's stay the deeds it cites). A hit written by another seat
@@ -838,7 +839,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   `(from brio)` in `ljos search`, `from` on the `ljos_search` row. Many
   seats share one pack; a reader now sees whose lesson it is reading.
 - `packset-client` 0.9.12, whose hits carry entities and whose writer
-  holds a workspace at a live cap.
+  keeps a workspace at a live cap.
 
 ## 0.13.0 (2026-09-19)
 
@@ -867,7 +868,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   as the seat.
 - `cargo install ljos` installs `ljos` and `ljos-mcp`.
 - Occupancy is `{holder}:{issue}` and the holder is any `*_SESSION_ID` the
-  runner stamped, else the seat tagged with the conversation's process,
+  runner set, else the seat tagged with the conversation's process,
   else `LJOS_SEAT`. No product list. Two conversations hold two tickets;
   the same ticket is still one holder. `doctor` prints the session and
   which variable it came from.
@@ -906,13 +907,13 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.12.9 (2026-09-14)
 
 - `ljos doctor` lists every seat binary (`ljos`, `packset-embed`,
-  `packset-mcp`, …) with the version on PATH against crates.io. A
+  `packset-mcp`, and the rest) with the version on PATH against crates.io. A
   part that is missing or behind is not ok. Encoder and policyd are
   required with the rest.
 
 ## 0.12.8 (2026-09-14)
 
-- `ljos doctor` treats the grok harness hook as the frozen events
+- `ljos doctor` treats the grok runner hook as the frozen events
   (prompt, PostToolUse, Bash rules, SessionEnd), not a stale
   SessionStart list. `~/.config/ljos/env` is loaded when those
   keys are unset, so a shell `ljos` shares the MCP pack. Argv law
@@ -921,12 +922,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 ## 0.12.7 (2026-09-14)
 
 - `ljos onboard --harness grok` writes the frozen `~/.grok/hooks/ljos.json`.
-  No table in harnesses.toml is required.
+  No table in `harnesses.toml` is required.
 
 ## 0.12.6 (2026-09-14)
 
 - Grok hook is `ljos hook` only. The prompt's pack text is held and
-  emitted once on `PostToolUse`, the event Grok delivers. No
+  emitted once on `PostToolUse`, the event Grok sends. No
   `sync.sh`. `PreToolUse` stays rules-only.
 
 ## 0.12.5 (2026-09-14)
@@ -934,7 +935,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - Grok `PreToolUse` no longer remaps to a pack search. The inject
   script exits on a tool call. `ljos hook` on Bash only decides
   rules. The due nudge no longer walks `consolidate` (that sitting
-  is what timed the hook out at 20s).
+  is what timed the hook out at 20 s).
 
 - `finish` does not fire a weak island (seeds no two scorers agreed on)
   and says why; `island` marks one as weak and as the pack's
@@ -968,7 +969,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   embedding landscape, from the optional `landscape` habitat; nothing
   written.
 - The hook reads a correction: a prompt that opens with "do you not
-  remember", "you should have", "I told you" and the like gets one line,
+  remember", "you should have", "I told you" or a phrase of that kind gets one line,
   once per cue a session, to write the preference or lesson into the pack
   before the work. A correction the pack never held cannot fire.
 
@@ -982,12 +983,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   where the linear rule gave three to two; chance earns the floor.
 - `search` prints how many scorers named each hit; the prompt nudge counts
   the pairs `consolidate` would close beside the claims due.
-- `consolidate` (and the `ljos_consolidate` tool): the pack's replacement
-  rule run over what it holds, pairs reported, `--apply` to write.
+- `consolidate` (and the `ljos_consolidate` tool) runs the pack's
+  replacement rule over its claims and reports pairs; `--apply` writes.
 - The hook injects only hits at least two of the pack's scorers named
   (`ballots` of `of` on a hit), when more than one ran; a claim one
   scorer alone matched on a command line stays in the pack.
-- A second `sitting` on an issue this name already holds is a sitting
+- A second `sitting` on an issue this name has already claimed is a sitting
   resumed: the lease is renewed and the verb goes on, where it refused
   with `claim: status claimed`. Held by another seat, the refusal names
   the actor.
@@ -1019,12 +1020,12 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `scripts/smoke.sh`: every loop on scratch stores, as a check.
 - `sitting` prints the island's strongest eight; `island` prints it all.
 - A habitat cut off by the seat's own reader closing the pipe is not a
-  refusal: `ljos consensus ID | head` ends quietly.
+  refusal: `ljos consensus ID | head` ends with no error.
 
 ## 0.7.0 (2026-09-12)
 
-- `learn --share S`: a fixed share of recovery toward one after the Hedge
-  step (Herbster and Warmuth), so a voter refuted long ago can come back;
+- `learn --share S` adds a fixed share of recovery toward one after the
+  Hedge step (Herbster and Warmuth), so a voter refuted long ago can come back;
   zero, the default, is plain Hedge.
 - `receive --import` tags every imported atom with its sender
   (`from:<signing key>`, or `from:handover` for an unsigned bag).
@@ -1040,7 +1041,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 - `handover --to user@host:path` copies the sealed, signed bag to another
   seat over ssh; the receiver runs `ljos receive`.
 - `predict ISSUE --expect OPTION` records a forecast of the others; with
-  two or more, `consensus` prints the surprisingly popular answer (Prelec,
+  two or more, `consensus` prints the answer more popular than forecast (Prelec,
   Seung and McCoy) and, with trust rows, each voter's EigenTrust standing.
 - `rule PATTERN --verdict deny|ask --why TEXT`: argv law in the pack. The
   hook returns the verdict as the runner's permission decision on tool
@@ -1054,7 +1055,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   without MCP can start one subagent per persona.
 - `remember --as NAME` and `prefer --as NAME` (and `as` on the tools): a
   persona keeps lessons of its own, which open its next `brief`.
-- `handover` signs the manifest with the seat's default host key, not only
+- `handover` signs the manifest with the seat's default host key, as well as
   with one named by `DEEDAR_HOST_SIGNING_KEY`; it went out unsigned while
   `doctor` reported the key present.
 
@@ -1066,7 +1067,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
   claims are due for review. `sitting` no longer waits on the runners'
   command lines; `doctor` asks them beside the seat's own rows.
 - `learn` moves a refuted persona's anchor toward one, and a scoped trust
-  row that applies stands in for the unscoped row of its pair instead of
+  row that applies replaces the unscoped row of its pair instead of
   adding to it. Islands print claims only; persona and trust atoms are
   weighed, not recalled.
 - `ljos brief NAME ISSUE` and `ljos_brief`: the text a subagent playing a
@@ -1076,7 +1077,7 @@ Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 
 ## 0.3.0 (2026-09-12)
 
-Memory at the point of action:
+Memory where the agent acts:
 
 - `ljos hook` reads a runner's hook JSON (or an argv line) on stdin and
   answers with the memories the action activates, preferences first, in the
@@ -1127,7 +1128,7 @@ For an agent, or the person running one:
   is onboarded.
 - `ljos release ID --assignee NAME` and `ljos_release` hand a session node
   back unfinished. A claim refused as busy now names the tracker id the
-  name still holds and the two verbs that free it.
+  name has still claimed and the two verbs that free it.
 - Nothing needs a variable set: the pack is found on `127.0.0.1:8761`
   (`PACKSET_URL=off` means no pack), the seat's memory is the one
   workspace `seat` from any directory (`PACKSET_WORKSPACE` names another),
