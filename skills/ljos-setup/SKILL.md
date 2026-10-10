@@ -14,7 +14,7 @@ Check the programs first.
 2. Install the programs. Prefer prebuilt binaries:
 
    ```
-   cargo binstall --locked ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus
+   cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus
    ```
 
    Without `cargo binstall`, use `cargo install --locked` with the same list.

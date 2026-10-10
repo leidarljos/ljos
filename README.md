@@ -22,7 +22,7 @@ on what), ljos-policyd (the command check) and ljos-consensus (voting).
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 
 ```
-cargo binstall --locked ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
+cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule '*--force*' --verdict deny --why "Never force push."
