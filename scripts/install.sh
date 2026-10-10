@@ -3,8 +3,10 @@
 # against the SHA-256 published beside it, and run `ljos onboard` for
 # every coding agent found on this machine.
 #
-#   curl -fsSLO https://raw.githubusercontent.com/leidarljos/ljos/main/scripts/install.sh
-#   sh install.sh
+#   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+#
+# Each ljos release attaches this script as the asset install.sh, from
+# the first release after 0.28.0 on. Before that release the URL is a 404.
 #
 # Options:
 #   --bin-dir DIR   where the programs go (default: $LJOS_BIN_DIR or ~/.local/bin)
@@ -35,7 +37,7 @@ while [ $# -gt 0 ]; do
     --with-embed) WITH_EMBED=1; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
     --no-onboard) ONBOARD=0; shift ;;
-    --help|-h) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help|-h) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
 done

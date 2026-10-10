@@ -41,6 +41,8 @@ the hand install below works. Read the script before you run it; it is
 ```
 cargo binstall --locked ljos packset vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
+ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
 ```
 
 `--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
@@ -57,11 +59,19 @@ What this seat already knows that bears on this (from the pack, each with its ag
 ```
 
 When the agent then reaches for `git push --force origin main`, the runner
-refuses the command before it runs. ljos-policyd refuses it without any rule
-of yours; `--force-with-lease` goes through:
+refuses the command before it runs. `ljos-policyd` answers first, with the
+rules it ships, and lets `--force-with-lease` through:
 
 ```
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
+```
+
+`sh -c "cd repo && git push -f origin main"` gets the same answer. A command
+only your own rule covers, such as `terraform destroy -auto-approve`, meets
+that rule:
+
+```
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (seat rule `terraform destroy*`)"}}
 ```
 
 The hook shows a preference from the moment it is written. A lesson
