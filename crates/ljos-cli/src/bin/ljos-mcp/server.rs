@@ -427,6 +427,9 @@ pub struct PackArgs {
     /// Issues to take, with what they stand on.
     #[serde(default)]
     pub issues: Vec<String>,
+    /// The log size the receiver kept last time; the bag then carries the bridge from it.
+    #[serde(default)]
+    pub since_size: Option<u64>,
 }
 
 /// A satchel that arrived.
@@ -434,8 +437,11 @@ pub struct PackArgs {
 pub struct ReceiveArgs {
     /// The satchel directory.
     pub dir: String,
-    /// A bridge file from the last handover by the same sender.
+    /// The head file `keep` wrote at the last receive from the same sender.
     pub since: Option<String>,
+    /// Write this bag's log head to this file, for `since` next time.
+    #[serde(default)]
+    pub keep: Option<String>,
     /// Put the enclosed atoms into this seat's pack.
     pub import: Option<bool>,
 }
@@ -1778,9 +1784,14 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PackArgs>,
     ) -> Result<Json<Rows<String>>, McpError> {
-        handover(Path::new(&args.out), &args.projects, &args.issues)
-            .map(as_rows)
-            .map_err(refused)
+        handover(
+            Path::new(&args.out),
+            &args.projects,
+            &args.issues,
+            args.since_size,
+        )
+        .map(as_rows)
+        .map_err(refused)
     }
 
     #[tool(
@@ -1800,6 +1811,7 @@ impl LjosServer {
         receive(
             Path::new(&args.dir),
             args.since.as_deref().map(Path::new),
+            args.keep.as_deref().map(Path::new),
             args.import.unwrap_or(false),
         )
         .map(as_rows)
@@ -2273,8 +2285,9 @@ impl LjosServer {
              unanswered by the one before it: did it arrive as written (the\n\
              manifest), do the deeds predate the asking (every receipt to the head\n\
              in the bag, and the bridge from a kept head when `since` is given),\n\
-             and who wrote it (the signature, when there is one). Pass `since` when\n\
-             this sender has handed over before.\n\
+             and who wrote it (the signature, when there is one). Pass `since`, the\n\
+             head file `keep` wrote, when this sender has handed over before, and\n\
+             `keep` every time so there is a head for the next one.\n\
              \n\
              Then, for each deed the bag names, `ljos_current`: a deed that arrived\n\
              intact and is no longer the tip is a different finding from one that\n\
