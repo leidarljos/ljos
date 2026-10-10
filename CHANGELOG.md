@@ -5,6 +5,8 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos finish --outcome` and `ljos learn --outcome` take `--new-option` for an answer that was on no ballot, such as a tie the person broke with a third answer. Every voter is scored a miss on it, the outcome is kept, and the reading says so. Without the flag, an outcome that matches no ballot and none of the issue's options is refused with the options it named, because a typo would score every voter a miss too and nothing said so. An outcome that matches an option in another case takes the option's spelling. The MCP finish and learn tools take `new_option`.
+
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
 - The prompt hook no longer waits on the search model. On a new machine packsetd downloads the model on the first search, and the first prompt used to spend its whole 8 s deadline on it and say nothing. When the pack reports an encoder that has not answered yet, the hook starts one search in the background, skips its own, and says once a session that memory is starting. Session start does the same, so the model is usually loaded by the first prompt.

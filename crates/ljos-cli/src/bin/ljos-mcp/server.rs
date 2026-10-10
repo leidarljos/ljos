@@ -411,6 +411,11 @@ pub struct LearnArgs {
     pub issue: String,
     /// The option that turned out right.
     pub outcome: String,
+    /// The outcome is none of the ballot's options: the person answered
+    /// with a new one. Without it such an outcome is refused, since a typo
+    /// would score every voter a miss as well.
+    #[serde(default)]
+    pub new_option: bool,
     /// The factor a refuted persona's anchor moves by; the seat's default
     /// when absent. The rows themselves follow each voter's record.
     pub beta: Option<f64>,
@@ -502,6 +507,10 @@ pub struct FinishSittingArgs {
     /// The option that turned out right, when the ballots are in and the
     /// world has said. Omit when nobody knows yet.
     pub outcome: Option<String>,
+    /// The outcome is none of the ballot's options: the person answered
+    /// with a new one.
+    #[serde(default)]
+    pub new_option: bool,
     /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
     #[serde(default)]
     pub gen: Option<u64>,
@@ -1303,6 +1312,7 @@ impl LjosServer {
             args.status.as_deref().unwrap_or("done"),
             args.lesson.as_deref(),
             args.outcome.as_deref(),
+            args.new_option,
             LEARN_BETA,
             &resolve_assignee(args.assignee.as_deref()),
             args.gen,
@@ -1631,6 +1641,14 @@ impl LjosServer {
     ) -> Result<Json<LearnPage>, McpError> {
         let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
         let forecasts = forecasts_from_json(&said.stdout).map_err(refused)?;
+        let (outcome, off) = ljos_cli::named_outcome(
+            &args.issue,
+            &args.outcome,
+            &forecasts,
+            &ljos_cli::options_of_issue(&args.issue),
+            args.new_option,
+        )
+        .map_err(refused)?;
         let ballots: Vec<(String, String)> = forecasts
             .iter()
             .map(|f| (f.agent.clone(), f.choice.clone()))
@@ -1641,19 +1659,14 @@ impl LjosServer {
         let (rows, moved, calibration) = learn_and_write(
             &args.issue,
             &ballots,
-            &args.outcome,
+            &outcome,
             args.beta.unwrap_or(LEARN_BETA),
             &about,
             &forecasts,
         )
         .map_err(refused)?;
-        let reading = learn_reading(
-            rows.len(),
-            moved.len(),
-            &forecasts,
-            &args.outcome,
-            &calibration,
-        );
+        let reading = off.unwrap_or_default()
+            + &learn_reading(rows.len(), moved.len(), &forecasts, &outcome, &calibration);
         Ok(Json(LearnPage {
             reading,
             rows: rows
