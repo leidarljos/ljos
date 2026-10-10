@@ -354,13 +354,17 @@ A persona is a =persona= atom: a name, an anchor in [0, 1], a view, and the
 domains it speaks to. =consensus= passes the anchor of each persona on the
 ballot to both settles as =--susceptibility-of=, and gives every other voter
 on that ballot, the seat included, an anchor of 0.5. A ballot with no
-persona settles as plain DeGroot. At 0 a persona never moves off its
-ballot and pulls the rest toward it (Acemoglu, Como, Fagnani and Ozdaglar,
-doi:10.1287/moor.1120.0570); at 1 it keeps none of its ballot. Before the
-default, the seat sat at 1, so any anchored persona took the whole settle.
-The settle prints in words: the shares, who leads and by how much,
-polarization, each voter's influence, and the share of its own ballot
-each voter keeps. =consensus ID --json= prints the model crate's JSON instead.
+persona settles as plain DeGroot. At 1 a persona keeps none of its
+ballot. An anchor below 0.5 settles at 0.5: under Friedkin-Johnsen with
+equal trust, the share of its ballot a voter keeps is its weight, and a
+stubborn voter pulls the rest toward it (Acemoglu, Como, Fagnani and
+Ozdaglar, doi:10.1287/moor.1120.0570). A persona at 0 would count as two
+seats and tie a 2-to-1 vote on its own. Trust rows still weigh voters as
+they say. Before the default, the seat sat at 1, so any anchored persona
+took the whole settle. The settle prints in words: the shares, who leads
+and by how much, polarization, each voter's influence, the share of its
+own ballot each voter keeps, and, when a persona or judge voted, the seat
+ballots a push cite counts beside the ballots that are advice. =consensus ID --json= prints the model crate's JSON instead.
 
 Without an outcome, =calibrate= estimates each voter's accuracy from the
 project's issues with two or more ballots, by expectation maximisation
