@@ -3,7 +3,7 @@
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), heads-up display (HUD), software bill of materials (SBOM), European Environment for Scientific Software Installations (EESSI).
 
-## Unreleased
+## 0.28.0 (2026-10-10)
 
 - A sitting opens with no encoder. The pack ranks by words alone, the sitting says so, and `finish` still declines a weak island. A refusal names the rows that stopped it. `ljos doctor` still fails on a missing encoder.
 - `ljos send` and `ljos inbox` read the writer's version before they probe. packset 0.12.1 refuses an empty message for its text, so the probe passed there, and `inbox` printed `nothing unread` on a pack that cannot keep mail.
