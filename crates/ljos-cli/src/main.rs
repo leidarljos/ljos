@@ -53,6 +53,12 @@ enum Cmd {
         /// Prefer as this persona.
         #[arg(long = "as")]
         as_persona: Option<String>,
+        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook refuses what the preference forbids. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        deny: Vec<String>,
+        /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        ask: Vec<String>,
     },
     /// Write one agent proposal into the pack. Until then it is not a memory.
     Accept { id: String },
@@ -461,6 +467,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The seat rules the hook and `policy` judge by: verdict, pattern and reason, one a line.
+    Rules {
+        /// Print them as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Record the person's explicit consent for one pending hook request.
     Approve {
         /// The request id printed by the hook. Approve only after the person agrees.
@@ -754,10 +766,19 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Prefer { text, as_persona } => {
-            let body =
-                packset_write_as("Prefer", &join(&text), as_persona.as_deref(), Some(false))?;
+        Cmd::Prefer {
+            text,
+            as_persona,
+            deny,
+            ask,
+        } => {
+            let text = join(&text);
+            let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
+            let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
             println!("{}", format_write_ack(&body));
+            for rule in &rules {
+                println!("{}", ljos_cli::atom_out(&write_rule(rule)?, false)?);
+            }
         }
         Cmd::Accept { id } => {
             print!("{}", ljos_cli::admit::accept(&id)?);
@@ -1243,6 +1264,12 @@ fn main() -> Result<()> {
                 reason: why,
             })?;
             println!("{}", ljos_cli::atom_out(&body, json)?);
+        }
+        Cmd::Rules { json } => {
+            print!(
+                "{}",
+                ljos_cli::format_rules(&ljos_cli::rules_from_pack()?, json)
+            );
         }
         Cmd::Approve { id } => {
             print!("{}", ljos_cli::approval::approve(&id)?);
