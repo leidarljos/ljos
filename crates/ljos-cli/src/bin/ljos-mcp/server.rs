@@ -207,6 +207,17 @@ pub struct IssueArgs {
     pub issue: String,
 }
 
+/// The issue to settle, and whether to run the tracker's settle too.
+#[derive(Deserialize, JsonSchema)]
+pub struct ConsensusArgs {
+    /// The issue id.
+    pub issue: String,
+    /// Also run the tracker's own settle, whose numbers can differ from the
+    /// model crate's once trust rows exist.
+    #[serde(default)]
+    pub compare: bool,
+}
+
 /// A forecast of the others' ballots.
 #[derive(Deserialize, JsonSchema)]
 pub struct PredictArgs {
@@ -1149,7 +1160,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. Pass `as` for a persona.",
+        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. Pass `as` for a persona.",
         annotations(
             title = "Vote",
             read_only_hint = false,
@@ -1420,12 +1431,12 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after the ballots are in. The first lines are the reading: act on those, not on a later count. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached, and the settle files a child for each option a voter still leads with that is not the unique plurality. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
+        description = "Call this after the ballots are in. The first line is what the push gate decides: whether a push citing this issue stands, on seat ballots alone, with the ballots it counted; persona and judge ballots neither pass nor block a push. Then comes the weighted settle over every ballot, which is advice. Pass `compare` to add the tracker's own settle. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached, and the settle files a child for each option a voter still leads with that is not the unique plurality. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
         &self,
-        Parameters(args): Parameters<IssueArgs>,
+        Parameters(args): Parameters<ConsensusArgs>,
     ) -> Result<Json<Rows<Said>>, McpError> {
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.
@@ -1452,16 +1463,31 @@ impl LjosServer {
         // every other voter under the default one.
         let ballots = ljos_cli::ballot_rows(&args.issue);
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
+        // As the CLI: the model crate's settle, and the tracker's only on
+        // `compare` or when the model crate is not there.
+        let have_model = on_path("ljos-consensus");
         let mut steps = consensus_steps_for(
             &args.issue,
-            on_path("ljos-consensus"),
-            on_path("vissue"),
+            have_model,
+            on_path("vissue") && (args.compare || !have_model),
             &trust,
             &anchors,
             &tags,
         )
         .map_err(refused)?;
         let mut out = Vec::new();
+        let names: std::collections::BTreeSet<String> =
+            personas.iter().map(|p| p.name.trim().to_string()).collect();
+        let (gate, gate_json) =
+            ljos_cli::push_cite_reading(&args.issue, &ballots, &names, &ljos_cli::seat_name());
+        out.push(Said {
+            text: gate,
+            aside: None,
+        });
+        out.push(Said {
+            text: gate_json.to_string(),
+            aside: None,
+        });
         // The CLI does the same: the named outcomes show which voters
         // err together, and those voters are discounted.
         if let Some((discount, line)) = settle_discount(&atoms) {
@@ -1480,13 +1506,6 @@ impl LjosServer {
                 if let Some(words) = ljos_cli::settle_in_words(&said.text, &anchors) {
                     out.push(Said {
                         text: words,
-                        aside: None,
-                    });
-                }
-                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
-                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
-                    out.push(Said {
-                        text: split,
                         aside: None,
                     });
                 }
