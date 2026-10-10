@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
 - `ljos onboard` lists the host key as a signer in an existing deed store, through `deedar host accept`: the key it writes, and an existing key too, so running onboard again fixes a seat onboarded before. A store made before the key existed refused every deed the key signed until the person edited its layout. A deedar without the verb leaves the step failed, and `ljos doctor` names the line to add.
 - `ljos onboard` makes the default deed store (`$XDG_DATA_HOME/deedar/store`) and a tracker at `$XDG_DATA_HOME/vissue/tracker`, and writes the `root` line in vissue's `config.toml` that names it. Before, a fresh seat had neither: `deedar create` refused with `no store at ~/.local/share/deedar/store`, and vissue said the home directory was not a tracker. A store or tracker named by `DEEDAR_URL`, `VISSUE_ROOT`, `ISSUE_ROOT` or an existing `root` line is left alone.
 - `ljos file` and the hooks no longer take another seat's held issue as their own. A hold record matched on the runner process alone, so a demo started from an agent's shell made that agent file under the demo's issue. A process match now needs the same seat, and a hold record names its claim graph, so a record from another graph never matches.
