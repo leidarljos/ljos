@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- The README's install line includes `packset-embed`, which the doctor requires, so a seat that follows it no longer gets exit 1 on day one. A seat binary the doctor lists but does not require (`ljos-hud`, `ljos-consensus`, `packset-mcp`) shows `info` when absent instead of `no`, matching the exit code it already gave.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)

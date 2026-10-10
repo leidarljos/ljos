@@ -11465,13 +11465,21 @@ pub fn failing_for_sitting<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
 /// and they do not fail `ljos doctor`.
 const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
 
+/// A seat binary doctor lists but the seat runs without (`ljos-hud`,
+/// `ljos-consensus`, `packset-mcp`): absent, its row is `info`, the same
+/// as [`healthy`] already treated it. It said `no` before, beside an exit
+/// of 0.
+fn optional_bin(name: &str) -> bool {
+    SEAT_BINS.iter().any(|(bin, _)| *bin == name) && !REQUIRED.contains(&name)
+}
+
 /// `ok` when the row answers, `info` when it is optional and absent,
 /// `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.ok {
         "ok"
-    } else if OPTIONAL_ROWS.contains(&row.name) {
+    } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
     } else {
         "no"
@@ -16166,6 +16174,43 @@ mod tests {
             .iter()
             .any(|(n, c)| *n == "ljos-hud" && *c == "ljos-hud"));
         assert!(!REQUIRED.contains(&"ljos-hud"));
+        let hud = Habitat {
+            name: "ljos-hud",
+            state: "not on PATH".into(),
+            ok: false,
+        };
+        let embed = Habitat {
+            name: "packset-embed",
+            state: "not on PATH".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&hud), "info");
+        assert!(healthy(std::slice::from_ref(&hud)));
+        assert_eq!(doctor_word(&embed), "no");
+        assert!(!healthy(&[embed]));
+    }
+
+    /// the README's install line installs every binary the
+    /// doctor requires, so a seat that follows it is not red on day one.
+    #[test]
+    fn the_readme_install_line_covers_every_required_binary() {
+        // The README sits at the repository root, outside a packaged crate.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let Ok(readme) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let line = readme
+            .lines()
+            .find(|l| l.starts_with("cargo binstall ljos "))
+            .expect("an install line");
+        for (bin, crate_name) in SEAT_BINS {
+            if REQUIRED.contains(bin) {
+                assert!(
+                    line.split_whitespace().any(|w| w == *crate_name),
+                    "{bin} ({crate_name}) is required and not in: {line}"
+                );
+            }
+        }
     }
 
     #[test]
