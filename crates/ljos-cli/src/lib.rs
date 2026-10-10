@@ -1719,10 +1719,16 @@ pub fn format_seat_row() -> String {
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {
-    format!(
+    let mut out = format!(
         "seat\t{}\nholder\t{}\nsource\t{}\n",
         seat.seat, seat.holder, seat.source
-    )
+    );
+    if holder_is_shared(seat) {
+        out.push_str(
+            "shared\tevery conversation of this runner holds under this name; export LJOS_SESSION_ID per conversation to split them\n",
+        );
+    }
+    out
 }
 
 /// Whether a runner with a `registered` command already has the server.
@@ -2057,29 +2063,35 @@ fn export_assignment(name: &str) -> String {
 
 /// What a shell runner sources. `LJOS_SEAT` is the harness name, because
 /// this agent has no MCP client and the process tree is not its seat.
-/// `LJOS_SESSION_ID` gives every shell the runner opens one holder, unless
-/// the runner stamps its own; without it each shell hashed its own process
-/// into a new holder, and `ljos finish` in a second shell was refused as
-/// not the assignee.
+/// The holder is the runner's conversation when the runner stamps an id
+/// for it (`*_SESSION_ID`, `*_THREAD_ID`, `*_CONVERSATION_ID`), so two
+/// conversations hold two names and a shell holds what the MCP server of
+/// the same conversation holds. A runner that stamps none gets
+/// `LJOS_SESSION_ID=NAME-shell`: without it each shell hashed its own
+/// process into a new holder, and `ljos finish` in a second shell was
+/// refused as not the assignee.
 fn seat_env_text(name: &str) -> String {
     format!(
         "# Source this in the shell that runs the agent's commands.\n\
          # This runner has no MCP client, so the process tree is not its seat.\n\
          # LJOS_SEAT is the name memory, ballots and trust use.\n\
-         # LJOS_SESSION_ID is the holder every shell of this runner claims under.\n\
+         # The holder of claims is the conversation id the runner stamps (any\n\
+         # *_SESSION_ID, *_THREAD_ID or *_CONVERSATION_ID). A runner that stamps\n\
+         # none shares {} across its shells and conversations; export\n\
+         # LJOS_SESSION_ID per conversation before sourcing this to split them.\n\
          # Before a prompt: ljos hook --prompt\n\
          # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
          {}\n\
          {}\n",
+        shared_holder_id(name),
         export_assignment(name),
         session_assignment(name)
     )
 }
 
-/// `export LJOS_SESSION_ID="${{LJOS_SESSION_ID:-NAME-shell}}"`: a holder
-/// that stays the same across the runner's shells, kept when the runner
-/// already set one. Padded to the eight characters a session id needs.
-fn session_assignment(name: &str) -> String {
+/// `NAME-shell`, the holder a runner that stamps no conversation id
+/// shares. Padded to the eight characters a session id needs.
+fn shared_holder_id(name: &str) -> String {
     let safe: String = name
         .chars()
         .map(|c| {
@@ -2090,12 +2102,48 @@ fn session_assignment(name: &str) -> String {
             }
         })
         .collect();
-    let mut id = format!("{safe}-shell");
+    let mut id = format!("{safe}{SHARED_HOLDER_SUFFIX}");
     while id.len() < 8 {
-        id.push('-');
-        id.push_str("seat");
+        id.push_str("-seat");
     }
-    format!("export LJOS_SESSION_ID=\"${{LJOS_SESSION_ID:-{id}}}\"")
+    id
+}
+
+/// The end of the holder a runner with no conversation id shares.
+const SHARED_HOLDER_SUFFIX: &str = "-shell";
+
+/// The env file's session line: set `LJOS_SESSION_ID` to the shared
+/// holder only when neither it nor a runner's conversation id is set.
+/// The variables tested are the ones [`runner_session_var`] reads.
+fn session_assignment(name: &str) -> String {
+    format!(
+        "if [ -z \"${{LJOS_SESSION_ID:-}}\" ] && ! env | grep -Ev '^(XDG|BLE)_SESSION_ID=' \\\n  \
+         | grep -Eq '^[A-Za-z0-9_]+_(SESSION|THREAD|CONVERSATION)_ID=.{{8}}'; then\n  \
+         export LJOS_SESSION_ID={}\n\
+         fi",
+        shared_holder_id(name)
+    )
+}
+
+/// Whether this seat holds under the name every conversation of a runner
+/// with no conversation id shares, so a node it already holds may belong
+/// to another conversation.
+fn holder_is_shared(seat: &Seat) -> bool {
+    seat.source == "LJOS_SESSION_ID" && seat.holder.ends_with(SHARED_HOLDER_SUFFIX)
+}
+
+/// The note a resumed sitting prints when the holder is shared and the
+/// hold was taken from another process that still runs: that process may
+/// be another conversation of the same runner.
+#[must_use]
+pub fn shared_holder_note(node: &str, holder: &str, hold: &Hold) -> String {
+    format!(
+        "note: {node} was taken under {holder} by process {} ({}) since {}, which still runs. \
+         Every conversation of a runner that stamps no conversation id holds as {holder}, \
+         so that process may be another conversation. If it is, `ljos release {node}` here \
+         and export LJOS_SESSION_ID per conversation.",
+        hold.pid, hold.comm, hold.since
+    )
 }
 
 fn env_step(path: &Path, name: &str, dry: bool) -> Step {
@@ -13306,9 +13354,20 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                         let renewed = run_captured("claimdag", &["renew", &id, "--actor", &actor])
                             .map(|s| s.stdout)
                             .unwrap_or_default();
+                        let who = whoami();
+                        let note = read_hold(&actor)
+                            .filter(|h| {
+                                holder_is_shared(&who)
+                                    && h.pid != conversation_process().0
+                                    && hold_alive(h)
+                            })
+                            .map(|h| format!("{}\n", shared_holder_note(node, &who.holder, &h)))
+                            .unwrap_or_default();
                         write_hold(&actor, assignee, node);
                         with_tracker(
-                            format!("already held by {assignee}; the sitting resumes\n{renewed}"),
+                            format!(
+                                "already held by {assignee}; the sitting resumes\n{note}{renewed}"
+                            ),
                             node,
                             assignee,
                         )
@@ -14170,7 +14229,7 @@ pub fn not_assignee_message(
         })
         .or_else(|| tracker.map(|t| (unscoped(t), " (the tracker's claim)".to_string())));
     let mine = unscoped(assignee);
-    let fix = "A shell runner's env file sets LJOS_SESSION_ID so every shell holds under one name; `ljos onboard` writes it";
+    let fix = "A shell runner's env file gives every shell of a conversation one holder, the runner's conversation id or else LJOS_SESSION_ID; `ljos onboard` writes it";
     match named {
         Some((name, whence)) => format!(
             "complete: {node} is held by {name}{whence}, not by {mine}, this shell's holder (`ljos seat` says where it came from). \
@@ -19647,8 +19706,10 @@ mod tests {
         );
     }
 
-    /// two shells that source a shell runner's env file hold
-    /// under one name, and a runner's own session id is kept.
+    /// two shells that source a shell runner's env file hold under one
+    /// name when the runner stamps no conversation id; a runner that stamps
+    /// one keeps the holder per conversation, and an explicit
+    /// `LJOS_SESSION_ID` is kept.
     #[test]
     fn every_shell_of_a_shell_runner_holds_under_one_name() {
         let _g = env_guard();
@@ -19656,15 +19717,17 @@ mod tests {
         let env = dir.path().join("grokbot.env");
         std::fs::write(&env, super::seat_env_text("grokbot")).unwrap();
         let holder_in_a_new_shell = |pre: &str| {
-            let out = std::process::Command::new("bash")
+            let out = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(format!(
-                    "{pre} . '{}' && printf %s \"$LJOS_SESSION_ID\"",
+                    "{pre} . '{}' && printf %s \"${{LJOS_SESSION_ID:-}}\"",
                     env.display()
                 ))
-                .env_remove("LJOS_SESSION_ID")
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
+            assert!(out.status.success(), "{out:?}");
             String::from_utf8(out.stdout).unwrap()
         };
         assert_eq!(holder_in_a_new_shell(""), "grokbot-shell");
@@ -19673,31 +19736,76 @@ mod tests {
             holder_in_a_new_shell("export LJOS_SESSION_ID=runner-own-id;"),
             "runner-own-id"
         );
+        // A runner's conversation id is the holder; the env file adds none.
         assert_eq!(
-            super::session_assignment("a"),
-            "export LJOS_SESSION_ID=\"${LJOS_SESSION_ID:-a-shell-seat}\""
+            holder_in_a_new_shell("export ACME_CONVERSATION_ID=conv-aaaa1111;"),
+            ""
         );
+        // A login's or a line editor's id is not a conversation.
+        assert_eq!(
+            holder_in_a_new_shell("export XDG_SESSION_ID=12345678 BLE_SESSION_ID=abcdefgh;"),
+            "grokbot-shell"
+        );
+        assert_eq!(super::shared_holder_id("a"), "a-shell-seat");
         // Other runners' ids in this test's own environment would join the
         // holder, so they are set aside while it reads.
         let others: Vec<(String, String)> = std::env::vars()
             .filter(|(k, v)| super::runner_session_var(k, v))
             .collect();
-        // SAFETY: the lock above is the only environment this test touches.
+        let read = |vars: &[(&str, &str)]| {
+            // SAFETY: the lock above is the only environment this test touches.
+            unsafe {
+                for (k, v) in vars {
+                    std::env::set_var(k, v);
+                }
+            }
+            let seat = super::whoami();
+            // SAFETY: as above.
+            unsafe {
+                for (k, _) in vars {
+                    std::env::remove_var(k);
+                }
+            }
+            seat
+        };
+        // SAFETY: as above.
         unsafe {
             for (k, _) in &others {
                 std::env::remove_var(k);
             }
-            std::env::set_var("LJOS_SESSION_ID", "grokbot-shell");
         }
-        let held = super::whoami().holder;
+        let shared = read(&[("LJOS_SESSION_ID", "grokbot-shell")]);
+        let one = read(&[("ACME_CONVERSATION_ID", "conv-aaaa1111")]);
+        let two = read(&[("ACME_CONVERSATION_ID", "conv-bbbb2222")]);
         // SAFETY: as above.
         unsafe {
-            std::env::remove_var("LJOS_SESSION_ID");
             for (k, v) in &others {
                 std::env::set_var(k, v);
             }
         }
-        assert_eq!(held, "grokbot-shell");
+        assert_eq!(shared.holder, "grokbot-shell");
+        assert!(super::holder_is_shared(&shared));
+        assert!(super::format_seat(&shared).contains("\nshared\t"));
+        assert_ne!(one.holder, two.holder, "two conversations, two holders");
+        assert!(!super::holder_is_shared(&one));
+        assert!(!super::format_seat(&one).contains("shared"));
+    }
+
+    /// a sitting resumed under a shared holder from another live process
+    /// says that process may be another conversation, and how to split.
+    #[test]
+    fn a_shared_holder_names_the_other_process() {
+        let hold = super::Hold {
+            assignee: "grokbot-shell:demo-dlnj".into(),
+            seat: "grokbot".into(),
+            pid: 4242,
+            comm: "node".into(),
+            since: "2026-10-10T06:00:00".into(),
+        };
+        let said = super::shared_holder_note("demo-dlnj", "grokbot-shell", &hold);
+        assert!(said.contains("process 4242 (node)"), "{said}");
+        assert!(said.contains("`ljos release demo-dlnj`"), "{said}");
+        assert!(said.contains("LJOS_SESSION_ID per conversation"), "{said}");
     }
 
     /// a finish refused as not the assignee names the holder
@@ -19779,7 +19887,7 @@ mod tests {
         assert!(env.contains("export LJOS_SEAT=grokbot\n"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
-            env.contains("export LJOS_SESSION_ID=\"${LJOS_SESSION_ID:-grokbot-shell}\"\n"),
+            env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
             "{env}"
         );
         let saved = std::fs::read_to_string(&file).unwrap();
