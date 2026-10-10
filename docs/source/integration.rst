@@ -143,7 +143,7 @@ ahead unchecked.
 Runner                   Hook exits non-zero (not 2) or crashes                                               Hook times out Answer is not JSON                             Source
 ======================== ==================================================================================== ============== ============================================== ======================================================================================================================
 Claude Code              runs; only exit 2 blocks                                                             runs           runs                                           `hooks reference <https://docs.claude.com/en/docs/claude-code/hooks>`__
-Codex                    runs, as reported                                                                    not checked    not checked                                    `Digital Applied <https://www.digitalapplied.com/blog/ai-coding-agent-hooks-compared-tool-interception>`__, 2026-10-03
+Codex                    runs; only exit 2 with a reason on stderr blocks                                     runs           runs                                           `hooks <https://developers.openai.com/codex/hooks>`__, `pre_tool_use.rs <https://github.com/openai/codex/blob/de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a/codex-rs/hooks/src/events/pre_tool_use.rs>`__
 Cursor                   runs, unless the hook sets ``failClosed``; the seat sets it on the permission events not checked    blocked on ``beforeShellExecution``            Cursor hooks docs
 GitHub Copilot CLI       blocked                                                                              runs           falls through to Copilot's own permission flow `hooks reference <https://docs.github.com/en/copilot/reference/hooks-reference>`__
 Gemini CLI               runs, with a warning                                                                 not documented runs                                           `hooks reference <https://geminicli.com/docs/hooks/reference/>`__
@@ -155,10 +155,13 @@ Qwen Code                runs; only exit 2 blocks                               
 Crush                    runs; only exit 2 blocks                                                             runs           not documented                                 `hooks <https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md>`__
 ======================== ==================================================================================== ============== ============================================== ======================================================================================================================
 
-Two settings on the seat's side close part of the gap. ``POLICYD_REQUIRED=1``
+Three things on the seat's side close part of the gap. ``POLICYD_REQUIRED=1``
 makes a missing ``ljos-policyd`` a deny instead of an allow. The hook
 files the seat writes give the runner a timeout of 10 to 20 seconds; a
-gate that takes longer meets the "times out" column. Neither helps when
+check that takes longer meets the "times out" column. On the runners
+from Copilot down, ``ljos hook --runner`` denies when the hook it runs
+crashes, exits non-zero without an answer, or runs past 12 seconds, so
+those failures reach the runner as a deny. None of these helps when
 the ``ljos`` binary itself is gone: on Copilot and Kiro that blocks every
 shell command, and on every other runner the commands run unchecked.
 

@@ -110,7 +110,7 @@ ahead unchecked.
 | Runner | Hook exits non-zero (not 2) or crashes | Hook times out | Answer is not JSON | Source |
 |---+---+---+---+---|
 | Claude Code | runs; only exit 2 blocks | runs | runs | [[https://docs.claude.com/en/docs/claude-code/hooks][hooks reference]] |
-| Codex | runs, as reported | not checked | not checked | [[https://www.digitalapplied.com/blog/ai-coding-agent-hooks-compared-tool-interception][Digital Applied]], 2026-10-03 |
+| Codex | runs; only exit 2 with a reason on stderr blocks | runs | runs | [[https://developers.openai.com/codex/hooks][hooks]], [[https://github.com/openai/codex/blob/de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a/codex-rs/hooks/src/events/pre_tool_use.rs][pre_tool_use.rs]] |
 | Cursor | runs, unless the hook sets =failClosed=; the seat sets it on the permission events | not checked | blocked on =beforeShellExecution= | Cursor hooks docs |
 | GitHub Copilot CLI | blocked | runs | falls through to Copilot's own permission flow | [[https://docs.github.com/en/copilot/reference/hooks-reference][hooks reference]] |
 | Gemini CLI | runs, with a warning | not documented | runs | [[https://geminicli.com/docs/hooks/reference/][hooks reference]] |
@@ -121,10 +121,13 @@ ahead unchecked.
 | Qwen Code | runs; only exit 2 blocks | not documented | runs | [[https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/][hooks]] |
 | Crush | runs; only exit 2 blocks | runs | not documented | [[https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md][hooks]] |
 
-Two settings on the seat's side close part of the gap. =POLICYD_REQUIRED=1=
+Three things on the seat's side close part of the gap. =POLICYD_REQUIRED=1=
 makes a missing =ljos-policyd= a deny instead of an allow. The hook
 files the seat writes give the runner a timeout of 10 to 20 seconds; a
-gate that takes longer meets the "times out" column. Neither helps when
+check that takes longer meets the "times out" column. On the runners
+from Copilot down, =ljos hook --runner= denies when the hook it runs
+crashes, exits non-zero without an answer, or runs past 12 seconds, so
+those failures reach the runner as a deny. None of these helps when
 the =ljos= binary itself is gone: on Copilot and Kiro that blocks every
 shell command, and on every other runner the commands run unchecked.
 
