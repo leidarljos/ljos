@@ -3857,6 +3857,19 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     if let Some(key) = due_key {
         pending.push(key);
     }
+    // While the encoder loads, a search waits on it past the hook's
+    // deadline and the answer is lost. The prompt hears that memory is
+    // starting, once a session, and the search waits for a later prompt.
+    if encoder_warming() {
+        if !seen_ids(call.session.as_deref()).contains(ENCODER_WARMING_KEY) {
+            if !nudge.is_empty() {
+                nudge.push('\n');
+            }
+            nudge.push_str(ENCODER_WARMING_NOTE);
+            pending.push(ENCODER_WARMING_KEY.to_string());
+        }
+        return (nudge, pending);
+    }
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
     // when it does not answer in time, the local path below runs.
@@ -5207,6 +5220,89 @@ pub fn subagent_stop_reason(
 /// shortest runner cut-off seen is grok's 15 s on a prompt; this leaves it
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
+
+/// What a prompt hears while the pack's encoder loads. On a new machine the
+/// first load downloads the model, which takes longer than a hook may.
+pub const ENCODER_WARMING_NOTE: &str = "ljos memory is starting: the pack is \
+loading its search model, which a new machine downloads first. Memories come \
+back on a later prompt; nothing needs doing.";
+
+/// The seen key that says the warming note went out in this session.
+const ENCODER_WARMING_KEY: &str = "encoder-warming";
+
+/// How long one warm-up stands before another may start.
+const ENCODER_WARM_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether the pack's encoder has not answered since packsetd started: it is
+/// on, its binary is there, and no dense call came back yet. A search then
+/// waits for the model to load, and on a new machine for its download. A
+/// status without the `answering` field, from an older packsetd, says nothing
+/// about it, and is not cold.
+#[must_use]
+pub fn encoder_cold(status: &Value) -> bool {
+    let embedder = &status["embedder"];
+    embedder["available"].as_bool().unwrap_or(false)
+        && embedder.get("answering").is_some_and(Value::is_null)
+}
+
+/// Whether a warm-up may start: no marker, or one older than
+/// [`ENCODER_WARM_EVERY`]. Taking it writes the marker, so a burst of hooks
+/// starts one.
+fn take_warm_turn(marker: &Path) -> bool {
+    let fresh = std::fs::metadata(marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < ENCODER_WARM_EVERY);
+    if fresh {
+        return false;
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(marker, "").is_ok()
+}
+
+/// The warm-up: one reranked search, run by `exe` in its own process group,
+/// so packsetd loads the encoder and the reranker off the hook's clock, and
+/// a runner that kills the hook's group does not stop it.
+#[must_use]
+pub fn warm_command(exe: &Path) -> std::process::Command {
+    use std::process::Stdio;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["search", "-n", "1", "--rerank", "the pack is open"])
+        .env_remove("LJOS_IN_HOOK")
+        .env_remove("PACKSET_TIMEOUT_MS")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+/// Whether the pack's encoder is still loading. When it is, a warm-up
+/// starts in the background, at most one per [`ENCODER_WARM_EVERY`]. The
+/// status call has half a second; a pack that does not answer in that time
+/// is not called cold, and the search goes on as before.
+pub fn encoder_warming() -> bool {
+    let cold = with_pack_timeout(500, || {
+        pack()
+            .ok()
+            .and_then(|client| client.status(None).ok())
+            .is_some_and(|status| encoder_cold(&status))
+    });
+    if cold && take_warm_turn(&runtime_dir().join("encoder-warming")) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = warm_command(&exe).spawn();
+        }
+    }
+    cold
+}
 
 /// Whether an identical call (event, session, text) started in the last 20
 /// seconds. A runner that loads another runner's hook file runs the same
@@ -22638,6 +22734,55 @@ mod tests {
 
     /// Cursor is read off its payload, whichever file registered the hook,
     /// and answered in its contract ([`cursor_output`]).
+    /// A pack whose encoder never answered since it started is cold, so a
+    /// prompt does not wait on the model; one that answered, one whose
+    /// encoder failed, one without an encoder, and an older status without
+    /// the field are not.
+    #[test]
+    fn a_pack_is_cold_until_its_encoder_answers_once() {
+        let status = |embedder: Value| serde_json::json!({ "embedder": embedder });
+        assert!(super::encoder_cold(&status(serde_json::json!({
+            "enabled": true, "binary": "/x/packset-embed", "available": true, "answering": null
+        }))));
+        for warm in [
+            serde_json::json!({"enabled": true, "available": true, "answering": true}),
+            serde_json::json!({"enabled": true, "available": false, "answering": false}),
+            serde_json::json!({"enabled": true, "binary": null, "available": false, "answering": null}),
+            serde_json::json!({"enabled": true, "available": true}),
+        ] {
+            assert!(!super::encoder_cold(&status(warm.clone())), "{warm}");
+        }
+        assert!(!super::encoder_cold(&serde_json::json!({})));
+    }
+
+    /// One warm-up per window: the first hook takes the turn and writes the
+    /// marker, the next one inside the window does not, and the warm-up is a
+    /// reranked search that does not inherit the hook's clock.
+    #[test]
+    fn a_burst_of_hooks_starts_one_warm_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("run/encoder-warming");
+        assert!(super::take_warm_turn(&marker));
+        assert!(marker.exists());
+        assert!(!super::take_warm_turn(&marker));
+        let command = super::warm_command(std::path::Path::new("/opt/ljos"));
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["search", "-n", "1", "--rerank", "the pack is open"]);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.contains(&"LJOS_IN_HOOK".to_string()), "{removed:?}");
+        assert!(
+            removed.contains(&"PACKSET_TIMEOUT_MS".to_string()),
+            "{removed:?}"
+        );
+    }
+
     #[test]
     fn cursor_is_read_off_its_payload_and_answered_in_its_contract() {
         let shell = hook_call(
