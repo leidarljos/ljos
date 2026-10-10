@@ -11,6 +11,9 @@ person and by every agent on this machine. Each tracker verb takes a ticket id.
 - A new tracker ticket: `vissue q -p PROJECT "One-line title"` prints the new id.
   Add `--parent ID` to put it under an existing ticket, and `-t bug` (or
   `task`, `decision`) to type it.
+- Mid-sitting, `ljos file "TITLE" -t bug` files a child of the held issue.
+  A bug in a tool (ljos, vissue, deedar) goes to the tool's project with
+  `-p PROJECT`; another project than the held issue's files at its top.
 - Note progress: `ljos note ISSUE "..."` (dated, committed).
 - A longer report: `vissue append ISSUE --file report.md`.
 - A tag: `vissue update ISSUE -t TAG`.

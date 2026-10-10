@@ -5132,6 +5132,43 @@ fn runner_record_holders() -> Vec<String> {
     out
 }
 
+/// Where `ljos file` puts a new issue: its parent, its project, and a line
+/// for the agent when the held issue was passed over. `--top` files with
+/// no parent and `--parent` names one. Otherwise the held issue is the
+/// parent, unless `-p` names another project: a child lives in its
+/// parent's project, so a tool bug filed with `-p` mid-sitting goes to
+/// the top of that project, not under the work being sat on.
+#[must_use]
+pub fn file_placement(
+    top: bool,
+    parent: Option<String>,
+    project: Option<String>,
+    held: Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    fn project_of(id: &str) -> Option<&str> {
+        id.rsplit_once('-').map(|(proj, _)| proj)
+    }
+    let mut passed_over = None;
+    let parent = if top {
+        None
+    } else if parent.is_some() {
+        parent
+    } else {
+        match (held, project.as_deref()) {
+            (Some(held), Some(asked)) if project_of(&held) != Some(asked) => {
+                passed_over = Some(format!(
+                    "filed at the top of {asked}: the held issue {held} is in another project; \
+                     --parent {held} files under it\n"
+                ));
+                None
+            }
+            (held, _) => held,
+        }
+    };
+    let project = project.or_else(|| parent.as_deref().and_then(project_of).map(str::to_string));
+    (parent, project, passed_over)
+}
+
 /// The issue this conversation's holder claimed last and still works: a
 /// subagent's hook runs under its parent's holder, so this is the work
 /// the subagent is a slice of.
@@ -17936,6 +17973,35 @@ mod tests {
             .collect();
         assert!(off.contains(&"quick-install"), "{off:?}");
         assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
+    #[test]
+    fn file_with_another_project_mid_sitting_goes_to_its_top() {
+        let held = || Some("garden-06v8".to_string());
+        let s = |v: &str| Some(v.to_string());
+        // The default: a child of the held issue, in its project.
+        let (parent, project, said) = file_placement(false, None, None, held());
+        assert_eq!(parent, s("garden-06v8"));
+        assert_eq!(project, s("garden"));
+        assert_eq!(said, None);
+        // The same project named: still a child.
+        let (parent, _, said) = file_placement(false, None, s("garden"), held());
+        assert_eq!(parent, s("garden-06v8"));
+        assert_eq!(said, None);
+        // A tool bug against another project: top level there, and a line
+        // that says how to file under the held issue after all.
+        let (parent, project, said) = file_placement(false, None, s("Tools"), held());
+        assert_eq!(parent, None);
+        assert_eq!(project, s("Tools"));
+        let said = said.expect("a line");
+        assert!(said.contains("filed at the top of Tools"), "{said}");
+        assert!(said.contains("--parent garden-06v8"), "{said}");
+        // --parent and --top still win.
+        let (parent, project, _) = file_placement(false, s("Tools-x6vs"), s("Tools"), held());
+        assert_eq!(parent, s("Tools-x6vs"));
+        assert_eq!(project, s("Tools"));
+        let (parent, project, said) = file_placement(true, None, None, held());
+        assert_eq!((parent, project, said), (None, None, None));
     }
 
     #[test]

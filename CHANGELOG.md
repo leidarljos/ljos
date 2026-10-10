@@ -5,6 +5,8 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos file -p PROJECT` files at the top of PROJECT when the held issue is in another project, and says so on stderr with the `--parent` that files under the held issue. It made a child of the held issue, so a bug in ljos found while sitting on another project's issue needed `--top -p` to land in the right place, and no help text said so. `--parent` and `--top` work as before. The skills, the protocol and the MCP tool say how to file a bug in a tool mid-sitting.
+
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
 - The prompt hook no longer waits on the search model. On a new machine packsetd downloads the model on the first search, and the first prompt used to spend its whole 8 s deadline on it and say nothing. When the pack reports an encoder that has not answered yet, the hook starts one search in the background, skips its own, and says once a session that memory is starting. Session start does the same, so the model is usually loaded by the first prompt.

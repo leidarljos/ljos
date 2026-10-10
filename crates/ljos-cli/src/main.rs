@@ -141,7 +141,8 @@ enum Cmd {
     },
     /// File work found while sitting: a child of the issue this
     /// conversation holds unless `--parent` names another or `--top` none,
-    /// in the parent's project. Prints the new id.
+    /// in the parent's project. `-p` naming another project files at its
+    /// top level, for a bug in a tool found mid-sitting. Prints the new id.
     File {
         /// The issue's title.
         title: String,
@@ -151,7 +152,8 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted.
+        /// The project; the parent's when omitted. Another project than
+        /// the held issue's files at its top level.
         #[arg(short, long)]
         project: Option<String>,
         /// The type tag: bug, task, feature, decision.
@@ -871,17 +873,16 @@ fn main() -> Result<()> {
             priority,
             body,
         } => {
-            let parent = if top {
+            let held = if top || parent.is_some() {
                 None
             } else {
-                parent.or_else(ljos_cli::held_issue)
+                ljos_cli::held_issue()
             };
-            let project = project.or_else(|| {
-                parent
-                    .as_deref()
-                    .and_then(|p| p.rsplit_once('-'))
-                    .map(|(proj, _)| proj.to_string())
-            });
+            let (parent, project, passed_over) =
+                ljos_cli::file_placement(top, parent, project, held);
+            if let Some(line) = passed_over {
+                eprint!("{line}");
+            }
             let Some(project) = project else {
                 anyhow::bail!("no project: name one with -p, or a parent with --parent");
             };
