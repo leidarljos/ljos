@@ -9893,53 +9893,36 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
     Ok(dropped)
 }
 
-/// Whether a cite stands: a deed accession `deedar current` takes, or an
-/// issue whose ballots settle (`vissue consensus --gate`) or that closed
-/// as a decision, either one backed by a seat other than the one
-/// pushing. The text says what it stood on.
+/// Whether a cite stands: a deed accession `deedar current` takes, or a
+/// tracker issue its seat ballots decide ([`seats_decide`]), open or
+/// closed. The text says which ballots it counted.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
-    let ok = |bin: &str, args: &[&str]| {
-        std::process::Command::new(bin)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    };
     if let Ok(v) = tracker_show_json(cite) {
-        if ok("vissue", &["consensus", cite, "--gate"]) {
-            settled_by_seats(cite)?;
-            return Ok(format!("{cite} settles"));
-        }
-        if v["state"].as_str() == Some("DONE") && is_decision(&v) {
-            let choice = decided_on_tracker(cite)?;
-            return Ok(format!("{cite} closed as a decision on {choice}"));
-        }
-        return Err(format!(
-            "{cite} neither settles (`vissue consensus {cite} --gate`) nor closed as a decision"
+        let (ballots, personas) = cite_ballots(cite)?;
+        let d = seats_decide(cite, &ballots, &personas, &seat_name())?;
+        let closed = if v["state"].as_str() == Some("DONE") && is_decision(&v) {
+            ", closed as a decision"
+        } else {
+            ""
+        };
+        return Ok(format!(
+            "{cite} decides {}{closed}; counted {}",
+            d.choice, d.counted
         ));
     }
-    if ok("deedar", &["current", cite]) {
+    let current = std::process::Command::new("deedar")
+        .args(["current", cite])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if current {
         return Ok(format!("deed {cite} is current"));
     }
     Err(format!(
         "{cite} is neither a tracker issue nor a current deed"
     ))
-}
-
-/// The option an issue settled on, from `vissue consensus --json`: the
-/// choice the consensus weighs most.
-#[must_use]
-pub fn settled_choice(consensus: &Value) -> Option<String> {
-    let choices = consensus["choices"].as_array()?;
-    let weights = consensus["consensus"].as_array()?;
-    let (i, _) = weights
-        .iter()
-        .filter_map(Value::as_f64)
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(&b.1))?;
-    choices.get(i)?.as_str().map(str::to_string)
 }
 
 /// The ballots that count toward a push cite, as `(agent, choice)`. A
@@ -9956,103 +9939,72 @@ fn seat_ballots<'a>(
         .collect()
 }
 
-/// Whether a cite's settle stands on seat ballots alone, persona and Jev
-/// ballots left out (see [`seat_ballots`]). What is left has to hold at
-/// least one ballot from a seat other than `pusher`, the seat asking to
-/// push, and every one of them for `choice`. A seat that votes alone on
-/// its own issue has not been checked by anyone.
+/// What a push cite stood on: the option, and the ballots counted for it
+/// in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatDecision {
+    pub choice: String,
+    pub counted: String,
+}
+
+/// The option an issue's seat ballots decide for a push cite. Only seat
+/// ballots count: persona ballots and Jev ballots (`judge:MODEL`) are
+/// left out before anything is weighed, so they can neither pass a push
+/// nor block one. The seats that voted have to agree, and at least one of
+/// them has to be a seat other than `pusher`, the seat asking to push: a
+/// seat that votes alone on its own issue has not been checked by anyone.
+/// Every answer names the seat ballots counted and how many were left out.
 ///
 /// # Errors
 ///
-/// The refusal, naming the ballots it looked at.
-pub fn settles_on_seats(
+/// The refusal, naming the seat ballots it counted.
+pub fn seats_decide(
     cite: &str,
     ballots: &[Value],
-    choice: &str,
     personas: &std::collections::BTreeSet<String>,
     pusher: &str,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<SeatDecision, String> {
     let seats = seat_ballots(ballots, personas);
-    if seats.is_empty() {
-        return Err(format!(
-            "{cite} settles on persona ballots alone, and those do not count toward a push cite; \
-             a seat has to vote {choice}"
-        ));
-    }
-    let against: Vec<String> = seats
+    let advice = ballots
         .iter()
-        .filter(|(_, c)| *c != choice)
-        .map(|(a, c)| format!("{a} for {c}"))
-        .collect();
-    if !against.is_empty() {
+        .filter(|b| b["agent"].as_str().is_some() && b["choice"].as_str().is_some())
+        .count()
+        - seats.len();
+    let left_out = match advice {
+        0 => String::new(),
+        1 => "; 1 persona or judge ballot left out".to_string(),
+        n => format!("; {n} persona and judge ballots left out"),
+    };
+    let counted = if seats.is_empty() {
+        "no seat ballot".to_string()
+    } else {
+        seats
+            .iter()
+            .map(|(a, c)| format!("{a} for {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some(&(_, choice)) = seats.first() else {
         return Err(format!(
-            "without its persona ballots {cite} does not settle on {choice}: {}",
-            against.join(", ")
+            "no seat voted on {cite}, so it decides nothing for a push{left_out}; \
+             a seat votes, or the person approves this push"
+        ));
+    };
+    if seats.iter().any(|(_, c)| *c != choice) {
+        return Err(format!(
+            "the seats on {cite} split, so it decides nothing for a push: counted {counted}{left_out}"
         ));
     }
     if seats.iter().all(|(a, _)| *a == pusher) {
         return Err(format!(
-            "{cite} settles on the ballot of {pusher}, the seat pushing, alone; \
+            "the only seat ballot on {cite} is from {pusher}, the seat pushing: counted {counted}{left_out}; \
              another seat votes {choice}, or the person approves this push"
         ));
     }
-    Ok(())
-}
-
-/// Whether an issue closed as a decision stands as a push cite. The
-/// tracker does not record who closed an issue, so the close alone says
-/// nothing: the pushing seat, or a persona it wrote, could have closed
-/// it. It stands when a seat other than `pusher` voted on it and every
-/// seat ballot names the same option, persona and Jev ballots left out.
-/// The person backs a push by approving it, or by voting.
-///
-/// # Errors
-///
-/// The refusal, naming the ballots it looked at.
-pub fn decided_by_another_seat(
-    cite: &str,
-    ballots: &[Value],
-    personas: &std::collections::BTreeSet<String>,
-    pusher: &str,
-) -> std::result::Result<String, String> {
-    let seats = seat_ballots(ballots, personas);
-    let Some(&(by, choice)) = seats.iter().find(|(a, _)| *a != pusher) else {
-        return Err(format!(
-            "{cite} closed as a decision, but no seat other than {pusher} voted on it, \
-             and a close does not say who made it; another seat votes, \
-             or the person approves this push"
-        ));
-    };
-    let against: Vec<String> = seats
-        .iter()
-        .filter(|(_, c)| *c != choice)
-        .map(|(a, c)| format!("{a} for {c}"))
-        .collect();
-    if !against.is_empty() {
-        return Err(format!(
-            "{cite} closed as a decision, but its seats split: {by} for {choice}, {}",
-            against.join(", ")
-        ));
-    }
-    Ok(choice.to_string())
-}
-
-/// [`settles_on_seats`] for an issue on the tracker. A count or a roster
-/// that cannot be read does not stand.
-fn settled_by_seats(cite: &str) -> std::result::Result<(), String> {
-    let consensus = vissue_json(&["consensus", cite, "--json"])
-        .map_err(|e| format!("{cite}: the settle is not readable: {e}"))?;
-    let choice =
-        settled_choice(&consensus).ok_or_else(|| format!("{cite}: the settle names no option"))?;
-    let (ballots, personas) = cite_ballots(cite)?;
-    settles_on_seats(cite, &ballots, &choice, &personas, &seat_name())
-}
-
-/// [`decided_by_another_seat`] for an issue on the tracker. Ballots or a
-/// roster that cannot be read do not stand.
-fn decided_on_tracker(cite: &str) -> std::result::Result<String, String> {
-    let (ballots, personas) = cite_ballots(cite)?;
-    decided_by_another_seat(cite, &ballots, &personas, &seat_name())
+    Ok(SeatDecision {
+        choice: choice.to_string(),
+        counted: format!("{counted}{left_out}"),
+    })
 }
 
 fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
@@ -10473,8 +10425,8 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
             Some(Err(e)) => Some(ruled(format!("{why}; the cite does not stand: {e}"))),
             None => Some(ruled(format!(
                 "{why}, so the push cites the decision behind it: run it as `LJOS_CITE=ISSUE {}`, \
-                 where ISSUE settles (`vissue consensus ISSUE --gate`) or closed as a decision, \
-                 with a ballot from another seat, or LJOS_CITE=ACCESSION for a current deed",
+                 where the seats that voted on ISSUE agree and one of them is not this seat \
+                 (persona and judge ballots do not count), or LJOS_CITE=ACCESSION for a current deed",
                 line.trim()
             ))),
         },
@@ -16014,56 +15966,57 @@ pub fn voters_of(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The count split the way a push cite reads it: seat ballots, which are
-/// all `LJOS_CITE` counts, then persona and Jev (`judge:`) ballots, which
-/// are advice. `None` when there are no ballots or no persona voted, so
-/// the count the tracker prints already says it all.
+/// What the push gate makes of an issue, the first lines `ljos consensus`
+/// prints: whether a push citing it stands for `pusher`, on which seat
+/// ballots ([`seats_decide`]), then what the ballots' confidence does.
+/// The JSON beside the words carries the same answer.
 #[must_use]
-pub fn seat_count_in_words(
+pub fn push_cite_reading(
+    issue: &str,
     rows: &[Value],
     personas: &std::collections::BTreeSet<String>,
-) -> Option<String> {
-    let mut seats: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
-    let mut advice: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
-    for r in rows {
-        let (Some(agent), Some(choice)) = (r["agent"].as_str(), r["choice"].as_str()) else {
-            continue;
-        };
-        let agent = agent.trim();
-        let side = if personas.contains(agent) || agent.starts_with("judge:") {
-            &mut advice
-        } else {
-            &mut seats
-        };
-        side.entry(choice).or_default().push(agent);
-    }
-    if advice.is_empty() {
-        return None;
-    }
-    let line = |m: &std::collections::BTreeMap<&str, Vec<&str>>| {
-        let mut rows: Vec<(&&str, &Vec<&str>)> = m.iter().collect();
-        rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-        rows.iter()
-            .map(|(c, who)| format!("{c} {} ({})", who.len(), who.join(", ")))
-            .collect::<Vec<_>>()
-            .join(", ")
+    pusher: &str,
+) -> (String, Value) {
+    let (mut words, json) = match seats_decide(issue, rows, personas, pusher) {
+        Ok(d) => (
+            format!(
+                "push cite: {issue} decides {} for a push by {pusher}; counted {}\n",
+                d.choice, d.counted
+            ),
+            serde_json::json!({"push_cite": {
+                "issue": issue, "pusher": pusher, "stands": true,
+                "choice": d.choice, "counted": d.counted,
+            }}),
+        ),
+        Err(e) => (
+            format!("push cite: does not stand for {pusher}: {e}\n"),
+            serde_json::json!({"push_cite": {
+                "issue": issue, "pusher": pusher, "stands": false, "refusal": e,
+            }}),
+        ),
     };
-    let mut out = String::new();
-    if seats.is_empty() {
-        out.push_str(
-            "seats: none voted, so no push can cite this issue; persona ballots are advice\n",
-        );
-    } else {
-        out.push_str(&format!(
-            "seats, the only ballots a push cite counts: {}\n",
-            line(&seats)
-        ));
+    if let Some(line) = confidence_in_words(rows) {
+        words.push_str(&line);
     }
-    out.push_str(&format!(
-        "personas and judges, advice that does not settle a push cite: {}\n",
-        line(&advice)
-    ));
-    Some(out)
+    (words, json)
+}
+
+/// What a ballot's confidence does, said when any ballot states one: it
+/// is recorded, `ljos learn` scores it once an outcome is named, and
+/// nothing else reads it. `None` when no ballot states one.
+#[must_use]
+pub fn confidence_in_words(rows: &[Value]) -> Option<String> {
+    let stated = rows
+        .iter()
+        .filter(|r| !r["confidence"].is_null() && r.get("confidence").is_some())
+        .count();
+    (stated > 0).then(|| {
+        format!(
+            "confidence: stated on {stated} of {} ballots and recorded; no settle and no push cite \
+             weighs it. `ljos learn ID --outcome OPTION` scores it once the outcome is known\n",
+            rows.len()
+        )
+    })
 }
 
 /// The steps [`consensus_steps_anchored`] builds, under the anchors
@@ -19719,36 +19672,41 @@ mod tests {
         assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
     }
 
-    /// The count a push cite reads is printed beside the settle: seat
-    /// ballots, then persona and judge ballots as advice. A ballot of
-    /// seats alone adds nothing, and one of personas alone says no push
-    /// can cite it.
+    /// `ljos consensus` opens with what the push gate decides, on seat
+    /// ballots only, and says what confidence does when a ballot states
+    /// one; the JSON carries the same answer.
     #[test]
-    fn the_settle_names_which_ballots_a_push_cite_counts() {
+    fn consensus_opens_with_what_the_push_gate_decides() {
         let rows: Vec<Value> = serde_json::from_str(
-            r#"[{"agent":"ljos-bot","choice":"guard-fix"},{"agent":"hn-skeptic","choice":"guard-fix"},
-                {"agent":"agent-daily-user","choice":"install"},{"agent":"judge:qwen","choice":"install"}]"#,
+            r#"[{"agent":"ljos-bot","choice":"guard-fix","confidence":"0.6"},
+                {"agent":"hn-skeptic","choice":"guard-fix","confidence":"0.75"},
+                {"agent":"agent-daily-user","choice":"install"},
+                {"agent":"judge:qwen","choice":"install"},
+                {"agent":"inky","choice":"guard-fix"}]"#,
         )
         .unwrap();
         let personas: std::collections::BTreeSet<String> = ["hn-skeptic", "agent-daily-user"]
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let said = seat_count_in_words(&rows, &personas).unwrap();
+        let (words, json) = push_cite_reading("x-1", &rows, &personas, "ljos-bot");
         assert_eq!(
-            said,
-            "seats, the only ballots a push cite counts: guard-fix 1 (ljos-bot)\n\
-             personas and judges, advice that does not settle a push cite: \
-             install 2 (agent-daily-user, judge:qwen), guard-fix 1 (hn-skeptic)\n"
+            words,
+            "push cite: x-1 decides guard-fix for a push by ljos-bot; counted ljos-bot for guard-fix, \
+             inky for guard-fix; 3 persona and judge ballots left out\n\
+             confidence: stated on 2 of 5 ballots and recorded; no settle and no push cite weighs it. \
+             `ljos learn ID --outcome OPTION` scores it once the outcome is known\n"
         );
-        assert_eq!(voters_of(&rows).len(), 4);
-        assert!(seat_count_in_words(&rows[..1], &personas).is_none());
-        assert!(seat_count_in_words(&[], &personas).is_none());
-        let alone = seat_count_in_words(&rows[1..3], &personas).unwrap();
+        assert_eq!(json["push_cite"]["stands"], true);
+        assert_eq!(json["push_cite"]["choice"], "guard-fix");
+        let (words, json) = push_cite_reading("x-1", &rows[..4], &personas, "ljos-bot");
         assert!(
-            alone.starts_with("seats: none voted, so no push can cite this issue"),
-            "{alone}"
+            words.starts_with("push cite: does not stand for ljos-bot: the only seat ballot on x-1 is from ljos-bot"),
+            "{words}"
         );
+        assert_eq!(json["push_cite"]["stands"], false);
+        assert_eq!(voters_of(&rows).len(), 5);
+        assert!(confidence_in_words(&rows[2..]).is_none());
     }
 
     /// Playbooks are kind playbook, latest per name, unreviewed; sitting
@@ -22121,29 +22079,55 @@ mod tests {
     }
 
     #[test]
-    fn persona_ballots_do_not_settle_a_push_cite() {
-        let consensus = serde_json::json!({
-            "choices": ["hold", "ship"], "consensus": [0.2, 0.8]
-        });
-        assert_eq!(settled_choice(&consensus).as_deref(), Some("ship"));
+    fn persona_ballots_neither_pass_nor_block_a_push_cite() {
         let personas: std::collections::BTreeSet<String> =
             ["reviewer".to_string(), "reader".to_string()].into();
         let ballot =
             |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        // Personas and a judge alone: nothing counted, so nothing stands.
         let only = [
             ballot("reviewer", "ship"),
             ballot("reader", "ship"),
             ballot("judge:grok-4", "ship"),
         ];
-        let err = settles_on_seats("surf-ab12", &only, "ship", &personas, "grok").unwrap_err();
-        assert!(err.contains("persona ballots alone"), "{err}");
-        let mut seat = only.to_vec();
-        seat.push(ballot("grok", "ship"));
-        assert!(settles_on_seats("surf-ab12", &seat, "ship", &personas, "codex").is_ok());
-        let mut split = seat.clone();
-        split.push(ballot("codex", "hold"));
-        let err = settles_on_seats("surf-ab12", &split, "ship", &personas, "grok").unwrap_err();
-        assert!(err.contains("codex for hold"), "{err}");
+        let err = seats_decide("surf-ab12", &only, &personas, "grok").unwrap_err();
+        assert_eq!(
+            err,
+            "no seat voted on surf-ab12, so it decides nothing for a push; \
+             3 persona and judge ballots left out; a seat votes, or the person approves this push"
+        );
+        // One seat for ship against every persona for hold: the personas
+        // do not block it. Before, the settle over all ballots named hold
+        // and the seat was refused.
+        let outvoted = [
+            ballot("codex", "ship"),
+            ballot("reviewer", "hold"),
+            ballot("reader", "hold"),
+            ballot("judge:grok-4", "hold"),
+        ];
+        let d = seats_decide("surf-ab12", &outvoted, &personas, "grok").unwrap();
+        assert_eq!(d.choice, "ship");
+        assert_eq!(
+            d.counted,
+            "codex for ship; 3 persona and judge ballots left out"
+        );
+        // Seats that split decide nothing, and the refusal names them.
+        let mut split = outvoted.to_vec();
+        split.push(ballot("rgoswami", "hold"));
+        let err = seats_decide("surf-ab12", &split, &personas, "grok").unwrap_err();
+        assert_eq!(
+            err,
+            "the seats on surf-ab12 split, so it decides nothing for a push: \
+             counted codex for ship, rgoswami for hold; 3 persona and judge ballots left out"
+        );
+        // No advice on the ballot: nothing said about it.
+        let plain = [ballot("codex", "ship")];
+        assert_eq!(
+            seats_decide("surf-ab12", &plain, &personas, "grok")
+                .unwrap()
+                .counted,
+            "codex for ship"
+        );
     }
 
     #[test]
@@ -22152,37 +22136,23 @@ mod tests {
         let ballot =
             |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
         let own = [ballot("grok", "ship"), ballot("reviewer", "ship")];
-        let err = settles_on_seats("surf-ab12", &own, "ship", &personas, "grok").unwrap_err();
-        assert!(err.contains("the seat pushing, alone"), "{err}");
+        let err = seats_decide("surf-ab12", &own, &personas, "grok").unwrap_err();
+        assert_eq!(
+            err,
+            "the only seat ballot on surf-ab12 is from grok, the seat pushing: \
+             counted grok for ship; 1 persona or judge ballot left out; \
+             another seat votes ship, or the person approves this push"
+        );
         let mut seen = own.to_vec();
         seen.push(ballot("codex", "ship"));
-        assert!(settles_on_seats("surf-ab12", &seen, "ship", &personas, "grok").is_ok());
-    }
-
-    #[test]
-    fn a_closed_decision_stands_on_another_seats_ballot() {
-        let personas: std::collections::BTreeSet<String> = ["reviewer".to_string()].into();
-        let ballot =
-            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
-        let err = decided_by_another_seat("surf-ab12", &[], &personas, "grok").unwrap_err();
-        assert!(err.contains("no seat other than grok"), "{err}");
-        let own = [
-            ballot("grok", "ship"),
-            ballot("reviewer", "ship"),
-            ballot("judge:grok-4", "ship"),
-        ];
-        let err = decided_by_another_seat("surf-ab12", &own, &personas, "grok").unwrap_err();
-        assert!(err.contains("no seat other than grok"), "{err}");
-        let mut seen = own.to_vec();
-        seen.push(ballot("rgoswami", "ship"));
+        let d = seats_decide("surf-ab12", &seen, &personas, "grok").unwrap();
         assert_eq!(
-            decided_by_another_seat("surf-ab12", &seen, &personas, "grok").as_deref(),
-            Ok("ship")
+            d.counted,
+            "grok for ship, codex for ship; 1 persona or judge ballot left out"
         );
-        let mut split = seen.clone();
-        split.push(ballot("codex", "hold"));
-        let err = decided_by_another_seat("surf-ab12", &split, &personas, "grok").unwrap_err();
-        assert!(err.contains("codex for hold"), "{err}");
+        assert!(seats_decide("surf-ab12", &[], &personas, "grok")
+            .unwrap_err()
+            .starts_with("no seat voted on surf-ab12"));
     }
 
     #[test]

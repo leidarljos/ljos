@@ -252,7 +252,9 @@ enum Cmd {
         /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
-        /// Probability in (0, 1] that the choice is the outcome.
+        /// Probability in (0, 1] that the choice is the outcome. Recorded;
+        /// `ljos learn` scores it once the outcome is named, and no settle
+        /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
         /// Deed accessions this ballot used, comma-separated, or `none`.
@@ -493,14 +495,19 @@ enum Cmd {
         #[arg(long)]
         fail_on_deny: bool,
     },
-    /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
-    /// The settle prints in words: shares, who leads, influence, and what
-    /// each anchor did.
+    /// What the push gate decides on the issue, from seat ballots alone,
+    /// then the weighted settle over every ballot as advice: shares, who
+    /// leads, influence, and what each anchor did.
     Consensus {
         id: String,
-        /// Print the settle's JSON as the model crate wrote it, not the words.
+        /// Print JSON: the push gate's answer, then the settle's JSON as the
+        /// model crate wrote it.
         #[arg(long)]
         json: bool,
+        /// Also run the tracker's own settle (`vissue consensus`), whose
+        /// numbers can differ from the model crate's once trust rows exist.
+        #[arg(long)]
+        compare: bool,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -1576,7 +1583,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Consensus { id, json } => {
+        Cmd::Consensus { id, json, compare } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -1594,14 +1601,30 @@ fn main() -> Result<()> {
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
             let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
+            // The model crate's settle is the one printed; the tracker's
+            // runs under --compare, or when the model crate is not there.
+            let have_model = on_path("ljos-consensus");
             let mut steps = consensus_steps_for(
                 &id,
-                on_path("ljos-consensus"),
-                on_path("vissue"),
+                have_model,
+                on_path("vissue") && (compare || !have_model),
                 &trust,
                 &anchors,
                 &tags,
             )?;
+            // First what the push gate decides: seat ballots only.
+            let names: std::collections::BTreeSet<String> =
+                personas.iter().map(|p| p.name.trim().to_string()).collect();
+            let (gate, gate_json) =
+                ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&gate_json)?);
+            } else {
+                print!("{gate}");
+                println!(
+                    "advice, which does not decide a push: the weighted settle over every ballot"
+                );
+            }
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             if let Some((discount, line)) = settle_discount(&atoms) {
@@ -1619,10 +1642,6 @@ fn main() -> Result<()> {
                 match ljos_cli::settle_in_words(&said.stdout, &anchors) {
                     Some(words) => print!("{words}"),
                     None => print!("{}", said.stdout),
-                }
-                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
-                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
-                    print!("{split}");
                 }
             }
             // Beside the settle: the surprisingly popular answer when two

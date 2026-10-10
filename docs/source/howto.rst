@@ -886,8 +886,8 @@ same pair supersedes it.
 Settle under the pack's trust
 =============================
 
-``ljos consensus ID`` reads the live trust rows and passes them to both
-settles. To anchor voters to their own ballots (Friedkin-Johnsen) on the
+``ljos consensus ID`` reads the live trust rows and passes them to the
+settle (and to the tracker's, with ``--compare``). To anchor voters to their own ballots (Friedkin-Johnsen) on the
 model crate alone, pass the rows as JSON tuples:
 
 .. code:: console
