@@ -17512,6 +17512,75 @@ mod tests {
         assert!(!healthy(&[embed]));
     }
 
+    /// the tarball the release workflow uploads for each target is the one
+    /// binstall's metadata asks for, holding every binary of both crates,
+    /// and each target's standard library is added to the toolchain that
+    /// `rust-toolchain.toml` pins, so no target fails the release.
+    #[test]
+    fn the_release_uploads_what_binstall_fetches() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(release) = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        else {
+            return;
+        };
+        assert!(
+            release.contains("toolchain: ${{ steps.pin.outputs.channel }}")
+                && release
+                    .contains("rustup target list --installed | grep -qx '${{ matrix.target }}'"),
+            "the pinned toolchain needs each target"
+        );
+        assert!(release.contains("fail-fast: false"));
+        let targets: Vec<&str> = release
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("target: "))
+            .collect();
+        assert_eq!(targets.len(), 4, "{targets:?}");
+        assert!(release.contains(r#"name="ljos-${TAG}-${{ matrix.target }}""#));
+        assert!(release.contains(r#"tar -C dist -czf "dist/$name.tar.gz" "$name""#));
+        // ljos-hud builds from source on a target with no tarball, as ljos
+        // does; quickinstall is a third party's build and stays off.
+        let hud: toml::Value = toml::from_str(
+            &std::fs::read_to_string(root.join("crates/ljos-hud/Cargo.toml")).unwrap(),
+        )
+        .unwrap();
+        let off = hud["package"]["metadata"]["binstall"]["disabled-strategies"]
+            .as_array()
+            .unwrap();
+        assert_eq!(off, &vec![toml::Value::from("quick-install")]);
+        for (manifest, bins) in [
+            ("crates/ljos-cli/Cargo.toml", &["ljos", "ljos-mcp"][..]),
+            ("crates/ljos-hud/Cargo.toml", &["ljos-hud"][..]),
+        ] {
+            let text = std::fs::read_to_string(root.join(manifest)).unwrap();
+            let doc: toml::Value = toml::from_str(&text).unwrap();
+            let meta = &doc["package"]["metadata"]["binstall"];
+            for target in &targets {
+                let fill = |t: &str| {
+                    t.replace("{ version }", "1.2.3")
+                        .replace("{ target }", target)
+                };
+                let url = fill(meta["pkg-url"].as_str().unwrap());
+                assert!(
+                    url.ends_with(&format!(
+                        "/releases/download/v1.2.3/ljos-v1.2.3-{target}.tar.gz"
+                    )),
+                    "{manifest}: {url}"
+                );
+                for bin in bins {
+                    let at = fill(meta["bin-dir"].as_str().unwrap())
+                        .replace("{ bin }", bin)
+                        .replace("{ binary-ext }", "");
+                    assert_eq!(at, format!("ljos-v1.2.3-{target}/{bin}"), "{manifest}");
+                    assert!(
+                        release.contains(&format!("release/{bin} "))
+                            || release.contains(&format!("release/{bin} \"")),
+                        "the tarball holds {bin}"
+                    );
+                }
+            }
+        }
+    }
+
     /// every install line the README and the docs print installs every
     /// binary the doctor requires, so a seat that follows one is not red on
     /// day one.
@@ -17532,8 +17601,8 @@ mod tests {
             let line = text
                 .lines()
                 .map(|l| l.trim_start().trim_start_matches("$ "))
-                .find(|l| l.starts_with("cargo binstall ljos "))
-                .unwrap_or_else(|| panic!("{file} has no install line"));
+                .find(|l| l.starts_with("cargo binstall --locked ljos "))
+                .unwrap_or_else(|| panic!("{file} has no `cargo binstall --locked ljos` line"));
             for (bin, crate_name) in SEAT_BINS {
                 if REQUIRED.contains(bin) {
                     assert!(

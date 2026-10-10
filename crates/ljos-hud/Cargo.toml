@@ -20,9 +20,9 @@ targets = [
 pkg-url = "{ repo }/releases/download/v{ version }/ljos-v{ version }-{ target }.tar.gz"
 bin-dir = "ljos-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
-# The release tarball or nothing. A target without one fails here, and
-# `cargo install` builds it from source.
-disabled-strategies = ["quick-install", "compile"]
+# cargo-quickinstall is a third party's build. Without a release tarball
+# for the target, binstall builds from source.
+disabled-strategies = ["quick-install"]
 
 [lib]
 name = "ljos_hud"
