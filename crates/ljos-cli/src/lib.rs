@@ -9188,11 +9188,129 @@ fn plain_command(segment: &str) -> Option<String> {
         .unwrap_or(&name)
         .to_string();
     drop_git_options(&mut words);
+    drop_tool_options(&mut words);
     if words.is_empty() {
         return None;
     }
     let plain = words.join(" ");
     (plain != strip_prefixes(segment).join(" ")).then_some(plain)
+}
+
+/// The options a tool takes before its subcommand that carry a value in
+/// the next word. An option not listed here and not written `--opt=value`
+/// ends the skipping, so a tool this does not know is matched as written.
+const TOOL_OPTIONS: &[(&[&str], &[&str])] = &[
+    (&["terraform", "tofu"], &[]),
+    (
+        &["kubectl", "oc"],
+        &[
+            "-n",
+            "--namespace",
+            "--context",
+            "--cluster",
+            "--user",
+            "--kubeconfig",
+            "-s",
+            "--server",
+            "--token",
+            "--as",
+            "--as-group",
+            "--request-timeout",
+            "-v",
+        ],
+    ),
+    (
+        &["helm"],
+        &[
+            "-n",
+            "--namespace",
+            "--kube-context",
+            "--kubeconfig",
+            "--registry-config",
+            "--repository-config",
+            "--repository-cache",
+        ],
+    ),
+    (
+        &["docker", "podman"],
+        &[
+            "-H",
+            "--host",
+            "-c",
+            "--context",
+            "--connection",
+            "--config",
+            "-l",
+            "--log-level",
+            "--url",
+            "--root",
+            "--runroot",
+        ],
+    ),
+    (
+        &["aws"],
+        &[
+            "--profile",
+            "--region",
+            "--output",
+            "--endpoint-url",
+            "--query",
+            "--color",
+            "--ca-bundle",
+            "--cli-read-timeout",
+            "--cli-connect-timeout",
+        ],
+    ),
+    (
+        &["gcloud"],
+        &[
+            "--project",
+            "--account",
+            "--configuration",
+            "--verbosity",
+            "--format",
+            "--billing-project",
+            "--impersonate-service-account",
+        ],
+    ),
+    (&["az"], &["--subscription", "-o", "--output", "--query"]),
+];
+
+/// A cloud or cluster tool's own options before its subcommand off, as
+/// git's are: `terraform -chdir=infra destroy` is `terraform destroy`,
+/// `kubectl --context prod -n web delete ns web` is `kubectl delete ns web`
+/// and `aws --profile prod s3 rb s3://b` is `aws s3 rb s3://b`. Terraform's
+/// `apply -destroy` is its `destroy` and reads as one.
+fn drop_tool_options(words: &mut Vec<String>) {
+    let Some(valued) = words.first().and_then(|tool| {
+        TOOL_OPTIONS
+            .iter()
+            .find(|(names, _)| names.contains(&tool.as_str()))
+            .map(|(_, valued)| *valued)
+    }) else {
+        return;
+    };
+    let mut i = 1;
+    while let Some(w) = words.get(i) {
+        if valued.contains(&w.as_str()) {
+            i += 2;
+        } else if w.starts_with('-') && w.len() > 1 {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    words.drain(1..i.min(words.len()));
+    if matches!(words[0].as_str(), "terraform" | "tofu")
+        && words.get(1).map(String::as_str) == Some("apply")
+        && words
+            .iter()
+            .skip(2)
+            .any(|w| w == "-destroy" || w == "--destroy")
+    {
+        words[1] = "destroy".to_string();
+        words.retain(|w| w != "-destroy" && w != "--destroy");
+    }
 }
 
 /// Git's own options before the subcommand off: `git -C repo -c k=v push`
@@ -10780,6 +10898,8 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
         let mut words = plain_words(seg);
         cues.push(words.join(" "));
         drop_git_options(&mut words);
+        cues.push(words.join(" "));
+        drop_tool_options(&mut words);
         cues.push(words.join(" "));
     }
     cues.extend(command_segments(line));
@@ -23368,6 +23488,55 @@ mod tests {
         let json: Value = serde_json::from_str(&format_rules(&rules, true)).unwrap();
         assert_eq!(json[1]["verdict"], "ask");
         assert!(format_rules(&[], false).starts_with("no rules"));
+    }
+
+    #[test]
+    fn a_rule_sees_past_a_cloud_tool_s_own_options() {
+        let rule = |pattern: &str| Rule {
+            pattern: pattern.into(),
+            verdict: "deny".into(),
+            reason: "the person runs this".into(),
+        };
+        let rules = vec![
+            rule("terraform destroy*"),
+            rule("kubectl delete ns*"),
+            rule("helm uninstall*"),
+            rule("docker system prune*"),
+            rule("podman system prune*"),
+            rule("aws s3 rb*"),
+            rule("gcloud projects delete*"),
+            rule("az group delete*"),
+        ];
+        for line in [
+            "terraform -chdir=infra destroy -auto-approve",
+            "terraform apply -destroy -auto-approve",
+            "terraform -chdir=infra apply -auto-approve -destroy",
+            "cd infra && TF_LOG=1 terraform -chdir=. destroy",
+            "kubectl --context prod -n web delete ns web",
+            "kubectl --kubeconfig=/k -v 6 delete ns web",
+            "helm -n web --kube-context prod uninstall api",
+            "docker --context remote system prune -af",
+            "podman --connection box system prune -a",
+            "aws --profile prod --region us-east-1 s3 rb s3://b --force",
+            "gcloud --project p projects delete p",
+            "az --subscription s group delete -n rg --yes",
+            "sudo -E kubectl -n web delete ns web",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+        }
+        for line in [
+            "terraform -chdir=infra plan",
+            "terraform plan -destroy",
+            "terraform apply -auto-approve",
+            "kubectl --context prod -n web get ns",
+            "kubectl delete pod web-1",
+            "docker --context remote ps",
+            "aws --profile prod s3 ls s3://b",
+            "gcloud --project p projects list",
+            "echo terraform destroy is the command",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
     }
 
     #[test]
