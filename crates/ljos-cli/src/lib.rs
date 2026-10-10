@@ -6014,16 +6014,56 @@ fn host_key_step(dry: bool) -> Step {
         Ok(())
     })();
     match made {
-        Ok(()) => Step {
-            what: "host key".into(),
-            detail: format!("wrote a 32-byte seed to {}", path.display()),
-            ok: true,
-        },
+        Ok(()) => {
+            // A deed store made before this key existed does not list it,
+            // so every deed the key signs would fail evidence. deedar adds
+            // it; a store made after this lists it on its own.
+            let said = run_captured("deedar", &["host", "accept"])
+                .map(|s| s.stdout)
+                .map_err(|e| e.to_string());
+            let (listed, ok) = host_accept_detail(said);
+            Step {
+                what: "host key".into(),
+                detail: format!("wrote a 32-byte seed to {}; {listed}", path.display()),
+                ok,
+            }
+        }
         Err(e) => Step {
             what: "host key".into(),
             detail: format!("{}: {e}", path.display()),
             ok: false,
         },
+    }
+}
+
+/// What `deedar host accept` said about the key onboard just wrote, as a
+/// detail for the step and whether the seat can sign deeds evidence takes.
+fn host_accept_detail(said: std::result::Result<String, String>) -> (String, bool) {
+    match said {
+        Ok(out) => (out.lines().next().unwrap_or("").trim().to_string(), true),
+        Err(e) if e.contains("no store at") => (
+            "no deed store yet; the first deed makes one that lists this key".into(),
+            true,
+        ),
+        Err(e) if e.contains("not on PATH") => (
+            "deedar is not on PATH; install it before the first deed".into(),
+            false,
+        ),
+        // A deedar older than `host accept` answers with its status or does
+        // not know the verb at all.
+        Err(e) if e.contains("is not a signer") || e.contains("unknown command") => (
+            "this deedar has no `host accept`; `ljos doctor` names the signer line \
+             the deed store's layout needs"
+                .into(),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "deedar host accept: {}",
+                e.lines().next().unwrap_or("").trim()
+            ),
+            false,
+        ),
     }
 }
 
@@ -18764,6 +18804,12 @@ mod tests {
     #[test]
     fn onboarding_a_config_file_runner_writes_once() {
         let _g = env_guard();
+        // The host key step writes to the real config home and asks the
+        // real deedar; neither belongs in a test.
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+        }
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
@@ -18844,6 +18890,10 @@ mod tests {
             // refusal says so and the rest of the check needs the binary.
             Err(e) => {
                 assert!(e.to_string().contains("ljos-mcp not on PATH"), "{e}");
+                // SAFETY: the lock above is still held.
+                unsafe {
+                    std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+                }
                 return;
             }
         };
@@ -18879,7 +18929,36 @@ mod tests {
             1,
             "the entry was appended twice"
         );
+        // SAFETY: the lock above is still held.
+        unsafe {
+            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn onboard_reports_whether_the_deed_store_lists_the_new_host_key() {
+        let (said, ok) = super::host_accept_detail(Ok(
+            "host key: ed25519:ab, added as a signer to /s/layout\n".into(),
+        ));
+        assert!(ok && said == "host key: ed25519:ab, added as a signer to /s/layout");
+        let (said, ok) = super::host_accept_detail(Err(
+            "deedar: set DEEDAR_URL or pass --url; no store at /s".into(),
+        ));
+        assert!(ok && said.contains("first deed"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err(
+            "deedar: host key ed25519:ab is not a signer /s/layout lists".into(),
+        ));
+        assert!(!ok && said.contains("no `host accept`"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err("deedar: unknown command host".into()));
+        assert!(!ok && said.contains("no `host accept`"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err("deedar not on PATH".into()));
+        assert!(!ok && said.contains("not on PATH"), "{said}");
+        let (said, ok) = super::host_accept_detail(Err("deedar: layout: bad\nmore".into()));
+        assert!(
+            !ok && said == "deedar host accept: deedar: layout: bad",
+            "{said}"
+        );
     }
 
     #[test]

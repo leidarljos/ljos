@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos onboard` lists the host key it writes as a signer in an existing deed store, through `deedar host accept`. A store made before the key existed refused every deed the key signed until the person edited its layout. A deedar without the verb leaves the step failed, and `ljos doctor` names the line to add.
 - ljos builds against `packset-client` 0.13.0, up from 0.9.20. The client API ljos calls has not changed; the new client brings `packset-core` 0.13.0 with it.
 
 ## 0.28.0 (2026-10-10)
