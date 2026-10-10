@@ -23,9 +23,12 @@ here=$(cd "$(dirname "$0")" && pwd)
 # seat picks from whatever tools answer here.
 unset LJOS_SEAT LJOS_PANE_TOOL
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+workspace="smoke:$(basename "$root")"
+# The writer is the seat's own, not a scratch store: each run drops its
+# workspace on the way out.
+trap 'packset forget "$workspace" >/dev/null 2>&1 || true; rm -rf "$root"' EXIT
 export VISSUE_ROOT="$root/tracker" DEEDAR_URL="file://$root/deeds" CLAIMDAG_DIR="$root/claims"
-export PACKSET_WORKSPACE="smoke:$(basename "$root")" VISSUE_AGENT=you
+export PACKSET_WORKSPACE="$workspace" VISSUE_AGENT=you
 export DEEDAR_HOST_SIGNING_KEY="$root/host.key"
 head -c 32 /dev/urandom > "$DEEDAR_HOST_SIGNING_KEY"
 mkdir -p "$VISSUE_ROOT" "$root/run" && git -C "$VISSUE_ROOT" init -q

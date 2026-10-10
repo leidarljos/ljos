@@ -5,9 +5,12 @@
 # binaries on PATH and a pack writer it may start.
 set -euo pipefail
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+workspace="herd:$(basename "$root")"
+# The writer is the seat's own, not a scratch store: each run drops its
+# workspace on the way out.
+trap 'packset forget "$workspace" >/dev/null 2>&1 || true; rm -rf "$root"' EXIT
 export VISSUE_ROOT="$root/tracker" DEEDAR_URL="file://$root/deeds" CLAIMDAG_DIR="$root/claims"
-export PACKSET_WORKSPACE="herd:$(basename "$root")" XDG_RUNTIME_DIR="$root/run"
+export PACKSET_WORKSPACE="$workspace" XDG_RUNTIME_DIR="$root/run"
 mkdir -p "$VISSUE_ROOT" "$XDG_RUNTIME_DIR" && git -C "$VISSUE_ROOT" init -q
 cd "$root"
 packset ensure >/dev/null
