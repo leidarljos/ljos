@@ -179,6 +179,15 @@ closed. An atom taken by ``receive --import`` or by ``sync`` has origin
 The claim graph records the held ticket too: a tracker id maps to one node
 (FNV-1a 128 of the id) and a name to one actor; a 32-hex id passes through.
 
+On Linux the pack client reads who owns the socket on its port from
+``/proc/net/tcp``. A ``PACKSET_PORT`` that another user listens on is
+refused. With nothing set and 8761 another user's, the seat uses port
+18761 plus its user id modulo 10000 and exports it as ``PACKSET_PORT``, so
+``packset ensure`` starts its writer there. ``PACKSET_URL`` is used as given.
+Without ``XDG_RUNTIME_DIR``, the hud socket and seat records go in
+``ljos-UID`` under the temporary directory, mode 0700, or in
+``~/.cache/ljos/run`` when that name is another user's or a symlink.
+
 MCP tools
 =========
 
@@ -199,7 +208,7 @@ Environment
 =========================================================== ================================================================================================================================================================================
 Variable                                                    Read by
 =========================================================== ================================================================================================================================================================================
-``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port); ``off`` means no pack
+``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port), or this user's own port when 8761 is another user's; ``off`` means no pack
 ``PACKSET_WORKSPACE``                                       the pack workspace; unset, ``seat``
 ``LJOS_SEAT``                                               override for who is sitting; unset, the seat is the MCP client that connected or the program above the shell, and the holder is that seat tagged with the conversation's process
 ``VISSUE_ROOT``, ``VISSUE_AGENT``                           the tracker

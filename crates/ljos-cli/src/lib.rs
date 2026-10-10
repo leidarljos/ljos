@@ -1003,11 +1003,47 @@ pub fn conversation_tag(pid: u32) -> String {
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
 fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|r| !r.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ljos")
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
+        return PathBuf::from(run).join("ljos");
+    }
+    let dir = runtime_fallback(
+        &std::env::temp_dir(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        euid(),
+    );
+    if !dir.exists() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir);
+    }
+    dir
+}
+
+/// This process's effective user id.
+fn euid() -> u32 {
+    // SAFETY: geteuid has no arguments and only reads the process identity.
+    unsafe { libc::geteuid() }
+}
+
+/// The runtime directory when `XDG_RUNTIME_DIR` is unset: `ljos-UID` under
+/// the temporary directory, so two users on one host never read each
+/// other's holds, seat records or approvals. A `ljos-UID` that is a
+/// symlink, or that another user made first, is not used; the seat then
+/// keeps its records under `~/.cache/ljos/run`.
+#[must_use]
+pub fn runtime_fallback(tmp: &Path, home: Option<&Path>, uid: u32) -> PathBuf {
+    use std::os::unix::fs::MetadataExt as _;
+    let mine = tmp.join(format!("ljos-{uid}"));
+    match std::fs::symlink_metadata(&mine) {
+        Err(_) => mine,
+        Ok(m) if m.is_dir() && m.uid() == uid => mine,
+        Ok(_) => home.map_or_else(
+            || tmp.join(format!("ljos-{uid}-own")),
+            |h| h.join(".cache/ljos/run"),
+        ),
+    }
 }
 
 /// The record a server leaves for the shells the same runner opens.
@@ -6509,6 +6545,110 @@ fn load_seat_env() {
     }
 }
 
+/// The port packset listens on when nothing names one.
+const PACK_DEFAULT_PORT: u16 = 8761;
+
+/// Where a seat's writer listens when the default port is another user's:
+/// one port per user id, from 18761 up.
+#[must_use]
+pub fn per_user_pack_port(uid: u32) -> u16 {
+    18761 + u16::try_from(uid % 10_000).unwrap_or(0)
+}
+
+/// The user id that owns the socket listening on TCP `port`, read from the
+/// kernel's socket tables (`/proc/net/tcp`, `/proc/net/tcp6`). `None` when
+/// nothing listens there, or off Linux where the tables are not files.
+fn listener_uid(port: u16) -> Option<u32> {
+    let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    listener_uid_in(&tables, port)
+}
+
+/// [`listener_uid`] over the text of the tables. A row is `sl local remote
+/// state ... uid ...`; the local address ends in `:PORT` in hex, and state
+/// `0A` is a listening socket.
+#[must_use]
+pub fn listener_uid_in(tables: &[String], port: u16) -> Option<u32> {
+    let want = format!(":{port:04X}");
+    tables
+        .iter()
+        .flat_map(|t| t.lines().skip(1))
+        .find_map(|row| {
+            let cols: Vec<&str> = row.split_whitespace().collect();
+            let local = cols.get(1)?;
+            (local.ends_with(&want) && cols.get(3) == Some(&"0A"))
+                .then(|| cols.get(7)?.parse().ok())
+                .flatten()
+        })
+}
+
+/// The port to point the pack client at, or `None` to leave the default.
+/// A port the person named is used as named, unless another user's process
+/// listens on it: that is refused. With nothing named, a writer this user
+/// already runs on the per-user port is used; the default port is used
+/// when it is free or this user's; when another user's writer holds it,
+/// the seat moves to the per-user port, where `packset ensure` starts its
+/// own.
+///
+/// # Errors
+///
+/// The named port, or both the default and the per-user port, are another
+/// user's.
+pub fn pick_pack_port(
+    named: Option<u16>,
+    uid: u32,
+    owner: impl Fn(u16) -> Option<u32>,
+) -> Result<Option<u16>> {
+    let theirs = |port: u16| owner(port).filter(|o| *o != uid);
+    if let Some(port) = named {
+        if let Some(other) = theirs(port) {
+            bail!(
+                "127.0.0.1:{port} is another user's (uid {other}), not this seat's pack writer. \
+                 Set PACKSET_PORT to a port of your own, or unset it and the seat picks \
+                 {}",
+                per_user_pack_port(uid)
+            );
+        }
+        return Ok(None);
+    }
+    let own = per_user_pack_port(uid);
+    if owner(own) == Some(uid) {
+        return Ok(Some(own));
+    }
+    match theirs(PACK_DEFAULT_PORT) {
+        None => Ok(None),
+        Some(other) => {
+            if let Some(squatter) = theirs(own) {
+                bail!(
+                    "127.0.0.1:{PACK_DEFAULT_PORT} is uid {other}'s pack writer and \
+                     127.0.0.1:{own} is uid {squatter}'s. Set PACKSET_PORT to a free port"
+                );
+            }
+            Ok(Some(own))
+        }
+    }
+}
+
+/// Keep the pack client on this user's own writer: see [`pick_pack_port`].
+/// A `PACKSET_URL` is the person's choice and is left alone. The port
+/// picked goes into `PACKSET_PORT`, so `packset ensure` and the other
+/// packset commands this seat runs use it too.
+fn scope_pack_port() -> Result<()> {
+    if std::env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
+        return Ok(());
+    }
+    let named = std::env::var("PACKSET_PORT")
+        .or_else(|_| std::env::var("GROK_MEM_PORT"))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok());
+    if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
+        std::env::set_var("PACKSET_PORT", port.to_string());
+    }
+    Ok(())
+}
+
 /// A transport failure, as distinct from a writer that answered and refused.
 fn writer_unreachable(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
@@ -6655,6 +6795,7 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
 
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
+    scope_pack_port()?;
     let workspace = std::env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
@@ -12187,11 +12328,13 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
-    load_seat_env();
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     out.push(
-        match PacksetClient::from_env().and_then(|c| c.status(None)) {
+        match pack()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .and_then(|c| c.status(None).map_err(anyhow::Error::from))
+        {
             Ok(status) => {
                 let available = status["embedder"]["available"].as_bool().unwrap_or(false);
                 let answering = status["embedder"]["answering"].as_bool();
@@ -12232,9 +12375,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 ok: false,
             },
         },
-        Err(_) => Habitat {
+        Err(e) => Habitat {
             name: "pack",
-            state: "PACKSET_URL=off: no pack on purpose".into(),
+            state: e.to_string(),
             ok: false,
         },
     });
@@ -12912,7 +13055,7 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     lines.push(run_captured("vissue", &args)?.stdout.trim_end().to_string());
 
     let mut cited = String::new();
-    match PacksetClient::from_env() {
+    match pack() {
         Ok(client) => {
             let atoms_dir = out.join("data").join("atoms");
             match run_captured(
@@ -12931,7 +13074,7 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
                 Err(e) => lines.push(format!("atoms not enclosed: {e}")),
             }
         }
-        Err(_) => lines.push("no pack: PACKSET_URL=off, atoms not enclosed".into()),
+        Err(e) => lines.push(format!("no pack ({e}), atoms not enclosed")),
     }
 
     let description = std::fs::read_to_string(out.join("data").join("satchel.json"))
@@ -17112,6 +17255,88 @@ mod tests {
 
     /// A slow pre-push hook does not hold the sitting: the push outlives the
     /// wait and the line says so; a quick one reports the push.
+    #[test]
+    fn a_listener_s_owner_is_read_off_the_socket_table() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:2239 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4242 1 0000000000000000 100 0 0 10 0\n   1: 0100007F:2239 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 4343 1 0000000000000000 20 4 30 10 -1\n".to_string();
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000000000000000000001000000:4B72 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 99 1 0000000000000000 100 0 0 10 0\n".to_string();
+        let tables = [tcp, tcp6];
+        assert_eq!(
+            listener_uid_in(&tables, 8761),
+            Some(1001),
+            "the listener, not the connection"
+        );
+        assert_eq!(
+            listener_uid_in(&tables, 19314),
+            Some(1000),
+            "tcp6 rows count"
+        );
+        assert_eq!(listener_uid_in(&tables, 9999), None);
+    }
+
+    #[test]
+    fn another_user_s_writer_is_never_this_seat_s() {
+        let me = 1000;
+        let own = per_user_pack_port(me);
+        assert_eq!(own, 19761);
+        let nobody = |_: u16| None;
+        assert_eq!(
+            pick_pack_port(None, me, nobody).unwrap(),
+            None,
+            "the default when free"
+        );
+        let mine = |p: u16| (p == 8761).then_some(me);
+        assert_eq!(
+            pick_pack_port(None, me, mine).unwrap(),
+            None,
+            "the default when ours"
+        );
+        let theirs = |p: u16| (p == 8761).then_some(1001);
+        assert_eq!(
+            pick_pack_port(None, me, theirs).unwrap(),
+            Some(own),
+            "another user's default moves the seat to its own port"
+        );
+        let both = |p: u16| (p == 8761 || p == own).then_some(1001);
+        assert!(pick_pack_port(None, me, both).is_err());
+        let earlier = |p: u16| (p == own).then_some(me);
+        assert_eq!(
+            pick_pack_port(None, me, earlier).unwrap(),
+            Some(own),
+            "a writer this user runs on its own port is kept"
+        );
+        let err = pick_pack_port(Some(8761), me, theirs)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("uid 1001") && err.contains("PACKSET_PORT"),
+            "{err}"
+        );
+        assert_eq!(pick_pack_port(Some(18000), me, theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn the_runtime_fallback_is_this_user_s_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let mine = tmp.path().join(format!("ljos-{uid}"));
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        std::fs::create_dir(&mine).unwrap();
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        std::fs::remove_dir(&mine).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &mine).unwrap();
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(home.path()), uid),
+            home.path().join(".cache/ljos/run"),
+            "a symlink planted at the name is not followed"
+        );
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(home.path()), uid + 1),
+            tmp.path().join(format!("ljos-{}", uid + 1))
+        );
+    }
+
     #[test]
     fn a_slow_tracker_push_finishes_in_the_background() {
         let _env = env_guard();
