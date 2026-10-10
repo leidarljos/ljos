@@ -2472,13 +2472,17 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         };
     }
     let mut change = Vec::new();
+    let mut done = Vec::new();
     if !added.is_empty() {
         change.push(format!("add it on {}", added.join(", ")));
+        done.push(format!("added on {}", added.join(", ")));
     }
     if !removed.is_empty() {
         change.push(format!("drop it from {}", removed.join(", ")));
+        done.push(format!("dropped from {}", removed.join(", ")));
     }
     let change = change.join(" and ");
+    let done = done.join(" and ");
     if dry {
         return Step {
             what,
@@ -2494,7 +2498,7 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     match written {
         Ok(()) => Step {
             what,
-            detail: format!("memory hook: {change} in {}", file.display()),
+            detail: format!("memory hook: {done} in {}", file.display()),
             ok: true,
         },
         Err(e) => Step {
@@ -6191,7 +6195,7 @@ fn ensure_writer() -> Result<()> {
         );
     }
     if !on_path("packset") {
-        bail!("no pack writer is answering, and packset is not on PATH. cargo binstall packset");
+        bail!("no pack writer is answering, and packset is not on PATH. cargo install --locked packset");
     }
     run_captured("packset", &["ensure"]).context("packset ensure")?;
     Ok(())
@@ -10652,10 +10656,10 @@ fn panes_row() -> Habitat {
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
-            Err("ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; `cargo binstall ljos-policyd`".to_string())
+            Err("ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; `cargo install --locked ljos-policyd`".to_string())
         }
         None => Err(
-            "ljos-policyd is not installed: shell commands are judged only by seat rules; `cargo binstall ljos-policyd`"
+            "ljos-policyd is not installed: shell commands are judged only by seat rules; `cargo install --locked ljos-policyd`"
                 .to_string(),
         ),
         Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
@@ -10804,7 +10808,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         let (mut state, mut ok) = match (found, have.as_deref(), latest.as_ref()) {
             (None, _, Some(cr)) => (
                 format!(
-                    "not on PATH; cargo binstall {crate_name} (crates.io {})",
+                    "not on PATH; cargo install --locked {crate_name} (crates.io {})",
                     cr.version
                 ),
                 false,
@@ -10858,7 +10862,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
                          ranking is lexical until packsetd restarts it on the next search"
                             .to_string()
                     } else {
-                        "down; cargo binstall packset-embed and put it beside packsetd".to_string()
+                        "down; search is lexical. packset-embed links ONNX Runtime 1.28 \
+                         (system or source build): cargo install --locked packset-embed, \
+                         beside packsetd"
+                            .to_string()
                     },
                     ok: available,
                 }
@@ -11449,8 +11456,30 @@ fn status_field(status: &str, key: &str) -> Option<String> {
 
 /// Whether every required habitat answers.
 pub fn healthy(rows: &[Habitat]) -> bool {
+    failing(rows).is_empty()
+}
+
+/// The required rows that do not answer, by name.
+#[must_use]
+pub fn failing<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
     rows.iter()
-        .all(|h| h.ok || !REQUIRED.contains(&h.name) && h.name != "pack")
+        .filter(|h| !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack"))
+        .map(|h| h.name)
+        .collect()
+}
+
+/// Rows a sitting opens without. With no encoder the pack ranks by words
+/// alone and `finish` declines to fire a weak island, so the loop still
+/// holds; `ljos doctor` keeps failing on them.
+const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
+
+/// The required rows a sitting cannot open without, by name.
+#[must_use]
+pub fn failing_for_sitting<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
+    failing(rows)
+        .into_iter()
+        .filter(|name| !SITTING_DEGRADED.contains(name))
+        .collect()
 }
 
 /// Rows a fresh seat may lack after the first write. They are reported,
@@ -13562,8 +13591,20 @@ pub fn sitting_gated(
     let rows = doctor_seat();
     out.push_str("== doctor\n");
     out.push_str(&format_doctor(&rows));
-    if !healthy(&rows) {
-        bail!("{out}sitting: a required habitat does not answer; nothing was claimed");
+    let down = failing_for_sitting(&rows);
+    if !down.is_empty() {
+        bail!(
+            "{out}sitting: {} does not answer; nothing was claimed",
+            down.join(", ")
+        );
+    }
+    if failing(&rows)
+        .iter()
+        .any(|name| SITTING_DEGRADED.contains(name))
+    {
+        out.push_str(
+            "encoder down: the pack ranks by words alone and a weak island is not fired\n",
+        );
     }
     // Other machines' memories of this scope arrive before the island is
     // walked, or the sitting orients on half the seat.
@@ -13968,6 +14009,11 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     }
     if mode == "commit" {
         return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
+    }
+    // A tracker with no remote is local on purpose; a push would only fail.
+    let remotes = git(&["remote"]).ok().filter(|o| o.status.success());
+    if remotes.is_some_and(|o| o.stdout.iter().all(u8::is_ascii_whitespace)) {
+        return format!("tracker git: committed {message}; no remote, kept local\n");
     }
     // A push can run a repository's pre-push hook that publishes data first
     // and takes minutes. The sitting waits a bounded time; a push still going
@@ -15616,7 +15662,7 @@ mod tests {
             "{said}"
         );
         assert!(
-            said.contains("push refused") || said.contains("not pushed"),
+            said.contains("no remote, kept local"),
             "a missing remote must still name the commit: {said}"
         );
         assert_eq!(
@@ -17489,7 +17535,7 @@ mod tests {
         // leaves the other tool's group alone.
         let narrowed = hook_step(&file, &prompts, false);
         assert!(
-            narrowed.detail.contains("drop it from PreToolUse"),
+            narrowed.detail.contains("dropped from PreToolUse"),
             "{narrowed:?}"
         );
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -21188,6 +21234,25 @@ mod tests {
             ok: false,
         }];
         assert!(healthy(&fine));
+        // A default install has no encoder: doctor fails, a sitting opens,
+        // and a refusal names the rows that stopped it.
+        let lexical = vec![
+            Habitat {
+                name: "packset-embed",
+                state: "not on PATH".into(),
+                ok: false,
+            },
+            Habitat {
+                name: "encoder",
+                state: "down".into(),
+                ok: false,
+            },
+        ];
+        assert!(!healthy(&lexical));
+        assert!(super::failing_for_sitting(&lexical).is_empty());
+        let mut stopped = lexical.clone();
+        stopped.push(sick[0].clone());
+        assert_eq!(super::failing_for_sitting(&stopped), vec!["pack"]);
         assert_eq!(
             super::format_write_ack(&serde_json::json!({
                 "id": "ab",
@@ -21382,7 +21447,11 @@ mod tests {
                 let req = read_http(&mut s);
                 let line = req.lines().next().unwrap_or("");
                 let (code, body): (u16, &str) = if line.starts_with("GET /v1/status") {
-                    (200, r#"{"version":"0.12.1"}"#)
+                    match kind {
+                        "refuse" | "attach" => (200, r#"{"version":"0.12.1"}"#),
+                        "unversioned" => (200, r#"{}"#),
+                        _ => (200, r#"{"version":"0.13.0"}"#),
+                    }
                 } else if line.starts_with("GET /v1/atoms") {
                     if kind == "down" {
                         (500, r#"{"error":"the store is down"}"#)
@@ -21391,7 +21460,10 @@ mod tests {
                     }
                 } else if line.starts_with("POST /v1/atoms") {
                     count.fetch_add(1, Ordering::SeqCst);
-                    if kind == "refuse" {
+                    if kind == "attach" && req.contains("\"text\":\"\"") {
+                        // What packset 0.12.1 answers an empty message.
+                        (400, r#"{"error":"tool dump is attach, not an atom"}"#)
+                    } else if kind == "refuse" || kind == "attach" {
                         (400, r#"{"error":"unknown atom kind: message"}"#)
                     } else if req.contains("\"text\":\"\"") {
                         (400, r#"{"error":"atom text is required"}"#)
@@ -21468,8 +21540,8 @@ mod tests {
         assert!(!text.contains("nothing unread"), "{text}");
         assert_eq!(
             posts.load(Ordering::SeqCst),
-            1,
-            "the probe is the only post"
+            0,
+            "the writer's version answers without a probe"
         );
 
         let err = super::mail::send(&super::mail::Send {
@@ -21487,9 +21559,31 @@ mod tests {
         assert!(!text.contains("POST /v1/atoms failed"), "{text}");
         assert_eq!(
             posts.load(Ordering::SeqCst),
-            2,
-            "send probes and does not post the message"
+            0,
+            "send does not post the message"
         );
+    }
+
+    /// packset 0.12.1 refuses an empty message for its text before its
+    /// kind. The inbox must still say the pack cannot keep mail.
+    #[test]
+    fn a_writer_that_checks_text_first_is_still_refused() {
+        let _g = env_guard();
+        let (url, _) = serve_pack("attach");
+        let _held = PackUrl::set(&url);
+        let err = super::mail::inbox(false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("packset 0.12.1"), "{text}");
+        assert!(!text.contains("nothing unread"), "{text}");
+
+        // A writer that names no version is probed as before.
+        let (bare, posts) = serve_pack("unversioned");
+        let _bare = PackUrl::set(&bare);
+        assert_eq!(
+            super::mail::inbox(false).unwrap(),
+            "inbox: nothing unread\n"
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 1, "one probe");
     }
 
     #[test]
@@ -21543,7 +21637,11 @@ mod tests {
         .unwrap();
         assert!(sent.starts_with("sent "), "{sent}");
         assert!(sent.contains("scratch"), "{sent}");
-        assert_eq!(posts.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "only the message is posted"
+        );
     }
 
     #[test]

@@ -525,6 +525,18 @@ fn writer_version(client: &packset_client::PacksetClient) -> Option<String> {
 /// Fail when this writer does not keep mail. An empty message is not
 /// stored: the kind is refused, or the text is.
 fn ensure_mail(client: &packset_client::PacksetClient, verb: &str) -> Result<()> {
+    // The writer's version decides when it gives one. packset 0.12.1 checks
+    // the text before the kind, so an empty probe reads the same from a
+    // writer that keeps mail and from one that refuses it.
+    if let Some(version) = writer_version(client) {
+        match super::cmp_semver(&version, MAIL_PACKSET) {
+            Some(std::cmp::Ordering::Less) => {
+                bail!("{verb}: {}", unsupported_mail(Some(&version)));
+            }
+            Some(_) => return Ok(()),
+            None => {}
+        }
+    }
     let probe = json!({
         "schema": "inside.atom/v1",
         "kind": "message",

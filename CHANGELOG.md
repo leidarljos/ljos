@@ -5,6 +5,10 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- A sitting opens with no encoder. The pack ranks by words alone, the sitting says so, and `finish` still declines a weak island. A refusal names the rows that stopped it. `ljos doctor` still fails on a missing encoder.
+- `ljos send` and `ljos inbox` read the writer's version before they probe. packset 0.12.1 refuses an empty message for its text, so the probe passed there, and `inbox` printed `nothing unread` on a pack that cannot keep mail.
+- doctor's install hints say `cargo install --locked`. The encoder hint names the Open Neural Network Exchange (ONNX) Runtime that `packset-embed` links.
+- A tracker with no remote says `no remote, kept local` after each commit, not `push refused`. `onboard` says it added the hook once it has.
 - `ljos accept` writes an agent lesson the writer held. Filing posts the atom, and a `held as proposal` answer is the proposal. Accept calls `/v1/proposals/accept`, so the lesson becomes live, the acceptance is recorded, and a retry does not leave another held proposal. `remember` or `prefer` of the same text still satisfies the proposal and closes it.
 - `ljos hook --prompt` prints `mail could not be checked` when the pack does not answer, and still exits 0.
 - `ljos deed --remove ACCESSION --ticket ID` drops that citation. The removal is appended to the ticket. The heading is not rewritten.
