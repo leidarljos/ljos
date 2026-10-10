@@ -401,7 +401,7 @@ enum Cmd {
         /// Your name; mapped to one actor id. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Atomically claim the next balanced ready work node from the graph.
+        /// Claim the first ready node in the claim graph's order for this name.
         #[arg(long)]
         next: bool,
         /// Desired role affinity when claiming next work ('explore', 'architect', 'implementor', 'verifier', 'orchestrator', 'general').

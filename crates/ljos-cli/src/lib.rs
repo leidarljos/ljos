@@ -13026,34 +13026,69 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
     }
 }
 
-/// Atomically find and claim the next ready work node with load-balanced selection.
+/// Claim the ready node the claim graph puts first for `assignee`, through
+/// [`claim`]. A node another conversation took first is passed over.
 ///
 /// # Errors
 ///
-/// Refusal from the claim graph, or if no work is ready.
+/// Nothing is ready, every ready node was taken first, or the claim graph
+/// refused for some other reason.
 pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
-    let actor = work_id(&occupancy_scope(assignee, "next"));
-    let mut args = vec!["claim-next".to_string(), "--assignee".into(), actor.clone()];
-    if let Some(r) = role {
-        args.push("--role".into());
-        args.push(r.to_string());
+    let asker = work_id(assignee);
+    let slack = slack.map(|s| s.to_string());
+    let mut args = vec![
+        "ready",
+        "--json",
+        "--balanced",
+        "--assignee",
+        asker.as_str(),
+    ];
+    if let Some(role) = role {
+        args.extend(["--role", role]);
     }
-    if let Some(s) = slack {
-        args.push("--slack".into());
-        args.push(s.to_string());
+    if let Some(slack) = slack.as_deref() {
+        args.extend(["--slack", slack]);
     }
-    let ref_args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let said = run_captured("claimdag", &ref_args)?;
-    let claimed_id = said
-        .stdout
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if !claimed_id.is_empty() {
-        write_hold(&actor, assignee, &claimed_id);
+    let listed = run_captured("claimdag", &args)?.stdout;
+    let rows: Vec<Value> =
+        serde_json::from_str(listed.trim()).context("claim --next: claimdag ready --json")?;
+    if rows.is_empty() {
+        bail!("claim --next: nothing in the claim graph is ready");
     }
-    with_tracker(said.stdout, &claimed_id, assignee)
+    for row in &rows {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        // A node minted for a tracker id has the id as its summary, and the
+        // id hashes back to the node; claiming by the id stamps the issue.
+        let summary = row["summary"].as_str().unwrap_or("").trim();
+        let node = if !summary.is_empty() && work_id(summary) == id {
+            summary
+        } else {
+            id
+        };
+        match claim(node, assignee) {
+            Ok(said) => return Ok(format!("{node}  {said}")),
+            Err(e) if taken_first(&e.to_string()) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    bail!(
+        "claim --next: {} ready, and another conversation took each first",
+        rows.len()
+    )
+}
+
+/// Whether a refusal means the graph moved since the listing.
+fn taken_first(text: &str) -> bool {
+    [
+        "held by another",
+        "status claimed",
+        "status running",
+        "deps unsatisfied",
+    ]
+    .iter()
+    .any(|said| text.contains(said))
 }
 
 /// Hand a session node back before it is terminal: ready again, assignee
@@ -22216,6 +22251,73 @@ mod tests {
         let text = format!("{err:#}");
         assert!(text.contains("ljos release proj-1a2b"), "{text}");
         assert!(text.contains("refused"), "{text}");
+    }
+
+    /// A fake `claimdag` that logs every call and answers `ready` with the
+    /// nodes for `proj-aaaa` and `proj-bbbb`, in that order. Claims on the
+    /// first are refused.
+    fn fake_claimdag(dir: &Path, log: &Path) {
+        let (taken, free) = (work_id("proj-aaaa"), work_id("proj-bbbb"));
+        let script = format!(
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  ready) echo '[{{\"id\":\"{taken}\",\"summary\":\"proj-aaaa\"}},{{\"id\":\"{free}\",\"summary\":\"proj-bbbb\"}}]' ;;\n  get) echo \"$2  claimed  task  gen=2  assignee={other}\" ;;\n  claim) [ \"$2\" = '{taken}' ] && {{ echo 'claim: status claimed' >&2; exit 1; }}; echo gen=2 ;;\n  complete) echo done ;;\nesac\n",
+            log = log.display(),
+            other = "f".repeat(32),
+        );
+        let fake = dir.join("claimdag");
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// Another conversation took the asker's first node.
+    #[test]
+    fn claiming_next_moves_past_a_taken_node_and_completes_by_name() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _tracker = fake_vissue(dir.path(), true, true);
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let said = with_fake_on_path(dir.path(), || {
+            let said = claim_next("alice", None, None)?;
+            complete("proj-bbbb", None, "alice", Some(2))?;
+            Ok::<_, anyhow::Error>(said)
+        });
+        unsafe {
+            match runtime {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+        let said = said.unwrap();
+        assert!(said.starts_with("proj-bbbb  gen=2"), "{said}");
+        assert!(
+            said.contains("tracker: proj-bbbb STARTED under alice"),
+            "{said}"
+        );
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        let free = work_id("proj-bbbb");
+        let held = calls
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(&format!("claimdag claim {free} --assignee "))?
+                    .split_whitespace()
+                    .next()
+            })
+            .unwrap_or_else(|| panic!("no claim on {free}: {calls}"));
+        let finished = calls
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(&format!("claimdag complete {free} --actor "))?
+                    .split_whitespace()
+                    .next()
+            })
+            .unwrap_or_else(|| panic!("no completion: {calls}"));
+        assert_eq!(held, finished, "{calls}");
     }
 
     /// The Claude Code plugin in the repository root is the seat onboard
