@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos consensus` names the standing of the issue's voters only. The EigenTrust step runs over every trust row about the topic, and its JSON beside the settle listed personas that never voted, at 0.0807 each on one issue, as if they had weight there. The others are now counted on one line, and `--json` and the `ljos_consensus` tool still return the full JSON.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
 - The prompt hook no longer waits on the search model. On a new machine packsetd downloads the model on the first search, and the first prompt used to spend its whole 8 s deadline on it and say nothing. When the pack reports an encoder that has not answered yet, the hook starts one search in the background, skips its own, and says once a session that memory is starting. Session start does the same, so the model is usually loaded by the first prompt.

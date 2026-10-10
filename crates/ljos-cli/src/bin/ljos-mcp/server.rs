@@ -1499,7 +1499,20 @@ impl LjosServer {
         let predictions = predictions_of(&atoms, &args.issue);
         for step in panel_steps(&args.issue, on_path("ljos-consensus"), &trust, &predictions) {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
-            out.push(habitat(step.bin, &args)?.0);
+            let said = habitat(step.bin, &args)?.0;
+            // As the CLI: the standing of the issue's voters in words, then
+            // the JSON with every voter the rows name.
+            if args.first() == Some(&"reputation") {
+                if let Some(words) =
+                    ljos_cli::standing_in_words(&said.text, &ljos_cli::voters_of(&ballots))
+                {
+                    out.push(Said {
+                        text: words,
+                        aside: None,
+                    });
+                }
+            }
+            out.push(said);
         }
         Ok(as_rows(out))
     }

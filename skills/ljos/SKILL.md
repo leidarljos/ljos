@@ -169,7 +169,8 @@ Every piece of work has an issue before it has a claim.
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
   still records one on its own. With two or more forecasts
   the settle also names the option whose actual share most exceeds its
-  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows each voter's standing.
+  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows the standing of each voter on the issue.
+  The other names in the trust rows are counted; `--json` lists them.
   When the world says which option was right, `ljos finish ISSUE
   --outcome OPTION` (or `ljos learn`) writes every voter's record of
   outcomes as its weight, so the next settle weighs a voter by what it
