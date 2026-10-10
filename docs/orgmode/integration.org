@@ -99,6 +99,35 @@ The runners from Copilot down call =ljos hook --runner NAME=. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
 
+** When a hook fails
+
+A guard is only as strong as what the runner does when the hook breaks.
+Each runner decides that itself, and they disagree. The table says what
+happens to the command when the seat's hook crashes, times out, or
+prints something the runner cannot read. "Runs" means the command goes
+ahead unchecked.
+
+| Runner | Hook exits non-zero (not 2) or crashes | Hook times out | Answer is not JSON | Source |
+|---+---+---+---+---|
+| Claude Code | runs; only exit 2 blocks | runs | runs | [[https://docs.claude.com/en/docs/claude-code/hooks][hooks reference]] |
+| Codex | runs, as reported | not checked | not checked | [[https://www.digitalapplied.com/blog/ai-coding-agent-hooks-compared-tool-interception][Digital Applied]], 2026-10-03 |
+| Cursor | runs, unless the hook sets =failClosed=; the seat sets it on the permission events | not checked | blocked on =beforeShellExecution= | Cursor hooks docs |
+| GitHub Copilot CLI | blocked | runs | falls through to Copilot's own permission flow | [[https://docs.github.com/en/copilot/reference/hooks-reference][hooks reference]] |
+| Gemini CLI | runs, with a warning | not documented | runs | [[https://geminicli.com/docs/hooks/reference/][hooks reference]] |
+| Windsurf (Devin Desktop) | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://docs.devin.ai/desktop/cascade/hooks][Cascade hooks]] |
+| Factory droid | runs; only exit 2 blocks | not documented | runs | [[https://docs.factory.ai/harness/hooks][hooks]] |
+| Kiro | blocked | not documented | not read; the exit code decides | [[https://kiro.dev/docs/hooks/actions/][hook actions]] |
+| Cline | not documented | not documented | not documented | [[https://github.com/cline/cline][cline/cline]] |
+| Qwen Code | runs; only exit 2 blocks | not documented | runs | [[https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/][hooks]] |
+| Crush | runs; only exit 2 blocks | runs | not documented | [[https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md][hooks]] |
+
+Two settings on the seat's side close part of the gap. =POLICYD_REQUIRED=1=
+makes a missing =ljos-policyd= a deny instead of an allow. The hook
+files the seat writes give the runner a timeout of 10 to 20 seconds; a
+gate that takes longer meets the "times out" column. Neither helps when
+the =ljos= binary itself is gone: on Copilot and Kiro that blocks every
+shell command, and on every other runner the commands run unchecked.
+
 Two rules hold on every runner. First, the seat guard refuses a command
 that writes the seat's own files (its binaries, its hook entries,
 =~/.config/ljos=, the approvals store): an agent cannot rewrite the law
