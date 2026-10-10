@@ -18,10 +18,11 @@ machine unless you turn on a remote judge.
 The first line installs the seat and the programs a sitting calls: packset
 (memory), vissue (the tracker), deedar (records of work), claimdag (who works
 on what), ljos-policyd (the command check) and ljos-consensus (voting).
-`ljos doctor` names any that are missing.
+`ljos doctor` names any that are missing. `packset-embed` is the encoder packsetd runs beside it.
+`ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 
 ```
-cargo binstall ljos packset vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install, same list
+cargo binstall ljos packset packset-embed vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule '*--force*' --verdict deny --why "Never force push."
