@@ -20,6 +20,7 @@ The first line installs the seat and the programs a sitting calls: packset
 on what), ljos-policyd (the command check) and ljos-consensus (voting).
 `ljos doctor` names any that are missing. `packset-embed` is the encoder packsetd runs beside it.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
+An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 
 ```
 cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
