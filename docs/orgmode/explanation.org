@@ -52,6 +52,9 @@ what an earlier one refused, so the first refusal wins.
 - *The push check.* A =git push= is free to a repository the account
    owns alone and has never released; to any other it needs
    =LJOS_CITE= set to the issue that records the decision behind it.
+   Persona ballots do not count toward that settle. Personas still vote,
+   and count in every other settle, but the issue has to settle on the
+   seats' own ballots for the push to pass.
 
 An =ask= verdict is a question for the person. On Claude Code and Grok
 Build it is the runner's own permission prompt. On a runner without one,
