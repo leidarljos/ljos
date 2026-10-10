@@ -22732,8 +22732,6 @@ mod tests {
         }
     }
 
-    /// Cursor is read off its payload, whichever file registered the hook,
-    /// and answered in its contract ([`cursor_output`]).
     /// A pack whose encoder never answered since it started is cold, so a
     /// prompt does not wait on the model; one that answered, one whose
     /// encoder failed, one without an encoder, and an older status without
@@ -22783,6 +22781,8 @@ mod tests {
         );
     }
 
+    /// Cursor is read off its payload, whichever file registered the hook,
+    /// and answered in its contract ([`cursor_output`]).
     #[test]
     fn cursor_is_read_off_its_payload_and_answered_in_its_contract() {
         let shell = hook_call(
