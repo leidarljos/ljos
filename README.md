@@ -211,11 +211,9 @@ a receipt for each message it shows. When the pack does not answer, it prints
 
 ## Decision panel concurrency
 
-`ljos panel` runs persona subagents with bounded concurrency. The limit
-defaults to the system's parallelism clamped to `[1, 4]`. Set
-`LJOS_PANEL_CONCURRENCY` or `LJOS_MAX_PARALLEL` to change it, or `0` to run
-every member at once. With more members than slots, a detached POSIX process
-pool schedules them, with no runner daemon.
+A decision panel runs at most `LJOS_PANEL_CONCURRENCY` members at once, and
+the next starts as one exits. Unset, that is the machine's parallelism clamped
+to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
 
 ## Commands
 
@@ -236,7 +234,7 @@ ljos evidence deed-…
 ljos deed vissue-xxxx --add deed-…
 ljos recall vissue-xxxx
 ljos claim <node>                              # the session node, and the tracker issue to STARTED under the same name
-ljos claim --next [--role <role>]              # atomically claim next balanced ready node with role affinity
+ljos claim --next [--role <role>]              # the first ready node in claimdag's order for you
 ljos release <node>
 ljos seat                                      # who is sitting: the seat, this conversation's holder, and where the names came from
 ljos complete <node> --status done

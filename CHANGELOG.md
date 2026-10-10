@@ -24,6 +24,9 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - A tracker that keeps one file per issue is read and committed as that file. `ljos` follows vissue 0.20: when `issues/.ledger` is present, a sitting finds the issue there, and the tracker commit names `issues/<id>.org` rather than the project board.
 - A persona hand can carry an actor message (`cast`, `call`, `event`, or `exit`). The inbox file is still the markdown `hand` writes. Herdr is up when `herdr workspace list` exits 0.
 - `docs/orgmode/integration.org` places the seat among the memory systems it learns from and names the events each runner registers. `docs/orgmode/architecture.org` says how a persona pane, the actor message and `ljos supervise` fit together.
+- The bound on decision panel members did not hold under dash: the opener's script counted running members with `jobs` in a command substitution, where dash lists none. The opener now starts the next member as one exits.
+- `ljos claim --next` claims a node the way `ljos claim ID` does, so `ljos complete` and `ljos release` find the holder. Claiming a node minted for a tracker id stamps that issue.
+- The smoke and herd scripts drop their pack workspace on the way out.
 
 ## 0.27.0 (2026-10-09)
 
