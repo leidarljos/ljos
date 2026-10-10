@@ -331,9 +331,17 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. It has forty-seven tools, each
-opening with when to call it, plus the protocol at `ljos://protocol`, the
-cards read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the
+`ljos-mcp` serves the same verbs over stdio. By default it lists seventeen
+core tools: `remember`, `search`, `prefer`, `rule`, `file`, `note`,
+`sitting`, `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`,
+`consensus`, `doctor` and `request_approval`, each with the prefix `ljos_`.
+Every listed tool costs its description and schema on every session: about
+6,100 tokens for the core set against 15,000 for all forty-seven (o200k_base
+count). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
+`LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
+with a result marked `isError` that carries the reason, so the model reads
+it. The server also has the protocol at `ljos://protocol`, the cards
+read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the
 soonest eight claims and the total still due. Paste this where the runner
 keeps its servers:
 

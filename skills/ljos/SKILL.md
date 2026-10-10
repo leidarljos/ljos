@@ -9,7 +9,9 @@ description: >
 One seat, five stores, five questions. Ask the store that owns the question.
 `ljos` is the one command in front of them; `ljos-mcp` serves the same verbs
 over the Model Context Protocol (MCP). Every verb below has a tool of the same
-name with the prefix `ljos_`.
+name with the prefix `ljos_`. The server lists the core tools unless
+`LJOS_MCP_TOOLS=all` is in its environment; a verb with no tool listed runs
+as `ljos VERB` in the shell.
 
 | question | store | verbs |
 |---|---|---|
