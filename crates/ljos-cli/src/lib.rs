@@ -3924,27 +3924,35 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         // filters. When none does, no memory can reach the prompt, and
         // the second stage, a few hundred milliseconds a prompt, is not
         // run.
-        if rerank {
-            if let Ok(pool) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-                packset_search_opts(cue, RERANK_POOL, false)
-            }) {
-                let could = |h: &Hit| {
-                    !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                        && agreed(h)
-                        && names_the_cue(&h.text, cue)
-                        && is_refresher(h)
-                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
-                };
-                if !pool.iter().any(could) {
-                    return (nudge, pending);
-                }
+        let pool = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+            packset_search_opts(cue, RERANK_POOL, false)
+        })
+        .ok();
+        if let Some(pool) = &pool {
+            let could = |h: &Hit| {
+                !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                    && agreed(h)
+                    && names_the_cue(&h.text, cue)
+                    && is_refresher(h)
+                    && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+            };
+            if !pool.iter().any(could) {
+                return (nudge, pending);
             }
         }
-        let reranked = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-            packset_search_opts(cue, 10, rerank)
-        });
-        let Ok(found) = reranked.or_else(|_| packset_search(cue)) else {
-            return (nudge, pending);
+        // The pack client gives a reranked search at least a minute, so
+        // the budget is kept here: past it the fused pool answers. A
+        // writer that is still fetching its cross-encoder on the first
+        // prompt then costs the budget, not the whole hook deadline.
+        let reranked = if rerank {
+            search_within(cue, 10, HOOK_RERANK_BUDGET_MS)
+        } else {
+            Err(anyhow::anyhow!("search: rerank off"))
+        };
+        let found = match (reranked, pool) {
+            (Ok(found), _) => found,
+            (Err(_), Some(pool)) => pool,
+            (Err(_), None) => return (nudge, pending),
         };
         hits = found;
         let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
@@ -5267,6 +5275,24 @@ pub const HOOK_RERANK_BUDGET_MS: u64 = 2500;
 /// `RERANK_DEPTH`). Its first stage returns this many when asked to
 /// rerank.
 const RERANK_POOL: u32 = 20;
+
+/// The reranked search, or an error once `ms` has passed. The request
+/// runs on its own thread: the pack client gives a reranked search at
+/// least a minute whatever `PACKSET_TIMEOUT_MS` says, and a hook cannot
+/// wait that long. A thread left waiting ends with the hook's process.
+///
+/// # Errors
+///
+/// The search's own error, or the budget running out first.
+pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<Vec<Hit>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cue = cue.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(packset_search_opts(&cue, limit, true));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(ms))
+        .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
+}
 
 /// Run `f` with the pack client's request timeout set to `ms`, then put
 /// back whatever it was.
@@ -24392,6 +24418,60 @@ mod tests {
         assert!(out.is_err());
         assert!(took < std::time::Duration::from_secs(5), "{took:?}");
         drop(held);
+    }
+
+    /// A writer that answers a plain search at once and holds a reranked
+    /// one, as packsetd does while it fetches its cross-encoder.
+    fn serve_slow_rerank() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                std::thread::spawn(move || {
+                    let req = read_http(&mut s);
+                    let first = req.lines().next().unwrap_or("").to_string();
+                    let (status, body) = if first.contains("/v1/search") {
+                        if first.contains("rerank=1") {
+                            std::thread::sleep(std::time::Duration::from_secs(20));
+                        }
+                        (
+                            "200 OK",
+                            r#"{"hits":[{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"ballots":3,"of":3}]}"#.to_string(),
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"error":"not here"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                });
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_slow_rerank_leaves_the_prompt_its_memory() {
+        let _env = env_guard();
+        let url = serve_slow_rerank();
+        let _held = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "how should I tag the release?".into(),
+            session: None,
+            shape: HookShape::default(),
+        };
+        let started = std::time::Instant::now();
+        let (note, _) = hook_note(&call, 5);
+        let took = started.elapsed();
+        assert!(note.contains("Tag a release"), "{note:?}");
+        assert!(
+            took < std::time::Duration::from_millis(HOOK_DEADLINE_MS - 2000),
+            "the prompt waited {took:?} on a rerank"
+        );
     }
 
     #[test]
