@@ -77,18 +77,31 @@ rows every voter weighs the same. Now suppose =hold= turned out right:
 
 #+begin_src console
 $ ljos learn $id --outcome hold
+Learned. 6 trust rows rewritten. ...
 alice weighs bob at 0.010
-alice weighs carol at 1.000
-bob weighs alice at 0.010
-bob weighs carol at 1.000
-carol weighs alice at 0.010
-carol weighs bob at 0.010
+alice weighs carol at 0.010
+...
 $ ljos consensus $id
 ... ship 0.667, hold 0.333 ...
 #+end_src
 
-Every voter the outcome refuted shrank in every other voter's row. The settle
-printed beside those rows on this tracker is still the equal-weight count.
+By default =learn= uses the =record= rule, which weighs each voter by its hits and
+misses across outcomes. One outcome cannot tell a lucky voter from a good
+one. Every row sits at the floor, and the settle stays the equal-weight
+count. The rows separate once more issues have outcomes. With
+=--rule hedge=, only the voters the outcome refuted shrink, by =--beta=
+(0.5 unset):
+
+#+begin_src console
+$ ljos learn $id --outcome hold --rule hedge
+alice weighs bob at 0.500
+alice weighs carol at 1.000
+...
+$ ljos consensus $id
+settle (DeGroot, 3 voters): hold 0.500, ship 0.500
+#+end_src
+
+That is the same three ballots on a fresh pack, so the rows start at 1.
 The rows are =trust= atoms in the pack, so they carry a validity window, can be
 superseded, and travel in a handover. A person can also set one by hand:
 =ljos trust alice carol 0.9 --why deed-...=.
@@ -142,8 +155,11 @@ the payload matches the manifest ...
 1 deeds proven against a log of 1 entries ...
 0 atoms enclosed, 0 trust rows
 $ ljos receive /tmp/bag --import
-0 atoms imported, 0 refused
+Error: receive: unsigned satchel; will not import
 #+end_src
+
+A scratch seat has no host key, so its bag goes out unsigned, and
+=--import= refuses an unsigned bag. =ljos onboard --harness NAME= writes the key.
 
 The receiver now knows what the sender learned, who the sender trusts, and
 which deeds the work produced, and checked all of it before importing. The
@@ -164,7 +180,16 @@ $ ljos protocol | head -3
 
 One seat, five stores, five questions. Ask the store that owns the question.
 $ ljos onboard
-{ "mcpServers": { "ljos": { "type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {} } } }
+{
+  "mcpServers": {
+    "ljos": {
+      "type": "stdio",
+      "command": "/home/you/.cargo/bin/ljos-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
 #+end_src
 
 That entry goes into any runner, where it keeps its

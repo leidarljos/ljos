@@ -62,9 +62,12 @@ The hook shows a preference from the moment it is written. A lesson
 `ljos due` lists the lessons waiting.
 
 The hooks also keep the work on the tracker. A conversation with no issue
-gets told, on the first tool result, to file one and sit. `Stop` blocks that
-turn once if it used tools and never touched the seat. A conversation that
+gets told, on the first tool result, to file one and sit. A conversation that
 has an issue waits forty tool calls before the reminder to record the work.
+Where the runner registers `Stop`, the hook also blocks a turn once if it
+used tools and never touched the seat. Of the shapes ljos carries, `grok` and
+`antigravity` register it. For `claude` or `codex`, add `Stop` to that
+runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
 
 ## What you get
 
@@ -78,8 +81,11 @@ has an issue waits forty tool calls before the reminder to record the work.
   taught. `ljos accept ID` writes that lesson and records the acceptance.
 - A check on shell commands: rules in the pack (`ljos rule`), tried on each
   command a line runs, plus a guard that keeps agents from rewriting the
-  checker's own binaries and hook files. Pushes to your own unreleased
-  repositories go through; a push anywhere else has to cite a decision.
+  checker's own binaries and hook files. With an ask rule on pushes
+  (`ljos rule 'git push*' --verdict ask --why "..."`), a push to your own
+  unreleased repository goes through, a push to a released or shared one
+  has to cite a decision another seat voted on, and anything else goes to
+  you. Without that rule a plain push is not checked.
 - Decisions with more than one defensible answer go to personas, voters with
   a view of their own. They settle by trust-weighted
   [consensus](https://github.com/leidarljos/consensus) that learns from the
@@ -200,8 +206,8 @@ seat. `ljos seat` prints both names and where they came from. `ljos onboard`
 prints the one MCP entry any runner takes, and `ljos protocol` prints the
 text an agent reads first.
 
-Nothing needs a variable set. `ljos onboard` makes the deed store deedar
-falls back to (`~/.local/share/deedar/store`) and a tracker under
+Nothing needs a variable set. `ljos onboard --harness NAME` makes the deed
+store deedar falls back to (`~/.local/share/deedar/store`) and a tracker under
 `~/.local/share/vissue/tracker` that `~/.config/vissue/config.toml` names,
 unless `DEEDAR_URL` or `VISSUE_ROOT` already names one. `ljos remember`
 starts the writer when none is answering. The seat's memory is the one
