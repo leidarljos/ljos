@@ -16,6 +16,14 @@ targets = [
     "x86_64-unknown-linux-gnu",
 ]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/ljos-v{ version }-{ target }.tar.gz"
+bin-dir = "ljos-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+# The release tarball or nothing. A target without one fails here, and
+# `cargo install` builds it from source.
+disabled-strategies = ["quick-install", "compile"]
+
 [lib]
 name = "ljos_hud"
 path = "src/lib.rs"

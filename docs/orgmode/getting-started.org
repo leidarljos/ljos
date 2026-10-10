@@ -11,11 +11,11 @@ second seat that checked it.
 Install the binaries once:
 
 #+begin_src console
-$ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-consensus
+$ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
 #+end_src
 
-They provide =ljos=, =ljos-mcp=, =ljos-consensus=, =packset=, =packsetd=,
-=deedar=, =claimdag= and =vissue=. =VISSUE_ROOT= must name an existing
+They provide =ljos=, =ljos-mcp=, =ljos-policyd=, =ljos-consensus=, =packset=,
+=packsetd=, =deedar=, =claimdag= and =vissue=. =VISSUE_ROOT= must name an existing
 directory with a prefix directory inside it, and =packset ensure= starts the
 pack writer.
 

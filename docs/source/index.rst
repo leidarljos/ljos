@@ -47,7 +47,7 @@ Install
 
 .. code:: console
 
-   $ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-consensus
+   $ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
    $ packset ensure
    $ ljos doctor
    $ ljos onboard --harness json
@@ -55,8 +55,10 @@ Install
 ``ljos`` provides ``ljos`` and ``ljos-mcp``. ``packset`` provides ``packset`` and the
 writer ``packsetd``. ``deedar-cli`` provides ``deedar``. ``claimdag-cli`` provides
 ``claimdag``. ``vissue-cli`` provides ``vissue``. ``ljos-consensus`` provides
-``ljos-consensus``, which ``ljos consensus`` runs. Those are the binaries the
-tutorial calls.
+``ljos-consensus``, which ``ljos consensus`` runs. ``ljos-policyd`` is the command
+check. Those are the binaries the tutorial calls. Each comes prebuilt from
+its GitHub release; ``cargo install`` takes the same names and builds from
+source.
 
 ``doctor`` names each habitat and whether it answers. The seat works with the
 habitats it has; a missing one is reported, not guessed around. ``onboard``
