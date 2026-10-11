@@ -16697,6 +16697,56 @@ pub fn consensus_steps_anchored(
     Ok(steps)
 }
 
+/// Refuse a settle on an issue that holds no ballots. The model reads an
+/// empty ballot as settled with no options, which a caller takes for
+/// agreement.
+///
+/// # Errors
+///
+/// `ballots` is empty.
+pub fn require_ballots(issue: &str, ballots: &[Value]) -> Result<()> {
+    if ballots.is_empty() {
+        bail!(
+            "consensus: {issue} holds no ballots, so there is nothing to settle. \
+             `ljos vote {issue} --for OPTION` casts one, and a panel (`ljos panel {issue}`) casts one per persona"
+        );
+    }
+    Ok(())
+}
+
+/// The key a step's output takes in `ljos consensus --json`: the model
+/// crate's verb (`settle`, `surprising`, `reputation`), or `tracker` for
+/// vissue's own settle.
+#[must_use]
+pub fn consensus_step_label(step: &ConsensusStep) -> String {
+    if step.bin == "vissue" {
+        "tracker".to_string()
+    } else {
+        step.args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| step.bin.to_string())
+    }
+}
+
+/// `ljos consensus --json` as one JSON object: the issue, the discount
+/// line when outcomes discounted voters, and each step's output under its
+/// label, parsed when it is JSON and kept as text when it is not.
+#[must_use]
+pub fn consensus_document(issue: &str, discount: Option<&str>, said: &[(String, String)]) -> Value {
+    let mut doc = serde_json::Map::new();
+    doc.insert("issue".into(), Value::String(issue.to_string()));
+    if let Some(line) = discount {
+        doc.insert("discount".into(), Value::String(line.trim().to_string()));
+    }
+    for (label, out) in said {
+        let value = serde_json::from_str::<Value>(out.trim())
+            .unwrap_or_else(|_| Value::String(out.trim().to_string()));
+        doc.insert(label.clone(), value);
+    }
+    Value::Object(doc)
+}
+
 pub fn on_path(bin: &str) -> bool {
     which::which(bin).is_ok()
 }

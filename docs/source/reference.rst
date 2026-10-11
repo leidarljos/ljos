@@ -502,7 +502,7 @@ they say. Before the default, the seat sat at 1, so any anchored persona
 took the whole settle. The settle prints in words: the shares, who leads
 and by how much, polarization, each voter's influence, the share of its
 own ballot each voter keeps, and, when a persona or judge voted, the seat
-ballots a push cite counts beside the ballots that are advice. ``consensus ID --json`` prints the model crate's JSON instead.
+ballots a push cite counts beside the ballots that are advice. ``consensus ID --json`` prints one JSON object instead: the model crate's settle, the tracker's, and the panel readings, each under its own key. An issue with no ballots is refused.
 
 Without an outcome, ``calibrate`` estimates each voter's accuracy from the
 project's issues with two or more ballots, by expectation maximisation

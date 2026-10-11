@@ -1553,6 +1553,7 @@ impl LjosServer {
         // As the CLI: a persona on the ballot settles under its anchor and
         // every other voter under the default one.
         let ballots = ljos_cli::ballot_rows(&args.issue);
+        ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         let mut steps = consensus_steps_for(
             &args.issue,

@@ -498,7 +498,7 @@ enum Cmd {
     /// each anchor did.
     Consensus {
         id: String,
-        /// Print the settle's JSON as the model crate wrote it, not the words.
+        /// Print one JSON object: the model crate's settle, the tracker's, and the panel readings, each under its own key.
         #[arg(long)]
         json: bool,
     },
@@ -1619,6 +1619,7 @@ fn main() -> Result<()> {
             // other voter, the seat too, under the default one; a ballot
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
+            ljos_cli::require_ballots(&id, &ballots)?;
             let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
             let mut steps = consensus_steps_for(
                 &id,
@@ -1630,14 +1631,40 @@ fn main() -> Result<()> {
             )?;
             // The named outcomes show which voters err together, and
             // those voters are discounted.
-            if let Some((discount, line)) = settle_discount(&atoms) {
+            let discount = settle_discount(&atoms).map(|(discount, line)| {
                 with_discount(&mut steps, &discount);
+                line
+            });
+            // Beside the settle: the surprisingly popular answer when two
+            // or more voters forecast, and the voters' standing when rows
+            // exist.
+            let predictions = predictions_of(&atoms, &id);
+            steps.extend(panel_steps(
+                &id,
+                on_path("ljos-consensus"),
+                &trust,
+                &predictions,
+            ));
+            if json {
+                // One document on stdout, so a caller can parse it whole.
+                let mut said = Vec::new();
+                for step in &steps {
+                    said.push((
+                        ljos_cli::consensus_step_label(step),
+                        run_captured(step.bin, &step.args)?.stdout,
+                    ));
+                }
+                let doc = ljos_cli::consensus_document(&id, discount.as_deref(), &said);
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+                return Ok(());
+            }
+            if let Some(line) = discount {
                 println!("{line}");
             }
             for step in steps {
                 let settle = step.bin == "ljos-consensus"
                     && step.args.first().map(String::as_str) == Some("settle");
-                if !settle || json {
+                if !settle {
                     run(step.bin, &step.args)?;
                     continue;
                 }
@@ -1650,13 +1677,6 @@ fn main() -> Result<()> {
                 if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
                     print!("{split}");
                 }
-            }
-            // Beside the settle: the surprisingly popular answer when two
-            // or more voters forecast, and the voters' standing when rows
-            // exist.
-            let predictions = predictions_of(&atoms, &id);
-            for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
-                run(step.bin, &step.args)?;
             }
         }
         Cmd::Trust {

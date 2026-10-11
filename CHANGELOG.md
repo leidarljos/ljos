@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos consensus` refuses an issue with no ballots. It ran the settle anyway, and the model answered `settled: true` with no options and a margin of 0, which a caller read as agreement. The MCP tool refuses the same way. `ljos consensus --json` prints one JSON object: the model crate's settle under `settle`, the tracker's under `tracker`, and the surprisingly popular reading and the voters' standing when there are any. It printed the settle's JSON and then the tracker's plain-text tally on the same stdout, so `json.load` failed with `Extra data`.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
