@@ -785,6 +785,16 @@ fn write_ack(body: &serde_json::Value) -> String {
 }
 
 fn main() -> Result<()> {
+    let ran = run_command();
+    if let Err(e) = &ran {
+        // A gate whose hook fails answers deny in the runner's JSON and
+        // exits 2, so a runner that reads silence as allow still refuses.
+        ljos_cli::refuse_failed_gate(&format!("{e:#}"));
+    }
+    ran
+}
+
+fn run_command() -> Result<()> {
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
@@ -1412,7 +1422,7 @@ fn main() -> Result<()> {
             // at the same moment is answered once. A tool gate is exempt
             // from both: its verdict must not be lost to a clock. Exiting
             // at the deadline writes no deny, and the runner then allows
-            // the command.
+            // the command; a gate's own deadline, armed below, writes one.
             // The same holds for an event said once, such as a stop or the
             // end of a session: its twin is answered with nothing.
             if ljos_cli::hook_twin(&call, &input) {
@@ -1441,6 +1451,7 @@ fn main() -> Result<()> {
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
             unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+            ljos_cli::arm_gate(&input, event.as_deref());
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());
             // A subagent about to stop is held once while its parent holds
@@ -1737,8 +1748,7 @@ fn main() -> Result<()> {
                 }
             };
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
-            print!("{output}");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            ljos_cli::answer_gate(&output);
             ljos_cli::keep_hook_answer(&call, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
