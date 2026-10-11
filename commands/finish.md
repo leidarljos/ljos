@@ -1,4 +1,5 @@
 ---
+name: finish
 description: Close a sitting and record its lesson
 # proseguard:off rgoswami.EmDashInText
 argument-hint: <issue-id> --lesson <text>
