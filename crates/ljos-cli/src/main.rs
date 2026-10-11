@@ -328,8 +328,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0.5)]
         anchor: f64,
         /// How this persona reads the work, in a sentence or two.
-        #[arg(long)]
-        view: String,
+        #[arg(long, required_unless_present = "retire")]
+        view: Option<String>,
         /// Domains it speaks to, comma-separated, repeated, or several after one flag; a trust row scoped to one of them applies when the issue is about it.
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         about: Vec<String>,
@@ -340,6 +340,12 @@ enum Cmd {
         /// Take over a name another seat, or another holder of this seat, defined.
         #[arg(long)]
         replace: bool,
+        /// Say what the define would do (free, yours, refused, taken over, and which personas share its view or domains) and write nothing.
+        #[arg(long, conflicts_with = "retire")]
+        check: bool,
+        /// Withdraw the persona, so it casts no more ballots. Only the conversation that defined it may; --replace retires one someone else defined.
+        #[arg(long, conflicts_with_all = ["view", "about", "runner"])]
+        retire: bool,
     },
     /// Install a published release's binaries beside this ljos: fetched from the release, checked against its sha256 and its version, the old ones kept.
     Upgrade {
@@ -1239,21 +1245,31 @@ fn run_command() -> Result<()> {
             about,
             runner,
             replace,
+            check,
+            retire,
         } => {
-            let body = write_persona_as(
-                &Persona {
-                    name,
-                    anchor,
-                    view,
-                    entities: about,
-                    runner,
-                },
-                if replace {
-                    PersonaWrite::Replace
-                } else {
-                    PersonaWrite::Define
-                },
-            )?;
+            if retire {
+                print!("{}", ljos_cli::retire_persona(&name, replace)?);
+                ljos_cli::refresh_agents();
+                return Ok(());
+            }
+            let persona = Persona {
+                name,
+                anchor,
+                view: view.unwrap_or_default(),
+                entities: about,
+                runner,
+            };
+            let how = if replace {
+                PersonaWrite::Replace
+            } else {
+                PersonaWrite::Define
+            };
+            if check {
+                print!("{}", ljos_cli::check_persona(&persona, how)?);
+                return Ok(());
+            }
+            let body = write_persona_as(&persona, how)?;
             println!("{}", write_ack(&body));
             ljos_cli::refresh_agents();
         }

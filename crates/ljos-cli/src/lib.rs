@@ -8586,14 +8586,11 @@ pub fn write_persona_as(p: &Persona, how: PersonaWrite) -> Result<Value> {
     let (seat, holder) = (seat_name(), holder_name());
     let owner = match (how, live.as_ref().and_then(persona_owner)) {
         (PersonaWrite::Learned, Some(kept)) => kept,
-        (PersonaWrite::Define, Some((owner, by, since)))
-            if owner != seat || (!by.is_empty() && by != holder) =>
-        {
+        (PersonaWrite::Define, Some(kept)) if foreign_owner(&kept, &seat, &holder) => {
             bail!(
-                "persona: {name} was defined by seat {owner}{}{}, and personas are shared by every seat on this pack. \
+                "persona: {name} was defined by {}, and personas are shared by every seat on this pack. \
                  Pass --replace to take it over, or pick another name. Nothing was written",
-                if by.is_empty() { String::new() } else { format!(" ({by})") },
-                if since.is_empty() { String::new() } else { format!(" on {since}") },
+                owner_phrase(&kept),
             );
         }
         (PersonaWrite::Define, Some(kept)) => kept,
@@ -8618,6 +8615,178 @@ pub fn write_persona_as(p: &Persona, how: PersonaWrite) -> Result<Value> {
         .context("persona: POST /v1/atoms failed")?;
     ensure_unscoped_inbound(p)?;
     Ok(posted)
+}
+
+/// Whether a persona's owner is someone other than this conversation:
+/// another seat, or another holder of this seat. A write or a retire on
+/// such a persona needs `--replace`.
+fn foreign_owner(owner: &(String, String, String), seat: &str, holder: &str) -> bool {
+    let (by_seat, by_holder, _) = owner;
+    by_seat != seat || (!by_holder.is_empty() && by_holder != holder)
+}
+
+/// `seat saddle (sand-subagent-0e61) on 2026-10-11T09:58:00Z`, leaving out
+/// what the atom does not record.
+fn owner_phrase(owner: &(String, String, String)) -> String {
+    let (seat, holder, since) = owner;
+    format!(
+        "seat {seat}{}{}",
+        if holder.is_empty() {
+            String::new()
+        } else {
+            format!(" ({holder})")
+        },
+        if since.is_empty() {
+            String::new()
+        } else {
+            format!(" on {since}")
+        },
+    )
+}
+
+/// Normalized view text, for telling two personas that read the work the
+/// same way: lowercase words, punctuation and spacing dropped.
+fn view_key(view: &str) -> String {
+    view.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What `ljos persona NAME` would do with the pack as it stands, written
+/// as lines a person reads. `atoms` are the pack's persona atoms; `seat`
+/// and `holder` are this conversation's. Nothing is written.
+///
+/// # Errors
+///
+/// An invalid persona: an empty name or view, or an anchor outside [0, 1].
+pub fn persona_check_report(
+    p: &Persona,
+    how: PersonaWrite,
+    atoms: &[Value],
+    seat: &str,
+    holder: &str,
+) -> Result<String> {
+    persona_atom(p, "check")?;
+    let name = p.name.trim();
+    let latest = latest_persona_atoms(atoms);
+    let mut out = String::new();
+    match latest.get(name) {
+        None => out.push_str(&format!(
+            "{name} is free: a define writes it under seat {seat}.\n"
+        )),
+        Some(live) => match persona_owner(live) {
+            None => out.push_str(&format!(
+                "{name} exists with no owner recorded: a define supersedes it under seat {seat}.\n"
+            )),
+            Some(kept) if foreign_owner(&kept, seat, holder) => {
+                if how == PersonaWrite::Replace {
+                    out.push_str(&format!(
+                        "{name} was defined by {}: --replace takes it over under seat {seat}.\n",
+                        owner_phrase(&kept)
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "{name} was defined by {}: a define is refused. --replace takes it over, or pick another name.\n",
+                        owner_phrase(&kept)
+                    ));
+                }
+            }
+            Some(kept) => out.push_str(&format!(
+                "{name} is this seat's, defined by {}: a define supersedes its view and keeps the owner.\n",
+                owner_phrase(&kept)
+            )),
+        },
+    }
+    let key = view_key(&p.view);
+    let wanted: Vec<String> = p.entities.iter().map(|e| e.to_lowercase()).collect();
+    for (other, atom) in &latest {
+        if other == name {
+            continue;
+        }
+        let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+        if !key.is_empty() && view_key(text) == key {
+            out.push_str(&format!("{other} already holds the same view.\n"));
+            continue;
+        }
+        let shared: Vec<&str> = atom
+            .get("entities")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|e| wanted.iter().any(|w| w == e))
+            .collect();
+        if !shared.is_empty() {
+            out.push_str(&format!("{other} also speaks to {}.\n", shared.join(", ")));
+        }
+    }
+    out.push_str("Nothing was written.\n");
+    Ok(out)
+}
+
+/// `ljos persona NAME --check`: [`persona_check_report`] against the pack.
+///
+/// # Errors
+///
+/// The pack not answering, or an invalid persona.
+pub fn check_persona(p: &Persona, how: PersonaWrite) -> Result<String> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_of_kind(&client.workspace(), "persona")
+        .context("persona: GET /v1/atoms?kind=persona failed")?;
+    persona_check_report(p, how, &atoms, &seat_name(), &holder_name())
+}
+
+/// `ljos persona NAME --retire`: withdraw every atom of the persona, so it
+/// leaves the roster and casts no more ballots. The pack keeps that it was
+/// held and withdrawn. Only the conversation that defined it may retire it;
+/// `take_over` (`--replace`) retires one another seat or holder defined.
+///
+/// # Errors
+///
+/// The pack not answering, no live persona of that name, or one another
+/// seat or holder defined without `take_over`.
+pub fn retire_persona(name: &str, take_over: bool) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("persona: name the persona to retire");
+    }
+    let client = pack()?;
+    let workspace = client.workspace();
+    let same: Vec<Value> = client
+        .atoms_of_kind(&workspace, "persona")
+        .context("persona: GET /v1/atoms?kind=persona failed")?
+        .into_iter()
+        .filter(|a| a.get("name").and_then(Value::as_str) == Some(name))
+        .collect();
+    let Some(live) = latest_persona_atoms(&same).remove(name) else {
+        bail!("persona: no persona {name} on this pack; `ljos personas` lists them");
+    };
+    let owner = persona_owner(&live)
+        .filter(|kept| !take_over && foreign_owner(kept, &seat_name(), &holder_name()));
+    if let Some(kept) = owner {
+        bail!(
+            "persona: {name} was defined by {}, so this seat may not retire it. \
+             Pass --replace to retire it anyway. Nothing was withdrawn",
+            owner_phrase(&kept)
+        );
+    }
+    let mut withdrawn = 0;
+    for id in same
+        .iter()
+        .filter_map(|a| a.get("id").and_then(Value::as_str))
+    {
+        client
+            .delete_atom(&workspace, id, None)
+            .with_context(|| format!("persona: POST /v1/atoms/delete failed for {id}"))?;
+        withdrawn += 1;
+    }
+    Ok(format!(
+        "retired {name}: {withdrawn} atom{} withdrawn; it casts no more ballots.\n",
+        if withdrawn == 1 { "" } else { "s" }
+    ))
 }
 
 /// `ljos personas`: one line per live persona, with the seat that defined
@@ -31127,6 +31296,134 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             listing.contains("by saddle (sand-subagent-0e61) since 2026-10-11"),
             "{listing}"
         );
+    }
+
+    /// `--check` says what a define would do, names who defined the name,
+    /// and writes nothing; with `--replace` it says the name is taken over.
+    #[test]
+    fn a_check_says_what_a_define_would_do_and_writes_nothing() {
+        let _g = env_guard();
+        let _seat = HoldEnv::set(&[("LJOS_SEAT", "inky")]);
+        let (url, seen, posted) = serve_owned_persona();
+        let _url = PackUrl::set(&url);
+        let view = chemist("Reads every result as a chemist would.");
+        let refused = check_persona(&view, PersonaWrite::Define).unwrap();
+        assert!(refused.contains("a define is refused"), "{refused}");
+        assert!(
+            refused.contains("seat saddle (sand-subagent-0e61)"),
+            "{refused}"
+        );
+        assert!(refused.ends_with("Nothing was written.\n"), "{refused}");
+        let over = check_persona(&view, PersonaWrite::Replace).unwrap();
+        assert!(
+            over.contains("--replace takes it over under seat inky"),
+            "{over}"
+        );
+        assert!(
+            posted.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+        assert!(
+            seen.lock().unwrap().iter().all(|l| l.starts_with("GET ")),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    /// The check names a persona that already holds the same view and one
+    /// that speaks to the same domains, so a second panel is caught before
+    /// it is written. A name this conversation defined is superseded.
+    #[test]
+    fn a_check_names_the_personas_a_define_would_duplicate() {
+        let atoms: Vec<Value> = serde_json::from_str(
+            r#"[{"id":"a1","kind":"persona","name":"rust-perf","text":"Reads code for the cost of each allocation.","entities":["rust"],"owner":"saddle","holder":"saddle@k3j9","since":"2026-10-11T09:00:00Z","ts":"2026-10-11T09:00:00Z"},
+                {"id":"a2","kind":"persona","name":"hpc-simd","text":"Reads a kernel for its vector width.","entities":["simd","rust"],"owner":"saddle","holder":"saddle@x1y2","since":"2026-10-11T09:05:00Z","ts":"2026-10-11T09:05:00Z"}]"#,
+        )
+        .unwrap();
+        let new = Persona {
+            name: "rust-idiom".into(),
+            anchor: 0.5,
+            view: "reads code for the COST of each allocation".into(),
+            entities: vec!["Rust".into()],
+            runner: None,
+        };
+        let report =
+            persona_check_report(&new, PersonaWrite::Define, &atoms, "saddle", "saddle@k3j9")
+                .unwrap();
+        assert!(report.starts_with("rust-idiom is free"), "{report}");
+        assert!(
+            report.contains("rust-perf already holds the same view."),
+            "{report}"
+        );
+        assert!(report.contains("hpc-simd also speaks to rust."), "{report}");
+        let own = Persona {
+            name: "rust-perf".into(),
+            ..new
+        };
+        let report =
+            persona_check_report(&own, PersonaWrite::Define, &atoms, "saddle", "saddle@k3j9")
+                .unwrap();
+        assert!(report.contains("is this seat's"), "{report}");
+        assert!(report.contains("supersedes its view"), "{report}");
+    }
+
+    /// A pack serving one persona, `eon-chemist`, owned by `owner` and
+    /// `holder`, that records every request line.
+    fn serve_persona_of(owner: &str, holder: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let atoms = format!(
+            r#"{{"atoms":[{{"id":"atom-chem","kind":"persona","name":"eon-chemist","anchor":0.4,"text":"Reads a saddle search as a chemist.","owner":"{owner}","holder":"{holder}","since":"2026-10-11T09:58:00Z","ts":"2026-10-11T09:58:00Z"}}]}}"#
+        );
+        serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (200, atoms.clone())
+            } else if line.starts_with("POST /v1/atoms/delete") {
+                (200, r#"{"deleted":"atom-chem"}"#.into())
+            } else {
+                (200, r#"{"atoms":[]}"#.into())
+            }
+        })
+    }
+
+    /// Only the conversation that defined a persona retires it. Another
+    /// seat's retire is refused and withdraws nothing; `--replace` retires
+    /// it anyway. A name the pack does not hold is refused.
+    #[test]
+    fn only_the_defining_conversation_retires_a_persona() {
+        let _g = env_guard();
+        let _seat = HoldEnv::set(&[("LJOS_SEAT", "inky")]);
+        let (url, seen) = serve_persona_of("saddle", "sand-subagent-0e61");
+        let _url = PackUrl::set(&url);
+        let err = retire_persona("eon-chemist", false).expect_err("another seat's persona retired");
+        let text = format!("{err:#}");
+        assert!(text.contains("seat saddle"), "{text}");
+        assert!(text.contains("--replace"), "{text}");
+        let deletes = |seen: &Arc<Mutex<Vec<String>>>| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.contains("/v1/atoms/delete"))
+                .count()
+        };
+        assert_eq!(deletes(&seen), 0, "{:?}", seen.lock().unwrap());
+        let out = retire_persona("eon-chemist", true).unwrap();
+        assert_eq!(
+            out,
+            "retired eon-chemist: 1 atom withdrawn; it casts no more ballots.\n"
+        );
+        assert_eq!(deletes(&seen), 1, "{:?}", seen.lock().unwrap());
+        let err = retire_persona("nla-analyst", false).expect_err("a missing persona retired");
+        assert!(
+            format!("{err:#}").contains("no persona nla-analyst"),
+            "{err:#}"
+        );
+
+        let holder = holder_name();
+        let (url, seen) = serve_persona_of("inky", &holder);
+        let _url = PackUrl::set(&url);
+        retire_persona("eon-chemist", false).unwrap();
+        assert_eq!(deletes(&seen), 1, "{:?}", seen.lock().unwrap());
     }
 
     /// A pack that refuses the lesson after the work is done leaves the
