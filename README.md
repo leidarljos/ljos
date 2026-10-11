@@ -123,12 +123,17 @@ copied before recall. Without `--playbook`, the sitting takes a name already
 bound, then a closed-set token in the title, then `sit`. The playbook name
 lives as a tracker note until finish or release, and `ljos panel` refuses to
 run until one is bound.
+The sitting prints a short report: whether ljos is ready, what needs action, what the seat remembers for the task, and the claim.
+`--verbose` prints every section in full.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
 goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
 standing lesson and records that the person accepted it. Under an agent runner
 it accepts only a proposal another conversation filed, such as a worker's, so
-an agent can't accept its own proposal. The island fires, the session node
+an agent can't accept its own proposal. A lesson you type at `ljos finish` in a
+terminal of your own, with no agent runner above it, is written at once as
+yours. `ljos accept`, `ljos forget` and `ljos graded` take the first eight
+characters of an id. The island fires, the session node
 completes, and a named outcome shrinks the weight of the voters it refuted. A
 lesson typed with `ljos remember` stays `user-declared`, and the same words
 satisfy the open proposal. The ticket stays open unless `--close` is given,
@@ -328,7 +333,8 @@ ljos habit                                     # every habit as it stands, the c
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
-ljos doctor
+ljos doctor                                    # whether ljos is ready, and only the rows that need action
+ljos doctor --all                              # every row
 ljos protocol
 ljos onboard                                   # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes

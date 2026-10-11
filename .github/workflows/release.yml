@@ -94,6 +94,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The installer goes up beside the archives, so
+      # releases/latest/download/install.sh always names the latest one.
+      - name: Attach the installer
+        run: |
+          cp scripts/install.sh dist/install.sh
+          (cd dist && sha256sum install.sh > install.sh.sha256)
       - name: Release notes from the changelog
         run: |
           awk -v v="${TAG#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md
