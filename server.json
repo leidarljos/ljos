@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.leidarljos/ljos",
+  "title": "ljos",
+  "description": "Local memory, a work tracker and a shell-command guard shared by coding agents on one machine.",
+  "version": "0.28.0",
+  "websiteUrl": "https://leidarljos.github.io",
+  "repository": {
+    "url": "https://github.com/leidarljos/ljos",
+    "source": "github",
+    "id": "1365951786"
+  },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/leidarljos/ljos/main/assets/logo.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": ["any"]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "ljos",
+      "version": "0.28.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

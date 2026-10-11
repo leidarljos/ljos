@@ -358,6 +358,7 @@ ljos receive bag [--since bridge.txt] [--import]
 ljos doctor                                    # whether ljos is ready, and only the rows that need action
 ljos doctor --all                              # every row
 ljos protocol
+ljos mcp                                       # serve MCP over stdio through the ljos-mcp beside this ljos
 ljos onboard                                   # at a terminal, every runner found on this machine; into a pipe, the one MCP server entry any runner takes
 ljos onboard --harness all --dry-run           # what onboarding every runner found would write
 ljos onboard --harness json                    # the one MCP server entry any runner takes
@@ -377,10 +378,12 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. By default it lists seventeen
-core tools: `remember`, `search`, `prefer`, `rule`, `file`, `note`,
-`sitting`, `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`,
-`consensus`, `doctor` and `request_approval`, each with the prefix `ljos_`.
+`ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which
+runs the `ljos-mcp` installed beside it. By default it lists seventeen core
+tools, guard and memory first: `rule`, `request_approval`, `prefer`,
+`remember`, `search`, `file`, `note`, `sitting`, `finish`, `claim`,
+`release`, `send`, `inbox`, `reply`, `vote`, `consensus` and `doctor`, each
+with the prefix `ljos_`.
 Every listed tool costs its description and schema on every session: about
 6,100 tokens for the core set against 15,000 for all forty-seven (o200k_base
 count). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
@@ -394,6 +397,15 @@ keeps its servers:
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
 ```
+
+The official MCP Registry lists the server from the crates.io page of
+`ljos`, and checks this line there:
+
+- mcp-name: io.github.leidarljos/ljos
+
+`server.json` holds the registry entry, and a release tag publishes it.
+`Dockerfile` builds `ljos-mcp` and starts it, for a registry that runs the
+server to list its tools.
 
 [`examples/unanimous-green/`](examples/unanimous-green/) shows two
 implementers and two reviewers reaching a unanimous `GREEN` from

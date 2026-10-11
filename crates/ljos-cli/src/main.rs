@@ -578,6 +578,12 @@ enum Cmd {
     Protocol,
     /// Who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from.
     Seat,
+    /// Serve MCP over stdio: run the `ljos-mcp` installed beside this `ljos`, with these arguments. For a client that starts a server by its crate's name.
+    Mcp {
+        /// Arguments passed to `ljos-mcp` as they stand.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Print the one MCP server entry any runner takes; with --harness, register it with a runner named in ~/.config/ljos/harnesses.toml and install the protocol as its skill.
     Onboard {
         /// A runner named in ~/.config/ljos/harnesses.toml or shipped with ljos; `all` onboards every runner found on this machine, and `json` prints the entry to paste anywhere. Absent: `all` at a terminal, `json` into a pipe.
@@ -1950,6 +1956,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::Protocol => print!("{PROTOCOL}"),
         Cmd::Seat => print!("{}", format_seat(&whoami())),
+        Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
         Cmd::Onboard {
             harness,
             dry_run,
