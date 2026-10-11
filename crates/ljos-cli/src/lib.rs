@@ -10312,12 +10312,21 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
         bail!("deed: an accession is required");
     }
     let layout = vissue_core::Layout::resolve(None, None)?;
-    let hit = vissue_core::Router::load(layout)?.find_by_id(ticket)?;
+    let mut hit = vissue_core::Router::load(layout)?.find_by_id(ticket)?;
+    // A removal is an appended event, and a board has nowhere to append
+    // it. The board is split into per-issue files first, which reads it
+    // and does not write it, then the removal appends to the ledger.
+    let mut split = String::new();
     if !vissue_core::ledger::is_ledger(&hit.path) {
-        bail!(
-            "deed: {ticket} is not in a ledger, so a removal would rewrite the board. \
-             A removal is an appended event"
-        );
+        let said = vissue_core::ledger::migrate(&hit.layout, false).with_context(|| {
+            format!("deed: {ticket} is on a board, and splitting it into a ledger failed")
+        })?;
+        split = format!("split the board into a ledger first (`vissue migrate-ledger`):\n{said}");
+        hit = vissue_core::Router::load(vissue_core::Layout::resolve(None, None)?)?
+            .find_by_id(ticket)?;
+        if !vissue_core::ledger::is_ledger(&hit.path) {
+            bail!("deed: {ticket} is still on a board after the split; nothing was removed");
+        }
     }
     let card = vissue_core::agent::show_json(&hit.layout, ticket)?;
     let cited = card
@@ -10333,7 +10342,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
         ticket,
         &format!("removed citation {accession}"),
     )?;
-    Ok(dropped)
+    Ok(format!("{split}{dropped}"))
 }
 
 /// Whether a cite stands: an issue whose ballots settle (`vissue
@@ -22294,10 +22303,11 @@ mod tests {
         assert!(super::uncite_deed("probe-c1te", "  ").is_err());
     }
 
-    /// A single board file has no append. Removing a citation there would
-    /// rewrite it, so the verb refuses and the file stays.
+    /// A freshly filed issue sits on a board. Removing a citation splits
+    /// the board into a ledger first, then appends the removal, so a
+    /// superseded deed can be dropped the minute the issue exists.
     #[test]
-    fn removing_a_citation_from_a_board_is_refused() {
+    fn removing_a_citation_from_a_board_splits_it_first() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -22310,20 +22320,35 @@ mod tests {
 * TODO [#C] Board
 :PROPERTIES:
 :ID:         probe-b0rd
-:DEEDS:      deed-file
+:DEEDS:      deed-file deed-keep
 :END:
 ";
         let issues = project.join("issues.org");
         std::fs::write(&issues, board).unwrap();
         let root_s = root.to_str().unwrap();
         unsafe { std::env::remove_var("ISSUE_ROOT") };
-        let _env = HoldEnv::set(&[("VISSUE_ROOT", root_s), ("VISSUE_NO_ROUTE", "1")]);
-        let before = std::fs::read(&issues).unwrap();
-        let err = super::uncite_deed("probe-b0rd", "deed-file")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not in a ledger"), "{err}");
-        assert_eq!(std::fs::read(&issues).unwrap(), before);
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root_s),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+        ]);
+        let said = super::uncite_deed("probe-b0rd", "deed-file")
+            .unwrap_or_else(|e| panic!("removal on a board failed: {e:#}"));
+        assert!(said.contains("split the board into a ledger"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(&issues).unwrap(),
+            board,
+            "the board was rewritten"
+        );
+        assert!(project.join("issues/probe-b0rd.org").is_file());
+        let card = super::tracker_show_json("probe-b0rd").unwrap();
+        let left: Vec<&str> = card["deeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(left, vec!["deed-keep"]);
     }
 
     /// A non-zero exit is an error carrying what was said on stderr.

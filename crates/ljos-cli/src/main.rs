@@ -126,16 +126,16 @@ enum Cmd {
     Current { accession: String },
     /// Cite a deed on an issue, drop one, or list what it cites. Citing a deed names it; the bytes stay in deedar.
     Deed {
-        /// The issue, when citing or listing.
+        /// The issue: cited on, listed, or dropped from.
         #[arg(required_unless_present = "ticket")]
         issue: Option<String>,
         /// An accession to cite, from `deedar create`; repeat for several.
         #[arg(long, conflicts_with = "remove")]
         add: Vec<String>,
         /// An accession to drop. Repeat for several. The removal is appended.
-        #[arg(long, requires = "ticket")]
+        #[arg(long)]
         remove: Vec<String>,
-        /// The ticket `--remove` drops the accession from.
+        /// The ticket `--remove` drops the accession from, in place of the positional issue.
         #[arg(long, conflicts_with = "issue")]
         ticket: Option<String>,
     },
@@ -840,7 +840,10 @@ fn main() -> Result<()> {
             ticket,
         } => {
             if !remove.is_empty() {
-                let ticket = ticket.as_deref().context("deed: --ticket is required")?;
+                let ticket = ticket
+                    .as_deref()
+                    .or(issue.as_deref())
+                    .context("deed: name the issue to drop it from")?;
                 for a in &remove {
                     print!("{}", uncite_deed(ticket, a)?);
                 }

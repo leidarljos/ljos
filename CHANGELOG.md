@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos deed --remove` works on an issue that is still on a board. It refused with `not in a ledger`, so an issue filed with `ljos file` minutes earlier kept a superseded deed cited. The removal now splits the board into per-issue files first, as `vissue migrate-ledger` does, and then appends the removal. The board file is read and not written. `ljos deed ISSUE --remove ACCESSION` takes the issue as the positional argument too; it failed with a usage error and needed `--ticket`.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
