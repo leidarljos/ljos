@@ -93,8 +93,10 @@ fn text(out: &Output) -> String {
     )
 }
 
-#[test]
-fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
+/// A fresh home with packsetd on a free port and the hooks `ljos onboard
+/// --harness claude` wrote: the home, the daemon, and the prompt hook's
+/// command.
+fn seat() -> (Home, Daemon, String) {
     let Some(packsetd) = on_path("packsetd") else {
         panic!("packsetd is not on PATH; CI builds it from packset develop");
     };
@@ -163,6 +165,39 @@ fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
         .unwrap_or_else(|| panic!("no UserPromptSubmit hook: {settings}"))
         .to_string();
 
+    (home, _daemon, hook)
+}
+
+/// Send one prompt through the hook onboard wrote and return the context
+/// it gave back.
+fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> String {
+    let payload = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": session,
+        "cwd": home.dir.path(),
+        "prompt": prompt,
+    })
+    .to_string();
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", hook]);
+    home.env(&mut cmd, home.dir.path());
+    let said = run(cmd, Some(&payload));
+    assert!(said.status.success(), "{hook}: {}", text(&said));
+    // A hook with nothing to say prints nothing.
+    if said.stdout.iter().all(u8::is_ascii_whitespace) {
+        return String::new();
+    }
+    let out: Value = serde_json::from_slice(&said.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {hook} printed {}", text(&said)));
+    out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
+    let (home, _daemon, hook) = seat();
     let remembered = home.ljos(&["remember", LESSON], None);
     assert!(remembered.status.success(), "{}", text(&remembered));
     if text(&remembered).contains("episode:") {
@@ -180,27 +215,41 @@ fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
     assert!(text(&found).contains("follow-tags"), "{}", text(&found));
 
     for prompt in ["tag the 0.3.0 release", "how do I tag a release"] {
-        let payload = serde_json::json!({
-            "hook_event_name": "UserPromptSubmit",
-            "session_id": format!("cold-{}", prompt.len()),
-            "cwd": home.dir.path(),
-            "prompt": prompt,
-        })
-        .to_string();
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", &hook]);
-        home.env(&mut cmd, home.dir.path());
-        let said = run(cmd, Some(&payload));
-        assert!(said.status.success(), "{hook}: {}", text(&said));
-        let out: Value = serde_json::from_slice(&said.stdout)
-            .unwrap_or_else(|e| panic!("{e}: {hook} printed {}", text(&said)));
-        let context = out["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default();
+        let context = prompt_through(&home, &hook, &format!("cold-{}", prompt.len()), prompt);
         assert!(
             context.contains("follow-tags leaves the v-tags behind"),
-            "{prompt:?}: the hook did not show the lesson: {}",
-            text(&said)
+            "{prompt:?}: the hook did not show the lesson: {context}"
         );
     }
+}
+
+/// "From now on always use bun, never yarn" said in chat is saved, in the
+/// person's words, on the prompt that says it, and a later session's
+/// prompt about yarn gets it back.
+#[test]
+fn a_choice_said_in_chat_is_saved_and_comes_back() {
+    let (home, _daemon, hook) = seat();
+    // The first write loads the pack's encoder; a session warms it first.
+    let warm = home.ljos(&["prefer", "Run cargo clippy before every commit"], None);
+    assert!(warm.status.success(), "{}", text(&warm));
+    let said = "From now on always use bun, never yarn, in this repo";
+    let context = prompt_through(&home, &hook, "chat-one", said);
+    assert!(
+        context.contains("Saved the person's preference"),
+        "the hook did not save the stated choice: {context}"
+    );
+    let found = home.ljos(&["search", "bun yarn"], None);
+    assert!(text(&found).contains(said), "{}", text(&found));
+    assert!(text(&found).contains("preference"), "{}", text(&found));
+
+    let context = prompt_through(
+        &home,
+        &hook,
+        "chat-two",
+        "add lodash as a dev dependency with yarn",
+    );
+    assert!(
+        context.contains("always use bun, never yarn"),
+        "the next session did not get the preference: {context}"
+    );
 }

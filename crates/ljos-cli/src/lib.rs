@@ -14,6 +14,7 @@ use serde_json::Value;
 pub mod admit;
 pub mod approval;
 pub mod ask_pack;
+pub mod capture;
 pub mod command_prefs;
 pub mod hud;
 pub mod jev;
@@ -5919,13 +5920,81 @@ pub fn encoder_warming() -> bool {
 /// hook twice for one event, and both queue on the pack's one reranker.
 /// The first call makes the marker and answers; the second returns at once.
 pub fn hook_already_running(call: &HookCall) -> bool {
-    let key = work_id(&format!(
+    hook_marker_fresh(&running_key(call), std::time::Duration::from_secs(20))
+}
+
+fn running_key(call: &HookCall) -> String {
+    work_id(&format!(
         "{}|{}|{}",
         call.event,
         call.session.as_deref().unwrap_or(""),
         call.cue
-    ));
-    hook_marker_fresh(&key, std::time::Duration::from_secs(20))
+    ))
+}
+
+/// Whether a copy of this call gets the first call's answer again rather
+/// than nothing. Codex (the runner whose stdin carries `turn_id`) delivers
+/// every hook event twice, and how it joins the two answers is not
+/// written down, so its copy of a prompt or a tool result says what the
+/// first said. A runner that joins two registrations' answers, such as
+/// Cursor, would show the memories twice, so its copy stays silent.
+#[must_use]
+pub fn replays_its_copy(call: &HookCall) -> bool {
+    call.shape == HookShape::DenyOnly
+        && matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse")
+}
+
+/// Where the first call's answer waits for its copy. The name starts like
+/// the markers, so the same sweep clears it.
+fn hook_answer_path(call: &HookCall) -> PathBuf {
+    runtime_dir().join(format!("hook-once-{}.answer", running_key(call)))
+}
+
+/// Keep the answer the first call printed, for [`replay_hook_answer`].
+/// Readable by its owner only, and written whole before it can be read.
+pub fn keep_hook_answer(call: &HookCall, output: &str) {
+    if !replays_its_copy(call) {
+        return;
+    }
+    let path = hook_answer_path(call);
+    let partial = path.with_extension("partial");
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&partial)
+        .and_then(|mut f| f.write_all(output.as_bytes()));
+    if written.is_ok() {
+        let _ = std::fs::rename(&partial, &path);
+    }
+}
+
+/// The first call's answer, once it is written, waiting up to `wait`.
+/// `None` when it never comes: the copy then answers with nothing, as a
+/// copy on any other runner does, and the first call's answer stands.
+#[must_use]
+pub fn replay_hook_answer(call: &HookCall, wait: std::time::Duration) -> Option<String> {
+    let path = hook_answer_path(call);
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    // An answer older than the marker is an earlier prompt's with the same
+    // words, and is not this one's.
+    let since = modified(&runtime_dir().join(format!("hook-once-{}", running_key(call))));
+    let start = std::time::Instant::now();
+    loop {
+        let current = modified(&path).is_some_and(|at| since.is_none_or(|since| at >= since));
+        if current {
+            if let Ok(answer) = std::fs::read_to_string(&path) {
+                return Some(answer);
+            }
+        }
+        if start.elapsed() >= wait {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Events said once per occurrence, whose twin from a second registration
@@ -13200,6 +13269,17 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
     )
 }
 
+/// The line a write prints when the pack stored the person's words over a
+/// prose warning: what the gate said, and that shorter sentences are
+/// recalled better. `None` when the pack gave no warning.
+#[must_use]
+pub fn prose_warning_line(body: &Value) -> Option<String> {
+    let warning = body["prose"]["warning"].as_str()?.trim();
+    (!warning.is_empty()).then(|| {
+        format!("stored as written; the pack's prose check said: {warning}. Shorter sentences are recalled better.")
+    })
+}
+
 /// One line after a pack write: id, kind, due, text. Not the embedding.
 #[must_use]
 pub fn format_write_ack(body: &serde_json::Value) -> String {
@@ -19488,7 +19568,7 @@ mod tests {
         }
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         for (k, v) in std::env::vars() {
@@ -21616,6 +21696,59 @@ mod tests {
             !hook_already_running(&call("another prompt")),
             "another prompt answers"
         );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// Codex's copy of a prompt event says what the first delivery said,
+    /// once that answer is written, and nothing is run twice. A Cursor
+    /// copy keeps quiet.
+    #[test]
+    fn a_codex_copy_replays_the_first_answer() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let call = |shape: HookShape| HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "From now on always use bun".into(),
+            session: Some("019a-root".into()),
+            shape,
+        };
+        let codex = call(HookShape::DenyOnly);
+        assert!(!hook_already_running(&codex), "the first runs");
+        assert!(hook_already_running(&codex), "the copy does not");
+        let quick = std::time::Duration::from_millis(100);
+        assert_eq!(
+            replay_hook_answer(&codex, quick),
+            None,
+            "nothing written yet"
+        );
+        keep_hook_answer(&codex, "{\"hookSpecificOutput\":{}}\n");
+        assert_eq!(
+            replay_hook_answer(&codex, quick).as_deref(),
+            Some("{\"hookSpecificOutput\":{}}\n")
+        );
+        let cursor = call(HookShape::Cursor);
+        assert!(!replays_its_copy(&cursor));
+        keep_hook_answer(&cursor, "x");
+        assert_eq!(
+            replay_hook_answer(&codex, quick).as_deref(),
+            Some("{\"hookSpecificOutput\":{}}\n"),
+            "a Cursor call writes no answer"
+        );
+        // The same words a minute on are a new prompt: the old answer is
+        // not replayed to its copy.
+        let marker = dir
+            .path()
+            .join("ljos")
+            .join(format!("hook-once-{}", running_key(&codex)));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(replay_hook_answer(&codex, quick), None);
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
@@ -28258,6 +28391,150 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
     }
 
+    /// A pack that keeps what is posted and answers every search with it.
+    fn serve_keeping_pack() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if first.contains("POST /v1/atoms") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let mut held = slot.lock().unwrap();
+                atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
+                held.push(atom.clone());
+                return (200, atom.to_string());
+            }
+            if first.contains("/v1/search") {
+                let hits: Vec<Value> = slot
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "id": a["id"], "text": a["text"], "score": 2.0, "kind": a["kind"],
+                            "ts": "2026-10-11T15:00:00.000Z", "entities": a["entities"],
+                            "ballots": 3, "of": 3
+                        })
+                    })
+                    .collect();
+                return (200, serde_json::json!({ "hits": hits }).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        (url, stored)
+    }
+
+    /// "From now on always use bun, never yarn" is saved as the person's
+    /// own standing preference on the prompt that says it, and the next
+    /// session's prompt about yarn gets it back.
+    #[test]
+    fn a_choice_said_in_chat_is_saved_and_comes_back_next_session() {
+        let _env = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let (url, stored) = serve_keeping_pack();
+        let _hold = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+            ("LJOS_CAPTURE", "save"),
+        ]);
+        let _url = PackUrl::set(&url);
+        let said = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "From now on always use bun, never yarn, in this repo".into(),
+            session: Some("chat-one".into()),
+            shape: HookShape::default(),
+        };
+        let (line, _) = capture::capture_stated(&said).expect("the choice is saved");
+        assert!(line.contains("ljos forget"), "{line}");
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["kind"], "preference");
+        assert_eq!(live[0]["origin"], "user-declared");
+        assert_eq!(
+            live[0]["text"],
+            "From now on always use bun, never yarn, in this repo"
+        );
+        let tags = live[0]["entities"].to_string();
+        assert!(tags.contains("horizon:standing"), "{tags}");
+        assert!(tags.contains("via:prompt"), "{tags}");
+        assert!(line.contains(live[0]["id"].as_str().unwrap()), "{line}");
+
+        assert!(capture::capture_stated(&said).is_none(), "saved twice");
+        let (note, _) = hook_note(&said, 5);
+        assert!(!note.contains("never yarn"), "the note repeated it: {note}");
+
+        let next = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "add lodash as a dev dependency with yarn".into(),
+            session: Some("chat-two".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&next, 5);
+        assert!(note.contains("always use bun, never yarn"), "{note}");
+    }
+
+    /// With `LJOS_CAPTURE=off` a stated choice is left alone, and `nudge`
+    /// asks the agent to write it without writing anything.
+    #[test]
+    fn capture_off_and_nudge_write_nothing() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let (url, stored) = serve_keeping_pack();
+        let _url = PackUrl::set(&url);
+        let said = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "Never push directly to main.".into(),
+            session: Some("chat-off".into()),
+            shape: HookShape::default(),
+        };
+        {
+            let _hold = HoldEnv::set(&[
+                ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+                ("LJOS_CAPTURE", "off"),
+            ]);
+            assert!(capture::capture_stated(&said).is_none());
+        }
+        {
+            let _hold = HoldEnv::set(&[
+                ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+                ("LJOS_CAPTURE", "nudge"),
+            ]);
+            let (line, _) = capture::capture_stated(&said).unwrap();
+            assert!(line.contains("ljos prefer"), "{line}");
+        }
+        assert!(stored.lock().unwrap().is_empty());
+    }
+
+    /// An agent's `ljos remember` of the person's words from their latest
+    /// prompt is theirs, so it stands; the agent's own wording does not.
+    #[test]
+    fn the_persons_words_from_the_latest_prompt_stand() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("LJOS_CAPTURE", "save"),
+        ]);
+        capture::note_latest_prompt(
+            "remember this: the integration tests need a local Redis on port 6380, not 6379",
+        );
+        assert!(capture::said_in_latest_prompt(
+            "The integration tests need a local Redis on port 6380, not 6379."
+        ));
+        assert!(!capture::said_in_latest_prompt(
+            "Redis for the tests listens on 6380"
+        ));
+        assert!(!capture::said_in_latest_prompt("local Redis"));
+        let agents = !capture::said_in_latest_prompt(
+            "the integration tests need a local Redis on port 6380",
+        );
+        assert_eq!(remember_horizon(false, false, agents), Some(false));
+    }
+
     #[test]
     fn a_deed_the_pusher_minted_does_not_carry_a_push() {
         let _env = env_guard();
@@ -29386,6 +29663,24 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{calls}"
         );
         assert!(!calls.contains(&format!("--actor {alive}")), "{calls}");
+    }
+
+    #[test]
+    fn a_prose_warning_is_one_line_and_its_absence_is_none() {
+        let warned = serde_json::json!({"id": "a", "prose": {"grade": 14.78,
+            "warning": "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
+        let line = prose_warning_line(&warned).unwrap();
+        assert!(line.starts_with("stored as written"), "{line}");
+        assert!(
+            line.contains("readability grade 14.78 exceeds 14"),
+            "{line}"
+        );
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            prose_warning_line(&serde_json::json!({"prose": {"grade": 8.0}})),
+            None
+        );
+        assert_eq!(prose_warning_line(&serde_json::json!({"id": "b"})), None);
     }
 
     #[test]

@@ -771,6 +771,12 @@ enum Cmd {
 /// The write acknowledgement: the plain sentence for a person at a
 /// terminal, the tab-separated row for a pipe.
 fn write_ack(body: &serde_json::Value) -> String {
+    // The pack keeps a person's hard sentence and says why it would have
+    // refused it; that goes to stderr, so the one line a script reads
+    // stays one line.
+    if let Some(note) = ljos_cli::prose_warning_line(body) {
+        eprintln!("{note}");
+    }
     if std::io::stdout().is_terminal() {
         ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
     } else {
@@ -795,9 +801,13 @@ fn main() -> Result<()> {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
-            let horizon =
-                ljos_cli::remember_horizon(transient, standing, ljos_cli::under_a_runner());
-            let body = packset_write_as("Remember", &join(&text), as_persona.as_deref(), horizon)?;
+            let text = join(&text);
+            // Under a runner the lesson is the agent's, unless it is the
+            // person's words from their latest prompt: then it stands.
+            let agents =
+                ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
+            let horizon = ljos_cli::remember_horizon(transient, standing, agents);
+            let body = packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?;
             println!("{}", write_ack(&body));
             eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
@@ -1440,6 +1450,12 @@ fn main() -> Result<()> {
             }
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
                 if ljos_cli::hook_already_running(&call) {
+                    if ljos_cli::replays_its_copy(&call) {
+                        let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
+                        if let Some(answer) = ljos_cli::replay_hook_answer(&call, wait) {
+                            print!("{answer}");
+                        }
+                    }
                     return Ok(());
                 }
                 std::thread::spawn(|| {
@@ -1679,7 +1695,12 @@ fn main() -> Result<()> {
                 _ => {
                     // The person's prompt is the chat's consent channel; the
                     // grant goes first, ahead of the hook's deadline.
-                    let granted = (call.event == "UserPromptSubmit")
+                    // Only the person's own prompt grants, saves or
+                    // corrects: a subagent's brief or an unattended run's
+                    // prompt is an agent's words in that channel.
+                    let person = call.event == "UserPromptSubmit"
+                        && ljos_cli::capture::not_the_person(&input).is_none();
+                    let granted = person
                         .then(|| {
                             ljos_cli::approval::approve_from_prompt(
                                 &call.cue,
@@ -1687,10 +1708,28 @@ fn main() -> Result<()> {
                             )
                         })
                         .flatten();
-                    if call.event == "UserPromptSubmit" {
+                    // A standing choice the person states is saved in their
+                    // words before the note is read, so the note does not
+                    // repeat it and the correction hook does not file it
+                    // again as a proposal.
+                    let captured = if person {
+                        ljos_cli::capture::note_latest_prompt(&call.cue);
+                        ljos_cli::capture::capture_stated(&call)
+                    } else {
+                        None
+                    };
+                    if person {
                         ljos_cli::store_correction(&call);
                     }
                     let (mut ctx, mut ids) = hook_note(&call, limit);
+                    if let Some((line, keys)) = captured {
+                        ctx = if ctx.is_empty() {
+                            line
+                        } else {
+                            format!("{line}\n{ctx}")
+                        };
+                        ids.extend(keys);
+                    }
                     if call.shape == ljos_cli::HookShape::CamelCase
                         && call.event == "UserPromptSubmit"
                     {
@@ -1743,6 +1782,7 @@ fn main() -> Result<()> {
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
             print!("{output}");
             let _ = std::io::Write::flush(&mut std::io::stdout());
+            ljos_cli::keep_hook_answer(&call, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
                 ljos_cli::mail::ack_delivered(&seen_later);
