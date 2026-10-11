@@ -27,7 +27,7 @@ rm -rf "$PACKSET_HOME"
 export PACKSET_TRACE_WRITES="$HOME/hook-scale-writes-${SLURM_JOB_ID:-local}.log"
 rm -f "$PACKSET_TRACE_WRITES"
 packset ensure
-ljos doctor | grep -E "^(ok|--)	(pack|encoder)" || true
+ljos doctor --all | grep -E "^(ok|--)	(pack|encoder)" || true
 uv run --script "$HOME/Git/Github/ljos/scripts/terra/hook_scale.py" --sizes 1000 --sizes 5000 --sizes 10000; rc=$?
 packset stop >/dev/null 2>&1 || true
 rm -rf "$PACKSET_HOME"

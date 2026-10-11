@@ -3,22 +3,22 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, complete,
-    conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
-    format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
-    format_hubs, format_island, format_playbooks, format_readings, format_remembered, format_seat,
-    format_steps, format_write_ack, graded, habit, habits, handover, healthy, hook_note,
-    identity_or_seat, island_entities, join, learn_anchors, learn_and_write, learn_reading,
-    learn_shared, mark_seen, now_utc, on_path, onboard_to, pack, packset_consolidate,
-    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
-    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
-    post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign, receive, release,
-    remember_findings, rows_about, rules_from_pack, run, run_as, run_captured, session_end,
-    settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words, tracker_show_json,
-    trim_num, trust_from_pack, uncite_deed, verdict_for, whoami, with_discount,
-    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, compact_sitting,
+    complete, conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish,
+    forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
+    format_doctor_short, format_findings, format_hits, format_hubs, format_island,
+    format_playbooks, format_readings, format_remembered, format_seat, format_steps,
+    format_write_ack, graded, habit, habits, handover, healthy, hook_note, identity_or_seat,
+    island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen,
+    now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
+    packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
+    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
+    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about,
+    rules_from_pack, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
+    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
+    uncite_deed, verdict_for, whoami, with_discount, withdraw_prediction, write_outcome,
+    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
+    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -531,8 +531,12 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
-    /// Which habitats answer. Exit 1 when a required one does not.
-    Doctor,
+    /// Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer.
+    Doctor {
+        /// Print every row, the ones that answer included.
+        #[arg(long, visible_alias = "verbose")]
+        all: bool,
+    },
     /// Read-only icedtea pane over due, claims, and trust. Execs sibling `ljos-hud`.
     Hud {
         /// Stay on the terminal. Default detaches.
@@ -676,6 +680,9 @@ enum Cmd {
         /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
         #[arg(long)]
         playbook: Option<String>,
+        /// Print every section in full: the doctor's rows, recall, timeline, reclaim. Without it the sitting prints what needs action and what the seat remembers.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
     Finish {
@@ -1742,9 +1749,13 @@ fn main() -> Result<()> {
             let v = write_trust(&row, &why)?;
             println!("{v}");
         }
-        Cmd::Doctor => {
+        Cmd::Doctor { all } => {
             let rows = doctor();
-            print!("{}", format_doctor(&rows));
+            if all {
+                print!("{}", format_doctor(&rows));
+            } else {
+                print!("{}", format_doctor_short(&rows));
+            }
             if !healthy(&rows) {
                 std::process::exit(1);
             }
@@ -1904,16 +1915,21 @@ fn main() -> Result<()> {
             cards: cards_dir,
             anyway,
             playbook,
-        } => print!(
-            "{}",
-            sitting_gated(
+            verbose,
+        } => {
+            let full = sitting_gated(
                 &issue,
                 &cli_assignee(assignee.as_deref()),
                 &cards_dir,
                 anyway,
-                playbook.as_deref()
-            )?
-        ),
+                playbook.as_deref(),
+            )?;
+            if verbose {
+                print!("{full}");
+            } else {
+                print!("{}", compact_sitting(&full, &issue));
+            }
+        }
         Cmd::Finish {
             issue,
             status,

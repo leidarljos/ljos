@@ -40,7 +40,7 @@ cd "$root"
 packset ensure >/dev/null
 fail() { echo "smoke: $1" >&2; exit 1; }
 
-doc=$(ljos doctor 2>&1 || true)
+doc=$(ljos doctor --all 2>&1 || true)
 echo "$doc" | grep -q '^ok	pack' || { echo "$doc"; fail "the pack does not answer"; }
 ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns." | grep -q lesson || fail remember
 ljos prefer "CombMNZ over RRF for fusing two ballots." | grep -q preference || fail prefer
@@ -170,7 +170,7 @@ if ljos receive "$root/unsigned" --import >/dev/null 2>&1; then fail "an unsigne
 # Signed import lands atoms; doctor still answers.
 got=$(ljos receive "$root/bag" --import 2>&1 || true)
 echo "$got" | grep -q 'atoms imported' || { echo "$got"; fail "signed import"; }
-ljos doctor | grep -q '^ok	pack' || fail "doctor after receive"
+ljos doctor --all | grep -q '^ok	pack' || fail "doctor after receive"
 # A bag altered after sealing is refused: one byte of one atom changed,
 # and the receipt must fail on the manifest, not count the atoms.
 tampered=$(ls "$root/bag/data/atoms"/* | head -1)
