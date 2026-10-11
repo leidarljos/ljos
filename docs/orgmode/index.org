@@ -65,7 +65,8 @@ check. Those are the binaries the tutorial calls. Each comes prebuilt from
 its GitHub release; =cargo install= takes the same names and builds from
 source.
 
-=doctor= names each habitat and whether it answers. The seat works with the
+=doctor= says whether ljos is ready and lists the habitats that need action;
+=doctor --all= names each habitat and whether it answers. The seat works with the
 habitats it has; a missing one is reported, not guessed around. =onboard=
 registers the server with an agent runner and installs the sitting protocol
 as its skill; =ljos protocol= prints that protocol for any other.

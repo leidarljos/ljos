@@ -9,4 +9,4 @@ Open a sitting on the issue named in the arguments.
 
 Arguments: $ARGUMENTS
 
-Run `ljos sitting` with those arguments and follow the sections it prints: doctor, cards, due, island, playbook, recall, timeline, and the claim. Stop at the first store that does not answer. Do not invent an issue id. When no issue is named, ask for one.
+Run `ljos sitting` with those arguments and follow what it prints: whether ljos is ready, what needs action, what the seat remembers for the task, and the claim. `--verbose` prints every section. Stop at the first store that does not answer. Do not invent an issue id. When no issue is named, ask for one.
