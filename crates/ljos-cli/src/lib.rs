@@ -15735,8 +15735,13 @@ pub fn sitting_gated(
     }
     // Other machines' memories of this scope arrive before the island is
     // walked, or the sitting orients on half the seat.
-    out.push_str("== sync\n");
-    out.push_str(&sync::sync_repo(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    // With no scope configured the section is left out: sync is opt-in.
+    let synced =
+        sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
+    if !synced.is_empty() {
+        out.push_str("== sync\n");
+        out.push_str(&synced);
+    }
     out.push_str("== cards\n");
     out.push_str(&cards(cards_dir)?);
     let title = issue_title(issue)?;
@@ -16149,7 +16154,9 @@ pub fn finish(
     }
     out.push_str(&persist_tracker(issue, "finished"));
     // What this sitting taught leaves the machine with the tracker.
-    out.push_str(&sync::sync_repo(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    out.push_str(
+        &sync::sync_repo_in_passing(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")),
+    );
     Ok(out)
 }
 
