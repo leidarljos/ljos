@@ -6,7 +6,7 @@
 | Verb | Habitat | Does |
 |---+---+---|
 | =sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway]= | all | open a sitting: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim; reclaim hands back claims quiet longer than =LJOS_LEASE_SECS= (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs; stops at the first store down; the name defaults to this conversation's holder (=ljos seat=); =--playbook= copies a recipe before recall; absent, title-match else =sit=; the name is a tracker =playbook:= note until finish or release |
-| =finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]= | all | close a sitting: file =--lesson= as a proposal with origin =agent-derived=, fire the island, complete, learn; =ljos accept ID= writes the lesson; =--gen= names the claim's generation (absent, the live one; a stale one is refused); =--assignee= names the holder (absent, this conversation's holder); =--close= closes the ticket only when the work is accepted, else the ticket stays |
+| =finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]= | all | close a sitting: file =--lesson= as a proposal with origin =agent-derived=, or write it at once as the person's when no agent runner is above the process and a terminal is on its input, fire the island, complete, learn; =ljos accept ID= writes the lesson; =--gen= names the claim's generation (absent, the live one; a stale one is refused); =--assignee= names the holder (absent, this conversation's holder); =--close= closes the ticket only when the work is accepted, else the ticket stays |
 | =calibrate -p PROJECT [--rounds N]= | consensus, pack | trust rows from the project's voting history (Dawid-Skene accuracy) |
 | =remember TEXT [--as PERSONA] [--transient\vert--standing]= | pack | one lesson, stored as written, origin =user-declared=; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; =--transient= or =--standing= picks one either way |
 | =prefer TEXT [--deny PATTERN] [--ask PATTERN]= | pack | one standing preference, origin =user-declared=; each =--deny= or =--ask= also writes that rule with the preference as its reason, so the hook enforces it |
@@ -36,7 +36,7 @@
 | =learn ID --outcome OPTION [--rule record\vert hedge] [--beta B] [--share S]= | tracker, pack | reweigh voters by what turned out right: by default each voter's record of hits and misses as log-odds weights, its accuracy shrunk toward the panel's pooled accuracy; =hedge= shrinks refuted voters by =B= with =S= recovery; either way the outcome is kept |
 | =evidence ACCESSION= / =current ACCESSION= | deed store | intact; still the tip |
 | =file TITLE [--parent ID\vert --top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT]= | tracker | file work found while sitting: a child of the held issue unless =--parent= names another or =--top= none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed |
-| =note ID TEXT...= | tracker | a dated progress note on the issue, committed |
+| =note ID TEXT...= | tracker | a dated progress note on the issue, committed; on an issue another seat holds it says so: the note is an assist, and =ljos send= reaches the holder |
 | =send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]= | pack | write to one seat, or with =--group= to the other members of that group; =--interrupt= leads the next prompt; =--issue= threads the message on that vissue issue and the atom takes the issue's scope, so =ljos sync= carries it in that repository's sealed log |
 | =inbox [--all]= | pack | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; =ljos hook --prompt= writes a receipt for each message it shows; a pack that does not answer is an error; =--all= includes mail already read |
 | =read ID= | pack | write a read receipt for one message; a second read writes nothing |
@@ -51,8 +51,8 @@
 | =rules [--json]= | pack | the rules the hook and =policy= judge by: verdict, pattern and reason, deny first |
 | =consensus ID [--compare]= | consensus, tracker | first what a push cite on the issue decides, from seat ballots alone; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue tagged =broad= runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted; =--compare= adds the tracker's own settle |
 | =claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]= | claim graph | claim a session node. With =--next=, or with no id, it claims the first ready node in claimdag's order for the name, the way =claim ID= claims one; =--role= and =--slack= set the affinity and the depth slack. A busy refusal names what the name has still claimed |
-| =release ID [--assignee NAME]= | claim graph | hand the session node back unfinished: ready, generation moved |
-| =complete ID [--status done\vert failed\vert cancelled] [--gen G] [--assignee NAME]= | claim graph | finish the session node; does not close the ticket; =--gen= and =--assignee= as on =finish= |
+| =release ID [--assignee NAME]= | claim graph | hand the session node back unfinished: ready, generation moved; a node another conversation of this seat holds (a worker it started, or the one that started it) is released under that name |
+| =complete ID [--status done\vert failed\vert cancelled] [--gen G] [--assignee NAME]= | claim graph | finish the session node; does not close the ticket; =--gen= and =--assignee= as on =finish=; a node another conversation of this seat holds is completed under that name, and another seat's is refused |
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =approve REQUEST_ID= | runtime | record explicit consent for one pending hook request; one matching attempt, fifteen-minute lifetime, deny rules still apply |
 | =policy [--fail-on-deny] ARGV...= | policy, pack | the line as it would run, the trusted computing base (TCB) verdict if =ljos-policyd= answered, then a matching pack rule, then what the pack knows that bears on it; =--fail-on-deny= exits 1 on a deny, and without the flag the exit stays 0 |
@@ -67,8 +67,10 @@
 | =protocol= | none | print the sitting protocol |
 | =onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory; a shell runner (=shell = true=, =grokbot=, or =shell=) writes the skill and an env file and registers no server and no hook |
 
-=send SEAT TEXT= writes to one seat. =send --group NAME TEXT= writes to
-the other members of that group. =--interrupt= leads the next prompt.
+=send SEAT TEXT= writes to one seat. A seat the pack has never heard
+from is refused, with the seats it knows, since mail waits under the name
+it was sent to; =--new-seat= writes to one that has not started yet.
+=send --group NAME TEXT= writes to the other members of that group. =--interrupt= leads the next prompt.
 =--issue ID= threads the message on that vissue issue, and the atom takes
 the issue's scope so =ljos sync= carries it in that repository's sealed
 log. =inbox= lists unread mail and writes no receipt. A pack that does
@@ -142,6 +144,7 @@ as text, so the model reads it as a tool result.
 | =LJOS_HUD_SOCKET= | summon socket; else =$XDG_RUNTIME_DIR/ljos/hud.sock= |
 | =LJOS_TRACKER_GIT= | =commit= commits the ticket's =issues.org= without pushing; =off= skips the commit and push; unset, commit and push |
 | =LJOS_TRACKER_PUSH_WAIT= | seconds the tracker push after a claim or finish waits; 5 when unset |
+| =LJOS_TRACK_WORK= | =on= makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else =~/.config/ljos/env=; unset, they say nothing until it sits |
 | =XDG_CONFIG_HOME= | where =ljos/harnesses.toml= is read from; =~/.config= when unset |
 | =LJOS_PANE_TOOL= | the one =[[tool]]= persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers |
 | =LJOS_PANEL_RUNNER= | the runner a decision panel's members run on, through its =headless= argv; unset, the seat's own runner, else Grok |
@@ -238,7 +241,7 @@ stdin is an argv line and answered in plain lines.
 | =PostToolUse= | emits the held prompt note once, on the first tool result, for a runner that discards prompt-hook stdout (grok sends this event) |
 | =PostToolUseFailure= | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions |
 | =PreCompact= | fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery |
-| =SessionStart= | after a compaction (=source= =compact=), on a runner that takes its context, answers with that note |
+| =SessionStart= | after a compaction (=source= =compact=), on a runner that takes its context, answers with that note; a fresh session hears one line: that ljos is on, the memory and due counts, the command guard, and up to three preferences |
 | =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit=); a deny blocks |
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
