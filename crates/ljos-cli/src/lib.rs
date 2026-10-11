@@ -16625,7 +16625,7 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
                 return Some(Rule {
                     pattern: "ljos-policyd".into(),
                     verdict: "deny".into(),
-                    reason: t.split('\t').nth(1).unwrap_or("tcb").to_string(),
+                    reason: policyd_reason(t.split('\t').nth(1).unwrap_or("tcb")),
                 });
             }
             Some(_) => answered = true,
@@ -16635,8 +16635,69 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     (!answered && policyd_required()).then(|| Rule {
         pattern: "ljos-policyd".into(),
         verdict: "deny".into(),
-        reason: "TCB required".to_string(),
+        reason: "TCB required: POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
+                 shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
+            .to_string(),
     })
+}
+
+/// A refusal from `ljos-policyd` in words a person and an agent can act
+/// on: the check's token first, so logs and scripts still find it, then
+/// what the command would have done and what to run instead. A token this
+/// build does not know is passed through as it came.
+#[must_use]
+pub fn policyd_reason(token: &str) -> String {
+    let token = token.trim();
+    let said = match token {
+        "git-force-push" => {
+            "a force push rewrites history that others may already have pulled. Push \
+             without --force, use --force-with-lease to overwrite only your own last push, or \
+             ask the person to run it"
+        }
+        "git-reset-hard" => {
+            "git reset --hard throws away every uncommitted change in the tree. Commit or \
+             `git stash` the work first, or reset one file with `git restore --source REF FILE`"
+        }
+        "git-clean-force" => {
+            "git clean -f deletes untracked files, which git cannot bring back. Run \
+             `git clean -n` to list them, then remove the ones you mean by name"
+        }
+        "git-stash-clear" => {
+            "git stash clear drops every stash at once. Drop one with `git stash drop stash@{N}` \
+             after `git stash list`"
+        }
+        "git-discard-worktree" => {
+            "this discards uncommitted changes across the whole tree. Restore the files you \
+             mean by name, or `git stash` first so the work can come back"
+        }
+        "rm-rf-outside-tmp" | "find-delete-outside-tmp" => {
+            "a recursive delete outside /tmp cannot be undone. Move the directory to the trash \
+             or under /tmp instead, or ask the person to delete it"
+        }
+        "curl-pipe-shell" => {
+            "this runs a script from the network without anyone reading it. Download it to a \
+             file, read it, then run the file"
+        }
+        "raw-disk" => {
+            "this writes to a raw disk device and can destroy a filesystem. Ask the person to \
+             run it"
+        }
+        "chmod-setuid" => {
+            "a setuid bit lets anyone run the file as its owner. Ask the person if the file \
+             really needs it"
+        }
+        "sudo" => "this runs as root. Ask the person to run it in their own terminal",
+        "secret-in-argv" => {
+            "a secret on the command line lands in shell history and the process list. Read it \
+             from a file or an environment variable instead"
+        }
+        "python-dash-c" | "python-requires-uv" => {
+            "this Python call is not allowed as written. Put the code in a script file and run \
+             it with `uv run`"
+        }
+        _ => return token.to_string(),
+    };
+    format!("{token}: {said}")
 }
 
 /// One line from `ljos-policyd check -- argv`. None if the binary is absent
@@ -22608,6 +22669,71 @@ mod tests {
         assert!(err.contains("not in the deed store"), "{err}");
         assert!(super::require_deed("known").is_ok());
         assert!(super::require_deed("  ").is_err());
+    }
+
+    /// A refusal from the command check says what the command would do
+    /// and what to run instead, and keeps the check's token first.
+    #[test]
+    fn a_policyd_refusal_reads_as_words_with_its_token_first() {
+        for token in [
+            "git-force-push",
+            "git-reset-hard",
+            "git-clean-force",
+            "git-stash-clear",
+            "git-discard-worktree",
+            "rm-rf-outside-tmp",
+            "find-delete-outside-tmp",
+            "curl-pipe-shell",
+            "raw-disk",
+            "chmod-setuid",
+            "sudo",
+            "secret-in-argv",
+            "python-dash-c",
+            "python-requires-uv",
+        ] {
+            let said = policyd_reason(token);
+            assert!(said.starts_with(&format!("{token}: ")), "{said}");
+            assert!(said.len() > token.len() + 40, "{said}");
+        }
+        assert!(policyd_reason("git-force-push").contains("--force-with-lease"));
+        assert!(policyd_reason("git-reset-hard").contains("git stash"));
+        assert_eq!(policyd_reason("a-token-from-later"), "a-token-from-later");
+        assert_eq!(policyd_reason(" phronesis "), "phronesis");
+    }
+
+    /// The hook's verdict carries those words, and a runner still reads
+    /// the answer as a deny.
+    #[test]
+    fn the_hook_explains_a_force_push_refusal_in_words() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("ljos-policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$*\" in\n*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = HoldEnv::set(&[("POLICYD_BIN", bin.to_str().unwrap())]);
+        assert!(tcb_verdict("git status").is_none());
+        let rule = tcb_verdict("git push --force origin main").expect("the check refuses");
+        assert_eq!(rule.verdict, "deny");
+        assert_eq!(rule.pattern, "ljos-policyd");
+        assert!(
+            rule.reason.starts_with("git-force-push: "),
+            "{}",
+            rule.reason
+        );
+        let call = HookCall {
+            event: "PreToolUse".into(),
+            cue: "git push --force origin main".into(),
+            session: None,
+            shape: HookShape::CamelCase,
+        };
+        let answer = hook_output_ruled(&call, "", Some(&rule));
+        assert!(answer_denies(&answer), "{answer}");
+        assert!(answer.contains("--force-with-lease"), "{answer}");
     }
 
     /// A removal is an appended ledger event. The heading that already
