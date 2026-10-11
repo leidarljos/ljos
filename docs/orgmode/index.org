@@ -63,7 +63,9 @@ writer =packsetd=. =packset-embed= is the encoder =packsetd= runs. =deedar-cli= 
 =ljos-consensus=, which =ljos consensus= runs. =ljos-policyd= is the command
 check. Those are the binaries the tutorial calls. Each comes prebuilt from
 its GitHub release; =cargo install= takes the same names and builds from
-source.
+source with Rust 1.89 or newer. An older Rust fails on several crates and can
+install an =ljos-policyd= older than 0.3.0 without a word; =ljos doctor= marks
+that row =no= and names the fix.
 
 =doctor= names each habitat and whether it answers. The seat works with the
 habitats it has; a missing one is reported, not guessed around. =onboard=

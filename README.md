@@ -21,6 +21,8 @@ on what), ljos-policyd (the command check) and ljos-consensus (voting).
 `ljos doctor` names any that are missing. `packset-embed` is the encoder packsetd runs beside it.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
+Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
+An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.3.0 installed without a word, so the doctor marks that row `no` and names the fix.
 
 ```
 cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list

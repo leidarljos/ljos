@@ -12648,6 +12648,59 @@ fn panes_row() -> Habitat {
 const POLICY_TABLE_ONLY: &str =
     "phronesis is not linked; install an ljos-policyd release built with it";
 
+/// The oldest `ljos-policyd` this ljos runs with. A Rust older than the
+/// workspace's `rust-version` can leave an older one installed: `cargo
+/// install` picks the newest release that builds and says nothing.
+pub const POLICYD_MIN: &str = "0.3.0";
+
+/// The policy row's state from what `ljos-policyd version` printed: the
+/// law it runs, or an error when the release is older than
+/// [`POLICYD_MIN`], with how to get a current one.
+fn policy_state(line: &str, bin: &str) -> std::result::Result<String, String> {
+    let version = line.split_whitespace().nth(1).unwrap_or("");
+    if cmp_semver(version, POLICYD_MIN) == Some(std::cmp::Ordering::Less) {
+        return Err(format!(
+            "{line} at {bin} is older than {POLICYD_MIN}, the oldest this ljos runs with. \
+             A Rust older than {RUST_MIN} installs an old release without saying so: \
+             `rustup update stable`, then `cargo install --locked ljos-policyd`, \
+             or `cargo binstall --locked ljos-policyd`"
+        ));
+    }
+    let backend = line
+        .split_once('(')
+        .and_then(|(_, rest)| rest.strip_suffix(')'));
+    Ok(match backend {
+        Some("phronesis") => format!(
+            "{line} at {bin}: each pipeline is judged by its built-in table, then by phronesis"
+        ),
+        Some(_) => format!("{line} at {bin}: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"),
+        None => format!(
+            "{line} at {bin}: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}"
+        ),
+    })
+}
+
+/// What a required binary older than the release this ljos runs with
+/// adds to its row: the floor and how to get past it. `None` when the
+/// binary has no floor or meets it.
+fn below_floor(bin: &str, have: Option<&str>) -> Option<String> {
+    let floor = match bin {
+        "ljos-policyd" => POLICYD_MIN,
+        _ => return None,
+    };
+    (cmp_semver(have?, floor) == Some(std::cmp::Ordering::Less)).then(|| {
+        format!(
+            "; older than {floor}, the oldest this ljos runs with. A Rust older than {RUST_MIN} \
+             installs an old release without saying so: `rustup update stable`, then \
+             `cargo install --locked {bin}`"
+        )
+    })
+}
+
+/// The oldest Rust that builds the seat from source, the workspace's
+/// `rust-version`.
+pub const RUST_MIN: &str = env!("CARGO_PKG_RUST_VERSION");
+
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
@@ -12658,26 +12711,7 @@ fn policy_row() -> Habitat {
                 .to_string(),
         ),
         Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
-            Ok(said) => {
-                let line = said.stdout.trim().to_string();
-                let backend = line
-                    .split_once('(')
-                    .and_then(|(_, rest)| rest.strip_suffix(')'));
-                Ok(match backend {
-                    Some("phronesis") => format!(
-                        "{line} at {}: each pipeline is judged by its built-in table, then by phronesis",
-                        bin.display()
-                    ),
-                    Some(_) => format!(
-                        "{line} at {}: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}",
-                        bin.display()
-                    ),
-                    None => format!(
-                        "{line} at {}: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}",
-                        bin.display()
-                    ),
-                })
-            }
+            Ok(said) => policy_state(said.stdout.trim(), &bin.display().to_string()),
             Err(e) => Err(format!("{} does not answer `version`: {e:#}", bin.display())),
         },
     };
@@ -12828,6 +12862,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
                     ok = false;
                 }
             }
+        }
+        if let Some(floor) = below_floor(bin, have.as_deref()) {
+            state.push_str(&floor);
+            ok = false;
         }
         out.push(Habitat {
             name: bin,
@@ -19365,6 +19403,25 @@ mod tests {
         assert_eq!(doctor_word(&linked), "ok");
         // A warning does not fail the doctor.
         assert!(healthy(&[table, old]));
+    }
+
+    #[test]
+    fn a_policyd_older_than_the_floor_fails_the_policy_row() {
+        assert_eq!(RUST_MIN, "1.89");
+        let old = policy_state("ljos-policyd 0.2.6 (host table)", "/bin/ljos-policyd").unwrap_err();
+        assert!(old.contains("older than 0.3.0"), "{old}");
+        assert!(old.contains("Rust older than 1.89"), "{old}");
+        assert!(old.contains("rustup update stable"), "{old}");
+        let unnamed = policy_state("ljos-policyd 0.2.0", "/bin/ljos-policyd");
+        assert!(unnamed.is_err());
+        let current = policy_state("ljos-policyd 0.3.0 (host table)", "/bin/ljos-policyd").unwrap();
+        assert!(current.ends_with(POLICY_TABLE_ONLY), "{current}");
+        let linked = policy_state("ljos-policyd 0.4.0 (phronesis)", "/bin/ljos-policyd").unwrap();
+        assert!(linked.ends_with("then by phronesis"), "{linked}");
+        let floor = below_floor("ljos-policyd", Some("0.2.6")).unwrap();
+        assert!(floor.contains("older than 0.3.0"), "{floor}");
+        assert_eq!(below_floor("ljos-policyd", Some("0.3.0")), None);
+        assert_eq!(below_floor("vissue", Some("0.0.1")), None);
     }
 
     #[test]
