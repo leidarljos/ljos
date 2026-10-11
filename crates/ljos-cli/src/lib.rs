@@ -996,6 +996,25 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
     (raw.trim().to_string(), key.to_string())
 }
 
+/// The holder for the conversation this process belongs to, named after
+/// its seat: `SEAT@TAG`, where TAG is [`session_tag`] of the id the runner
+/// stamped. A person reads `saddle@k3j9x0a1b2` on a board and knows whose
+/// claim it is; a bare conversation id said nothing. `LJOS_SESSION_ID`
+/// alone is a name a person or an env file chose, and is kept as written.
+fn session_holder(seat: &str) -> Option<(String, String)> {
+    let (id, keys) = session_actor()?;
+    if keys == "LJOS_SESSION_ID" {
+        return Some((id, keys));
+    }
+    Some((holder_for_session(seat, &id), keys))
+}
+
+/// `SEAT@TAG` for one conversation id.
+#[must_use]
+pub fn holder_for_session(seat: &str, id: &str) -> String {
+    format!("{}@{}", seat.trim(), session_tag(id))
+}
+
 /// Who is sitting. The seat is the program that connected: the name a
 /// runner remembers, votes and earns trust under, the same across its
 /// conversations. The holder is that seat in one conversation: the name
@@ -1369,8 +1388,9 @@ fn holder_naming(text: &str, id: &str) -> Option<String> {
 }
 
 /// The MCP server, once a client has said who it is: the seat is the
-/// client's name. The holder is any `*_SESSION_ID` the runner stamped,
-/// else that seat tagged with the runner's process. The record under the
+/// client's name. The holder is that seat and a short tag for the
+/// `*_SESSION_ID` the runner stamped, else that seat tagged with the
+/// runner's process. The record under the
 /// runtime directory is how `ljos` in a shell the same runner opened
 /// names the same seat and holder. A runner started from another runner's
 /// shell carries that runner's ids; it holds under its own process and
@@ -1390,7 +1410,7 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
         let _ = ANNOUNCED.set(seat.clone());
         return seat;
     }
-    let seat = if let Some((holder, keys)) = session_actor() {
+    let seat = if let Some((holder, keys)) = session_holder(&name) {
         Seat {
             seat: name,
             holder,
@@ -1679,8 +1699,9 @@ fn named_var(key: &str) -> Option<String> {
 /// tracker's `VISSUE_AGENT` when someone set one; else what the MCP client
 /// said at initialize; else the process tree above this shell, which is
 /// the runner that opened it or the server that runner opened; else the
-/// login user, who is the seat when no program is. The holder is any
-/// `*_SESSION_ID` the runner stamped, ahead of the process tag, so MCP
+/// login user, who is the seat when no program is. The holder is the seat
+/// and a short tag for any `*_SESSION_ID` the runner stamped
+/// ([`holder_for_session`]), ahead of the process tag, so MCP
 /// sitting and CLI sitting of one conversation are one occupancy name;
 /// else the seat tagged with the conversation's process.
 #[must_use]
@@ -1688,7 +1709,6 @@ pub fn whoami() -> Seat {
     if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
         return seat;
     }
-    let session = session_actor();
     // Both variables are a person naming the seat: the seat's own, and the
     // tracker's name for the same thing. Either beats what the tree says.
     let named = named_var("LJOS_SEAT")
@@ -1724,7 +1744,7 @@ pub fn whoami() -> Seat {
             source: record.source,
         };
     }
-    if let Some((holder, keys)) = session {
+    if let Some((holder, keys)) = session_holder(&seat_name) {
         let seat = Seat {
             seat: seat_name,
             holder,
@@ -18622,8 +18642,12 @@ mod tests {
         }
         let holder = resolve_assignee(None);
         assert_eq!(
-            holder, "01a09b25-ffe9-7972-881a-3cee2ea6efd6",
-            "the session is the occupancy, not a prefix and not the seat"
+            holder,
+            format!(
+                "runner-x@{}",
+                session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6")
+            ),
+            "the session is the occupancy, named after the seat, not the bare seat"
         );
         assert_eq!(resolve_assignee(Some("seat")), holder);
         assert_eq!(
@@ -18656,11 +18680,64 @@ mod tests {
             a, b,
             "a shared eight-character prefix is not one conversation"
         );
-        assert_eq!(a, "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
-        assert_eq!(b, "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
+        assert!(
+            a.ends_with(&session_tag("01a09b25-aaaa-7972-881a-3cee2ea6efd6")),
+            "{a}"
+        );
+        assert!(
+            b.ends_with(&session_tag("01a09b25-bbbb-7972-881a-3cee2ea6efd6")),
+            "{b}"
+        );
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
         }
+    }
+
+    /// A board shows whose claim it is: the seat, then a short tag for the
+    /// conversation, never the runner's bare conversation id. A name the
+    /// person chose with `LJOS_SESSION_ID` is kept as written.
+    #[test]
+    fn a_conversation_holds_under_its_seat_name_and_a_short_tag() {
+        let _g = env_guard();
+        let dir = std::env::temp_dir().join(format!("ljos-rt-seat-tag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stamped: Vec<String> = std::env::vars()
+            .map(|(k, _)| k)
+            .filter(|k| runner_session_var(k, "long-enough-value"))
+            .collect();
+        unsafe {
+            for k in &stamped {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("LJOS_SEAT", "saddle");
+            std::env::set_var(
+                "CURSOR_CONVERSATION_ID",
+                "4eeb651b-18e3-4c42-910e-5e16f4f7825b",
+            );
+        }
+        let holder = holder_name();
+        assert_eq!(
+            holder,
+            format!(
+                "saddle@{}",
+                session_tag("4eeb651b-18e3-4c42-910e-5e16f4f7825b")
+            )
+        );
+        assert!(!holder.contains("4eeb651b"), "{holder}");
+        assert_eq!(seat_name(), "saddle");
+        unsafe {
+            std::env::remove_var("CURSOR_CONVERSATION_ID");
+            std::env::set_var("LJOS_SESSION_ID", "saddle-review");
+        }
+        assert_eq!(holder_name(), "saddle-review");
+        unsafe {
+            std::env::remove_var("LJOS_SESSION_ID");
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -18708,8 +18785,9 @@ mod tests {
         let b_holder = resolve_assignee(None);
         assert_eq!(a_seat, "acme");
         assert_eq!(b_seat, "brio");
-        assert_eq!(a_holder, "acme-sess-aaaaaa");
-        assert_eq!(b_holder, "brio-sess-bbbbbb");
+        assert_eq!(a_holder, holder_for_session("acme", "acme-sess-aaaaaa"));
+        assert_eq!(b_holder, holder_for_session("brio", "brio-sess-bbbbbb"));
+        assert!(a_holder.starts_with("acme@"), "{a_holder}");
         assert_ne!(a_holder, b_holder);
         unsafe {
             std::env::remove_var("LJOS_SEAT");
@@ -18924,9 +19002,13 @@ mod tests {
         }
         let row = format_seat_row();
         assert!(
-            row.contains("01a09b25-ffe9-7972-881a-3cee2ea6efd6"),
-            "doctor names the whole session: {row}"
+            row.contains(&format!(
+                "@{}",
+                session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6")
+            )),
+            "doctor names this session's holder: {row}"
         );
+        assert!(!row.contains("01a09b25-ffe9"), "no bare session id: {row}");
         assert!(
             row.contains("GROK_SESSION_ID"),
             "doctor names where the session came from: {row}"
@@ -24864,6 +24946,8 @@ mod tests {
 
     #[test]
     fn a_named_hook_file_takes_the_seats_hooks_once() {
+        // The hook command is read from PATH, which other tests change.
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("hooks.json");
         std::fs::write(&file, r#"{"lint": {"PostToolUse": []}}"#).unwrap();

@@ -457,8 +457,10 @@ finds the same name through the process tree, so a runner's tools and its
 command-line verbs claim and vote as one. Two names come from that. The
 seat (`acme-cli`) collects memory, ballots and trust rows across every
 conversation of that runner. The holder (`acme-cli-39u`) owns this
-conversation's claims. Any `*_SESSION_ID` the runner wrote is the holder
-ahead of the process tag. Occupancy is `{holder}:{issue}`, so two
+conversation's claims. A `*_SESSION_ID` the runner wrote names the holder
+ahead of the process tag, as the seat and a short tag for that conversation
+(`acme-cli@k3j9x0a1b2`), so a board says whose claim it is. A
+`LJOS_SESSION_ID` a person or an env file set is kept as written. Occupancy is `{holder}:{issue}`, so two
 conversations of one runner hold two tickets, and a second sitting does not
 release the first. `ljos seat` prints both names
 and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
