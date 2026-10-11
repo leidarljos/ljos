@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos complete`, `ljos finish` and `ljos release` act on a claim that another conversation of the same seat took: a background worker the conversation started, or the conversation that started the worker. Before, a seat could not complete or close the claims its finished workers left, and a worker could not finish its parent's claim; both failed with `not assignee`. The output names that conversation. A claim of another seat is still refused.
 - The integration page has a table of what each runner does when its hook fails, times out or prints something that is not JSON, with the source for each cell, and names the cells no source documents.
 - `ljos onboard --harness` takes `copilot`, `factory`, `qwen`, `crush` and `cline`, and `gemini`, `windsurf` and `kiro` now get the guard hook beside their MCP entry. Each hook runs `ljos hook --runner NAME`, which turns the runner's payload into the one the seat reads and answers in the runner's own shape: Copilot CLI's `permissionDecision`, Gemini CLI's `decision`, exit 2 for Windsurf and Kiro, Cline's `cancel`, and Crush's `decision`. Factory and Qwen Code read the Claude shape. Where a runner cannot ask, an ask is a deny.
 - `ljos hook --runner NAME` denies when the hook it runs crashes, exits non-zero without an answer, or runs past 12 seconds. Before, the relay answered such a failure as an allow, and the runner ran the command.

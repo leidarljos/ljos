@@ -77,6 +77,12 @@ tracker as a `playbook:` note until `finish` or `release`.
    node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
    `vissue claims` answers who has it; a tracker that refuses the name
    refuses the sitting, and `ljos release` frees the claim graph.
+   A background worker you start sits under its own conversation's
+   name and the same seat. The conversation that started it can
+   complete, finish or release the worker's claim, and the worker can
+   finish a claim its parent took.
+   Another seat's claim is still refused, and the refusal names who
+   has it.
 
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
