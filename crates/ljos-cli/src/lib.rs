@@ -996,6 +996,25 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
     (raw.trim().to_string(), key.to_string())
 }
 
+/// The holder for the conversation this process belongs to, named after
+/// its seat: `SEAT@TAG`, where TAG is [`session_tag`] of the id the runner
+/// stamped. A person reads `saddle@k3j9x0a1b2` on a board and knows whose
+/// claim it is; a bare conversation id said nothing. `LJOS_SESSION_ID`
+/// alone is a name a person or an env file chose, and is kept as written.
+fn session_holder(seat: &str) -> Option<(String, String)> {
+    let (id, keys) = session_actor()?;
+    if keys == "LJOS_SESSION_ID" {
+        return Some((id, keys));
+    }
+    Some((holder_for_session(seat, &id), keys))
+}
+
+/// `SEAT@TAG` for one conversation id.
+#[must_use]
+pub fn holder_for_session(seat: &str, id: &str) -> String {
+    format!("{}@{}", seat.trim(), session_tag(id))
+}
+
 /// Who is sitting. The seat is the program that connected: the name a
 /// runner remembers, votes and earns trust under, the same across its
 /// conversations. The holder is that seat in one conversation: the name
@@ -1369,8 +1388,9 @@ fn holder_naming(text: &str, id: &str) -> Option<String> {
 }
 
 /// The MCP server, once a client has said who it is: the seat is the
-/// client's name. The holder is any `*_SESSION_ID` the runner stamped,
-/// else that seat tagged with the runner's process. The record under the
+/// client's name. The holder is that seat and a short tag for the
+/// `*_SESSION_ID` the runner stamped, else that seat tagged with the
+/// runner's process. The record under the
 /// runtime directory is how `ljos` in a shell the same runner opened
 /// names the same seat and holder. A runner started from another runner's
 /// shell carries that runner's ids; it holds under its own process and
@@ -1390,7 +1410,7 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
         let _ = ANNOUNCED.set(seat.clone());
         return seat;
     }
-    let seat = if let Some((holder, keys)) = session_actor() {
+    let seat = if let Some((holder, keys)) = session_holder(&name) {
         Seat {
             seat: name,
             holder,
@@ -1495,10 +1515,51 @@ const SESSION: &[&str] = &[
     "tmux", "screen", "zellij", "herdr", "systemd", "init", "sshd", "login",
 ];
 
+/// Terminal emulators, by the name the kernel keeps for the process (at
+/// most fifteen bytes, so `gnome-terminal-server` reads `gnome-terminal-`).
+/// A shell a person opens in one of these has no program above it but the
+/// terminal, and the terminal is not a seat: without this list a person
+/// typing `ljos sitting` became the seat `gnome-terminal-server`, and each
+/// window of a terminal that runs one process per window held under its
+/// own name, so a finish typed in a second window was refused. Matched
+/// whole, since several names are short words.
+const TERMINALS: &[&str] = &[
+    "gnome-terminal-",
+    "kgx",
+    "ptyxis-agent",
+    "konsole",
+    "yakuake",
+    "kitty",
+    "alacritty",
+    "wezterm-gui",
+    "ghostty",
+    "foot",
+    "footclient",
+    "xterm",
+    "uxterm",
+    "urxvt",
+    "urxvtd",
+    "rxvt",
+    "terminator",
+    "tilix",
+    "xfce4-terminal",
+    "mate-terminal",
+    "lxterminal",
+    "qterminal",
+    "terminology",
+    "sakura",
+    "guake",
+    "tabby",
+    "contour",
+    "cool-retro-term",
+    "deepin-terminal",
+];
+
 /// Whether a process is the person's session rather than a program in it:
-/// a multiplexer, a login, the init system. Many conversations share one.
+/// a multiplexer, a login, the init system, a terminal emulator. Many
+/// conversations share one.
 fn is_session(comm: &str) -> bool {
-    SESSION.iter().any(|s| comm.starts_with(s))
+    SESSION.iter().any(|s| comm.starts_with(s)) || TERMINALS.contains(&comm)
 }
 
 /// The ancestors that belong to this conversation alone: the chain up to,
@@ -1679,8 +1740,9 @@ fn named_var(key: &str) -> Option<String> {
 /// tracker's `VISSUE_AGENT` when someone set one; else what the MCP client
 /// said at initialize; else the process tree above this shell, which is
 /// the runner that opened it or the server that runner opened; else the
-/// login user, who is the seat when no program is. The holder is any
-/// `*_SESSION_ID` the runner stamped, ahead of the process tag, so MCP
+/// login user, who is the seat when no program is. The holder is the seat
+/// and a short tag for any `*_SESSION_ID` the runner stamped
+/// ([`holder_for_session`]), ahead of the process tag, so MCP
 /// sitting and CLI sitting of one conversation are one occupancy name;
 /// else the seat tagged with the conversation's process.
 #[must_use]
@@ -1688,7 +1750,6 @@ pub fn whoami() -> Seat {
     if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
         return seat;
     }
-    let session = session_actor();
     // Both variables are a person naming the seat: the seat's own, and the
     // tracker's name for the same thing. Either beats what the tree says.
     let named = named_var("LJOS_SEAT")
@@ -1724,7 +1785,7 @@ pub fn whoami() -> Seat {
             source: record.source,
         };
     }
-    if let Some((holder, keys)) = session {
+    if let Some((holder, keys)) = session_holder(&seat_name) {
         let seat = Seat {
             seat: seat_name,
             holder,
@@ -5405,6 +5466,43 @@ fn runner_record_holders() -> Vec<String> {
         }
     }
     out
+}
+
+/// Where `ljos file` puts a new issue: its parent, its project, and a line
+/// for the agent when the held issue was passed over. `--top` files with
+/// no parent and `--parent` names one. Otherwise the held issue is the
+/// parent, unless `-p` names another project: a child lives in its
+/// parent's project, so a tool bug filed with `-p` mid-sitting goes to
+/// the top of that project, not under the work being sat on.
+#[must_use]
+pub fn file_placement(
+    top: bool,
+    parent: Option<String>,
+    project: Option<String>,
+    held: Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    fn project_of(id: &str) -> Option<&str> {
+        id.rsplit_once('-').map(|(proj, _)| proj)
+    }
+    let mut passed_over = None;
+    let parent = if top {
+        None
+    } else if parent.is_some() {
+        parent
+    } else {
+        match (held, project.as_deref()) {
+            (Some(held), Some(asked)) if project_of(&held) != Some(asked) => {
+                passed_over = Some(format!(
+                    "filed at the top of {asked}: the held issue {held} is in another project; \
+                     --parent {held} files under it\n"
+                ));
+                None
+            }
+            (held, _) => held,
+        }
+    };
+    let project = project.or_else(|| parent.as_deref().and_then(project_of).map(str::to_string));
+    (parent, project, passed_over)
 }
 
 /// The issue this conversation's holder claimed last and still works: a
@@ -11253,6 +11351,70 @@ pub struct Forecast {
     pub confidence: Option<f64>,
 }
 
+/// The outcome as the ballots spell it, and a line for the reading when it
+/// is on no ballot. An outcome that matches a ballot or one of the issue's
+/// options, ignoring case, takes that spelling. Any other answer scores
+/// every voter a miss, which a typo would do as well, so it is refused
+/// unless `new_option` says the person's answer was none of them: a tie
+/// broken with a third answer is recorded and calibrated like any other.
+///
+/// # Errors
+///
+/// An empty outcome, or one on no ballot and no option without
+/// `new_option`.
+pub fn named_outcome(
+    issue: &str,
+    outcome: &str,
+    forecasts: &[Forecast],
+    options: &[String],
+    new_option: bool,
+) -> Result<(String, Option<String>)> {
+    let outcome = outcome.trim();
+    if outcome.is_empty() {
+        bail!("outcome: an outcome is required");
+    }
+    let mut known: Vec<&str> = forecasts.iter().map(|f| f.choice.as_str()).collect();
+    known.extend(options.iter().map(String::as_str));
+    known.dedup();
+    if let Some(same) = known
+        .iter()
+        .find(|k| **k == outcome)
+        .or_else(|| known.iter().find(|k| k.eq_ignore_ascii_case(outcome)))
+    {
+        return Ok(((*same).to_string(), None));
+    }
+    let mut names: Vec<&str> = known.clone();
+    names.sort_unstable();
+    names.dedup();
+    let named = if names.is_empty() {
+        "nothing".to_string()
+    } else {
+        names.join(", ")
+    };
+    if !new_option {
+        bail!(
+            "outcome: {outcome:?} is on no ballot for {issue}, which named {named}. It would score every \
+             voter a miss, and so would a typo. When the answer was none of them, pass --new-option \
+             (new_option in the tool). Nothing was written"
+        );
+    }
+    Ok((
+        outcome.to_string(),
+        Some(format!(
+            "{outcome} was on no ballot (they named {named}): every voter is scored a miss, and the outcome is kept as the answer.\n"
+        )),
+    ))
+}
+
+/// The options an issue's body puts to a vote, or none when the tracker
+/// does not answer.
+#[must_use]
+pub fn options_of_issue(issue: &str) -> Vec<String> {
+    tracker_show_json(issue)
+        .map(|v| issue_options(v["body"].as_str().unwrap_or("")))
+        .unwrap_or_default()
+}
+
 /// Quadratic score of a stated probability against the outcome.
 ///
 /// `p` is the probability the voter assigned to its own choice being the
@@ -13164,8 +13326,8 @@ fn unpushed_drift(root: &Path, up: &str) -> Option<(String, bool)> {
 }
 
 /// The kernel, its OOM kills since boot, and the ljos-mcp servers this
-/// login runs with their resident memory. Fails on any OOM kill: one kill
-/// took the encoder, the next the compositor.
+/// login runs with their resident memory. A kill within a day turns the
+/// row to `warn`: one kill took the encoder, the next the compositor.
 fn host_row() -> Habitat {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
@@ -13312,6 +13474,30 @@ pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
 /// and they do not fail `ljos doctor`.
 const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
 
+/// Rows about the machine the seat runs on. They fail neither `ljos doctor`
+/// nor a sitting, and print `warn` so the agent reads them before it adds
+/// load. The host row printed `no` beside an exit of 0, and a sitting
+/// opened under it, so the word and the gate disagreed.
+const WARN_ROWS: &[&str] = &["host"];
+
+/// The line a sitting prints under its doctor when a `warn` row failed:
+/// what the row means for the work that follows.
+#[must_use]
+pub fn sitting_warn_line(rows: &[Habitat]) -> Option<String> {
+    let names: Vec<&str> = rows
+        .iter()
+        .filter(|h| !h.ok && WARN_ROWS.contains(&h.name))
+        .map(|h| h.name)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n",
+        names.join(", ")
+    ))
+}
+
 /// A seat binary doctor lists but the seat runs without (`ljos-hud`,
 /// `ljos-consensus`, `packset-mcp`): absent, its row is `info`, the same
 /// as [`healthy`] already treated it. It said `no` before, beside an exit
@@ -13331,6 +13517,8 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         "ok"
     } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
+    } else if WARN_ROWS.contains(&row.name) {
+        "warn"
     } else {
         "no"
     }
@@ -14715,12 +14903,41 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
 #[must_use]
 pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
     format!(
-        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
+        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held. To help without a sitting, `ljos note {node} TEXT` adds to its logbook and `ljos send {} TEXT` reaches the holder",
         hold.assignee,
         hold.seat,
         hold.since,
-        hold.assignee
+        hold.assignee,
+        hold.seat
     )
+}
+
+/// The line `ljos note` adds when another seat holds the issue. A note
+/// from outside the sitting is an assist: it goes in the logbook, which
+/// the holder reads at its next sitting, and `ljos send` reaches the
+/// holder now. `None` when nobody holds the issue live, when this seat
+/// holds it, or when no record on this host names the holder's seat.
+/// Reads only; a node the claim graph lacks is not minted.
+#[must_use]
+pub fn assist_note_line(issue: &str) -> Option<String> {
+    let got = run_captured("claimdag", &["get", &work_id(issue)]).ok()?;
+    let line = got.stdout.lines().next().unwrap_or_default();
+    let live = matches!(line.split_whitespace().nth(1), Some("claimed" | "running"));
+    if !live {
+        return None;
+    }
+    let hold = read_hold(&holder_of(line)?)?;
+    assist_line(issue, &hold, &seat_name())
+}
+
+/// [`assist_note_line`] for one hold record and this seat's name.
+fn assist_line(issue: &str, hold: &Hold, seat: &str) -> Option<String> {
+    (hold.seat != seat).then(|| {
+        format!(
+            "{} holds {issue} (since {}). This note is an assist, not a sitting: it is in the logbook the holder reads, and `ljos send {} TEXT` reaches the holder now\n",
+            hold.seat, hold.since, hold.seat
+        )
+    })
 }
 
 fn holder_of(get_output: &str) -> Option<String> {
@@ -15638,10 +15855,18 @@ pub fn sitting_gated(
             "encoder down: the pack ranks by words alone and a weak island is not fired\n",
         );
     }
+    if let Some(line) = sitting_warn_line(&rows) {
+        out.push_str(&line);
+    }
     // Other machines' memories of this scope arrive before the island is
     // walked, or the sitting orients on half the seat.
-    out.push_str("== sync\n");
-    out.push_str(&sync::sync_repo(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    // With no scope configured the section is left out: sync is opt-in.
+    let synced =
+        sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
+    if !synced.is_empty() {
+        out.push_str("== sync\n");
+        out.push_str(&synced);
+    }
     out.push_str("== cards\n");
     out.push_str(&cards(cards_dir)?);
     let title = issue_title(issue)?;
@@ -15941,6 +16166,7 @@ pub fn finish(
     status: &str,
     lesson: Option<&str>,
     outcome: Option<&str>,
+    new_option: bool,
     beta: f64,
     assignee: &str,
     gen: Option<u64>,
@@ -16023,6 +16249,17 @@ pub fn finish(
         if forecasts.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
         } else {
+            let (option, off) = named_outcome(
+                issue,
+                option,
+                &forecasts,
+                &options_of_issue(issue),
+                new_option,
+            )?;
+            let option = option.as_str();
+            if let Some(line) = off {
+                out.push_str(&line);
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
@@ -16054,7 +16291,9 @@ pub fn finish(
     }
     out.push_str(&persist_tracker(issue, "finished"));
     // What this sitting taught leaves the machine with the tracker.
-    out.push_str(&sync::sync_repo(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    out.push_str(
+        &sync::sync_repo_in_passing(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")),
+    );
     Ok(out)
 }
 
@@ -18725,8 +18964,12 @@ mod tests {
         }
         let holder = resolve_assignee(None);
         assert_eq!(
-            holder, "01a09b25-ffe9-7972-881a-3cee2ea6efd6",
-            "the session is the occupancy, not a prefix and not the seat"
+            holder,
+            format!(
+                "runner-x@{}",
+                session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6")
+            ),
+            "the session is the occupancy, named after the seat, not the bare seat"
         );
         assert_eq!(resolve_assignee(Some("seat")), holder);
         assert_eq!(
@@ -18759,11 +19002,64 @@ mod tests {
             a, b,
             "a shared eight-character prefix is not one conversation"
         );
-        assert_eq!(a, "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
-        assert_eq!(b, "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
+        assert!(
+            a.ends_with(&session_tag("01a09b25-aaaa-7972-881a-3cee2ea6efd6")),
+            "{a}"
+        );
+        assert!(
+            b.ends_with(&session_tag("01a09b25-bbbb-7972-881a-3cee2ea6efd6")),
+            "{b}"
+        );
         unsafe {
             std::env::remove_var("GROK_SESSION_ID");
         }
+    }
+
+    /// A board shows whose claim it is: the seat, then a short tag for the
+    /// conversation, never the runner's bare conversation id. A name the
+    /// person chose with `LJOS_SESSION_ID` is kept as written.
+    #[test]
+    fn a_conversation_holds_under_its_seat_name_and_a_short_tag() {
+        let _g = env_guard();
+        let dir = std::env::temp_dir().join(format!("ljos-rt-seat-tag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stamped: Vec<String> = std::env::vars()
+            .map(|(k, _)| k)
+            .filter(|k| runner_session_var(k, "long-enough-value"))
+            .collect();
+        unsafe {
+            for k in &stamped {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("LJOS_SEAT", "saddle");
+            std::env::set_var(
+                "CURSOR_CONVERSATION_ID",
+                "4eeb651b-18e3-4c42-910e-5e16f4f7825b",
+            );
+        }
+        let holder = holder_name();
+        assert_eq!(
+            holder,
+            format!(
+                "saddle@{}",
+                session_tag("4eeb651b-18e3-4c42-910e-5e16f4f7825b")
+            )
+        );
+        assert!(!holder.contains("4eeb651b"), "{holder}");
+        assert_eq!(seat_name(), "saddle");
+        unsafe {
+            std::env::remove_var("CURSOR_CONVERSATION_ID");
+            std::env::set_var("LJOS_SESSION_ID", "saddle-review");
+        }
+        assert_eq!(holder_name(), "saddle-review");
+        unsafe {
+            std::env::remove_var("LJOS_SESSION_ID");
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -18779,6 +19075,28 @@ mod tests {
         assert!(said.contains("held by another"), "{said}");
         assert!(said.contains("acme"), "{said}");
         assert!(said.contains("not by brio"), "{said}");
+    }
+
+    /// Another seat sits on the issue: a note is an assist and says so,
+    /// and the sitting refusal names the note and the message as the ways
+    /// to help. This seat's own hold adds nothing.
+    #[test]
+    fn a_note_on_another_seats_issue_says_it_is_an_assist() {
+        let hold = Hold {
+            assignee: "eessi-1:proj-jz8x".into(),
+            seat: "eessi".into(),
+            pid: 1,
+            comm: "node".into(),
+            since: "2026-10-10T21:00:00.000Z".into(),
+        };
+        let line = super::assist_line("proj-jz8x", &hold, "inky").unwrap();
+        assert!(line.starts_with("eessi holds proj-jz8x"), "{line}");
+        assert!(line.contains("an assist, not a sitting"), "{line}");
+        assert!(line.contains("`ljos send eessi TEXT`"), "{line}");
+        assert!(super::assist_line("proj-jz8x", &hold, "eessi").is_none());
+        let refused = super::held_by_another_message("proj-jz8x", "inky-2", &hold, "still running");
+        assert!(refused.contains("`ljos note proj-jz8x TEXT`"), "{refused}");
+        assert!(refused.contains("`ljos send eessi TEXT`"), "{refused}");
     }
 
     /// Two seats on one ticket: LJOS_SEAT plus a distinct session id each.
@@ -18811,8 +19129,9 @@ mod tests {
         let b_holder = resolve_assignee(None);
         assert_eq!(a_seat, "acme");
         assert_eq!(b_seat, "brio");
-        assert_eq!(a_holder, "acme-sess-aaaaaa");
-        assert_eq!(b_holder, "brio-sess-bbbbbb");
+        assert_eq!(a_holder, holder_for_session("acme", "acme-sess-aaaaaa"));
+        assert_eq!(b_holder, holder_for_session("brio", "brio-sess-bbbbbb"));
+        assert!(a_holder.starts_with("acme@"), "{a_holder}");
         assert_ne!(a_holder, b_holder);
         unsafe {
             std::env::remove_var("LJOS_SEAT");
@@ -18866,6 +19185,73 @@ mod tests {
     }
 
     #[test]
+    fn an_outcome_off_the_ballot_needs_new_option_and_then_scores_every_voter() {
+        let f = |agent: &str, choice: &str| Forecast {
+            agent: agent.into(),
+            choice: choice.into(),
+            confidence: Some(0.6),
+        };
+        let tie = [f("saddle", "hook"), f("inky", "drop-highway")];
+        // On the ballot, any case: the ballot's spelling, no line.
+        let (named, off) = named_outcome("Demo-sdhm", " Hook ", &tie, &[], false).unwrap();
+        assert_eq!((named.as_str(), off), ("hook", None));
+        // An issue option nobody voted for still counts as an option.
+        let options = vec!["hook".to_string(), "drop-highway".into(), "patch".into()];
+        let (named, off) = named_outcome("Demo-sdhm", "patch", &tie, &options, false).unwrap();
+        assert_eq!((named.as_str(), off), ("patch", None));
+        // A third answer, or a typo, is refused without the flag.
+        let err = named_outcome("Demo-sdhm", "use an easyblock", &tie, &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("on no ballot for Demo-sdhm"), "{err}");
+        assert!(err.contains("drop-highway, hook"), "{err}");
+        assert!(err.contains("--new-option"), "{err}");
+        // With it the answer is kept, and the line says what it scores.
+        let (named, off) = named_outcome("Demo-sdhm", "use an easyblock", &tie, &[], true).unwrap();
+        assert_eq!(named, "use an easyblock");
+        let off = off.expect("a line");
+        assert!(off.contains("every voter is scored a miss"), "{off}");
+        let ballots: Vec<(String, String)> = tie
+            .iter()
+            .map(|t| (t.agent.clone(), t.choice.clone()))
+            .collect();
+        let (_, records) =
+            learn_record(&ballots, &named, &std::collections::BTreeMap::new(), &[]).unwrap();
+        assert_eq!(records["saddle"], (0.0, 1.0));
+        assert_eq!(records["inky"], (0.0, 1.0));
+        assert!(named_outcome("Demo-sdhm", "  ", &tie, &[], true).is_err());
+    }
+
+    #[test]
+    fn file_with_another_project_mid_sitting_goes_to_its_top() {
+        let held = || Some("garden-06v8".to_string());
+        let s = |v: &str| Some(v.to_string());
+        // The default: a child of the held issue, in its project.
+        let (parent, project, said) = file_placement(false, None, None, held());
+        assert_eq!(parent, s("garden-06v8"));
+        assert_eq!(project, s("garden"));
+        assert_eq!(said, None);
+        // The same project named: still a child.
+        let (parent, _, said) = file_placement(false, None, s("garden"), held());
+        assert_eq!(parent, s("garden-06v8"));
+        assert_eq!(said, None);
+        // A tool bug against another project: top level there, and a line
+        // that says how to file under the held issue after all.
+        let (parent, project, said) = file_placement(false, None, s("Tools"), held());
+        assert_eq!(parent, None);
+        assert_eq!(project, s("Tools"));
+        let said = said.expect("a line");
+        assert!(said.contains("filed at the top of Tools"), "{said}");
+        assert!(said.contains("--parent garden-06v8"), "{said}");
+        // --parent and --top still win.
+        let (parent, project, _) = file_placement(false, s("Tools-x6vs"), s("Tools"), held());
+        assert_eq!(parent, s("Tools-x6vs"));
+        assert_eq!(project, s("Tools"));
+        let (parent, project, said) = file_placement(true, None, None, held());
+        assert_eq!((parent, project, said), (None, None, None));
+    }
+
+    #[test]
     fn doctor_warns_on_a_policyd_without_phronesis() {
         let row = |state: String| Habitat {
             name: "policy",
@@ -18908,6 +19294,29 @@ mod tests {
         assert!(healthy(std::slice::from_ref(&hud)));
         assert_eq!(doctor_word(&embed), "no");
         assert!(!healthy(&[embed]));
+    }
+
+    #[test]
+    fn a_recent_oom_kill_warns_and_the_sitting_says_so() {
+        let host = Habitat {
+            name: "host",
+            state: "6.12.94+; 70 OOM kills since boot, the last within a day".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&host), "warn");
+        let rows = [host];
+        assert!(healthy(&rows));
+        assert!(failing_for_sitting(&rows).is_empty());
+        let line = sitting_warn_line(&rows).expect("a warn line");
+        assert!(line.starts_with("host: the kernel killed"), "{line}");
+        assert!(line.contains("one build or test suite at a time"), "{line}");
+        let calm = Habitat {
+            name: "host",
+            state: "6.12.94+; no OOM kills since boot".into(),
+            ok: true,
+        };
+        assert_eq!(doctor_word(&calm), "ok");
+        assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
     /// the tarball the release workflow uploads for each target is the one
@@ -19027,9 +19436,13 @@ mod tests {
         }
         let row = format_seat_row();
         assert!(
-            row.contains("01a09b25-ffe9-7972-881a-3cee2ea6efd6"),
-            "doctor names the whole session: {row}"
+            row.contains(&format!(
+                "@{}",
+                session_tag("01a09b25-ffe9-7972-881a-3cee2ea6efd6")
+            )),
+            "doctor names this session's holder: {row}"
         );
+        assert!(!row.contains("01a09b25-ffe9"), "no bare session id: {row}");
         assert!(
             row.contains("GROK_SESSION_ID"),
             "doctor names where the session came from: {row}"
@@ -21858,6 +22271,37 @@ mod tests {
             "a holder named outright still matches"
         );
         assert!(is_session("herdr") && is_session("tmux: server") && !is_session("acme"));
+    }
+
+    /// A shell in a terminal window belongs to the person: the terminal
+    /// ends the tree like a multiplexer does, so no terminal becomes a seat
+    /// and the person is their login user. A runner started in that
+    /// terminal still sits below it and is found first.
+    #[test]
+    fn a_terminal_emulator_is_the_person_s_session() {
+        for comm in [
+            "gnome-terminal-",
+            "konsole",
+            "kitty",
+            "alacritty",
+            "wezterm-gui",
+            "ghostty",
+            "foot",
+            "xterm",
+            "tilix",
+            "xfce4-terminal",
+        ] {
+            assert!(is_session(comm), "{comm}");
+        }
+        for comm in [
+            "claude", "codex", "grok", "cursor", "node", "kitten", "footb", "code",
+        ] {
+            assert!(!is_session(comm), "{comm}");
+        }
+        assert!(
+            TERMINALS.iter().all(|t| t.len() <= 15),
+            "the kernel keeps fifteen bytes of a process name"
+        );
     }
 
     /// one graph directory, named three ways, is one scope.
@@ -25062,6 +25506,8 @@ mod tests {
 
     #[test]
     fn a_named_hook_file_takes_the_seats_hooks_once() {
+        // The hook command is read from PATH, which other tests change.
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("hooks.json");
         std::fs::write(&file, r#"{"lint": {"PostToolUse": []}}"#).unwrap();

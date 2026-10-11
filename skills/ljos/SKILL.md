@@ -50,6 +50,8 @@ tracker as a `playbook:` note until `finish` or `release`.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
+   A `warn` on `host` means the kernel killed a process within a day. The
+   sitting opens; run one build or test suite at a time.
 2. `ljos cards`. What the human froze. Read, never write.
 3. `ljos due`. What is due for review: the soonest eight and the total.
    The verb prints a page; it does not grade. Grade it after the sitting:
@@ -104,7 +106,9 @@ whose `.ljos/sync.toml` names a scope and its age recipients carries one
 sealed log per machine under `.ljos/atoms/`. The sitting pulls and takes
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `ljos sync --key` prints this machine's public key
-for a scope's recipients, and `ljos sync` runs the pull and the push by hand. An
+for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
+A repository with no `.ljos/sync.toml` is not synced, and the sitting and
+finish say nothing about it; only `ljos sync` names the missing file. An
 atom goes to the scope its `scope:NAME` entity names, else the machine's
 `default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
 takes the scope of the repository its issue lives in, and a
@@ -185,7 +189,10 @@ Every piece of work has an issue before it has a claim.
   outcomes as its weight, so the next settle weighs a voter by what it
   got right. A record's accuracy is first shrunk toward the panel's
   pooled accuracy, and the outcome is kept: once five issues have one, the
-  settle discounts voters who err together.
+  settle discounts voters who err together. When the person's answer was
+  none of the options (a tie broken with a third answer), add
+  `--new-option`: every voter is scored a miss on it. Without the flag an
+  outcome on no ballot is refused, since a typo would score the same.
 - When the work has shown that a kind of command must never run, or must
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks before the command runs, and
@@ -245,7 +252,10 @@ Every piece of work has an issue before it has a claim.
   `ljos ask NAME "..."` puts a question to it in that session.
 - Work found while sitting is filed with `ljos file "TITLE" -t bug`: a
   child of the held issue, in its project, committed. `--parent ID`
-  names another parent and `--top` none. A board this tracker projects
+  names another parent and `--top` none. A bug in a tool found
+  mid-sitting goes to the tool's project: `-p PROJECT` naming another
+  project than the held issue's files at its top level, and says so.
+  A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
@@ -254,6 +264,9 @@ Every piece of work has an issue before it has a claim.
 - Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
   report is `vissue append ISSUE "..."` (or `--file F`); a tag is
   `vissue update ISSUE -t TAG`.
+- An issue another seat sits on refuses your sitting. To help, `ljos
+  note ISSUE "..."` adds an assist to its logbook, and the note names
+  the seat that has it; `ljos send SEAT "..."` reaches that seat now.
 
 ### A bump, and a build campaign
 
@@ -458,8 +471,10 @@ finds the same name through the process tree, so a runner's tools and its
 command-line verbs claim and vote as one. Two names come from that. The
 seat (`acme-cli`) collects memory, ballots and trust rows across every
 conversation of that runner. The holder (`acme-cli-39u`) owns this
-conversation's claims. Any `*_SESSION_ID` the runner wrote is the holder
-ahead of the process tag. Occupancy is `{holder}:{issue}`, so two
+conversation's claims. A `*_SESSION_ID` the runner wrote names the holder
+ahead of the process tag, as the seat and a short tag for that conversation
+(`acme-cli@k3j9x0a1b2`), so a board says whose claim it is. A
+`LJOS_SESSION_ID` a person or an env file set is kept as written. Occupancy is `{holder}:{issue}`, so two
 conversations of one runner hold two tickets, and a second sitting does not
 release the first. `ljos seat` prints both names
 and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
