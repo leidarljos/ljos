@@ -14,6 +14,7 @@ use serde_json::Value;
 pub mod admit;
 pub mod approval;
 pub mod ask_pack;
+pub mod capture;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -13132,6 +13133,17 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
     )
 }
 
+/// The line a write prints when the pack stored the person's words over a
+/// prose warning: what the gate said, and that shorter sentences are
+/// recalled better. `None` when the pack gave no warning.
+#[must_use]
+pub fn prose_warning_line(body: &Value) -> Option<String> {
+    let warning = body["prose"]["warning"].as_str()?.trim();
+    (!warning.is_empty()).then(|| {
+        format!("stored as written; the pack's prose check said: {warning}. Shorter sentences are recalled better.")
+    })
+}
+
 /// One line after a pack write: id, kind, due, text. Not the embedding.
 #[must_use]
 pub fn format_write_ack(body: &serde_json::Value) -> String {
@@ -19420,7 +19432,7 @@ mod tests {
         }
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         for (k, v) in std::env::vars() {
@@ -28190,6 +28202,150 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
     }
 
+    /// A pack that keeps what is posted and answers every search with it.
+    fn serve_keeping_pack() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if first.contains("POST /v1/atoms") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let mut held = slot.lock().unwrap();
+                atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
+                held.push(atom.clone());
+                return (200, atom.to_string());
+            }
+            if first.contains("/v1/search") {
+                let hits: Vec<Value> = slot
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "id": a["id"], "text": a["text"], "score": 2.0, "kind": a["kind"],
+                            "ts": "2026-10-11T15:00:00.000Z", "entities": a["entities"],
+                            "ballots": 3, "of": 3
+                        })
+                    })
+                    .collect();
+                return (200, serde_json::json!({ "hits": hits }).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        (url, stored)
+    }
+
+    /// "From now on always use bun, never yarn" is saved as the person's
+    /// own standing preference on the prompt that says it, and the next
+    /// session's prompt about yarn gets it back.
+    #[test]
+    fn a_choice_said_in_chat_is_saved_and_comes_back_next_session() {
+        let _env = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let (url, stored) = serve_keeping_pack();
+        let _hold = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+            ("LJOS_CAPTURE", "save"),
+        ]);
+        let _url = PackUrl::set(&url);
+        let said = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "From now on always use bun, never yarn, in this repo".into(),
+            session: Some("chat-one".into()),
+            shape: HookShape::default(),
+        };
+        let (line, _) = capture::capture_stated(&said).expect("the choice is saved");
+        assert!(line.contains("ljos forget"), "{line}");
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["kind"], "preference");
+        assert_eq!(live[0]["origin"], "user-declared");
+        assert_eq!(
+            live[0]["text"],
+            "From now on always use bun, never yarn, in this repo"
+        );
+        let tags = live[0]["entities"].to_string();
+        assert!(tags.contains("horizon:standing"), "{tags}");
+        assert!(tags.contains("via:prompt"), "{tags}");
+        assert!(line.contains(live[0]["id"].as_str().unwrap()), "{line}");
+
+        assert!(capture::capture_stated(&said).is_none(), "saved twice");
+        let (note, _) = hook_note(&said, 5);
+        assert!(!note.contains("never yarn"), "the note repeated it: {note}");
+
+        let next = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "add lodash as a dev dependency with yarn".into(),
+            session: Some("chat-two".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&next, 5);
+        assert!(note.contains("always use bun, never yarn"), "{note}");
+    }
+
+    /// With `LJOS_CAPTURE=off` a stated choice is left alone, and `nudge`
+    /// asks the agent to write it without writing anything.
+    #[test]
+    fn capture_off_and_nudge_write_nothing() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let (url, stored) = serve_keeping_pack();
+        let _url = PackUrl::set(&url);
+        let said = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "Never push directly to main.".into(),
+            session: Some("chat-off".into()),
+            shape: HookShape::default(),
+        };
+        {
+            let _hold = HoldEnv::set(&[
+                ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+                ("LJOS_CAPTURE", "off"),
+            ]);
+            assert!(capture::capture_stated(&said).is_none());
+        }
+        {
+            let _hold = HoldEnv::set(&[
+                ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+                ("LJOS_CAPTURE", "nudge"),
+            ]);
+            let (line, _) = capture::capture_stated(&said).unwrap();
+            assert!(line.contains("ljos prefer"), "{line}");
+        }
+        assert!(stored.lock().unwrap().is_empty());
+    }
+
+    /// An agent's `ljos remember` of the person's words from their latest
+    /// prompt is theirs, so it stands; the agent's own wording does not.
+    #[test]
+    fn the_persons_words_from_the_latest_prompt_stand() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("LJOS_CAPTURE", "save"),
+        ]);
+        capture::note_latest_prompt(
+            "remember this: the integration tests need a local Redis on port 6380, not 6379",
+        );
+        assert!(capture::said_in_latest_prompt(
+            "The integration tests need a local Redis on port 6380, not 6379."
+        ));
+        assert!(!capture::said_in_latest_prompt(
+            "Redis for the tests listens on 6380"
+        ));
+        assert!(!capture::said_in_latest_prompt("local Redis"));
+        let agents = !capture::said_in_latest_prompt(
+            "the integration tests need a local Redis on port 6380",
+        );
+        assert_eq!(remember_horizon(false, false, agents), Some(false));
+    }
+
     #[test]
     fn a_deed_the_pusher_minted_does_not_carry_a_push() {
         let _env = env_guard();
@@ -29318,6 +29474,24 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{calls}"
         );
         assert!(!calls.contains(&format!("--actor {alive}")), "{calls}");
+    }
+
+    #[test]
+    fn a_prose_warning_is_one_line_and_its_absence_is_none() {
+        let warned = serde_json::json!({"id": "a", "prose": {"grade": 14.78,
+            "warning": "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
+        let line = prose_warning_line(&warned).unwrap();
+        assert!(line.starts_with("stored as written"), "{line}");
+        assert!(
+            line.contains("readability grade 14.78 exceeds 14"),
+            "{line}"
+        );
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            prose_warning_line(&serde_json::json!({"prose": {"grade": 8.0}})),
+            None
+        );
+        assert_eq!(prose_warning_line(&serde_json::json!({"id": "b"})), None);
     }
 
     #[test]

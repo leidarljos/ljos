@@ -771,6 +771,12 @@ enum Cmd {
 /// The write acknowledgement: the plain sentence for a person at a
 /// terminal, the tab-separated row for a pipe.
 fn write_ack(body: &serde_json::Value) -> String {
+    // The pack keeps a person's hard sentence and says why it would have
+    // refused it; that goes to stderr, so the one line a script reads
+    // stays one line.
+    if let Some(note) = ljos_cli::prose_warning_line(body) {
+        eprintln!("{note}");
+    }
     if std::io::stdout().is_terminal() {
         ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
     } else {
@@ -795,9 +801,13 @@ fn main() -> Result<()> {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
-            let horizon =
-                ljos_cli::remember_horizon(transient, standing, ljos_cli::under_a_runner());
-            let body = packset_write_as("Remember", &join(&text), as_persona.as_deref(), horizon)?;
+            let text = join(&text);
+            // Under a runner the lesson is the agent's, unless it is the
+            // person's words from their latest prompt: then it stands.
+            let agents =
+                ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
+            let horizon = ljos_cli::remember_horizon(transient, standing, agents);
+            let body = packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?;
             println!("{}", write_ack(&body));
             eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
@@ -1644,10 +1654,28 @@ fn main() -> Result<()> {
                             )
                         })
                         .flatten();
+                    // A standing choice the person states is saved in their
+                    // words before the note is read, so the note does not
+                    // repeat it and the correction hook does not file it
+                    // again as a proposal.
+                    let captured = if call.event == "UserPromptSubmit" {
+                        ljos_cli::capture::note_latest_prompt(&call.cue);
+                        ljos_cli::capture::capture_stated(&call)
+                    } else {
+                        None
+                    };
                     if call.event == "UserPromptSubmit" {
                         ljos_cli::store_correction(&call);
                     }
                     let (mut ctx, mut ids) = hook_note(&call, limit);
+                    if let Some((line, keys)) = captured {
+                        ctx = if ctx.is_empty() {
+                            line
+                        } else {
+                            format!("{line}\n{ctx}")
+                        };
+                        ids.extend(keys);
+                    }
                     if call.shape == ljos_cli::HookShape::CamelCase
                         && call.event == "UserPromptSubmit"
                     {
