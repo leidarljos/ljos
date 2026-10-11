@@ -9923,6 +9923,7 @@ fn nested_walk(line: &str, depth: usize, out: &mut Vec<String>) -> bool {
             inner.extend(echoed_text(&segs[k - 1]));
         }
     }
+    inner.extend(carried_lines(&segs, &bodies));
     out.push(line);
     if depth >= NESTED_DEPTH {
         return !inner.is_empty();
@@ -9932,6 +9933,248 @@ fn nested_walk(line: &str, depth: usize, out: &mut Vec<String>) -> bool {
         deep |= nested_walk(&l, depth + 1, out);
     }
     deep
+}
+
+/// What one command on a line hands a later one, read as the commands
+/// that run: a variable's value put in place of `$NAME` (split on `IFS`
+/// when the line sets one), a program copied or linked to a new path and
+/// run from there, a command word that is `` `which git` ``, and a script
+/// written to a file by `echo`, `printf`, `cat` or `tee` and then run.
+/// `x='push -f'; git $x`, `cp /bin/rm /tmp/d && /tmp/d -rf ~` and
+/// `echo 'rm -rf ~' > s.sh && sh s.sh` each read as the call they make.
+fn carried_lines(segs: &[String], bodies: &[Heredoc]) -> Vec<String> {
+    let mut names: Vec<(String, String)> = Vec::new();
+    let mut copies: Vec<(String, String)> = Vec::new();
+    let mut written: Vec<(String, String)> = Vec::new();
+    for (body, _, owner) in bodies {
+        for seg in raw_segments(owner) {
+            let words = shell_words(&seg);
+            let (at, _) = prefix_end(&words);
+            let Some(cmd) = words.get(at) else { continue };
+            match base_name(cmd) {
+                "cat" => written.extend(redirect_target(&words).map(|t| (t, body.clone()))),
+                "tee" => written.extend(
+                    words[at + 1..]
+                        .iter()
+                        .filter(|w| !w.starts_with('-') && !w.starts_with('<') && *w != ">")
+                        .map(|t| (same_path(t), body.clone())),
+                ),
+                _ => {}
+            }
+        }
+    }
+    for seg in segs {
+        let words = shell_words(seg);
+        let assigns = |ws: &[String]| !ws.is_empty() && ws.iter().all(|w| is_name_value(w));
+        let bare = if words.first().is_some_and(|w| w == "export") {
+            &words[1..]
+        } else {
+            &words[..]
+        };
+        if assigns(bare) {
+            for w in bare {
+                if let Some((k, v)) = w.split_once('=') {
+                    names.push((k.to_string(), v.to_string()));
+                }
+            }
+            continue;
+        }
+        let (at, _) = prefix_end(&words);
+        let Some(cmd) = words.get(at) else { continue };
+        let operands: Vec<&String> = {
+            let mut out = Vec::new();
+            let mut it = words[at + 1..].iter();
+            while let Some(w) = it.next() {
+                if w == ">" {
+                    it.next();
+                } else if !w.starts_with('-') {
+                    out.push(w);
+                }
+            }
+            out
+        };
+        match base_name(cmd) {
+            "echo" | "printf" => {
+                if let (Some(t), Some(text)) = (redirect_target(&words), echoed_text(seg)) {
+                    written.push((t, text));
+                }
+            }
+            "cp" | "ln" | "install" if operands.len() == 2 => {
+                copies.push((same_path(operands[1]), operands[0].clone()));
+            }
+            _ => {}
+        }
+    }
+    let ifs = names
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "IFS")
+        .map(|(_, v)| v.clone());
+    let mut out = Vec::new();
+    for seg in segs {
+        let expanded = expand_names(seg, &names, ifs.as_deref());
+        let seg = expanded.clone().unwrap_or_else(|| seg.clone());
+        if let Some(run) = looked_up_head(&seg) {
+            out.push(run);
+            continue;
+        }
+        let mut words = shell_words(&seg);
+        let (at, _) = prefix_end(&words);
+        let mut changed = false;
+        if let Some(w) = words.get(at) {
+            let here = same_path(w);
+            if let Some((_, from)) = copies.iter().rev().find(|(to, _)| *to == here) {
+                words[at] = from.clone();
+                changed = true;
+            }
+        }
+        let ran = words.get(at).and_then(|cmd| {
+            let file = if SHELLS.contains(&base_name(cmd)) || matches!(cmd.as_str(), "." | "source")
+            {
+                words[at + 1..].iter().find(|w| !w.starts_with('-'))?
+            } else {
+                cmd
+            };
+            let file = same_path(file);
+            written
+                .iter()
+                .rev()
+                .find(|(t, _)| *t == file)
+                .map(|(_, text)| text.clone())
+        });
+        out.extend(ran);
+        if changed {
+            out.push(join_shell_words(&words));
+        } else if expanded.is_some() {
+            out.push(seg.trim().to_string());
+        }
+    }
+    out
+}
+
+/// A `NAME=value` word.
+fn is_name_value(w: &str) -> bool {
+    w.split_once('=').is_some_and(|(k, _)| {
+        !k.is_empty()
+            && !k.starts_with(|c: char| c.is_ascii_digit())
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn base_name(w: &str) -> &str {
+    w.rsplit('/').next().unwrap_or(w)
+}
+
+/// A path as a later command names it: `./x.sh` and `x.sh` are one file.
+fn same_path(p: &str) -> String {
+    p.strip_prefix("./").unwrap_or(p).to_string()
+}
+
+/// The file a command's `>` or `>>` writes, from its shell words.
+fn redirect_target(words: &[String]) -> Option<String> {
+    let at = words.iter().position(|w| w == ">")?;
+    words.get(at + 1).map(|t| same_path(t))
+}
+
+/// A command whose first word looks a program up and runs it, with that
+/// word put back as the program: `` `which git` push -f ``, `$(which git)
+/// push -f`, `$(command -v git) push -f` and `$(type -P git) push -f` are
+/// each `git push -f`.
+fn looked_up_head(seg: &str) -> Option<String> {
+    let t = seg.trim_start();
+    let (inner, rest) = if let Some(r) = t.strip_prefix('`') {
+        r.split_once('`')?
+    } else {
+        t.strip_prefix("$(")?.split_once(')')?
+    };
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    let name = match parts.as_slice() {
+        ["which", name] | ["command", "-v", name] | ["type", "-P" | "-p", name] => *name,
+        _ => return None,
+    };
+    Some(format!("{name}{rest}").trim().to_string())
+}
+
+/// `seg` with every `$NAME` and `${NAME}` a bare assignment on the line set
+/// replaced by its value, or `None` when it names none of them. Nothing in
+/// single quotes is replaced. Outside double quotes a value is split on the
+/// characters of `IFS`, as the shell splits it.
+fn expand_names(seg: &str, names: &[(String, String)], ifs: Option<&str>) -> Option<String> {
+    if names.is_empty() || !seg.contains('$') {
+        return None;
+    }
+    let chars: Vec<char> = seg.chars().collect();
+    let mut out = String::new();
+    let (mut single, mut double, mut hit) = (false, false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' if !single => {
+                out.push(c);
+                if let Some(n) = chars.get(i + 1) {
+                    out.push(*n);
+                }
+                i += 2;
+                continue;
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '$' if !single => {
+                let braced = chars.get(i + 1) == Some(&'{');
+                let from = i + 1 + usize::from(braced);
+                let mut j = from;
+                while chars
+                    .get(j)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    j += 1;
+                }
+                let name: String = chars[from..j].iter().collect();
+                let closed = !braced || chars.get(j) == Some(&'}');
+                if let Some((_, v)) = names.iter().rev().find(|(k, _)| *k == name) {
+                    if !name.is_empty() && closed {
+                        let v = match ifs {
+                            Some(sep) if !double => v
+                                .chars()
+                                .map(|ch| if sep.contains(ch) { ' ' } else { ch })
+                                .collect(),
+                            _ => v.clone(),
+                        };
+                        out.push_str(&v);
+                        hit = true;
+                        i = j + usize::from(braced);
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+        i += 1;
+    }
+    hit.then_some(out)
+}
+
+/// Shell words joined back into a line, each word with a space, quote or
+/// shell character in it put in single quotes.
+fn join_shell_words(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| {
+            if w == ">"
+                || (!w.is_empty()
+                    && !w
+                        .chars()
+                        .any(|c| c.is_whitespace() || "'\"\\;&|<>()`$*?".contains(c)))
+            {
+                w.clone()
+            } else {
+                format!("'{}'", w.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The shells a script can be handed to.
@@ -24700,6 +24943,51 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_line_reads_what_one_command_hands_the_next() {
+        let carried = |line: &str| nested_lines(line, 0);
+        for (line, runs) in [
+            ("x='push -f'; git $x origin main", "git push -f origin main"),
+            (
+                "IFS=,; cmd=rm,-rf,/home/u/proj; $cmd",
+                "rm -rf /home/u/proj",
+            ),
+            ("`which git` push -f", "git push -f"),
+            ("$(command -v git) push -f", "git push -f"),
+            (
+                "ln -s /usr/bin/git /tmp/g && /tmp/g push -f",
+                "/usr/bin/git push -f",
+            ),
+            (
+                "cp /bin/rm /tmp/del && /tmp/del -rf ~/projects",
+                "/bin/rm -rf ~/projects",
+            ),
+            ("echo 'rm -rf ~' > /tmp/y.sh && sh /tmp/y.sh", "rm -rf ~"),
+            (
+                "cat > /tmp/x.sh <<'EOF'\nrm -rf ~/projects\nEOF\nbash /tmp/x.sh",
+                "rm -rf ~/projects\n",
+            ),
+            ("printf 'git push -f\\n' > go.sh; ./go.sh", "git push -f\n"),
+        ] {
+            let lines = carried(line);
+            assert!(lines.iter().any(|l| l == runs), "{line:?} -> {lines:?}");
+        }
+        // Text that is only data, or a value in single quotes, stays as it was.
+        for line in [
+            "x=1; echo '$x'",
+            "echo 'rm -rf ~' > notes.txt && cat notes.txt",
+            "cp a.txt b.txt && cat b.txt",
+        ] {
+            let lines = carried(line);
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.contains("rm -rf ~") && !l.contains("echo") || l == "echo 1"),
+                "{line:?} -> {lines:?}"
+            );
+        }
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
