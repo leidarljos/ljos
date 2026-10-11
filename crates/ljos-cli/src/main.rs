@@ -955,6 +955,9 @@ fn main() -> Result<()> {
         }
         Cmd::Note { issue, text } => {
             run("vissue", &["note", &issue, &text.join(" ")])?;
+            if let Some(line) = ljos_cli::assist_note_line(&issue) {
+                print!("{line}");
+            }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
         Cmd::Send {
@@ -1690,7 +1693,18 @@ fn main() -> Result<()> {
             // exist.
             let predictions = predictions_of(&atoms, &id);
             for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
-                run(step.bin, &step.args)?;
+                if json || step.args.first().map(String::as_str) != Some("reputation") {
+                    run(step.bin, &step.args)?;
+                    continue;
+                }
+                // The rows name every voter on the topic; beside this
+                // settle only the issue's voters are read.
+                let said = run_captured(step.bin, &step.args)?;
+                let voters = ljos_cli::voters_of(&ballots);
+                match ljos_cli::standing_in_words(&said.stdout, &voters) {
+                    Some(words) => print!("{words}"),
+                    None => print!("{}", said.stdout),
+                }
             }
         }
         Cmd::Trust {
