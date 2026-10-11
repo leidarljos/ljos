@@ -515,8 +515,10 @@ enum Cmd {
     /// leads, influence, and what each anchor did.
     Consensus {
         id: String,
-        /// Print JSON: the push gate's answer, then the settle's JSON as the
-        /// model crate wrote it.
+        /// Print one JSON document and nothing else. The push cite stays at
+        /// the top level under `push_cite`. The model crate's settle is under
+        /// `settle`. The tracker's settle is under `tracker` when `--compare`
+        /// ran. `surprising` and `reputation` are present when those readings ran.
         #[arg(long)]
         json: bool,
         /// Also run the tracker's own settle (`vissue consensus`), whose
@@ -1699,6 +1701,7 @@ fn main() -> Result<()> {
             // other voter, the seat too, under the default one; a ballot
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
+            ljos_cli::require_ballots(&id, &ballots)?;
             let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
             // The model crate's settle is the one printed; the tracker's
             // runs under --compare, or when the model crate is not there.
@@ -1716,24 +1719,42 @@ fn main() -> Result<()> {
                 personas.iter().map(|p| p.name.trim().to_string()).collect();
             let (gate, gate_json) =
                 ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
-            if json {
-                println!("{}", serde_json::to_string_pretty(&gate_json)?);
-            } else {
-                print!("{gate}");
-                println!(
-                    "advice, which does not decide a push: the weighted settle over every ballot"
-                );
-            }
             // The named outcomes show which voters err together, and
             // those voters are discounted.
-            if let Some((discount, line)) = settle_discount(&atoms) {
+            let discount = settle_discount(&atoms).map(|(discount, line)| {
                 with_discount(&mut steps, &discount);
+                line
+            });
+            // Beside the settle: the surprisingly popular answer when two
+            // or more voters forecast, and the voters' standing when rows
+            // exist.
+            let predictions = predictions_of(&atoms, &id);
+            let panel = panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions);
+            if json {
+                // One document on stdout. The push cite stays at the top
+                // level; each reading is under its own key. A human tally
+                // stays off stdout.
+                let mut said = Vec::new();
+                for step in steps.iter().chain(&panel) {
+                    let captured = run_captured(step.bin, &step.args)?;
+                    if !captured.stderr.is_empty() {
+                        eprint!("{}", captured.stderr);
+                    }
+                    said.push((ljos_cli::consensus_step_label(step), captured.stdout));
+                }
+                let doc = ljos_cli::consensus_document(&gate_json, &said);
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+                return Ok(());
+            }
+            print!("{gate}");
+            println!("advice, which does not decide a push: the weighted settle over every ballot");
+            if let Some(line) = discount {
                 println!("{line}");
             }
             for step in steps {
                 let settle = step.bin == "ljos-consensus"
                     && step.args.first().map(String::as_str) == Some("settle");
-                if !settle || json {
+                if !settle {
                     run(step.bin, &step.args)?;
                     continue;
                 }
@@ -1743,12 +1764,8 @@ fn main() -> Result<()> {
                     None => print!("{}", said.stdout),
                 }
             }
-            // Beside the settle: the surprisingly popular answer when two
-            // or more voters forecast, and the voters' standing when rows
-            // exist.
-            let predictions = predictions_of(&atoms, &id);
-            for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
-                if json || step.args.first().map(String::as_str) != Some("reputation") {
+            for step in panel {
+                if step.args.first().map(String::as_str) != Some("reputation") {
                     run(step.bin, &step.args)?;
                     continue;
                 }
