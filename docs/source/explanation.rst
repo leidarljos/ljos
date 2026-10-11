@@ -56,12 +56,13 @@ what an earlier one refused, so the first refusal wins.
 -  **The ask pack.** It is built into ljos and on by default, and asks the person
    before a command that drops or resets a database, tears down
    infrastructure, deletes cluster or cloud resources, prunes containers
-   or volumes, publishes or yanks a package, prints a secret, or empties a
-   file. Each ask gives the reason and a safer form. A seat rule on the
+   or volumes, publishes or yanks a package, prints a secret, empties a
+   file, deletes a home config or system file, mirrors with ``--delete`` into
+   the home directory, drops a git stash, or puts /tmp ahead of PATH. Each ask gives the reason and a safer form. A seat rule on the
    same command comes first. ``LJOS_ASK_PACK=off`` in the runner's environment
    turns the pack off, and a list such as ``LJOS_ASK_PACK=db,cloud`` keeps
-   only those classes: ``db``, ``cloud``, ``containers``, ``publish``, ``secrets`` and
-   ``files``.
+   only those classes: ``db``, ``cloud``, ``containers``, ``publish``, ``secrets``,
+   ``files``, ``git`` and ``path``.
 -  **The push check.** A ``git push`` is free to a repository the account
    owns alone and has never released; to any other it needs
    ``LJOS_CITE`` set to the issue that records the decision behind it.
