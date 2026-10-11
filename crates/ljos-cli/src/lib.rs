@@ -27543,11 +27543,6 @@ mod tests {
         }
     }
 
-    /// The Claude Code plugin in the repository root is the seat onboard
-    /// already registers: the protocol skill, the Claude hook events, and
-    /// a leidarljos marketplace that also names the vissue tracker.
-    #[test]
-
     /// The pack's address, its request lines and its posted atoms.
     type Served = (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Value>>>);
 
