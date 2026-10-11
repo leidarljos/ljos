@@ -223,6 +223,66 @@ pub fn statusline(input: &str) -> String {
     line
 }
 
+/// The line a new session hears first: that ljos is on, how many
+/// memories this workspace holds and how many are due, whether the
+/// command guard runs, and up to three of the workspace's preferences.
+/// A pack that does not answer within 400 ms is named with its fix.
+#[must_use]
+pub fn session_start_line() -> String {
+    let atoms = with_pack_timeout(400, || -> Result<Vec<Value>> {
+        let client = pack()?;
+        atoms_lean(&client, &client.workspace())
+    });
+    session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"))
+}
+
+/// [`session_start_line`] from what it read: the workspace's atoms, or
+/// `None` when the pack did not answer, and whether `ljos-policyd` is on
+/// the PATH.
+#[must_use]
+pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) -> String {
+    let guard = if guard {
+        "command guard on"
+    } else {
+        "command guard off (`cargo binstall ljos-policyd` turns it on)"
+    };
+    let Some(atoms) = atoms else {
+        return format!(
+            "ljos is on, but the memory store does not answer (`packset ensure` starts it); {guard}."
+        );
+    };
+    let kept: Vec<&Value> = atoms.iter().filter(|a| reviewable(a)).collect();
+    if kept.is_empty() {
+        return format!(
+            "ljos is on: no memories here yet (`ljos remember` or `ljos prefer` adds one); {guard}."
+        );
+    }
+    let due = due_of(atoms, now).len();
+    let mut line = format!(
+        "ljos is on: {} memor{}, {due} due for review, {guard}.",
+        kept.len(),
+        if kept.len() == 1 { "y" } else { "ies" }
+    );
+    let prefs: Vec<String> = kept
+        .iter()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
+        .filter_map(|a| a.get("text").and_then(Value::as_str))
+        .map(|t| {
+            let t = t.trim().trim_end_matches('.');
+            if t.chars().count() > 80 {
+                format!("{}...", t.chars().take(77).collect::<String>())
+            } else {
+                t.to_string()
+            }
+        })
+        .take(3)
+        .collect();
+    if !prefs.is_empty() {
+        line.push_str(&format!(" Preferences here: {}.", prefs.join("; ")));
+    }
+    line
+}
+
 /// Rewrite the agent definitions after a persona changed, in every agents
 /// directory that harnesses.toml names and that exists on disk. A
 /// directory the file does not name, such as the Grok one a first
@@ -7581,19 +7641,110 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     Ok(atom)
 }
 
+/// How a persona write treats a live persona of the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonaWrite {
+    /// `ljos persona NAME`: refused when another seat, or another holder
+    /// of this seat, defined the name.
+    Define,
+    /// `ljos persona NAME --replace`: takes the name over.
+    Replace,
+    /// A settle moved the anchor. The owner and the date stay.
+    Learned,
+}
+
+/// Who defined a persona, from its atom: seat, holder and the date it was
+/// defined. `None` on a persona written before personas had owners.
+#[must_use]
+pub fn persona_owner(atom: &Value) -> Option<(String, String, String)> {
+    let field = |k: &str| {
+        atom.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let owner = field("owner");
+    if owner.is_empty() {
+        return None;
+    }
+    Some((owner, field("holder"), field("since")))
+}
+
+/// The latest persona atom per name.
+fn latest_persona_atoms(atoms: &[Value]) -> std::collections::BTreeMap<String, Value> {
+    let mut latest: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("persona") {
+            continue;
+        }
+        let Some(name) = atom.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let ts = atom.get("ts").and_then(Value::as_str).unwrap_or("");
+        let newer = latest
+            .get(name)
+            .is_none_or(|seen| seen.get("ts").and_then(Value::as_str).unwrap_or("") <= ts);
+        if newer {
+            latest.insert(name.to_string(), atom.clone());
+        }
+    }
+    latest
+}
+
+/// POST one persona, defined by this seat. See [`write_persona_as`].
+///
+/// # Errors
+///
+/// As [`write_persona_as`] with [`PersonaWrite::Define`].
+pub fn write_persona(p: &Persona) -> Result<Value> {
+    write_persona_as(p, PersonaWrite::Define)
+}
+
 /// POST one persona. A persona of the same name already in the pack is
 /// superseded, so a rewrite moves the roster without leaving the old view
-/// live. Every persona is owed one unscoped inbound trust row; `--about`
-/// on a later trust row only adds weight, it does not replace that floor.
-pub fn write_persona(p: &Persona) -> Result<Value> {
+/// live. Each persona names the seat and holder that defined it and when.
+/// Personas are shared by every seat on the pack, so redefining a name
+/// someone else defined is refused unless the write is a replace. Every
+/// persona is owed one unscoped inbound trust row; `--about` on a later
+/// trust row only adds weight, it does not replace that floor.
+///
+/// # Errors
+///
+/// The pack not answering, an invalid persona, or a name another seat or
+/// holder defined, under [`PersonaWrite::Define`].
+pub fn write_persona_as(p: &Persona, how: PersonaWrite) -> Result<Value> {
     let client = pack()?;
     let workspace = client.workspace();
     let mut atom = persona_atom(p, &workspace)?;
-    let previous: Vec<Value> = client
+    let name = p.name.trim();
+    let same: Vec<Value> = client
         .atoms_of_kind(&workspace, "persona")
         .unwrap_or_default()
         .into_iter()
-        .filter(|a| a.get("name").and_then(Value::as_str) == Some(p.name.trim()))
+        .filter(|a| a.get("name").and_then(Value::as_str) == Some(name))
+        .collect();
+    let live = latest_persona_atoms(&same).remove(name);
+    let (seat, holder) = (seat_name(), holder_name());
+    let owner = match (how, live.as_ref().and_then(persona_owner)) {
+        (PersonaWrite::Learned, Some(kept)) => kept,
+        (PersonaWrite::Define, Some((owner, by, since)))
+            if owner != seat || (!by.is_empty() && by != holder) =>
+        {
+            bail!(
+                "persona: {name} was defined by seat {owner}{}{}, and personas are shared by every seat on this pack. \
+                 Pass --replace to take it over, or pick another name. Nothing was written",
+                if by.is_empty() { String::new() } else { format!(" ({by})") },
+                if since.is_empty() { String::new() } else { format!(" on {since}") },
+            );
+        }
+        (PersonaWrite::Define, Some(kept)) => kept,
+        _ => (seat, holder, now_utc()),
+    };
+    atom["owner"] = Value::String(owner.0);
+    atom["holder"] = Value::String(owner.1);
+    atom["since"] = Value::String(owner.2);
+    let previous: Vec<Value> = same
+        .iter()
         .filter_map(|a| {
             a.get("id")
                 .and_then(Value::as_str)
@@ -7608,6 +7759,46 @@ pub fn write_persona(p: &Persona) -> Result<Value> {
         .context("persona: POST /v1/atoms failed")?;
     ensure_unscoped_inbound(p)?;
     Ok(posted)
+}
+
+/// `ljos personas`: one line per live persona, with the seat that defined
+/// it and when.
+///
+/// # Errors
+///
+/// The pack not answering.
+pub fn personas_listing() -> Result<String> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_of_kind(&client.workspace(), "persona")
+        .context("persona: GET /v1/atoms?kind=persona failed")?;
+    let owners = latest_persona_atoms(&atoms);
+    let mut out = String::new();
+    for line in format_personas(&personas_of(&atoms)).lines() {
+        let name = line.split_whitespace().next().unwrap_or("");
+        let by = owners.get(name).and_then(persona_owner).map_or_else(
+            || "  (no owner recorded)".to_string(),
+            |(owner, holder, since)| {
+                let holder = if holder.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({holder})")
+                };
+                let since = since
+                    .get(..10)
+                    .map(|d| format!(" since {d}"))
+                    .unwrap_or_default();
+                format!("  by {owner}{holder}{since}")
+            },
+        );
+        if owners.is_empty() {
+            out.push_str(line);
+        } else {
+            out.push_str(&format!("{line}{by}"));
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// The unscoped inbound row a persona is owed: the seat weighs it at 1,
@@ -8260,8 +8451,35 @@ pub fn playbook_opening(issue: &str, name: Option<&str>) -> Result<String> {
     }
 }
 
-/// The three blocks a brief carries: playbook step (full body), named
-/// principles, arena rubric.
+/// Whether an issue is ljos's own work: an id in the `ljos` project, a
+/// tracker project named `ljos`, or an `ljos` or `ljos-*` tag. The named
+/// principles and the arena rubric are ljos's product law, so only such
+/// an issue's brief carries them.
+#[must_use]
+pub fn is_ljos_issue(issue: &str) -> bool {
+    let issue = issue.trim();
+    if issue.to_ascii_lowercase().starts_with("ljos-") {
+        return true;
+    }
+    let Ok(card) = tracker_show_json(issue) else {
+        return false;
+    };
+    let ljos = |w: &str| {
+        let w = w.trim().to_ascii_lowercase();
+        w == "ljos" || w.starts_with("ljos-")
+    };
+    card["project"]
+        .as_str()
+        .is_some_and(|p| p.trim().eq_ignore_ascii_case("ljos"))
+        || card["tags"]
+            .as_array()
+            .is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(ljos))
+}
+
+/// The blocks a brief carries: the playbook step (full body), then, on
+/// ljos's own issues only, the named principles and the arena rubric.
+/// Another project's issue gets its playbook and a line saying no
+/// product rubric applies, so a persona reasons from the issue alone.
 #[must_use]
 pub fn brief_playbook_blocks(issue: &str) -> String {
     let copy = match bound_playbook(issue) {
@@ -8272,7 +8490,13 @@ pub fn brief_playbook_blocks(issue: &str) -> String {
             "none bound; `ljos playbook ISSUE NAME` names one before personas enter.\n".to_string()
         }
     };
-    format!("== playbook\n{copy}\n{PRINCIPLES}\n{RUBRIC}")
+    if is_ljos_issue(issue) {
+        format!("== playbook\n{copy}\n{PRINCIPLES}\n{RUBRIC}")
+    } else {
+        format!(
+            "== playbook\n{copy}\n== rubric\nnone: {issue} is not ljos's own work, so ljos's principles and rubric do not apply. Judge it on the issue's own terms.\n"
+        )
+    }
 }
 
 /// The brief a subagent playing a persona starts from: the persona's view
@@ -10610,12 +10834,21 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
         bail!("deed: an accession is required");
     }
     let layout = vissue_core::Layout::resolve(None, None)?;
-    let hit = vissue_core::Router::load(layout)?.find_by_id(ticket)?;
+    let mut hit = vissue_core::Router::load(layout)?.find_by_id(ticket)?;
+    // A removal is an appended event, and a board has nowhere to append
+    // it. The board is split into per-issue files first, which reads it
+    // and does not write it, then the removal appends to the ledger.
+    let mut split = String::new();
     if !vissue_core::ledger::is_ledger(&hit.path) {
-        bail!(
-            "deed: {ticket} is not in a ledger, so a removal would rewrite the board. \
-             A removal is an appended event"
-        );
+        let said = vissue_core::ledger::migrate(&hit.layout, false).with_context(|| {
+            format!("deed: {ticket} is on a board, and splitting it into a ledger failed")
+        })?;
+        split = format!("split the board into a ledger first (`vissue migrate-ledger`):\n{said}");
+        hit = vissue_core::Router::load(vissue_core::Layout::resolve(None, None)?)?
+            .find_by_id(ticket)?;
+        if !vissue_core::ledger::is_ledger(&hit.path) {
+            bail!("deed: {ticket} is still on a board after the split; nothing was removed");
+        }
     }
     let card = vissue_core::agent::show_json(&hit.layout, ticket)?;
     let cited = card
@@ -10631,7 +10864,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
         ticket,
         &format!("removed citation {accession}"),
     )?;
-    Ok(dropped)
+    Ok(format!("{split}{dropped}"))
 }
 
 /// Whether a cite stands: a tracker issue its seat ballots decide
@@ -11736,7 +11969,7 @@ pub fn learn_and_write(
         )?;
     }
     for p in &moved {
-        write_persona(p)?;
+        write_persona_as(p, PersonaWrite::Learned)?;
     }
     write_outcome(issue, outcome)?;
     Ok((rows, moved, calibration))
@@ -13636,6 +13869,204 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
             )
         })
         .collect()
+}
+
+/// The line `ljos doctor` opens with: whether the seat is ready, which
+/// required parts do not answer, and how many optional parts are off.
+#[must_use]
+pub fn doctor_summary(rows: &[Habitat]) -> String {
+    let down = failing(rows);
+    let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
+    summary_line(&down, off)
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn summary_line(down: &[&str], off: usize) -> String {
+    let mut line = if down.is_empty() {
+        "ljos is ready: memory, the tracker and the command guard answer.".to_string()
+    } else {
+        format!(
+            "ljos is not ready: {} {} not answer.",
+            and_list(down),
+            if down.len() == 1 { "does" } else { "do" }
+        )
+    };
+    if off > 0 {
+        line.push_str(&format!(
+            " {off} optional part{} {} off.",
+            if off == 1 { "" } else { "s" },
+            if off == 1 { "is" } else { "are" }
+        ));
+    }
+    line.push_str(" `ljos doctor --all` lists every row.\n");
+    line
+}
+
+/// The short doctor: the summary line, then only the rows that need
+/// action (`no` and `warn`), each with the fix its state names.
+#[must_use]
+pub fn format_doctor_short(rows: &[Habitat]) -> String {
+    let needs: Vec<Habitat> = rows
+        .iter()
+        .filter(|h| matches!(doctor_word(h), "no" | "warn"))
+        .cloned()
+        .collect();
+    format!("{}{}", doctor_summary(rows), format_doctor(&needs))
+}
+
+/// One section of a sitting's report, cut for [`compact_sitting`].
+fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut Vec<String>) {
+    match name {
+        "doctor" => {
+            let mut down = Vec::new();
+            let mut off = 0;
+            let mut act = String::new();
+            for l in lines {
+                let cols: Vec<&str> = l.splitn(3, '\t').collect();
+                match cols.as_slice() {
+                    ["info", _, _] => off += 1,
+                    ["ok", _, _] => {}
+                    [word @ ("no" | "warn"), name, _] => {
+                        if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
+                            down.push(*name);
+                        }
+                        act.push_str(l);
+                        act.push('\n');
+                    }
+                    _ if !l.trim().is_empty() => {
+                        act.push_str(l);
+                        act.push('\n');
+                    }
+                    _ => {}
+                }
+            }
+            out.push_str(&summary_line(&down, off));
+            out.push_str(&act);
+        }
+        "island" => {
+            for l in lines {
+                let cols: Vec<&str> = l.split('\t').collect();
+                if cols.len() == 5 && cols[0].parse::<f64>().is_ok() && memories.len() < 5 {
+                    memories.push(cols[4].to_string());
+                } else if l.starts_with("weak island") {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "due" => {
+            for l in lines {
+                if !l.starts_with("0 due") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "blockers" => {
+            for l in lines {
+                if !l.starts_with("none open") && !l.trim().is_empty() {
+                    out.push_str(&format!("blockers: {l}\n"));
+                }
+            }
+        }
+        "playbook" => {
+            if let Some(first) = lines.first().filter(|l| l.trim() != "sit") {
+                out.push_str(&format!("playbook: {first}\n"));
+            }
+        }
+        "panel" | "cards" => {
+            for l in lines {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        "reclaim" => {
+            for l in lines {
+                if l.starts_with("kept ") || l.starts_with("handed back") {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "claim" => {
+            for l in lines {
+                if !l.starts_with("gen=") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "sync" => {
+            for l in lines {
+                if !l.contains("names no scope") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        // recall and timeline are for `--verbose`.
+        _ => {}
+    }
+}
+
+/// A sitting's report cut to what a person acts on. The full report goes
+/// section by section (`== doctor`, `== island: TITLE`, ...); this keeps
+/// the doctor's summary and the rows that need action, the memories the
+/// island found, open blockers, the playbook's name, a panel, a reclaim
+/// that moved something, and the claim, then says the issue is held.
+/// `ljos sitting --verbose` prints the full report.
+#[must_use]
+pub fn compact_sitting(full: &str, issue: &str) -> String {
+    let mut out = String::new();
+    let mut memories: Vec<String> = Vec::new();
+    let mut section = "";
+    let mut section_lines: Vec<&str> = Vec::new();
+    for line in full.lines() {
+        if let Some(head) = line.strip_prefix("== ") {
+            compact_section(section, &section_lines, &mut out, &mut memories);
+            section_lines.clear();
+            section = if head.starts_with("island") {
+                "island"
+            } else {
+                match head {
+                    "doctor" => "doctor",
+                    "sync" => "sync",
+                    "cards" => "cards",
+                    "due" => "due",
+                    "blockers" => "blockers",
+                    "playbook" => "playbook",
+                    "panel" => "panel",
+                    "recall" => "recall",
+                    "timeline" => "timeline",
+                    "reclaim" => "reclaim",
+                    "claim" => "claim",
+                    _ => "",
+                }
+            };
+        } else {
+            section_lines.push(line);
+        }
+    }
+    compact_section(section, &section_lines, &mut out, &mut memories);
+    if !memories.is_empty() {
+        out.push_str("What the seat remembers for this task:\n");
+        for m in &memories {
+            out.push_str(&format!("- {m}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "{issue} is yours. `ljos finish {issue} --lesson \"...\"` closes the sitting; \
+         `ljos sitting {issue} --verbose` prints every section.\n"
+    ));
+    out
 }
 
 /// The accessions a satchel's description says it needs.
@@ -21710,10 +22141,13 @@ mod tests {
         let blocks = brief_playbook_blocks("proj-1a2b");
         assert!(blocks.contains("== playbook"), "{blocks}");
         assert!(blocks.contains("Grade due claims"), "{blocks}");
-        assert!(blocks.contains("== principles"), "{blocks}");
-        assert!(blocks.contains("split-fence"), "{blocks}");
-        assert!(blocks.contains("== rubric"), "{blocks}");
-        assert!(blocks.contains("Ledger intact"), "{blocks}");
+        assert!(!blocks.contains("split-fence"), "{blocks}");
+        assert!(!blocks.contains("Ledger intact"), "{blocks}");
+        let own = brief_playbook_blocks("ljos-1a2b");
+        assert!(own.contains("== principles"), "{own}");
+        assert!(own.contains("split-fence"), "{own}");
+        assert!(own.contains("== rubric"), "{own}");
+        assert!(own.contains("Ledger intact"), "{own}");
         drop_playbook("proj-1a2b");
         assert_eq!(bound_playbook("proj-1a2b"), None);
         let none = playbook_opening("proj-1a2b", None).unwrap();
@@ -23469,6 +23903,78 @@ mod tests {
         assert!(answer.contains("--force-with-lease"), "{answer}");
     }
 
+    fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {
+        Habitat {
+            name,
+            state: state.to_string(),
+            ok,
+        }
+    }
+
+    #[test]
+    fn a_ready_doctor_is_one_line() {
+        let rows = vec![
+            habitat_row("pack", "answers", true),
+            habitat_row("tracker", "answers", true),
+            habitat_row("host key", "none yet", false),
+        ];
+        let short = format_doctor_short(&rows);
+        assert_eq!(
+            short,
+            "ljos is ready: memory, the tracker and the command guard answer. 1 optional part is off. `ljos doctor --all` lists every row.\n"
+        );
+        assert!(format_doctor(&rows).contains("host key"));
+    }
+
+    #[test]
+    fn a_short_doctor_names_what_is_down_with_its_fix() {
+        let rows = vec![
+            habitat_row("pack", "no pack: run packset ensure", false),
+            habitat_row(
+                "encoder",
+                "not installed: cargo binstall packset-embed",
+                false,
+            ),
+            habitat_row("tracker", "answers", true),
+        ];
+        let short = format_doctor_short(&rows);
+        let lines: Vec<&str> = short.lines().collect();
+        assert_eq!(
+            lines[0],
+            "ljos is not ready: pack and encoder do not answer. `ljos doctor --all` lists every row."
+        );
+        assert_eq!(lines.len(), 3, "{short}");
+        assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
+        assert!(!short.contains("tracker"), "{short}");
+    }
+
+    #[test]
+    fn a_compact_sitting_keeps_what_needs_action_and_the_memories() {
+        let full = "== doctor\nok\tpack\tanswers\ninfo\thost key\tnone yet\nencoder down: the pack ranks by words alone\n\
+== sync\nsync: this repository names no scope\n\
+== cards\n\
+== due\n2 due; the soonest: abc\n\
+== island: Fix the guard\nSeat island.\n1.000\tseed\tabcd1234\ttoday\tPrefer plain words in denials.\n0.400\t    \tef567890\t3 days ago\tKeep hooks under 8 s.\n\
+== blockers\nnone open; the issue is workable\n\
+== playbook\nsit\n\
+== recall\nlots of recall\n\
+== timeline\n2026-10-11 noted\n\
+== reclaim\nno claim quiet longer than 900s\n\
+== claim\nclaimed Software-x for ljos-bot@ux-fix\ngen=4\n";
+        let short = compact_sitting(full, "Software-x");
+        assert_eq!(
+            short,
+            "ljos is ready: memory, the tracker and the command guard answer. 1 optional part is off. `ljos doctor --all` lists every row.\n\
+encoder down: the pack ranks by words alone\n\
+2 due; the soonest: abc\n\
+claimed Software-x for ljos-bot@ux-fix\n\
+What the seat remembers for this task:\n\
+- Prefer plain words in denials.\n\
+- Keep hooks under 8 s.\n\
+Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
+        );
+    }
+
     /// A removal is an appended ledger event. The heading that already
     /// cited the deed stays byte for byte, and the folded list drops it.
     #[test]
@@ -23537,10 +24043,11 @@ mod tests {
         assert!(super::uncite_deed("probe-c1te", "  ").is_err());
     }
 
-    /// A single board file has no append. Removing a citation there would
-    /// rewrite it, so the verb refuses and the file stays.
+    /// A freshly filed issue sits on a board. Removing a citation splits
+    /// the board into a ledger first, then appends the removal, so a
+    /// superseded deed can be dropped the minute the issue exists.
     #[test]
-    fn removing_a_citation_from_a_board_is_refused() {
+    fn removing_a_citation_from_a_board_splits_it_first() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -23553,20 +24060,35 @@ mod tests {
 * TODO [#C] Board
 :PROPERTIES:
 :ID:         probe-b0rd
-:DEEDS:      deed-file
+:DEEDS:      deed-file deed-keep
 :END:
 ";
         let issues = project.join("issues.org");
         std::fs::write(&issues, board).unwrap();
         let root_s = root.to_str().unwrap();
         unsafe { std::env::remove_var("ISSUE_ROOT") };
-        let _env = HoldEnv::set(&[("VISSUE_ROOT", root_s), ("VISSUE_NO_ROUTE", "1")]);
-        let before = std::fs::read(&issues).unwrap();
-        let err = super::uncite_deed("probe-b0rd", "deed-file")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not in a ledger"), "{err}");
-        assert_eq!(std::fs::read(&issues).unwrap(), before);
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root_s),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+        ]);
+        let said = super::uncite_deed("probe-b0rd", "deed-file")
+            .unwrap_or_else(|e| panic!("removal on a board failed: {e:#}"));
+        assert!(said.contains("split the board into a ledger"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(&issues).unwrap(),
+            board,
+            "the board was rewritten"
+        );
+        assert!(project.join("issues/probe-b0rd.org").is_file());
+        let card = super::tracker_show_json("probe-b0rd").unwrap();
+        let left: Vec<&str> = card["deeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(left, vec!["deed-keep"]);
     }
 
     /// A non-zero exit is an error carrying what was said on stderr.
@@ -26078,6 +26600,29 @@ mod tests {
     }
 
     #[test]
+    fn a_session_start_says_ljos_is_on_in_one_line() {
+        let now = "2026-10-11T12:00:00Z";
+        let atoms = vec![
+            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z"}),
+            serde_json::json!({"kind":"lesson","text":"BM25+ beat BM25.","due_at":"2027-01-01T00:00:00Z"}),
+        ];
+        let line = session_start_line_from(Some(&atoms), now, true);
+        assert_eq!(
+            line,
+            "ljos is on: 2 memories, 1 due for review, command guard on. Preferences here: Plain words in denials."
+        );
+        assert!(!line.contains('\n'));
+        let empty = session_start_line_from(Some(&[]), now, false);
+        assert!(
+            empty.starts_with("ljos is on: no memories here yet"),
+            "{empty}"
+        );
+        assert!(empty.contains("cargo binstall ljos-policyd"), "{empty}");
+        let down = session_start_line_from(None, now, true);
+        assert!(down.contains("`packset ensure`"), "{down}");
+    }
+
+    #[test]
     fn ahead_of_a_cached_registry_answer_is_said() {
         let cached = super::CrateVersion {
             version: "0.12.16".into(),
@@ -27496,6 +28041,158 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no completion: {calls}"));
         assert_eq!(held, finished, "{calls}");
+    }
+
+    /// A persona brief on another project's issue carries the issue and
+    /// its playbook, not ljos's own principles and rubric. Checked through
+    /// both doors a persona enters by: `ljos brief` and `ljos panel`.
+    #[test]
+    fn a_brief_on_another_project_carries_no_ljos_rubric() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* TODO [#C] Logo legibility review\n:PROPERTIES:\n:ID:         probe-l0g0\n:END:\n",
+        )
+        .unwrap();
+        let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (url, _seen) = serve_http(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-p","kind":"persona","name":"designer","anchor":0.5,"text":"Reads a mark for legibility at small sizes.","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let runtime = dir.path().join("run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let out = dir.path().join("panel");
+        let (brief_text, panel_text) = with_fake_on_path(dir.path(), || {
+            bind_playbook("probe-l0g0", "company-panel").unwrap();
+            let b = brief("designer", "probe-l0g0").unwrap();
+            panel("probe-l0g0", &out).unwrap();
+            let p = std::fs::read_to_string(out.join("designer.md")).unwrap();
+            (b, p)
+        });
+        for (door, text) in [("brief", &brief_text), ("panel", &panel_text)] {
+            assert!(text.contains("== playbook"), "{door}: {text}");
+            assert!(text.contains("Logo legibility review"), "{door}: {text}");
+            assert!(!text.contains("== principles"), "{door}: {text}");
+            assert!(!text.contains("split-fence"), "{door}: {text}");
+            assert!(!text.contains("Ledger intact"), "{door}: {text}");
+        }
+    }
+
+    /// The pack's address, its request lines and its posted atoms.
+    type Served = (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Value>>>);
+
+    /// A pack serving one persona, `eon-chemist`, defined by seat
+    /// `saddle` in another conversation. Records every request line and
+    /// every posted atom.
+    fn serve_owned_persona() -> Served {
+        let posted = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&posted);
+        let (url, seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-chem","kind":"persona","name":"eon-chemist","anchor":0.4,"text":"Reads a saddle search as a chemist.","owner":"saddle","holder":"sand-subagent-0e61","since":"2026-10-11T09:58:00Z","ts":"2026-10-11T09:58:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else if line.starts_with("POST /v1/atoms") {
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                slot.lock().unwrap().push(atom.clone());
+                (200, atom.to_string())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        (url, seen, posted)
+    }
+
+    fn chemist(view: &str) -> Persona {
+        Persona {
+            name: "eon-chemist".into(),
+            anchor: 0.5,
+            view: view.into(),
+            entities: vec!["eon".into()],
+            runner: None,
+        }
+    }
+
+    /// Two seats on one pack share its personas. Redefining a name another
+    /// seat defined is refused, names who defined it, and writes nothing.
+    #[test]
+    fn redefining_another_seat_s_persona_is_refused() {
+        let _g = env_guard();
+        let (url, seen, posted) = serve_owned_persona();
+        let _url = PackUrl::set(&url);
+        let err = write_persona(&chemist("Reads every result as a chemist would."))
+            .expect_err("another seat's persona was overwritten");
+        let text = format!("{err:#}");
+        assert!(text.contains("saddle"), "{text}");
+        assert!(text.contains("--replace"), "{text}");
+        assert!(
+            posted.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    /// `--replace` takes the name over under this seat. A settle that moves
+    /// the anchor keeps the owner. The listing names the owner.
+    #[test]
+    fn a_replace_takes_the_persona_over_and_a_settle_keeps_its_owner() {
+        let _g = env_guard();
+        let (url, _seen, posted) = serve_owned_persona();
+        let _url = PackUrl::set(&url);
+        write_persona_as(
+            &chemist("Reads every result as a chemist would."),
+            PersonaWrite::Replace,
+        )
+        .unwrap();
+        write_persona_as(
+            &chemist("Reads a saddle search as a chemist."),
+            PersonaWrite::Learned,
+        )
+        .unwrap();
+        let atoms = posted.lock().unwrap().clone();
+        let personas: Vec<&Value> = atoms.iter().filter(|a| a["kind"] == "persona").collect();
+        assert_eq!(personas.len(), 2, "{atoms:?}");
+        assert_eq!(personas[0]["owner"], "inky", "{:?}", personas[0]);
+        assert_eq!(personas[0]["supersedes"][0], "atom-chem");
+        assert_eq!(personas[1]["owner"], "saddle", "{:?}", personas[1]);
+        assert_eq!(personas[1]["since"], "2026-10-11T09:58:00Z");
+        let listing = personas_listing().unwrap();
+        assert!(
+            listing.contains("by saddle (sand-subagent-0e61) since 2026-10-11"),
+            "{listing}"
+        );
     }
 
     /// A pack that refuses the lesson after the work is done leaves the

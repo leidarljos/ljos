@@ -12,10 +12,12 @@ agent, in Cursor or any other tool, can see who has it and what it taught.
 
 1. Find or make the ticket. `vissue q -p PROJECT "TITLE"` makes one and prints
    its id (see the ljos-file skill).
-2. `ljos sitting ISSUE`. It prints, in order: doctor, cards (files the person
-   froze, read only), what is due for review, the memories the title brings
-   up, the recipe, the working set, the timeline, and the claim. It stops at
+2. `ljos sitting ISSUE`. It prints whether ljos is ready, anything that
+   needs action (a store down, cards the person froze, reviews due, open
+   blockers), the memories the title brings up, and the claim. It stops at
    the first store that does not answer. Fix that before going on.
+   `ljos sitting ISSUE --verbose` prints every section in full, the doctor's
+   rows, recall, the working set and the timeline included.
 3. Read what it printed. The memories and the cards are the constraints for
    this work.
 
