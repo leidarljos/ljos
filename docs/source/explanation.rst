@@ -46,9 +46,13 @@ what an earlier one refused, so the first refusal wins.
    row says whether it runs the table built into it or phronesis after
    that table. Without the binary nothing is refused here, unless
    ``POLICYD_REQUIRED`` is set to 1, which refuses everything instead.
+   A binary that is there but crashes, prints no verdict or takes more
+   than five seconds refuses the line.
 -  **Seat rules.** ``ljos rule`` writes a rule (a pattern, and a verdict of
    deny or ask) into the pack, and the seat tries it against each command
    of the line. A quoted sentence or a heredoc body counts as data.
+   The rules last read are kept under ``$XDG_DATA_HOME/ljos``, and they
+   stand when the pack is down or switched off.
 -  **The ask pack.** It is built into ljos and on by default, and asks the person
    before a command that drops or resets a database, tears down
    infrastructure, deletes cluster or cloud resources, prunes containers
