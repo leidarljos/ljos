@@ -345,6 +345,21 @@ fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result
     }
 }
 
+/// The full id of an open proposal a short id names; see
+/// [`crate::resolve_short_id`].
+///
+/// # Errors
+///
+/// The short id starts more than one open proposal.
+pub fn resolve_id(id: &str) -> Result<String> {
+    let open: Vec<String> = read_latest()
+        .into_values()
+        .filter(|r| r.status == "open")
+        .map(|r| r.id)
+        .collect();
+    crate::resolve_short_id("accept", id, &open)
+}
+
 /// The conversation that filed an open proposal: the holder its atom's
 /// source names. `None` when the id is not on file or the atom names none.
 #[must_use]
