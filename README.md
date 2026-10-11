@@ -44,7 +44,7 @@ the hand install below works. Read the script before you run it; it is
 
 ```
 cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
-ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
+ljos onboard                                # every coding tool found on this machine: MCP server, hooks and skill
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
 ```
@@ -220,8 +220,8 @@ The hooks run the same `ljos hook` as `ljos onboard --harness cursor`. Two of
 them, `beforeShellExecution` and `preToolUse`, check each command before it
 runs. A third, `beforeSubmitPrompt`, looks up what the seat knows. Cursor does not pass a
 prompt hook's text to the model, so that note reaches the agent with the next
-tool result. With the plugin installed, skip `ljos onboard --harness cursor`;
-it would register the hooks a second time. When the programs are missing, the
+tool result. With the plugin installed, `ljos onboard` sees it and leaves
+Cursor to the plugin, so the hooks are not registered a second time. When the programs are missing, the
 hooks say how to install them and let commands run, and the ljos-setup skill
 walks the agent through the install.
 
@@ -356,7 +356,9 @@ ljos receive bag [--since bridge.txt] [--import]
 ljos doctor                                    # whether ljos is ready, and only the rows that need action
 ljos doctor --all                              # every row
 ljos protocol
-ljos onboard                                   # the one MCP server entry any runner takes
+ljos onboard                                   # at a terminal, every runner found on this machine; into a pipe, the one MCP server entry any runner takes
+ljos onboard --harness all --dry-run           # what onboarding every runner found would write
+ljos onboard --harness json                    # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes
 ljos onboard --harness grokbot --skills ~/.grokbot/skills   # shell-only: skill and an env file, no MCP server and no hook
 source ~/.config/ljos/grokbot.env              # LJOS_SEAT=grokbot; the process tree is not this seat
