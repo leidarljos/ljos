@@ -14,6 +14,7 @@ use serde_json::Value;
 pub mod admit;
 pub mod approval;
 pub mod ask_pack;
+pub mod command_prefs;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -9639,16 +9640,83 @@ pub fn rules_from_pack() -> Result<Vec<Rule>> {
 /// a deny the person wrote does not lapse because a server did.
 #[must_use]
 pub fn rules_for_gate() -> Vec<Rule> {
+    gate_read().0
+}
+
+/// The rules a gate judges by, as [`rules_for_gate`], and the pack's
+/// preferences as (id, text), from the one listing. The preferences are
+/// empty when the pack does not answer: a reminder is not worth a wait.
+#[must_use]
+pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     let kept = rules_cache_path();
-    match rules_from_pack() {
-        Ok(rules) => {
+    let listed = pack().and_then(|client| {
+        atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
+    });
+    match listed {
+        Ok(atoms) => {
+            let rules = rules_of(&atoms);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
-            rules
+            (rules, preferences_of(&atoms))
         }
-        Err(_) => kept.map(|p| kept_rules(&p)).unwrap_or_default(),
+        Err(_) => (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new()),
     }
+}
+
+/// The live preferences in a set of atoms, as (id, text).
+#[must_use]
+pub fn preferences_of(atoms: &[Value]) -> Vec<(String, String)> {
+    atoms
+        .iter()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
+        .filter_map(|a| {
+            Some((
+                a.get("id")?.as_str()?.to_string(),
+                a.get("text")?.as_str()?.trim().to_string(),
+            ))
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .collect()
+}
+
+/// How many preferences one command hears at most.
+pub const COMMAND_PREFERENCES: usize = 2;
+
+/// The note a tool call carries: the preferences that bear on its command
+/// and that this session has not heard on a command yet, and the keys to
+/// mark seen once it is delivered.
+#[must_use]
+pub fn command_preference_note(
+    preferences: &[(String, String)],
+    line: &str,
+    session: Option<&str>,
+) -> (String, Vec<String>) {
+    let seen = seen_ids(session);
+    let fresh: Vec<(String, String)> = preferences
+        .iter()
+        .filter(|(id, _)| !seen.contains(&format!("cmd-pref:{id}")))
+        .cloned()
+        .collect();
+    let hits = command_prefs::naming_command(&fresh, line, COMMAND_PREFERENCES);
+    if hits.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let lines: Vec<String> = hits
+        .iter()
+        .map(|(_, text)| format!("- The person's preference: {text}"))
+        .collect();
+    let keys = hits
+        .iter()
+        .map(|(id, _)| format!("cmd-pref:{id}"))
+        .collect();
+    (
+        format!(
+            "ljos: before this command, the person said:\n{}",
+            lines.join("\n")
+        ),
+        keys,
+    )
 }
 
 /// `$XDG_DATA_HOME/ljos/rules-<workspace>.json`: one file per workspace,
