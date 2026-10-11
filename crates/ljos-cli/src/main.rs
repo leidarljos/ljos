@@ -19,6 +19,7 @@ use ljos_cli::{
     withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule, write_trust,
     Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -553,9 +554,9 @@ enum Cmd {
     Seat,
     /// Print the one MCP server entry any runner takes; with --harness, register it with a runner named in ~/.config/ljos/harnesses.toml and install the protocol as its skill.
     Onboard {
-        /// A runner named in ~/.config/ljos/harnesses.toml; absent, print the entry to paste anywhere.
-        #[arg(long, default_value = "json")]
-        harness: String,
+        /// A runner named in ~/.config/ljos/harnesses.toml or shipped with ljos; `all` onboards every runner found on this machine, and `json` prints the entry to paste anywhere. Absent: `all` at a terminal, `json` into a pipe.
+        #[arg(long)]
+        harness: Option<String>,
         /// Report what would be written and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -1764,7 +1765,18 @@ fn main() -> Result<()> {
                 print!("{HARNESSES_EXAMPLE}");
                 return Ok(());
             }
-            let steps = onboard_to(&harness, dry_run, skills.as_deref())?;
+            let harness = harness.unwrap_or_else(|| {
+                if std::io::stdout().is_terminal() {
+                    "all".to_string()
+                } else {
+                    "json".to_string()
+                }
+            });
+            let steps = if harness == "all" {
+                ljos_cli::onboard_detected(dry_run, skills.as_deref())?
+            } else {
+                onboard_to(&harness, dry_run, skills.as_deref())?
+            };
             // With no runner named, the entry is for pasting: print the
             // JSON alone, so it parses as it stands.
             if harness == "json" {
