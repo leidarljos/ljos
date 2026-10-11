@@ -168,8 +168,30 @@ pub fn body_of(text: &str) -> String {
         .unwrap_or_else(|| text.trim().to_string())
 }
 
+/// The pack refuses an atom whose text is longer than this, in characters.
+pub const ATOM_TEXT_CAP: usize = 500;
+
+/// The longest body a message carries. Past it, a file and a deed
+/// (`deedar create file`, then the accession in the message) say it better.
+pub const MAIL_BODY_CAP: usize = 16_000;
+
+/// A body past [`MAIL_BODY_CAP`] is refused before anything is written,
+/// with the way to send it as a deed.
+fn check_length(verb: &str, body: &str) -> Result<()> {
+    let n = body.chars().count();
+    if n > MAIL_BODY_CAP {
+        bail!(
+            "{verb}: the message is {n} characters, past {MAIL_BODY_CAP}; write it to a file, \
+             `deedar create file --path FILE --agent SEAT`, and send the accession it prints. Nothing was sent"
+        );
+    }
+    Ok(())
+}
+
 /// The text that travels. The id is in it, so an import that keys on the
-/// text keeps two copies of the same words.
+/// text keeps two copies of the same words. A body that would push the
+/// text past [`ATOM_TEXT_CAP`] is cut there with an ellipsis; the whole
+/// body rides in the atom's `body` field, which [`message_atom`] sets.
 #[must_use]
 pub fn message_text(m: &Outgoing) -> String {
     let mut head = format!("msg {}\nfrom {}\nto {}", m.id, m.from, m.to.join(", "));
@@ -185,7 +207,13 @@ pub fn message_text(m: &Outgoing) -> String {
     if let Some(reply) = &m.reply {
         head.push_str(&format!("\nreply {reply}"));
     }
-    format!("{head}\n\n{}", m.body.trim())
+    let body = m.body.trim();
+    let room = ATOM_TEXT_CAP.saturating_sub(head.chars().count() + 2);
+    if body.chars().count() <= room {
+        return format!("{head}\n\n{body}");
+    }
+    let cut: String = body.chars().take(room.saturating_sub(1)).collect();
+    format!("{head}\n\n{cut}\u{2026}")
 }
 
 /// The atom a message posts. The entities are what an inbox filters on.
@@ -214,14 +242,19 @@ pub fn message_atom(m: &Outgoing, workspace: &str) -> Value {
     if let Some(scope) = &m.scope {
         entities.push(format!("scope:{scope}"));
     }
-    json!({
+    let text = message_text(m);
+    let mut atom = json!({
         "schema": "inside.atom/v1",
         "kind": "message",
         "level": "explicit",
-        "text": message_text(m),
+        "text": text,
         "workspace": workspace,
         "entities": entities,
-    })
+    });
+    if body_of(&text) != m.body.trim() {
+        atom["body"] = Value::String(m.body.trim().to_string());
+    }
+    atom
 }
 
 fn letter_of(atom: &Value, seq: usize) -> Option<Letter> {
@@ -238,7 +271,11 @@ fn letter_of(atom: &Value, seq: usize) -> Option<Letter> {
         id,
         from,
         to,
-        body: body_of(atom["text"].as_str().unwrap_or("")),
+        // A long body rides whole in `body`; the text holds its start.
+        body: atom["body"]
+            .as_str()
+            .map(|b| b.trim().to_string())
+            .unwrap_or_else(|| body_of(atom["text"].as_str().unwrap_or(""))),
         interrupt: has(atom, "priority:interrupt"),
         issue: tag(atom, "issue:"),
         group: tag(atom, "group:"),
@@ -355,6 +392,19 @@ pub fn members(atoms: &[Value], group: &str) -> Vec<String> {
     out
 }
 
+/// A body as the prompt shows it: one line of 160 characters, and when it
+/// is cut, where the whole of it is. The prompt marks the letter read, so
+/// a long body would otherwise be seen only by its start.
+fn prompt_body(body: &str) -> String {
+    let n = body.chars().count();
+    let line = one_line(body, Some(160));
+    if n > 160 {
+        format!("{line} (all {n} characters: `ljos inbox --all`)")
+    } else {
+        line
+    }
+}
+
 fn one_line(body: &str, limit: Option<usize>) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     match limit {
@@ -450,7 +500,7 @@ pub fn prompt_lines(letters: &[Letter], receipts: &[Receipt]) -> (String, Vec<St
             "{mark}{} from {}{on}: {}",
             letter.id,
             letter.from,
-            one_line(&letter.body, Some(160))
+            prompt_body(&letter.body)
         ));
         ids.push(format!("mail:{}", letter.id));
     }
@@ -602,6 +652,7 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     if text.is_empty() {
         bail!("send: empty text");
     }
+    check_length("send", text)?;
     let from = super::seat_name();
     let group = args
         .group
@@ -751,6 +802,7 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     if text.is_empty() {
         bail!("reply: empty text");
     }
+    check_length("reply", text)?;
     let atoms = load("reply")?;
     let parent = find_letter(&atoms, id).context("reply")?;
     let from = super::seat_name();
@@ -961,6 +1013,40 @@ mod tests {
             reply: None,
             scope: None,
         }
+    }
+
+    #[test]
+    fn a_long_body_fits_the_pack_and_reads_back_whole() {
+        let long = "the aarch64 log says the Highway test times out. ".repeat(40);
+        let m = outgoing("msg-1", "saddle", &["inky"], &long);
+        let atom = message_atom(&m, "seat");
+        let text = atom["text"].as_str().unwrap();
+        assert!(
+            text.chars().count() <= ATOM_TEXT_CAP,
+            "{}",
+            text.chars().count()
+        );
+        assert!(text.ends_with('\u{2026}'), "{text}");
+        assert!(
+            text.starts_with("msg msg-1\nfrom saddle\nto inky\n\n"),
+            "{text}"
+        );
+        assert_eq!(atom["body"].as_str(), Some(long.trim()));
+        let letter = letter_of(&atom, 0).expect("a letter");
+        assert_eq!(letter.body, long.trim());
+        // A short body has no `body` field and reads back from the text.
+        let short = message_atom(&outgoing("msg-2", "saddle", &["inky"], "ok"), "seat");
+        assert!(short.get("body").is_none());
+        assert_eq!(letter_of(&short, 0).unwrap().body, "ok");
+        // Past the mail cap, a refusal that names the deed route.
+        let err = check_length("send", &"x".repeat(MAIL_BODY_CAP + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("deedar create file"), "{err}");
+        assert!(check_length("send", &"x".repeat(MAIL_BODY_CAP)).is_ok());
+        let shown = prompt_body(&long);
+        assert!(shown.contains("`ljos inbox --all`"), "{shown}");
+        assert_eq!(prompt_body("ok"), "ok");
     }
 
     fn atom(m: &Outgoing, ts: &str) -> Value {
