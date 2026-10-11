@@ -34,6 +34,8 @@ meaning-based search; without it search matches words, and nothing needs ONNX
 Runtime. `ljos doctor` names any part that is missing.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
+Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
+An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.3.0 installed without a word, so the doctor marks that row `no` and names the fix.
 
 Each ljos release attaches the script as `install.sh`, starting with the
 first release after 0.28.0. Until that release is out the link is a 404, and
