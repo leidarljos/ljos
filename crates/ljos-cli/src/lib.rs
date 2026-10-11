@@ -13435,6 +13435,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
     out.push(policy_row());
+    out.push(bypass_row());
     out.push(panes_row());
     out
 }
@@ -13515,6 +13516,81 @@ fn below_floor(bin: &str, have: Option<&str>) -> Option<String> {
 /// The oldest Rust that builds the seat from source, the workspace's
 /// `rust-version`.
 pub const RUST_MIN: &str = env!("CARGO_PKG_RUST_VERSION");
+
+/// `$XDG_DATA_HOME/ljos/bypass.jsonl`: one row each time a command ran
+/// that the guard would have stopped.
+#[must_use]
+pub fn bypass_log_path() -> Option<PathBuf> {
+    Some(data_base()?.join("ljos").join("bypass.jsonl"))
+}
+
+/// Write a row when the guard is passed over on a command it would have
+/// stopped: `approval` when a one-use grant let an asked command run, and
+/// `switch` when a setting such as `LJOS_ASK_PACK=off` turned off the rule
+/// that would have asked. `how` says which grant or setting. A row that
+/// cannot be written is skipped; the command's verdict does not wait on it.
+pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
+    let Some(path) = bypass_log_path() else {
+        return;
+    };
+    let row = serde_json::json!({
+        "ts": now_utc(),
+        "kind": kind,
+        "how": how,
+        "command": command,
+        "rule": rule.pattern,
+        "verdict": rule.verdict,
+        "reason": rule.reason.split(':').next().unwrap_or(""),
+        "seat": std::env::var("LJOS_SEAT").ok(),
+    });
+    let _ = path.parent().map(std::fs::create_dir_all);
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{row}");
+    }
+}
+
+/// The doctor's line on the bypass log: how many commands ran past the
+/// guard, and the last one. Passing over the guard is allowed, so the row
+/// stays green; it is there to be read.
+fn bypass_row() -> Habitat {
+    let state =
+        match bypass_log_path().and_then(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
+            None => "no command has run past the guard".to_string(),
+            Some((path, text)) => bypass_summary(&text, &path.display().to_string()),
+        };
+    Habitat {
+        name: "guard bypass",
+        state,
+        ok: true,
+    }
+}
+
+/// [`bypass_row`]'s text from the log's rows.
+#[must_use]
+pub fn bypass_summary(text: &str, path: &str) -> String {
+    let rows: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let Some(last) = rows.last() else {
+        return "no command has run past the guard".to_string();
+    };
+    let s = |k: &str| last[k].as_str().unwrap_or("").to_string();
+    format!(
+        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        local_when(&s("ts")),
+        s("command"),
+        s("rule"),
+        s("how"),
+    )
+}
 
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
@@ -24700,6 +24776,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_bypass_is_logged_and_the_doctor_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], "switch");
+        assert_eq!(rows[0]["reason"], "infra-destroy");
+        assert_eq!(rows[1]["how"], "grant 0a1b");
+        let said = bypass_summary(&text, "LOG");
+        assert!(
+            said.starts_with("2 commands ran past the guard")
+                && said.contains("`terraform destroy` past ask pack: cloud (grant 0a1b)")
+                && said.ends_with("see LOG"),
+            "{said}"
+        );
+        assert_eq!(
+            bypass_summary("", "LOG"),
+            "no command has run past the guard"
+        );
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
