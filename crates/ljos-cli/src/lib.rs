@@ -11290,6 +11290,70 @@ pub struct Forecast {
     pub confidence: Option<f64>,
 }
 
+/// The outcome as the ballots spell it, and a line for the reading when it
+/// is on no ballot. An outcome that matches a ballot or one of the issue's
+/// options, ignoring case, takes that spelling. Any other answer scores
+/// every voter a miss, which a typo would do as well, so it is refused
+/// unless `new_option` says the person's answer was none of them: a tie
+/// broken with a third answer is recorded and calibrated like any other.
+///
+/// # Errors
+///
+/// An empty outcome, or one on no ballot and no option without
+/// `new_option`.
+pub fn named_outcome(
+    issue: &str,
+    outcome: &str,
+    forecasts: &[Forecast],
+    options: &[String],
+    new_option: bool,
+) -> Result<(String, Option<String>)> {
+    let outcome = outcome.trim();
+    if outcome.is_empty() {
+        bail!("outcome: an outcome is required");
+    }
+    let mut known: Vec<&str> = forecasts.iter().map(|f| f.choice.as_str()).collect();
+    known.extend(options.iter().map(String::as_str));
+    known.dedup();
+    if let Some(same) = known
+        .iter()
+        .find(|k| **k == outcome)
+        .or_else(|| known.iter().find(|k| k.eq_ignore_ascii_case(outcome)))
+    {
+        return Ok(((*same).to_string(), None));
+    }
+    let mut names: Vec<&str> = known.clone();
+    names.sort_unstable();
+    names.dedup();
+    let named = if names.is_empty() {
+        "nothing".to_string()
+    } else {
+        names.join(", ")
+    };
+    if !new_option {
+        bail!(
+            "outcome: {outcome:?} is on no ballot for {issue}, which named {named}. It would score every \
+             voter a miss, and so would a typo. When the answer was none of them, pass --new-option \
+             (new_option in the tool). Nothing was written"
+        );
+    }
+    Ok((
+        outcome.to_string(),
+        Some(format!(
+            "{outcome} was on no ballot (they named {named}): every voter is scored a miss, and the outcome is kept as the answer.\n"
+        )),
+    ))
+}
+
+/// The options an issue's body puts to a vote, or none when the tracker
+/// does not answer.
+#[must_use]
+pub fn options_of_issue(issue: &str) -> Vec<String> {
+    tracker_show_json(issue)
+        .map(|v| issue_options(v["body"].as_str().unwrap_or("")))
+        .unwrap_or_default()
+}
+
 /// Quadratic score of a stated probability against the outcome.
 ///
 /// `p` is the probability the voter assigned to its own choice being the
@@ -16041,6 +16105,7 @@ pub fn finish(
     status: &str,
     lesson: Option<&str>,
     outcome: Option<&str>,
+    new_option: bool,
     beta: f64,
     assignee: &str,
     gen: Option<u64>,
@@ -16123,6 +16188,17 @@ pub fn finish(
         if forecasts.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
         } else {
+            let (option, off) = named_outcome(
+                issue,
+                option,
+                &forecasts,
+                &options_of_issue(issue),
+                new_option,
+            )?;
+            let option = option.as_str();
+            if let Some(line) = off {
+                out.push_str(&line);
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
@@ -18926,6 +19002,44 @@ mod tests {
             .collect();
         assert!(off.contains(&"quick-install"), "{off:?}");
         assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
+    #[test]
+    fn an_outcome_off_the_ballot_needs_new_option_and_then_scores_every_voter() {
+        let f = |agent: &str, choice: &str| Forecast {
+            agent: agent.into(),
+            choice: choice.into(),
+            confidence: Some(0.6),
+        };
+        let tie = [f("saddle", "hook"), f("inky", "drop-highway")];
+        // On the ballot, any case: the ballot's spelling, no line.
+        let (named, off) = named_outcome("Demo-sdhm", " Hook ", &tie, &[], false).unwrap();
+        assert_eq!((named.as_str(), off), ("hook", None));
+        // An issue option nobody voted for still counts as an option.
+        let options = vec!["hook".to_string(), "drop-highway".into(), "patch".into()];
+        let (named, off) = named_outcome("Demo-sdhm", "patch", &tie, &options, false).unwrap();
+        assert_eq!((named.as_str(), off), ("patch", None));
+        // A third answer, or a typo, is refused without the flag.
+        let err = named_outcome("Demo-sdhm", "use an easyblock", &tie, &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("on no ballot for Demo-sdhm"), "{err}");
+        assert!(err.contains("drop-highway, hook"), "{err}");
+        assert!(err.contains("--new-option"), "{err}");
+        // With it the answer is kept, and the line says what it scores.
+        let (named, off) = named_outcome("Demo-sdhm", "use an easyblock", &tie, &[], true).unwrap();
+        assert_eq!(named, "use an easyblock");
+        let off = off.expect("a line");
+        assert!(off.contains("every voter is scored a miss"), "{off}");
+        let ballots: Vec<(String, String)> = tie
+            .iter()
+            .map(|t| (t.agent.clone(), t.choice.clone()))
+            .collect();
+        let (_, records) =
+            learn_record(&ballots, &named, &std::collections::BTreeMap::new(), &[]).unwrap();
+        assert_eq!(records["saddle"], (0.0, 1.0));
+        assert_eq!(records["inky"], (0.0, 1.0));
+        assert!(named_outcome("Demo-sdhm", "  ", &tie, &[], true).is_err());
     }
 
     #[test]

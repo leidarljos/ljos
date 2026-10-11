@@ -183,7 +183,10 @@ Every piece of work has an issue before it has a claim.
   outcomes as its weight, so the next settle weighs a voter by what it
   got right. A record's accuracy is first shrunk toward the panel's
   pooled accuracy, and the outcome is kept: once five issues have one, the
-  settle discounts voters who err together.
+  settle discounts voters who err together. When the person's answer was
+  none of the options (a tie broken with a third answer), add
+  `--new-option`: every voter is scored a miss on it. Without the flag an
+  outcome on no ballot is refused, since a typo would score the same.
 - When the work has shown that a kind of command must never run, or must
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks before the command runs, and

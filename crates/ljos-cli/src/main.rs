@@ -686,6 +686,9 @@ enum Cmd {
         /// The option that turned out right, when the ballots are in and the world has said.
         #[arg(long)]
         outcome: Option<String>,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long, requires = "outcome")]
+        new_option: bool,
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -720,6 +723,9 @@ enum Cmd {
         /// The option that turned out right.
         #[arg(long)]
         outcome: String,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long)]
+        new_option: bool,
         /// The factor a refuted voter shrinks by.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -1901,6 +1907,7 @@ fn main() -> Result<()> {
             status,
             lesson,
             outcome,
+            new_option,
             beta,
             gen,
             assignee,
@@ -1912,6 +1919,7 @@ fn main() -> Result<()> {
                 &status,
                 lesson.as_deref(),
                 outcome.as_deref(),
+                new_option,
                 beta,
                 &resolve_assignee(assignee.as_deref()),
                 gen,
@@ -1932,12 +1940,23 @@ fn main() -> Result<()> {
         Cmd::Learn {
             id,
             outcome,
+            new_option,
             beta,
             share,
             rule,
         } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let forecasts = forecasts_from_json(&said.stdout)?;
+            let (outcome, off) = ljos_cli::named_outcome(
+                &id,
+                &outcome,
+                &forecasts,
+                &ljos_cli::options_of_issue(&id),
+                new_option,
+            )?;
+            if let Some(line) = off {
+                print!("{line}");
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
