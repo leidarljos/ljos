@@ -27,6 +27,7 @@ right before.
    not a position the group reached; say so.
 5. When the world shows which option was right:
    `ljos finish ISSUE --outcome OPTION`. Voters who were wrong weigh less next time.
+   When the answer was none of the options, add `--new-option`.
 
 Personas help think a choice through; their ballots do not settle a decision
 a push cites. A push that needs a decision needs a ballot from a seat other
