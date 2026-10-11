@@ -1003,11 +1003,47 @@ pub fn conversation_tag(pid: u32) -> String {
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
 fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|r| !r.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ljos")
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
+        return PathBuf::from(run).join("ljos");
+    }
+    let dir = runtime_fallback(
+        &std::env::temp_dir(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        euid(),
+    );
+    if !dir.exists() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir);
+    }
+    dir
+}
+
+/// This process's effective user id.
+fn euid() -> u32 {
+    // SAFETY: geteuid has no arguments and only reads the process identity.
+    unsafe { libc::geteuid() }
+}
+
+/// The runtime directory when `XDG_RUNTIME_DIR` is unset: `ljos-UID` under
+/// the temporary directory, so two users on one host never read each
+/// other's holds, seat records or approvals. A `ljos-UID` that is a
+/// symlink, or that another user made first, is not used; the seat then
+/// keeps its records under `~/.cache/ljos/run`.
+#[must_use]
+pub fn runtime_fallback(tmp: &Path, home: Option<&Path>, uid: u32) -> PathBuf {
+    use std::os::unix::fs::MetadataExt as _;
+    let mine = tmp.join(format!("ljos-{uid}"));
+    match std::fs::symlink_metadata(&mine) {
+        Err(_) => mine,
+        Ok(m) if m.is_dir() && m.uid() == uid => mine,
+        Ok(_) => home.map_or_else(
+            || tmp.join(format!("ljos-{uid}-own")),
+            |h| h.join(".cache/ljos/run"),
+        ),
+    }
 }
 
 /// The record a server leaves for the shells the same runner opens.
@@ -1670,6 +1706,14 @@ pub fn seat_name() -> String {
     whoami().seat
 }
 
+/// Whether a conversation under a runner may accept a proposal: only one
+/// another conversation filed, such as a worker it started. `proposer` is
+/// the holder the proposal's atom names, `holder` this conversation's.
+#[must_use]
+pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> bool {
+    proposer.is_some_and(|p| !p.trim().is_empty() && p.trim() != holder.trim())
+}
+
 /// The name this conversation's claims are held under.
 #[must_use]
 pub fn holder_name() -> String {
@@ -2295,6 +2339,23 @@ pub fn onboard_in(
         host_key_step(dry),
     ];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
+    // The Cursor plugin carries the server, the hooks and the skill.
+    let plugin = (h.hooks_format.as_deref() == Some("cursor"))
+        .then(|| cursor_plugin_in(&expand("~/.cursor/plugins")))
+        .flatten();
+    if let Some(dir) = &plugin {
+        let hooks = expand(h.hooks.as_deref().unwrap_or("~/.cursor/hooks.json"));
+        steps.push(cursor_plugin_step(dir, &hooks));
+        if let Some(dir) = &h.agents {
+            steps.push(agents_step(
+                &expand(dir),
+                &personas_from_pack().unwrap_or_default(),
+                dry,
+            ));
+        }
+        steps.extend(dependencies);
+        return Ok(steps);
+    }
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
         steps.push(match (&h.hooks_named, h.hooks_format.as_deref()) {
@@ -2805,6 +2866,66 @@ fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
         .map(|event| (*event).to_string())
         .collect();
     hook_installed(cursor, &only) && claude_has_seat_hook(claude)
+}
+
+/// The ljos Cursor plugin under Cursor's plugins directory, when installed:
+/// a clone in `local/ljos`, or a marketplace or `/add-plugin` install in
+/// `cache/<marketplace>/ljos/<commit>`.
+#[must_use]
+pub fn cursor_plugin_in(plugins: &Path) -> Option<PathBuf> {
+    let manifest = |dir: &Path| dir.join(".cursor-plugin/plugin.json").is_file();
+    let local = plugins.join("local/ljos");
+    if manifest(&local) {
+        return Some(local);
+    }
+    let markets = std::fs::read_dir(plugins.join("cache")).ok()?;
+    markets
+        .flatten()
+        .map(|market| market.path().join("ljos"))
+        .filter_map(|plugin| std::fs::read_dir(plugin).ok())
+        .flat_map(|commits| commits.flatten().map(|c| c.path()))
+        .find(|commit| manifest(commit))
+}
+
+/// Whether a hooks file carries the seat's hook on any event.
+fn file_has_seat_hook(file: &Path) -> bool {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| {
+            v["hooks"].as_object().is_some_and(|events| {
+                events
+                    .values()
+                    .flat_map(|e| e.as_array().into_iter().flatten())
+                    .any(is_seat_hook)
+            })
+        })
+}
+
+/// The step that stands in for the tool server, the hooks and the skill
+/// when the Cursor plugin carries them. Writing them as well would run every
+/// hook twice and list the tool server twice. A hooks file an earlier
+/// onboard wrote is named, since Cursor still runs it.
+fn cursor_plugin_step(plugin: &Path, hooks: &Path) -> Step {
+    let mut detail = format!(
+        "the ljos Cursor plugin at {} carries the tool server, the hooks and the skill, \
+         so onboard wrote none of them",
+        plugin.display()
+    );
+    let earlier = file_has_seat_hook(hooks);
+    if earlier {
+        detail.push_str(&format!(
+            "; {} still carries the seat's hook from an earlier onboard. Remove those \
+             entries and the ljos entry in ~/.cursor/mcp.json; until then a hook call \
+             the two make together is answered once",
+            hooks.display()
+        ));
+    }
+    Step {
+        what: "cursor plugin".into(),
+        detail,
+        ok: true,
+    }
 }
 
 fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
@@ -5362,6 +5483,43 @@ pub fn hook_already_running(call: &HookCall) -> bool {
         call.session.as_deref().unwrap_or(""),
         call.cue
     ));
+    hook_marker_fresh(&key, std::time::Duration::from_secs(20))
+}
+
+/// Events said once per occurrence, whose twin from a second registration
+/// is dropped by [`hook_twin`]. A tool gate is never dropped: its verdict
+/// must reach the runner from every registration.
+pub const TWIN_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "SubagentStop",
+    "PreCompact",
+    "PostToolUseFailure",
+];
+
+/// Whether this call is the twin of one that started in the last ten
+/// seconds: the same event with the same payload, byte for byte. A Cursor
+/// with the plugin and an earlier onboard, or a runner that also loads
+/// Claude's settings, runs the seat's hook twice for one event, and both
+/// copies get the same payload. A later event of the same kind carries a
+/// new generation, loop count or transcript, and is not a twin.
+pub fn hook_twin(call: &HookCall, input: &str) -> bool {
+    if !TWIN_EVENTS.contains(&call.event.as_str()) {
+        return false;
+    }
+    let key = work_id(&format!(
+        "twin|{}|{}|{}",
+        call.event,
+        call.session.as_deref().unwrap_or(""),
+        input.trim()
+    ));
+    hook_marker_fresh(&key, std::time::Duration::from_secs(10))
+}
+
+/// Make the marker for `key`, or say whether one younger than `window`
+/// already stands. A stale marker is renewed and the call goes on.
+fn hook_marker_fresh(key: &str, window: std::time::Duration) -> bool {
     let dir = runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
     // About one call in sixteen sweeps markers older than a minute.
@@ -5392,7 +5550,7 @@ pub fn hook_already_running(call: &HookCall) -> bool {
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age < std::time::Duration::from_secs(20));
+                .is_some_and(|age| age < window);
             if !fresh {
                 let _ = std::fs::write(&path, "");
             }
@@ -6557,6 +6715,110 @@ fn load_seat_env() {
     }
 }
 
+/// The port packset listens on when nothing names one.
+const PACK_DEFAULT_PORT: u16 = 8761;
+
+/// Where a seat's writer listens when the default port is another user's:
+/// one port per user id, from 18761 up.
+#[must_use]
+pub fn per_user_pack_port(uid: u32) -> u16 {
+    18761 + u16::try_from(uid % 10_000).unwrap_or(0)
+}
+
+/// The user id that owns the socket listening on TCP `port`, read from the
+/// kernel's socket tables (`/proc/net/tcp`, `/proc/net/tcp6`). `None` when
+/// nothing listens there, or off Linux where the tables are not files.
+fn listener_uid(port: u16) -> Option<u32> {
+    let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    listener_uid_in(&tables, port)
+}
+
+/// [`listener_uid`] over the text of the tables. A row is `sl local remote
+/// state ... uid ...`; the local address ends in `:PORT` in hex, and state
+/// `0A` is a listening socket.
+#[must_use]
+pub fn listener_uid_in(tables: &[String], port: u16) -> Option<u32> {
+    let want = format!(":{port:04X}");
+    tables
+        .iter()
+        .flat_map(|t| t.lines().skip(1))
+        .find_map(|row| {
+            let cols: Vec<&str> = row.split_whitespace().collect();
+            let local = cols.get(1)?;
+            (local.ends_with(&want) && cols.get(3) == Some(&"0A"))
+                .then(|| cols.get(7)?.parse().ok())
+                .flatten()
+        })
+}
+
+/// The port to point the pack client at, or `None` to leave the default.
+/// A port the person named is used as named, unless another user's process
+/// listens on it: that is refused. With nothing named, a writer this user
+/// already runs on the per-user port is used; the default port is used
+/// when it is free or this user's; when another user's writer holds it,
+/// the seat moves to the per-user port, where `packset ensure` starts its
+/// own.
+///
+/// # Errors
+///
+/// The named port, or both the default and the per-user port, are another
+/// user's.
+pub fn pick_pack_port(
+    named: Option<u16>,
+    uid: u32,
+    owner: impl Fn(u16) -> Option<u32>,
+) -> Result<Option<u16>> {
+    let theirs = |port: u16| owner(port).filter(|o| *o != uid);
+    if let Some(port) = named {
+        if let Some(other) = theirs(port) {
+            bail!(
+                "127.0.0.1:{port} is another user's (uid {other}), not this seat's pack writer. \
+                 Set PACKSET_PORT to a port of your own, or unset it and the seat picks \
+                 {}",
+                per_user_pack_port(uid)
+            );
+        }
+        return Ok(None);
+    }
+    let own = per_user_pack_port(uid);
+    if owner(own) == Some(uid) {
+        return Ok(Some(own));
+    }
+    match theirs(PACK_DEFAULT_PORT) {
+        None => Ok(None),
+        Some(other) => {
+            if let Some(squatter) = theirs(own) {
+                bail!(
+                    "127.0.0.1:{PACK_DEFAULT_PORT} is uid {other}'s pack writer and \
+                     127.0.0.1:{own} is uid {squatter}'s. Set PACKSET_PORT to a free port"
+                );
+            }
+            Ok(Some(own))
+        }
+    }
+}
+
+/// Keep the pack client on this user's own writer: see [`pick_pack_port`].
+/// A `PACKSET_URL` is the person's choice and is left alone. The port
+/// picked goes into `PACKSET_PORT`, so `packset ensure` and the other
+/// packset commands this seat runs use it too.
+fn scope_pack_port() -> Result<()> {
+    if std::env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
+        return Ok(());
+    }
+    let named = std::env::var("PACKSET_PORT")
+        .or_else(|_| std::env::var("GROK_MEM_PORT"))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok());
+    if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
+        std::env::set_var("PACKSET_PORT", port.to_string());
+    }
+    Ok(())
+}
+
 /// A transport failure, as distinct from a writer that answered and refused.
 fn writer_unreachable(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
@@ -6703,6 +6965,7 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
 
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
+    scope_pack_port()?;
     let workspace = std::env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
@@ -6834,6 +7097,8 @@ fn post_claim_horizon(
 /// `horizon:standing` or `horizon:transient` on a claim as it is written.
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
+/// `ljos remember` typed by the person says standing; see
+/// [`remember_horizon`].
 fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>) {
     let transient = match (kind, force) {
         ("preference", _) => false,
@@ -6846,6 +7111,35 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
         "horizon:standing"
     };
     add_entities(atom, [tag.to_string()]);
+}
+
+/// The horizon `ljos remember` writes when neither `--transient` nor
+/// `--standing` is given. The person typing it is the review, so the lesson
+/// takes effect at once, like `prefer` and `rule`. Run under an agent runner it is
+/// the agent's lesson: an episode, shown once a review promotes it.
+#[must_use]
+pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
+    if transient {
+        Some(true)
+    } else if standing || !under_runner {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The line `ljos remember` prints after the write, saying when the hook
+/// shows the lesson.
+#[must_use]
+pub fn remember_note(body: &Value) -> &'static str {
+    let standing = body["entities"]
+        .as_array()
+        .is_some_and(|e| e.iter().any(|v| v == "horizon:standing"));
+    if standing {
+        "standing: the hook shows it from the next prompt it bears on"
+    } else {
+        "episode: written from an agent runner, so the hook shows it once `ljos due` and `ljos graded` promote it; the person's `ljos remember` or `ljos accept` takes effect at once"
+    }
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
@@ -8833,6 +9127,55 @@ fn reads_script_on_stdin(segment: &str) -> bool {
             || w.starts_with('<')
             || w == ">"
     })
+}
+
+/// The interpreter a segment runs on a program from standard input, with
+/// the flag that takes a program as its next word: `python3 -`, `python3`,
+/// `node`, `perl` or `ruby` with no script file, as in `python3 - <<EOF`.
+fn reads_program_on_stdin(segment: &str) -> Option<(String, &'static str)> {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let name = words.get(at)?;
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let flag = if base.starts_with("python") {
+        "-c"
+    } else if matches!(base, "node" | "perl" | "ruby") {
+        "-e"
+    } else {
+        return None;
+    };
+    // Flags and redirections leave stdin as the program: `2>&1` and
+    // `>out` are each a `>` word and the target after it.
+    let mut rest = words[at + 1..].iter();
+    while let Some(w) = rest.next() {
+        if w == ">" {
+            rest.next();
+        } else if !(w.starts_with('-') || w.starts_with('<')) {
+            return None;
+        }
+    }
+    Some((name.clone(), flag))
+}
+
+/// Each here-document `line` feeds an interpreter as its program, as the
+/// argv that runs the same program inline: `python3 - <<EOF` with a body
+/// `B` is `python3 -c B`. ljos-policyd reads such a program for the shell
+/// calls and tree deletes it makes; a rule on the line does not see it.
+fn stdin_programs(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for sub in nested_lines(line, 0) {
+        let mut bodies = Vec::new();
+        split_commands_with(&sub.replace("\\\n", ""), false, &mut bodies);
+        for (body, _, owner) in bodies {
+            if let Some((name, flag)) = raw_segments(&owner)
+                .iter()
+                .find_map(|s| reads_program_on_stdin(s))
+            {
+                out.push(vec![name, flag.to_string(), body]);
+            }
+        }
+    }
+    out
 }
 
 /// The text an `echo` or `printf` segment writes, as a shell would read it
@@ -11999,6 +12342,12 @@ fn panes_row() -> Habitat {
 /// version and which law it runs (`phronesis`, or the `host table` built
 /// into it). Without the binary nothing judges them unless
 /// `POLICYD_REQUIRED` refuses every command instead.
+/// What the policy row says of an `ljos-policyd` built without phronesis.
+/// The seat runs on it, and the doctor marks the row `warn`: the table
+/// alone refuses less than the table with phronesis after it.
+const POLICY_TABLE_ONLY: &str =
+    "phronesis is not linked; install an ljos-policyd release built with it";
+
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
@@ -12020,11 +12369,11 @@ fn policy_row() -> Habitat {
                         bin.display()
                     ),
                     Some(_) => format!(
-                        "{line} at {}: each pipeline is judged by its built-in table; phronesis is not linked",
+                        "{line} at {}: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}",
                         bin.display()
                     ),
                     None => format!(
-                        "{line} at {}: this version does not name its backend; 0.2.5 and later do",
+                        "{line} at {}: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}",
                         bin.display()
                     ),
                 })
@@ -12196,11 +12545,13 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
-    load_seat_env();
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     out.push(
-        match PacksetClient::from_env().and_then(|c| c.status(None)) {
+        match pack()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .and_then(|c| c.status(None).map_err(anyhow::Error::from))
+        {
             Ok(status) => {
                 let available = status["embedder"]["available"].as_bool().unwrap_or(false);
                 let answering = status["embedder"]["answering"].as_bool();
@@ -12241,9 +12592,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 ok: false,
             },
         },
-        Err(_) => Habitat {
+        Err(e) => Habitat {
             name: "pack",
-            state: "PACKSET_URL=off: no pack on purpose".into(),
+            state: e.to_string(),
             ok: false,
         },
     });
@@ -12845,11 +13196,14 @@ fn optional_bin(name: &str) -> bool {
     SEAT_BINS.iter().any(|(bin, _)| *bin == name) && !REQUIRED.contains(&name)
 }
 
-/// `ok` when the row answers, `info` when it is optional and absent,
-/// `no` when a required row failed.
+/// `ok` when the row answers, `warn` when the policy row names an
+/// `ljos-policyd` without phronesis, `info` when the row is optional and
+/// absent, `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
-    if row.ok {
+    if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
+        "warn"
+    } else if row.ok {
         "ok"
     } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
@@ -12931,7 +13285,7 @@ pub fn handover(
     lines.push(run_captured("vissue", &args)?.stdout.trim_end().to_string());
 
     let mut cited = String::new();
-    match PacksetClient::from_env() {
+    match pack() {
         Ok(client) => {
             let atoms_dir = out.join("data").join("atoms");
             match run_captured(
@@ -12950,7 +13304,7 @@ pub fn handover(
                 Err(e) => lines.push(format!("atoms not enclosed: {e}")),
             }
         }
-        Err(_) => lines.push("no pack: PACKSET_URL=off, atoms not enclosed".into()),
+        Err(e) => lines.push(format!("no pack ({e}), atoms not enclosed")),
     }
 
     let description = std::fs::read_to_string(out.join("data").join("satchel.json"))
@@ -15305,7 +15659,10 @@ pub fn finish(
                 tags.push(format!("scope:{scope}"));
             }
             add_entities(&mut atom, tags);
-            stamp_horizon(&mut atom, "lesson", text, None);
+            // Standing once accepted: the person's `ljos accept` is the
+            // review, so the hook shows the lesson from the next prompt.
+            // Until then the writer holds it and no search returns it.
+            stamp_horizon(&mut atom, "lesson", text, Some(false));
             let filed = admit::propose_atom(&client, atom)?;
             out.push_str(&format!(
                 "proposed {} as agent-derived; `ljos accept {}` writes it\n",
@@ -15935,8 +16292,14 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     // command is one word, and a download piped into a shell is one call.
     // The substitutions and scripts inside the line run too, so each of
     // their pipelines is judged as well: `echo $(git push -f)` is a push.
-    for seg in nested_lines(line, 0).iter().flat_map(|l| pipelines(l)) {
-        let argv = shell_words(&seg);
+    // A here-document fed to `python3 -` or `node` is that program, sent
+    // as `python3 -c BODY`, so a shell call inside it is judged.
+    let argvs = nested_lines(line, 0)
+        .into_iter()
+        .flat_map(|l| pipelines(&l))
+        .map(|seg| shell_words(&seg))
+        .chain(stdin_programs(line));
+    for argv in argvs {
         if argv.is_empty() {
             continue;
         }
@@ -16115,7 +16478,11 @@ pub fn settle_in_words(
         }
         out.push('\n');
     }
-    if v["settled"].as_bool() == Some(false) {
+    // ljos-consensus 0.8 reports a tie as not settled and keeps the
+    // iteration's own state in `converged`; an older one has only
+    // `settled`, which is that state.
+    let converged = v["converged"].as_bool().or_else(|| v["settled"].as_bool());
+    if converged == Some(false) {
         out.push_str("the iteration stopped before it settled; read the shares as a trend\n");
     }
     if agents.len() == influence.len() && !agents.is_empty() {
@@ -16773,6 +17140,8 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         let lesson = finding_lesson(&campaign, f);
         let mut atom = atom_body("lesson", &lesson, &workspace);
         add_entities(&mut atom, finding_entities(&campaign, f));
+        // Standing once the person accepts it, like a finish lesson.
+        stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
         let result = match admit::propose_atom(&client, atom) {
             Ok(filed) => format!("proposed {}", filed.id),
             Err(e) => format!("refused: {e}"),
@@ -17168,6 +17537,88 @@ mod tests {
 
     /// A slow pre-push hook does not hold the sitting: the push outlives the
     /// wait and the line says so; a quick one reports the push.
+    #[test]
+    fn a_listener_s_owner_is_read_off_the_socket_table() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:2239 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4242 1 0000000000000000 100 0 0 10 0\n   1: 0100007F:2239 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 4343 1 0000000000000000 20 4 30 10 -1\n".to_string();
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000000000000000000001000000:4B72 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 99 1 0000000000000000 100 0 0 10 0\n".to_string();
+        let tables = [tcp, tcp6];
+        assert_eq!(
+            listener_uid_in(&tables, 8761),
+            Some(1001),
+            "the listener, not the connection"
+        );
+        assert_eq!(
+            listener_uid_in(&tables, 19314),
+            Some(1000),
+            "tcp6 rows count"
+        );
+        assert_eq!(listener_uid_in(&tables, 9999), None);
+    }
+
+    #[test]
+    fn another_user_s_writer_is_never_this_seat_s() {
+        let me = 1000;
+        let own = per_user_pack_port(me);
+        assert_eq!(own, 19761);
+        let nobody = |_: u16| None;
+        assert_eq!(
+            pick_pack_port(None, me, nobody).unwrap(),
+            None,
+            "the default when free"
+        );
+        let mine = |p: u16| (p == 8761).then_some(me);
+        assert_eq!(
+            pick_pack_port(None, me, mine).unwrap(),
+            None,
+            "the default when ours"
+        );
+        let theirs = |p: u16| (p == 8761).then_some(1001);
+        assert_eq!(
+            pick_pack_port(None, me, theirs).unwrap(),
+            Some(own),
+            "another user's default moves the seat to its own port"
+        );
+        let both = |p: u16| (p == 8761 || p == own).then_some(1001);
+        assert!(pick_pack_port(None, me, both).is_err());
+        let earlier = |p: u16| (p == own).then_some(me);
+        assert_eq!(
+            pick_pack_port(None, me, earlier).unwrap(),
+            Some(own),
+            "a writer this user runs on its own port is kept"
+        );
+        let err = pick_pack_port(Some(8761), me, theirs)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("uid 1001") && err.contains("PACKSET_PORT"),
+            "{err}"
+        );
+        assert_eq!(pick_pack_port(Some(18000), me, theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn the_runtime_fallback_is_this_user_s_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let mine = tmp.path().join(format!("ljos-{uid}"));
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        std::fs::create_dir(&mine).unwrap();
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        std::fs::remove_dir(&mine).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &mine).unwrap();
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(home.path()), uid),
+            home.path().join(".cache/ljos/run"),
+            "a symlink planted at the name is not followed"
+        );
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(home.path()), uid + 1),
+            tmp.path().join(format!("ljos-{}", uid + 1))
+        );
+    }
+
     #[test]
     fn a_slow_tracker_push_finishes_in_the_background() {
         let _env = env_guard();
@@ -17992,6 +18443,29 @@ mod tests {
             .collect();
         assert!(off.contains(&"quick-install"), "{off:?}");
         assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
+    #[test]
+    fn doctor_warns_on_a_policyd_without_phronesis() {
+        let row = |state: String| Habitat {
+            name: "policy",
+            state,
+            ok: true,
+        };
+        let table = row(format!(
+            "ljos-policyd 0.3.0 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
+        ));
+        let old = row(format!(
+            "ljos-policyd 0.2.0 at /bin/ljos-policyd: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}"
+        ));
+        let linked = row(
+            "ljos-policyd 0.4.0 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
+        );
+        assert_eq!(doctor_word(&table), "warn");
+        assert_eq!(doctor_word(&old), "warn");
+        assert_eq!(doctor_word(&linked), "ok");
+        // A warning does not fail the doctor.
+        assert!(healthy(&[table, old]));
     }
 
     #[test]
@@ -18885,6 +19359,88 @@ mod tests {
             "another prompt answers"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// An event said once is answered once when two registrations run it
+    /// with the same payload. The next stop of the same session carries a
+    /// new loop count and is answered, and a tool gate is never dropped.
+    #[test]
+    fn a_twin_stop_or_session_end_is_answered_once() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let call = |event: &str| HookCall {
+            event: event.into(),
+            cue: String::new(),
+            session: Some("conv-1".into()),
+            shape: HookShape::Cursor,
+        };
+        let stop = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","generation_id":"g-1","hook_event_name":"stop","status":"completed","loop_count":0}"#;
+        assert!(!hook_twin(&call("Stop"), stop), "the first answers");
+        assert!(hook_twin(&call("Stop"), stop), "its twin returns");
+        let next = stop.replace("\"loop_count\":0", "\"loop_count\":1");
+        assert!(!hook_twin(&call("Stop"), &next), "the next stop answers");
+        let end = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","hook_event_name":"sessionEnd","reason":"completed"}"#;
+        assert!(!hook_twin(&call("SessionEnd"), end));
+        assert!(hook_twin(&call("SessionEnd"), end));
+        let gate = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","hook_event_name":"beforeShellExecution","command":"git push -f"}"#;
+        assert!(!hook_twin(&call("PreToolUse"), gate));
+        assert!(
+            !hook_twin(&call("PreToolUse"), gate),
+            "a gate always answers"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// Onboarding Cursor finds the plugin in either place Cursor keeps it,
+    /// and says so instead of writing a second server and second hooks. A
+    /// hooks file an earlier onboard wrote is named.
+    #[test]
+    fn onboard_leaves_cursor_to_an_installed_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join(".cursor/plugins");
+        assert_eq!(cursor_plugin_in(&plugins), None);
+        let cached = plugins.join("cache/leidarljos/ljos/0123abc");
+        std::fs::create_dir_all(cached.join(".cursor-plugin")).unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), None, "no manifest yet");
+        std::fs::write(
+            cached.join(".cursor-plugin/plugin.json"),
+            r#"{"name":"ljos"}"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), Some(cached.clone()));
+        let local = plugins.join("local/ljos");
+        std::fs::create_dir_all(local.join(".cursor-plugin")).unwrap();
+        std::fs::write(
+            local.join(".cursor-plugin/plugin.json"),
+            r#"{"name":"ljos"}"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), Some(local.clone()));
+
+        let hooks = dir.path().join(".cursor/hooks.json");
+        let clean = cursor_plugin_step(&local, &hooks);
+        assert!(
+            clean.ok && clean.detail.contains("wrote none"),
+            "{}",
+            clean.detail
+        );
+        assert!(
+            !clean.detail.contains("earlier onboard"),
+            "{}",
+            clean.detail
+        );
+        std::fs::write(
+            &hooks,
+            r#"{"version":1,"hooks":{"stop":[{"command":"/b/ljos hook","timeout":15}]}}"#,
+        )
+        .unwrap();
+        let earlier = cursor_plugin_step(&local, &hooks);
+        assert!(
+            earlier.detail.contains("earlier onboard"),
+            "{}",
+            earlier.detail
+        );
     }
 
     #[test]
@@ -19884,6 +20440,24 @@ mod tests {
         assert!(words.contains("no option leads"), "{words}");
         assert!(!words.contains("anchors"), "{words}");
         assert!(settle_in_words("not json", &anchors).is_none());
+        // A 1-1 tie on opposite options, as ljos-consensus 0.7 printed it
+        // (settled beside tie) and as 0.8 prints it (a tie is not settled,
+        // and `converged` says the iteration finished). Neither reads as a
+        // lead, and neither says the iteration stopped short.
+        let old = r#"{"options":["drop","keep"],"shares":[0.5,0.5],"rounds":1,"settled":true,"engine":"degroot-fj","polarization":0.0,"disagreement":0.0,"agents":["eessi","inky"],"influence":[0.5,0.5],"margin":0.0,"tie":true}"#;
+        let new = r#"{"options":["drop","keep"],"shares":[0.5,0.5],"rounds":1,"settled":false,"converged":true,"engine":"degroot-fj","polarization":0.0,"disagreement":0.0,"agents":["eessi","inky"],"influence":[0.5,0.5],"margin":0.0,"tie":true}"#;
+        for raw in [old, new] {
+            let words = settle_in_words(raw, &Default::default()).unwrap();
+            assert!(
+                words.contains("no option leads: the settle is a tie"),
+                "{words}"
+            );
+            assert!(!words.contains("leads by"), "{words}");
+            assert!(!words.contains("stopped before it settled"), "{words}");
+        }
+        let short = r#"{"options":["a","b"],"shares":[0.6,0.4],"settled":false,"converged":false,"engine":"degroot-fj","agents":["x","y"],"tie":false}"#;
+        let words = settle_in_words(short, &Default::default()).unwrap();
+        assert!(words.contains("stopped before it settled"), "{words}");
     }
 
     /// Under Friedkin-Johnsen the share of its ballot a voter keeps is its
@@ -21818,6 +22392,61 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_accepts_only_another_s_proposal() {
+        assert!(accepts_another_conversation(
+            Some("claude-worker-2"),
+            "claude-parent-1"
+        ));
+        assert!(!accepts_another_conversation(
+            Some("claude-parent-1"),
+            "claude-parent-1"
+        ));
+        assert!(!accepts_another_conversation(Some(" "), "claude-parent-1"));
+        assert!(!accepts_another_conversation(None, "claude-parent-1"));
+    }
+
+    #[test]
+    fn the_person_s_remember_stands_and_an_agent_s_waits() {
+        assert_eq!(remember_horizon(false, false, false), Some(false));
+        assert_eq!(remember_horizon(false, false, true), None);
+        assert_eq!(remember_horizon(true, false, false), Some(true));
+        assert_eq!(remember_horizon(false, true, true), Some(false));
+        let mut person = atom_body("lesson", "Run the linter before the push.", "w");
+        stamp_horizon(
+            &mut person,
+            "lesson",
+            "",
+            remember_horizon(false, false, false),
+        );
+        let mut agent = atom_body("lesson", "Run the linter before the push.", "w");
+        stamp_horizon(
+            &mut agent,
+            "lesson",
+            "",
+            remember_horizon(false, false, true),
+        );
+        assert!(remember_note(&person).starts_with("standing"));
+        assert!(remember_note(&agent).starts_with("episode"));
+        let hit = |atom: &Value| Hit {
+            id: None,
+            text: "Run the linter before the push.".into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            ballots: None,
+            of: None,
+        };
+        assert!(is_refresher(&hit(&person)), "the hook shows it at once");
+        assert!(!is_refresher(&hit(&agent)), "a review promotes it first");
+    }
+
+    #[test]
     fn remember_is_lesson_prefer_is_preference() {
         assert_eq!(atom_kind("Remember").unwrap(), "lesson");
         assert_eq!(atom_kind("Prefer").unwrap(), "preference");
@@ -23404,6 +24033,57 @@ mod tests {
         assert_eq!(back.harness.len(), 1);
         assert_eq!(back.harness[0].name, "claude");
         assert_eq!(back.harness[0].resume, ["claude", "--continue"]);
+    }
+
+    #[test]
+    fn a_heredoc_fed_to_an_interpreter_goes_to_policyd_as_its_program() {
+        let line = "python3 - <<'PY'\nimport os\nos.system('git push -f')\nPY";
+        assert_eq!(
+            stdin_programs(line),
+            [vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "import os\nos.system('git push -f')\n".to_string()
+            ]]
+        );
+        assert_eq!(
+            stdin_programs("cd x && node <<EOF\nrequire('fs')\nEOF")[0][..2],
+            ["node".to_string(), "-e".to_string()]
+        );
+        assert!(
+            stdin_programs("python3 gen.py <<EOF\nx\nEOF").is_empty(),
+            "a script file reads the body as data"
+        );
+        assert!(stdin_programs("cat <<EOF\nos.system('x')\nEOF").is_empty());
+    }
+
+    #[test]
+    fn a_redirection_after_the_heredoc_word_keeps_stdin_the_program() {
+        let body = "import os\nos.system('git push -f')\n";
+        for line in [
+            "python3 - <<EOF 2>&1\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<EOF >out\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<'EOF' > out.log 2>/dev/null\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<EOF &>>log\nimport os\nos.system('git push -f')\nEOF",
+        ] {
+            assert_eq!(
+                stdin_programs(line),
+                [vec![
+                    "python3".to_string(),
+                    "-c".to_string(),
+                    body.to_string()
+                ]],
+                "{line}"
+            );
+        }
+        assert!(
+            stdin_programs("python3 gen.py <<EOF >out\nx\nEOF").is_empty(),
+            "a script file after a redirection still reads the body as data"
+        );
+        assert!(
+            stdin_programs("python3 >out gen.py <<EOF\nx\nEOF").is_empty(),
+            "a script file after a redirection target is still a script file"
+        );
     }
 
     #[test]
