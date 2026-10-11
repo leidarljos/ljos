@@ -27,6 +27,10 @@ ljos rule '*--force*' --verdict deny --why "Never force push."
 - Before answering from memory, search: `ljos search TOPIC`. An empty answer
   means the store has nothing on it. A failure means the store is down; run
   `ljos doctor`.
+- When the person states a standing choice in a prompt ("from now on use
+  bun", "never push to main"), the prompt hook saves it in their words and
+  says `Saved the person's preference`. Do not write it again. A lesson the
+  person dictates, written with `ljos remember` in their words, stands at once.
 - A correction from the person ("you should have", "I told you") goes in as
   `ljos prefer` with their words, after you confirm the wording with them.
 - `--verdict ask` hands the command to the person instead of refusing it.

@@ -231,7 +231,8 @@ It stays off unless the machine turns it on, because the call sends the
 prompt and up to ten candidate claims off the machine. When the judge
 does not answer, the hook reranks with the local cross-encoder. A
 correction the hook files is a proposal, and a pasted or quoted prompt
-files none.
+files none. A standing choice the person states ("from now on",
+"always", "never") is saved in their words, outside code and quotes.
 
 The same call asks two more questions, since a call costs its input
 tokens and each question adds about 70 of them to a median of 933. An

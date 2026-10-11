@@ -274,6 +274,12 @@ the pack when someone says to keep it with =remember= or =prefer=, and
 that write is origin =user-declared=. =finish --lesson= and
 =findings --remember= file origin =agent-derived= as proposals. The
 prompt hook files a correction as a proposal and does not write it.
+A standing choice the person states in a prompt, such as "from now on
+use bun, never yarn", is the person's own sentence, so the hook saves it
+as a standing preference and says so with the =ljos forget= line that
+takes it back. =LJOS_CAPTURE=nudge= asks the agent to write it instead,
+and =off= leaves it. An agent's =remember= of the person's words from
+their latest prompt stands at once too.
 =ljos accept= writes a proposal as a standing lesson, and so does the same
 text typed with =remember= or =prefer=. The person runs =accept=; under an
 agent runner it refuses. An import from =receive= or =sync= is origin
