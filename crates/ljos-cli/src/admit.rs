@@ -345,6 +345,18 @@ fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result
     }
 }
 
+/// The conversation that filed an open proposal: the holder its atom's
+/// source names. `None` when the id is not on file or the atom names none.
+#[must_use]
+pub fn proposed_by(id: &str) -> Option<String> {
+    let rec = read_latest().get(id.trim()).cloned()?;
+    rec.atom["source"]["session"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Write one open proposal into the pack. A satisfied proposal was already
 /// written by `remember` or `prefer`. An accepted one is already there.
 pub fn accept(id: &str) -> Result<String> {

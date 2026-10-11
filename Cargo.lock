@@ -726,9 +726,9 @@ dependencies = [
 
 [[package]]
 name = "claimdag"
-version = "0.6.2"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be5eb748c903ca339bf8e0976755a89d4cef371eac0905dc52ff5a769db80d1"
+checksum = "275ab1028d44e4fd3fa9dd4ab5e793fc3b4ad3fe46514f9650da42002761bd2d"
 dependencies = [
  "capnp 0.20.6",
  "libc",
