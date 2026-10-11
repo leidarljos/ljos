@@ -1179,7 +1179,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. Returns the new id, which a later child may name as its parent at once.",
+        description = "Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. A `project` other than the held issue's files at its top level, which is how a bug in a tool goes to the tool's project mid-sitting. Returns the new id, which a later child may name as its parent at once.",
         annotations(
             title = "File work",
             read_only_hint = false,

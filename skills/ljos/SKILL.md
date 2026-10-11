@@ -247,7 +247,10 @@ Every piece of work has an issue before it has a claim.
   `ljos ask NAME "..."` puts a question to it in that session.
 - Work found while sitting is filed with `ljos file "TITLE" -t bug`: a
   child of the held issue, in its project, committed. `--parent ID`
-  names another parent and `--top` none. A board this tracker projects
+  names another parent and `--top` none. A bug in a tool found
+  mid-sitting goes to the tool's project: `-p PROJECT` naming another
+  project than the held issue's files at its top level, and says so.
+  A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
