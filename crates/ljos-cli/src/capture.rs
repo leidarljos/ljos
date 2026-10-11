@@ -258,6 +258,75 @@ pub fn stated_preference(prompt: &str) -> Option<Stated> {
         .filter(|s| s.text.split_whitespace().count() >= 2)
 }
 
+/// Whether `LJOS_UNATTENDED` says no person is at this session: `1`,
+/// `true`, `yes` or `on`. An overnight runner or a script driving an agent
+/// sets it, and its prompts are then nobody's stated choice.
+#[must_use]
+pub fn unattended() -> bool {
+    std::env::var("LJOS_UNATTENDED").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// The thread a Codex rollout file is for, from a name such as
+/// `rollout-2026-10-11T09-30-00-<uuid>.jsonl`, or `None` for any other
+/// name.
+fn rollout_thread(path: &str) -> Option<String> {
+    let name = path.rsplit(['/', '\\']).next()?;
+    let rest = name.strip_prefix("rollout-")?;
+    let stem = &rest[..rest.find(".jsonl")?];
+    // The stamp is `YYYY-MM-DDTHH-MM-SS-`, twenty characters.
+    let id = stem.get(20..56)?;
+    let tail = &stem[56..];
+    let uuid_shape = id.char_indices().all(|(i, c)| {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            c == '-'
+        } else {
+            c.is_ascii_hexdigit()
+        }
+    });
+    (uuid_shape && (tail.is_empty() || tail.starts_with('_'))).then(|| id.to_ascii_lowercase())
+}
+
+/// Why a prompt event does not carry the person's words, or `None` when
+/// it does. A prompt event is not always typed by a person: Codex fires it
+/// inside a subagent, with the brief the parent agent wrote as `prompt`.
+/// A spawned agent's payload names it with `agent_id`, as Claude Code's
+/// does inside a subagent, and Codex's own review thread names a rollout
+/// file for a thread other than the session's. [`unattended`] covers a
+/// session with nobody there at all.
+#[must_use]
+pub fn not_the_person(input: &str) -> Option<&'static str> {
+    if unattended() {
+        return Some("LJOS_UNATTENDED is set");
+    }
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    let named = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    if named("agent_id") || named("agentId") {
+        return Some("a subagent's brief");
+    }
+    let session = v
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let thread = v
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .and_then(rollout_thread);
+    match (session, thread) {
+        (Some(session), Some(thread)) if session != thread => Some("another thread's prompt"),
+        _ => None,
+    }
+}
+
 /// How long a prompt counts as the latest one for [`said_in_latest_prompt`].
 pub const LATEST_PROMPT_SECS: u64 = 3600;
 
@@ -499,6 +568,66 @@ mod tests {
         "Explain why we never got the webhook",
         "Going forward is the only option for the migration",
     ];
+
+    /// A Codex subagent's brief, Codex's review thread and an unattended
+    /// run are not the person; the root thread's prompt and Claude Code's
+    /// main thread are.
+    #[test]
+    fn a_subagent_brief_or_unattended_run_is_not_the_person() {
+        let _g = crate::tests::env_guard();
+        unsafe { std::env::remove_var("LJOS_UNATTENDED") };
+        let root = "019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
+        let other = "019a1b2c-3d4e-7f80-9a1b-ffffffffffff";
+        let codex = |extra: &str, thread: &str| {
+            format!(
+                r#"{{"hook_event_name":"UserPromptSubmit","session_id":"{root}","turn_id":"t-1","prompt":"Always run the tests with --release","transcript_path":"/home/u/.codex/sessions/2026/10/11/rollout-2026-10-11T09-30-00-{thread}.jsonl"{extra}}}"#
+            )
+        };
+        assert_eq!(not_the_person(&codex("", root)), None);
+        assert_eq!(
+            not_the_person(&codex(
+                r#","agent_id":"019a-sub","agent_type":"worker""#,
+                root
+            )),
+            Some("a subagent's brief")
+        );
+        assert_eq!(
+            not_the_person(&codex("", other)),
+            Some("another thread's prompt")
+        );
+        let claude_main = r#"{"hook_event_name":"UserPromptSubmit","session_id":"abc","prompt":"From now on use uv","transcript_path":"/home/u/.claude/projects/x/abc.jsonl","agent_type":"reviewer"}"#;
+        assert_eq!(
+            not_the_person(claude_main),
+            None,
+            "--agent alone is the main thread"
+        );
+        let claude_sub =
+            claude_main.replace(r#""agent_type""#, r#""agent_id":"sub-1","agent_type""#);
+        assert_eq!(not_the_person(&claude_sub), Some("a subagent's brief"));
+        unsafe { std::env::set_var("LJOS_UNATTENDED", "1") };
+        assert_eq!(not_the_person(claude_main), Some("LJOS_UNATTENDED is set"));
+        unsafe { std::env::set_var("LJOS_UNATTENDED", "0") };
+        assert_eq!(not_the_person(claude_main), None);
+        unsafe { std::env::remove_var("LJOS_UNATTENDED") };
+    }
+
+    #[test]
+    fn a_rollout_name_gives_its_thread() {
+        let id = "019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
+        assert_eq!(
+            rollout_thread(&format!("/x/rollout-2026-10-11T09-30-00-{id}.jsonl")).as_deref(),
+            Some(id)
+        );
+        assert_eq!(
+            rollout_thread(&format!("rollout-2026-10-11T09-30-00-{id}_0042.jsonl")).as_deref(),
+            Some(id)
+        );
+        assert_eq!(rollout_thread("/x/abc.jsonl"), None);
+        assert_eq!(
+            rollout_thread("rollout-2026-10-11T09-30-00-not-a-uuid.jsonl"),
+            None
+        );
+    }
 
     #[test]
     fn thirty_stated_choices_are_read() {
