@@ -5,6 +5,9 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- An `LJOS_CITE` issue decides a push from seat ballots alone. The check ran `vissue consensus --gate` over every ballot, so persona and Jev ballots, left out of the count, could still block a push their seats agreed on. Now every seat ballot has to name the same option, and one has to come from a seat other than the one pushing; open or closed does not matter. Persona and judge ballots neither pass nor block it. A refusal names the seat ballots it counted (`counted 1 for ship, 1 for hold`) and how many persona and judge ballots it left out.
+- `ljos consensus` opens with what a push cite on the issue decides, then prints one settle, the model crate's, as advice. The tracker's settle (`vissue consensus`) runs under `--compare`, or when `ljos-consensus` is not installed. Without `--compare`, `ljos consensus` files no dissent ticket; `vissue consensus ID --file-dissent` files them. `--json` prints the push cite's JSON before the settle's, and the MCP tool takes `compare` too.
+- `ljos consensus` says on how many ballots a confidence was stated, and that no settle and no push cite weighs it. `ljos learn ID --outcome OPTION` scores it once the outcome is known.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
