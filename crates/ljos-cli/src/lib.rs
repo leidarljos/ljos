@@ -14942,7 +14942,69 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     let said = run_captured("claimdag", &["release", &id, "--actor", &actor])?;
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(said.stdout)
+    Ok(with_unstamp(said.stdout, node, &id, assignee))
+}
+
+/// Drop the tracker's claim on `issue` when `holder` holds it, and keep
+/// the issue's state. The claim graph frees a node on release and on
+/// completion; the tracker kept `CLAIMED_BY`, so `ljos claims` listed
+/// every finished sitting as still held. A claim another name took since
+/// is left alone and said so. `None` when the tracker does not know the
+/// issue or nobody holds it.
+///
+/// # Errors
+///
+/// The tracker not loading or not writing.
+pub fn unstamp_tracker(issue: &str, holder: &str) -> Result<Option<String>> {
+    let issue = issue.trim();
+    let holder = holder.trim();
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    let Ok(hit) = vissue_core::Router::load(layout)?.find_by_id(issue) else {
+        return Ok(None);
+    };
+    let said = vissue_core::store::with_issues_lock(&hit.path, || {
+        let mut doc = vissue_core::IssueDoc::parse_file(&hit.project, &hit.path)?;
+        let Some(h) = doc.headings.iter_mut().find(|h| h.id == issue) else {
+            return Ok(None);
+        };
+        match h.claimed_by().map(str::to_string) {
+            None => Ok(None),
+            Some(who) if who != holder => Ok(Some(format!(
+                "tracker: {issue} stays claimed by {who}, not {holder}"
+            ))),
+            Some(_) => {
+                h.release_claim();
+                doc.write()?;
+                Ok(Some(format!(
+                    "tracker: {issue} no longer claimed by {holder}; its state stays"
+                )))
+            }
+        }
+    })?;
+    Ok(said)
+}
+
+/// What the claim graph said, then the tracker's line when the node is an
+/// issue the holder had stamped. A tracker that does not write is a line,
+/// not a failure: the claim graph already moved.
+fn with_unstamp(said: String, node: &str, id: &str, holder: &str) -> String {
+    let mut out = said;
+    if id == node.trim() {
+        return out;
+    }
+    let line = match unstamp_tracker(node, holder) {
+        Ok(Some(line)) => line,
+        Ok(None) => return out,
+        Err(e) => format!(
+            "tracker: could not drop {holder}'s claim on {node} ({e:#}); `vissue update {node} -s TODO` drops it"
+        ),
+    };
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&line);
+    out.push('\n');
+    out
 }
 
 /// What a conversation left beside the claim graph when it took a node:
@@ -15622,7 +15684,7 @@ pub fn complete(
     };
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(said.stdout)
+    Ok(with_unstamp(said.stdout, node, &id, assignee))
 }
 
 /// Refusal when this shell's holder is not the name that holds the node:
@@ -15744,10 +15806,14 @@ pub fn finish(
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
     }
-    complete(issue, Some(status), assignee, gen)?;
+    let completed = complete(issue, Some(status), assignee, gen)?;
     out.push_str(&format!(
         "completed the session node for {issue} as {status}\n"
     ));
+    for line in completed.lines().filter(|l| l.starts_with("tracker: ")) {
+        out.push_str(line);
+        out.push('\n');
+    }
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
         let said = run_captured("vissue", &["vote", issue, "--json"])?;
         let forecasts = forecasts_from_json(&said.stdout)?;
