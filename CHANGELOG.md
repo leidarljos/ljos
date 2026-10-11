@@ -5,6 +5,8 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos doctor` prints `warn` on the host row after an OOM kill within a day. It printed `no` and still exited 0, and `ljos sitting` opened under it, while the skill says not to proceed on a `no`. The word now matches what the doctor and the sitting do, and the sitting adds a line under its doctor: the kernel killed a process within a day, so run one build or test suite at a time.
+
 - `ljos note` on an issue another seat sits on names that seat and says the note is an assist the holder reads in the logbook, with `ljos send SEAT` to reach the holder now. A sitting refused on such an issue names the same two ways to help. Before, the sitting was refused and the note went in without a word, so the two verbs seemed to disagree.
 - `ljos consensus` names the standing of the issue's voters only. The EigenTrust step runs over every trust row about the topic, and its JSON beside the settle listed personas that never voted, at 0.0807 each on one issue, as if they had weight there. The others are now counted on one line, and `--json` and the `ljos_consensus` tool still return the full JSON.
 - `ljos complete`, `ljos finish` and `ljos release` act on a claim that another conversation of the same seat took: a background worker the conversation started, or the conversation that started the worker. Before, a seat could not complete or close the claims its finished workers left, and a worker could not finish its parent's claim; both failed with `not assignee`. The output names that conversation. A claim of another seat is still refused.

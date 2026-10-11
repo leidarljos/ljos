@@ -50,6 +50,8 @@ tracker as a `playbook:` note until `finish` or `release`.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
+   A `warn` on `host` means the kernel killed a process within a day. The
+   sitting opens; run one build or test suite at a time.
 2. `ljos cards`. What the human froze. Read, never write.
 3. `ljos due`. What is due for review: the soonest eight and the total.
    The verb prints a page; it does not grade. Grade it after the sitting:
