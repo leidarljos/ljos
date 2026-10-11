@@ -18245,6 +18245,59 @@ pub fn consensus_steps_anchored(
     Ok(steps)
 }
 
+/// Refuse a settle on an issue that holds no ballots. The model reads an
+/// empty ballot as settled with no options, which a caller takes for
+/// agreement.
+///
+/// # Errors
+///
+/// `ballots` is empty.
+pub fn require_ballots(issue: &str, ballots: &[Value]) -> Result<()> {
+    if ballots.is_empty() {
+        bail!(
+            "consensus: {issue} holds no ballots, so there is nothing to settle. \
+             `ljos vote {issue} --for OPTION` casts one, and a panel (`ljos panel {issue}`) casts one per persona"
+        );
+    }
+    Ok(())
+}
+
+/// The key a step's output takes in `ljos consensus --json`: the model
+/// crate's verb (`settle`, `surprising`, `reputation`), or `tracker` for
+/// vissue's own settle.
+#[must_use]
+pub fn consensus_step_label(step: &ConsensusStep) -> String {
+    if step.bin == "vissue" {
+        "tracker".to_string()
+    } else {
+        step.args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| step.bin.to_string())
+    }
+}
+
+/// `ljos consensus --json` as one JSON object. `gate` is the push cite,
+/// and its fields stay at the top level under the keys the push cite
+/// already uses. Each step's output follows under its label (`settle`,
+/// `tracker`, `surprising`, `reputation`), parsed when it is JSON and
+/// kept as text when it is not.
+#[must_use]
+pub fn consensus_document(gate: &Value, said: &[(String, String)]) -> Value {
+    let mut doc = serde_json::Map::new();
+    if let Some(obj) = gate.as_object() {
+        for (k, v) in obj {
+            doc.insert(k.clone(), v.clone());
+        }
+    }
+    for (label, out) in said {
+        let value = serde_json::from_str::<Value>(out.trim())
+            .unwrap_or_else(|_| Value::String(out.trim().to_string()));
+        doc.insert(label.clone(), value);
+    }
+    Value::Object(doc)
+}
+
 pub fn on_path(bin: &str) -> bool {
     which::which(bin).is_ok()
 }
