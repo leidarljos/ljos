@@ -72,8 +72,10 @@ Three identities vote on one issue.
    $ ljos consensus $id
    ... ship 0.667, hold 0.333 ...
 
-Two settles print: the consensus crate's DeGroot or Friedkin-Johnsen
-model, then the tracker's own verb, both under the same trust rows. With no
+The first line says what a push cite on the issue decides from seat
+ballots. Then the consensus crate's DeGroot or Friedkin-Johnsen settle
+prints under the trust rows, as advice; ``--compare`` adds the tracker's own
+settle. With no
 rows every voter weighs the same. Now suppose ``hold`` turned out right:
 
 .. code:: console
@@ -119,6 +121,8 @@ superseded, and travel in a handover. A person can also set one by hand:
    2 due; 0 scheduled
    == island: Ship the fuse change?
    1.000   seed    ... CombMNZ over RRF for fusing two ballots.
+   == reclaim
+   no claim quiet longer than 900s
    == claim
    gen=2
    $ echo 'fn main() {}' > patch.rs

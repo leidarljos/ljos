@@ -17,6 +17,9 @@ message to one seat or to a group.
 - Read: the prompt hook shows unread mail at the start of the next turn and
   marks it read. `ljos inbox` lists unread mail without marking it.
 - Mark read: `ljos read ID`. Reply: `ljos reply ID "text"` (keeps the ticket).
+- A message carries up to 16,000 characters. A longer report goes in a
+  file: `deedar create file --path FILE --agent SEAT`, then send the
+  accession it prints.
 
 In Cursor, a message the prompt hook finds is handed to the agent with the
 next tool result, since Cursor does not pass a prompt hook's text to the
