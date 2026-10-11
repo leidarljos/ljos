@@ -10347,7 +10347,7 @@ pub fn panel_personas(issue: &str, all: &[Persona]) -> Vec<Persona> {
     seat_panel(all, &direct, &island, &title)
 }
 
-/// How many specialists a panel seats by their views when no domain and no/// How many specialists a panel seats by their views when no domain and no
+/// How many specialists a panel seats by their views when no domain and no
 /// generalist speaks to the issue.
 pub const PANEL_BY_VIEW: usize = 5;
 
