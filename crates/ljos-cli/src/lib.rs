@@ -4,6 +4,7 @@
 //! on write. Consensus is a different crate, then the tracker verb. Policyd
 //! is argv law: this process does not reload a pack as a check.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -7500,6 +7501,18 @@ pub fn packset_forget(id: &str, why: Option<&str>) -> Result<Value> {
     let why = why.map(str::trim).filter(|w| !w.is_empty());
     let client = pack()?;
     let workspace = client.workspace();
+    let full;
+    let trimmed = if trimmed.len() < 32 {
+        let ids: Vec<String> = atoms_lean(&client, &workspace)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|a| a["id"].as_str().map(str::to_string))
+            .collect();
+        full = resolve_short_id("forget", trimmed, &ids)?;
+        full.as_str()
+    } else {
+        trimmed
+    };
     client
         .delete_atom(&workspace, trimmed, why)
         .with_context(|| format!("forget: POST /v1/atoms/delete failed for {trimmed}"))
@@ -12396,6 +12409,79 @@ pub struct Habitat {
     pub ok: bool,
 }
 
+/// The full id a short one names: `input` itself when it is a whole id
+/// or names none of `ids`, the one id it starts when it starts exactly
+/// one, and an error naming them when it starts several. Ids under six
+/// characters are taken as typed.
+///
+/// # Errors
+///
+/// `input` starts more than one of `ids`.
+pub fn resolve_short_id(verb: &str, input: &str, ids: &[String]) -> Result<String> {
+    let input = input.trim();
+    if input.len() < 6 || ids.iter().any(|i| i == input) {
+        return Ok(input.to_string());
+    }
+    let mut hits: Vec<&String> = ids.iter().filter(|i| i.starts_with(input)).collect();
+    hits.sort();
+    hits.dedup();
+    match hits.as_slice() {
+        [] => Ok(input.to_string()),
+        [one] => Ok((*one).clone()),
+        many => bail!(
+            "{verb}: {input} starts {} ids ({}); type more of it",
+            many.len(),
+            many.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// An RFC 3339 time in the given zone as `2026-10-12 09:00 -05:00`, or the
+/// text unchanged when it does not parse.
+#[must_use]
+pub fn local_when_in<Tz: chrono::TimeZone>(ts: &str, zone: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    chrono::DateTime::parse_from_rfc3339(ts.trim()).map_or_else(
+        |_| ts.to_string(),
+        |t| {
+            t.with_timezone(zone)
+                .format("%Y-%m-%d %H:%M %:z")
+                .to_string()
+        },
+    )
+}
+
+/// [`local_when_in`] in this machine's zone.
+#[must_use]
+pub fn local_when(ts: &str) -> String {
+    local_when_in(ts, &chrono::Local)
+}
+
+/// What `remember` and `prefer` print to a person at a terminal: the
+/// kind and the text, when it comes up for review in local time, and the
+/// first eight characters of its id, which `accept`, `forget` and `graded`
+/// take. A pipe gets [`format_write_ack`].
+#[must_use]
+pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> String {
+    let id = body["id"].as_str().unwrap_or("?");
+    let short: String = id.chars().take(8).collect();
+    let text = body["text"].as_str().unwrap_or("").replace('\n', " ");
+    let due = body["due_at"]
+        .as_str()
+        .filter(|d| !d.is_empty())
+        .map_or_else(String::new, |d| format!(" Review {}.", when(d)));
+    format!(
+        "remembered ({}): {}{due} id {short}",
+        body["kind"].as_str().unwrap_or("?"),
+        text.trim()
+    )
+}
+
 /// One line after a pack write: id, kind, due, text. Not the embedding.
 #[must_use]
 pub fn format_write_ack(body: &serde_json::Value) -> String {
@@ -14408,6 +14494,15 @@ pub fn graded(id: &str, recalled: bool) -> Result<Value> {
     if id.is_empty() {
         bail!("graded: an atom id is required");
     }
+    let shown: Vec<String> = due_shown_live(
+        &std::fs::read_to_string(due_shown_path()).unwrap_or_default(),
+        epoch_s(),
+    )
+    .into_iter()
+    .map(|(_, i)| i)
+    .collect();
+    let full = resolve_short_id("graded", id, &shown)?;
+    let id = full.as_str();
     // A grade says the claim was read against the work. One no due page
     // showed in the last hour was not, and a loop over a saved list grades
     // a thousand claims it never read, each lapse bringing it back sooner.
@@ -16210,14 +16305,23 @@ pub fn not_assignee_message(
     }
 }
 
-/// File the lesson of a finished sitting as a proposal. A lesson
-/// learned on an issue belongs to the scope of the repository that holds
-/// the issue, wherever it was written. It is a proposal until `ljos
-/// accept`, or until the person types the same words. Called after the
-/// node completed, so a refusal is a line that names the pack's reason
-/// and the command that keeps the lesson, never an error.
+/// Whether a lesson given to `ljos finish` is the person's own: no agent
+/// runner above the process and a terminal on its input. Such a lesson is
+/// written at once; one an agent gives waits for `ljos accept`.
+#[must_use]
+pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
+    !under_runner && terminal
+}
+
+/// File the lesson of a finished sitting. A lesson learned on an issue
+/// belongs to the scope of the repository that holds the issue, wherever
+/// it was written. One the person typed in a terminal of their own is
+/// written at once; any other is a proposal until `ljos accept`, or until
+/// the person types the same words. Called after the node completed, so
+/// a refusal is a line that names the pack's reason and the command that
+/// keeps the lesson, never an error.
 fn finish_lesson(issue: &str, text: &str) -> String {
-    let filed = (|| {
+    let filed = (|| -> Result<String> {
         let scope = sync::scope_for_issue(issue);
         let client = pack()?;
         let workspace = client.workspace();
@@ -16231,13 +16335,33 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         // review, so the hook shows the lesson from the next prompt.
         // Until then the writer holds it and no search returns it.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
-        admit::propose_atom(&client, atom)
-    })();
-    match filed {
-        Ok(filed) => format!(
+        if lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal()) {
+            // Typed by the person in a terminal of their own: no
+            // runner above it, so it needs no second review.
+            admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+            let posted = with_writer(|| {
+                admit::post_kept(&client, &atom)
+                    .context("finish: POST /v1/atoms failed for the lesson")
+            })?;
+            admit::satisfy_text(text);
+            let id: String = posted["id"]
+                .as_str()
+                .unwrap_or("?")
+                .chars()
+                .take(8)
+                .collect();
+            return Ok(format!(
+                "remembered your lesson (id {id}); the hook shows it from the next prompt\n"
+            ));
+        }
+        let filed = admit::propose_atom(&client, atom)?;
+        Ok(format!(
             "proposed {} as agent-derived; `ljos accept {}` writes it\n",
             filed.id, filed.id
-        ),
+        ))
+    })();
+    match filed {
+        Ok(line) => line,
         Err(e) => format!(
             "the lesson was not kept: {e:#}. The node stays completed. Reword the lesson and keep it with: ljos remember {}\n",
             tools::sh_quote(text)
@@ -23575,6 +23699,66 @@ mod tests {
         // Never harvest a transcript: the text is the claim, not a prefix parse.
         let raw = atom_body("lesson", "Remember: pin the review set", "ws");
         assert_eq!(raw["text"], "Remember: pin the review set");
+    }
+
+    #[test]
+    fn a_short_id_names_the_one_id_it_starts() {
+        let ids = vec![
+            "922d35cd0123456789abcdef01234567".to_string(),
+            "922d35ff0123456789abcdef01234567".to_string(),
+            "a1b2c3d40123456789abcdef01234567".to_string(),
+        ];
+        assert_eq!(
+            resolve_short_id("forget", "a1b2c3d4", &ids).unwrap(),
+            ids[2]
+        );
+        assert_eq!(
+            resolve_short_id("forget", "922d35cd", &ids).unwrap(),
+            ids[0]
+        );
+        let err = resolve_short_id("forget", "922d35", &ids)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("starts 2 ids"), "{err}");
+        // Too short, unknown, or whole: taken as typed.
+        assert_eq!(resolve_short_id("forget", "922", &ids).unwrap(), "922");
+        assert_eq!(
+            resolve_short_id("forget", "ffffffff", &ids).unwrap(),
+            "ffffffff"
+        );
+        assert_eq!(resolve_short_id("forget", &ids[1], &ids).unwrap(), ids[1]);
+    }
+
+    #[test]
+    fn a_person_sees_the_ack_in_local_time_with_a_short_id() {
+        let zone = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        assert_eq!(
+            local_when_in("2026-10-12T14:00:00Z", &zone),
+            "2026-10-12 09:00 -05:00"
+        );
+        assert_eq!(local_when_in("not a time", &zone), "not a time");
+        let body = serde_json::json!({
+            "id": "922d35cd0123456789abcdef01234567",
+            "kind": "preference",
+            "text": "Plain words in denials.",
+            "due_at": "2026-10-12T14:00:00Z",
+        });
+        let when = |d: &str| local_when_in(d, &zone);
+        assert_eq!(
+            format_write_ack_plain(&body, &when),
+            "remembered (preference): Plain words in denials. Review 2026-10-12 09:00 -05:00. id 922d35cd"
+        );
+        // A pipe keeps the tab row.
+        assert!(
+            format_write_ack(&body).starts_with("922d35cd0123456789abcdef01234567\tpreference\t")
+        );
+    }
+
+    #[test]
+    fn a_lesson_typed_in_the_persons_terminal_is_theirs() {
+        assert!(lesson_is_the_persons(false, true));
+        assert!(!lesson_is_the_persons(true, true));
+        assert!(!lesson_is_the_persons(false, false));
     }
 
     #[test]
