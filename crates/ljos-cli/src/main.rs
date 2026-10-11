@@ -20,6 +20,7 @@ use ljos_cli::{
     write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
     Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -753,6 +754,16 @@ enum Cmd {
     },
 }
 
+/// The write acknowledgement: the plain sentence for a person at a
+/// terminal, the tab-separated row for a pipe.
+fn write_ack(body: &serde_json::Value) -> String {
+    if std::io::stdout().is_terminal() {
+        ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
+    } else {
+        format_write_ack(body)
+    }
+}
+
 fn main() -> Result<()> {
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
@@ -773,7 +784,7 @@ fn main() -> Result<()> {
             let horizon =
                 ljos_cli::remember_horizon(transient, standing, ljos_cli::under_a_runner());
             let body = packset_write_as("Remember", &join(&text), as_persona.as_deref(), horizon)?;
-            println!("{}", format_write_ack(&body));
+            println!("{}", write_ack(&body));
             eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
                 eprintln!(
@@ -790,9 +801,10 @@ fn main() -> Result<()> {
         Cmd::Prefer { text, as_persona } => {
             let body =
                 packset_write_as("Prefer", &join(&text), as_persona.as_deref(), Some(false))?;
-            println!("{}", format_write_ack(&body));
+            println!("{}", write_ack(&body));
         }
         Cmd::Accept { id } => {
+            let id = ljos_cli::admit::resolve_id(&id)?;
             // The agent proposed the lesson; accepting it is a review by
             // someone else. Under a runner that is the conversation that
             // started a worker, reviewing the worker's proposal; an agent
@@ -1169,7 +1181,7 @@ fn main() -> Result<()> {
                     PersonaWrite::Define
                 },
             )?;
-            println!("{}", format_write_ack(&body));
+            println!("{}", write_ack(&body));
             ljos_cli::refresh_agents();
         }
         Cmd::Upgrade { version, dir } => {
@@ -1896,7 +1908,7 @@ fn main() -> Result<()> {
             (Some(name), Some(value)) => {
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
-                println!("{}", format_write_ack(&body));
+                println!("{}", write_ack(&body));
                 if let Some(p) = prev {
                     eprintln!(
                         "was {}{}{} ({}), now closed",
@@ -1980,7 +1992,12 @@ fn main() -> Result<()> {
 
         Cmd::Graded { id, lapsed } => {
             let v = graded(&id, !lapsed)?;
-            println!("{}", v["due_at"].as_str().unwrap_or("graded"));
+            let due = v["due_at"].as_str().unwrap_or("graded");
+            if std::io::stdout().is_terminal() {
+                println!("graded; next review {}", ljos_cli::local_when(due));
+            } else {
+                println!("{due}");
+            }
         }
         Cmd::Learn {
             id,

@@ -128,7 +128,10 @@ The sitting prints a short report: whether ljos is ready, what needs action, wha
 goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
 standing lesson and records that the person accepted it. Under an agent runner
 it accepts only a proposal another conversation filed, such as a worker's, so
-an agent can't accept its own proposal. The island fires, the session node
+an agent can't accept its own proposal. A lesson you type at `ljos finish` in a
+terminal of your own, with no agent runner above it, is written at once as
+yours. `ljos accept`, `ljos forget` and `ljos graded` take the first eight
+characters of an id. The island fires, the session node
 completes, and a named outcome shrinks the weight of the voters it refuted. A
 lesson typed with `ljos remember` stays `user-declared`, and the same words
 satisfy the open proposal. The ticket stays open unless `--close` is given,
