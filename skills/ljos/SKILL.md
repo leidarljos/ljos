@@ -127,9 +127,10 @@ Every piece of work has an issue before it has a claim.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
 - A lesson is one `ljos remember` of two short sentences at most. Run by
-  you, the agent, it is stored as an episode and is not a refresher until
-  `ljos graded ID` recalls it, or until consolidation finds it replaced an
-  earlier claim. The person's own `ljos remember` takes effect at once.
+  you, the agent, it is stored as an episode. The hook shows it when a
+  prompt bears on it. `ljos graded ID` promotes it to standing, and so does
+  a consolidation that finds it replaced an earlier claim. The person's own
+  `ljos remember` takes effect at once.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")

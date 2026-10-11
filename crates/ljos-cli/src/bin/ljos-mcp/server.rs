@@ -946,7 +946,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Call this when the work taught something. One lesson, two short sentences at most, stored as an episode: it is kept and it is not a refresher until a recalled review or a consolidation promotes it. Pass transient false to store a standing rule now. Pass transient true to force an episode. Never a transcript. Progress notes go on the issue.",
+        description = "Call this when the work taught something. One lesson, two short sentences at most, stored as an episode: the hook shows it when a prompt bears on it, and a recalled review or a consolidation promotes it to standing. Pass transient false to store a standing rule now. Pass transient true to force an episode. Never a transcript. Progress notes go on the issue.",
         annotations(
             title = "Remember",
             read_only_hint = false,

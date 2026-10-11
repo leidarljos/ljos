@@ -4238,7 +4238,7 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
         .filter(|h| agreed(h))
         .filter(|h| shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS)
-        .filter(|h| is_refresher(h))
+        .filter(|h| shown_on_prompt(h))
         .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
         .take(limit)
         .collect();
@@ -4629,6 +4629,43 @@ fn names_the_cue(text: &str, cue: &str) -> bool {
         .any(|w| have.binary_search(w).is_ok())
 }
 
+/// Whether a claim names the cue's subject, which is the word test the
+/// prompt hook uses.
+///
+/// An alias is the name of one tool or one thing. Two content words are a
+/// subject. One content word is the subject only when the cue has two
+/// content words or fewer, so the overlap is at least half of what the cue
+/// is about. A longer cue that shares one ordinary word (`test`, `commit`,
+/// `build`) is a coincidence: the cosines on such a cue sit within a few
+/// hundredths of each other, and the best of them stays under the encoder's
+/// confidence line.
+fn names_the_subject(text: &str, cue: &str) -> bool {
+    if !names_the_cue(text, cue) {
+        return false;
+    }
+    let have = cue_terms(text, true);
+    let want = cue_terms(cue, false);
+    let mut plain = 0usize;
+    let mut alias = false;
+    let mut cue_plain = 0usize;
+    for w in &want {
+        if w.starts_with("alias:") {
+            if have.binary_search(w).is_ok() {
+                alias = true;
+            }
+        } else {
+            cue_plain += 1;
+            if have.binary_search(w).is_ok() {
+                plain += 1;
+            }
+        }
+    }
+    if plain == 0 && !alias {
+        return false;
+    }
+    alias || plain >= 2 || cue_plain <= 2
+}
+
 /// How many content words a lesson and a cue share.
 fn shared_cue_words(text: &str, cue: &str) -> usize {
     let want = cue_content_words(cue);
@@ -4741,6 +4778,17 @@ fn is_refresher(hit: &Hit) -> bool {
     hit.entities.iter().any(|e| e == "horizon:standing")
 }
 
+/// Whether the prompt hook may hand a claim over.
+///
+/// A preference is a rule. A standing lesson was said by the person or
+/// promoted by a review. A transient lesson is a default write from an
+/// agent runner: the hook shows it when the gate is sure the prompt is
+/// about it. A lesson with no horizon tag was written before the tag,
+/// and rehearsal promotes it.
+fn shown_on_prompt(hit: &Hit) -> bool {
+    is_refresher(hit) || hit.entities.iter().any(|e| e == "horizon:transient")
+}
+
 /// The pack note for a prompt, and the memory ids named in it.
 /// The ids are not marked seen here: the caller marks them when the runner
 /// delivers the note. A camel-case prompt hook's stdout is discarded, so
@@ -4802,8 +4850,8 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         nudge.push_str(&extra);
     }
     // The cross-encoder reads the prompt and the claim together. The lexical
-    // search is the fallback when that stage is down, and it still refuses
-    // an episode.
+    // search is the fallback when that stage is down. It uses the same
+    // subject test, and a transient lesson that passes it is shown.
     // The rerank gets a budget inside the runner's hook timeout; past it the
     // lexical search answers, which takes a fraction of a second.
     let seen = seen_ids(call.session.as_deref());
@@ -4837,10 +4885,12 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         })
         .ok();
         // A pack that sends the encoder's cosine has a judge of meaning:
-        // it admits what the encoder ranked near the top even when no word
-        // is shared, and it stands in for the two-scorer agreement when a
-        // word is. The cross-encoder is not asked then; on the 20-memory
-        // set it moved more targets out of the top three than in.
+        // it admits what the encoder ranked first at the confidence line
+        // even when no word is shared, and a claim that names the
+        // prompt's subject stands in for the two-scorer agreement. One
+        // ordinary word of a longer prompt does not. The cross-encoder
+        // is not asked then; on the 20-memory set it moved more targets
+        // out of the top three than in.
         if let Some(pool) = pool
             .as_ref()
             .filter(|p| p.iter().any(|(_, s)| s.cosine.is_some()))
@@ -4880,8 +4930,8 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 let could = |h: &Hit| {
                     !UNREVIEWED_KINDS.contains(&h.kind.as_str())
                         && agreed(h)
-                        && names_the_cue(&h.text, cue)
-                        && is_refresher(h)
+                        && names_the_subject(&h.text, cue)
+                        && shown_on_prompt(h)
                         && h.id.as_ref().is_none_or(|id| !seen.contains(id))
                 };
                 if !pool.iter().any(could) {
@@ -4911,8 +4961,8 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
                 .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
                 .filter(|h| agreed(h))
-                .filter(|h| names_the_cue(&h.text, cue))
-                .filter(|h| is_refresher(h))
+                .filter(|h| names_the_subject(&h.text, cue))
+                .filter(|h| shown_on_prompt(h))
                 .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
                 .collect()
         }
@@ -4983,7 +5033,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
     let candidates: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-        .filter(is_refresher)
+        .filter(shown_on_prompt)
         .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
         .take(10)
         .collect();
@@ -5024,7 +5074,7 @@ pub const JEV_ALONE_AT: f64 = 0.75;
 #[must_use]
 pub fn admits_judged(h: &Hit, bears: bool, p: f64, cue: &str, top: f64) -> bool {
     bears
-        && (names_the_cue(&h.text, cue) || p >= JEV_ALONE_AT)
+        && (names_the_subject(&h.text, cue) || p >= JEV_ALONE_AT)
         && agreed(h)
         && h.score >= top * HOOK_SCORE_FLOOR
 }
@@ -5052,22 +5102,23 @@ pub const DENSE_ALONE_RANK: u32 = 1;
 /// none of 12 unrelated prompts did (their best was 0.653).
 pub const DENSE_ALONE_AT: f64 = 0.66;
 
-/// How far below the prompt's best cosine a hit that shares a word may
-/// sit, in place of two scorers agreeing. One shared word (`test`,
-/// `build`) on a hit the encoder puts well behind the best is a
-/// coincidence. The cosines of one prompt sit close together, so the
-/// distance from the best tells more than a fixed floor.
+/// How far below the prompt's best cosine a hit that names the subject
+/// may sit, in place of two scorers agreeing. The cosines of one prompt
+/// sit close together, so the distance from the best tells more than a
+/// fixed floor. One ordinary word of a longer cue does not enter this
+/// band: see [`names_the_subject`].
 pub const DENSE_WORD_BEHIND: f64 = 0.05;
 
 /// Whether a hit from the fused pool reaches the prompt on a pack that
-/// sends the encoder's cosine. A refresher of a reviewed kind gets in
-/// when the encoder ranked it first at [`DENSE_ALONE_AT`] or more, or
-/// when it names a word of the prompt, clears [`HOOK_SCORE_FLOOR`] of the
-/// top score and sits within [`DENSE_WORD_BEHIND`] of `best`, the
-/// highest cosine in the pool.
+/// sends the encoder's cosine. A preference, a standing lesson or a
+/// transient lesson gets in when the encoder ranked it first at
+/// [`DENSE_ALONE_AT`] or more, or when it names the prompt's subject,
+/// clears [`HOOK_SCORE_FLOOR`] of the top score and sits within
+/// [`DENSE_WORD_BEHIND`] of `best`, the highest cosine in the pool.
+/// A lesson with no horizon tag stays out.
 #[must_use]
 pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> bool {
-    if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || !is_refresher(h) {
+    if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || !shown_on_prompt(h) {
         return false;
     }
     let Some(cosine) = s.cosine else {
@@ -5076,7 +5127,7 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> 
     if s.rank.is_some_and(|r| r <= DENSE_ALONE_RANK) && cosine >= DENSE_ALONE_AT {
         return true;
     }
-    names_the_cue(&h.text, cue)
+    names_the_subject(&h.text, cue)
         && h.score >= top * HOOK_SCORE_FLOOR
         && cosine >= best - DENSE_WORD_BEHIND
 }
@@ -8272,7 +8323,8 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
 /// The horizon `ljos remember` writes when neither `--transient` nor
 /// `--standing` is given. The person typing it is the review, so the lesson
 /// takes effect at once, like `prefer` and `rule`. Run under an agent runner it is
-/// the agent's lesson: an episode, shown once a review promotes it.
+/// the agent's lesson: an episode. The hook shows it when a prompt bears
+/// on it, and a review promotes it to standing.
 #[must_use]
 pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
     if transient {
@@ -8294,7 +8346,7 @@ pub fn remember_note(body: &Value) -> &'static str {
     if standing {
         "standing: the hook shows it from the next prompt it bears on"
     } else {
-        "episode: written from an agent runner, so the hook shows it once `ljos due` and `ljos graded` promote it; the person's `ljos remember` or `ljos accept` takes effect at once"
+        "episode: written from an agent runner; the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
     }
 }
 
@@ -23127,8 +23179,8 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_word_needs_the_encoder_not_two_scorers() {
-        let cue = "the backend URL is wrong after deploying the SPA";
+    fn a_shared_word_needs_the_subject_not_any_overlap() {
+        let long = "the backend URL is wrong after deploying the SPA";
         let lesson = signal_hit(
             "lesson",
             "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
@@ -23136,34 +23188,82 @@ mod tests {
             1,
         );
         let best = 0.70;
-        let some = DenseSignal {
+        let near = DenseSignal {
             rank: Some(2),
             cosine: Some(best - DENSE_WORD_BEHIND + 0.01),
         };
-        assert!(admits_local(&lesson, some, cue, 1.0, best));
+        // One ordinary word of a longer cue is a coincidence, even close to the best.
+        assert!(!admits_local(&lesson, near, long, 1.0, best));
+        // That word is the subject when the cue has two content words or fewer.
+        assert!(admits_local(&lesson, near, "wrong URL", 1.0, best));
+        // Two content words name the subject on a longer cue.
+        let two = "the API base URL is wrong after deploying";
+        assert!(admits_local(&lesson, near, two, 1.0, best));
         let behind = DenseSignal {
             rank: Some(5),
             cosine: Some(best - DENSE_WORD_BEHIND - 0.01),
         };
-        assert!(!admits_local(&lesson, behind, cue, 1.0, best));
+        assert!(!admits_local(&lesson, behind, two, 1.0, best));
         // Below the floor of the top score it stays out.
-        assert!(!admits_local(&lesson, some, cue, 10.0, best));
+        assert!(!admits_local(&lesson, near, "wrong URL", 10.0, best));
         // A word in common and no cosine: the encoder said nothing.
         assert!(!admits_local(
             &lesson,
             DenseSignal::default(),
-            cue,
+            "wrong URL",
             1.0,
             best
         ));
-        // An episode stays out whatever the encoder says.
+        // An alias names the subject even under the confidence line.
+        let uv = signal_hit(
+            "preference",
+            "Use uv to run Python tools instead of pip or plain python",
+            1.0,
+            1,
+        );
+        let alias = DenseSignal {
+            rank: Some(1),
+            cosine: Some(0.61),
+        };
+        assert!(admits_local(
+            &uv,
+            alias,
+            "set up a virtualenv and install black",
+            1.0,
+            0.61
+        ));
+        // One ordinary word on a longer unrelated cue stays out below the line.
+        let tests = signal_hit(
+            "lesson",
+            "The integration tests need a local Redis on port 6380, not the default 6379",
+            1.0,
+            1,
+        );
+        let weak = DenseSignal {
+            rank: Some(1),
+            cosine: Some(0.60),
+        };
+        assert!(!admits_local(
+            &tests,
+            weak,
+            "Run the tests and tell me what fails",
+            1.0,
+            0.60
+        ));
+        // A transient lesson the encoder ranks first at the confidence line is shown.
         let mut episode = lesson.clone();
         episode.entities = vec!["horizon:transient".into()];
         let sure = DenseSignal {
             rank: Some(1),
-            cosine: Some(0.95),
+            cosine: Some(DENSE_ALONE_AT),
         };
-        assert!(!admits_local(&episode, sure, cue, 1.0, 0.95));
+        assert!(admits_local(&episode, sure, long, 1.0, DENSE_ALONE_AT));
+        // The same episode stays out on one ordinary word of a long cue.
+        assert!(!admits_local(&episode, near, long, 1.0, best));
+        // A lesson written before the horizon tag stays out whatever the encoder says.
+        let mut untagged = lesson.clone();
+        untagged.entities.clear();
+        assert!(!admits_local(&untagged, sure, long, 1.0, DENSE_ALONE_AT));
     }
 
     /// A pack whose search sends the encoder's rank and cosine on each hit.
@@ -26512,8 +26612,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ballots: None,
             of: None,
         };
-        assert!(is_refresher(&hit(&person)), "the hook shows it at once");
-        assert!(!is_refresher(&hit(&agent)), "a review promotes it first");
+        assert!(
+            is_refresher(&hit(&person)),
+            "a standing lesson is a refresher"
+        );
+        assert!(
+            !is_refresher(&hit(&agent)),
+            "the tag stays transient until a review"
+        );
+        let sure = DenseSignal {
+            rank: Some(1),
+            cosine: Some(DENSE_ALONE_AT),
+        };
+        assert!(
+            admits_local(&hit(&agent), sure, "anything", 1.0, DENSE_ALONE_AT),
+            "the hook shows an episode the encoder ranks first"
+        );
     }
 
     #[test]

@@ -85,7 +85,8 @@ The hook shows what you write from the moment it is written: a preference
 `ljos remember`. A lesson the agent proposes at `ljos finish` stays out until
 you run `ljos accept ID` in your own terminal; then it shows at once too. An
 `ljos remember` that an agent runs from inside its runner is an episode: the
-hook shows it once a review promotes it, and `ljos due` lists those.
+hook shows it when a prompt bears on it, and `ljos due` lists it until a
+review promotes it to standing.
 
 The hooks also keep the work on the tracker once a conversation sits on an
 issue: after forty tool calls without a word to the seat, they remind it to
