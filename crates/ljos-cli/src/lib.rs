@@ -17,6 +17,7 @@ pub mod jev;
 pub mod mail;
 pub mod persona_session;
 pub mod plugin;
+pub mod runner_hooks;
 pub mod sync;
 pub mod tools;
 pub mod upgrade;
@@ -664,10 +665,14 @@ skills = "~/.agents/skills"
 
 [[harness]]
 name = "windsurf"
+# Windsurf, now Devin Desktop. Its pre_run_command hook blocks on exit 2;
+# a hook that errors any other way lets the command run.
 config_json = "~/.codeium/windsurf/mcp_config.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.codeium/windsurf/skills"
+hooks = "~/.codeium/windsurf/hooks.json"
+hooks_format = "windsurf"
 
 [[harness]]
 name = "zed"
@@ -694,10 +699,14 @@ skills = "~/.config/Claude/skills"
 [[harness]]
 name = "gemini"
 # The Gemini CLI. Antigravity's agy keeps its own file under ~/.gemini/config.
+# BeforeTool gates shell commands and BeforeAgent takes the prompt note.
+# Gemini reads a hook answer that is not JSON as an allow.
 config_json = "~/.gemini/settings.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": [], "env": {"LJOS_SEAT": "{name}"}}'
 skills = "~/.gemini/skills"
+hooks = "~/.gemini/settings.json"
+hooks_format = "gemini"
 
 [[harness]]
 name = "amazonq"
@@ -708,10 +717,69 @@ skills = "~/.aws/amazonq/skills"
 
 [[harness]]
 name = "kiro"
+# Kiro CLI V3 and IDE 1.0 load global hooks from ~/.kiro/hooks. A
+# PreToolUse command that exits non-zero blocks the tool.
 config_json = "~/.kiro/settings/mcp.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.kiro/skills"
+hooks = "~/.kiro/hooks/ljos.json"
+hooks_format = "kiro"
+
+[[harness]]
+name = "copilot"
+# GitHub Copilot CLI. A preToolUse command hook denies when it exits
+# non-zero, and lets the call run when it times out. The same file under
+# a repository's .github/hooks reaches Copilot's cloud agent.
+config_json = "~/.copilot/mcp-config.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "local", "command": "{server}", "args": [], "tools": ["*"]}'
+skills = "~/.copilot/skills"
+hooks = "~/.copilot/hooks/ljos.json"
+hooks_format = "copilot"
+
+[[harness]]
+name = "factory"
+# Factory's droid. Its hooks.json is keyed by event at the top level;
+# Execute is the shell tool.
+config_json = "~/.factory/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.factory/skills"
+hooks = "~/.factory/hooks.json"
+hooks_format = "factory"
+
+[[harness]]
+name = "qwen"
+# Qwen Code takes Claude Code's hook answer; run_shell_command is the shell.
+config_json = "~/.qwen/settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.qwen/skills"
+hooks = "~/.qwen/settings.json"
+hooks_format = "qwen"
+
+[[harness]]
+name = "crush"
+# Charm's Crush. Only PreToolUse fires so far, on the top-level agent.
+config_json = "~/.config/crush/crush.json"
+json_pointer = "/mcp/ljos"
+json_entry = '{"type": "stdio", "command": "{server}", "args": []}'
+skills = "~/.config/crush/skills"
+hooks = "~/.config/crush/crush.json"
+hooks_format = "crush"
+
+[[harness]]
+name = "cline"
+# Cline runs an executable named after the event from its hooks
+# directory, on macOS and Linux. The MCP file is the VS Code extension's
+# on Linux.
+config_json = "~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": [], "disabled": false}'
+skills = "~/.cline/skills"
+hooks = "~/Documents/Cline/Hooks"
+hooks_format = "cline"
 
 # Goose reads YAML. A snippet appended to a file that already has
 # `extensions:` is a second key, so this shape is an example to copy,
@@ -1003,11 +1071,47 @@ pub fn conversation_tag(pid: u32) -> String {
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
 fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|r| !r.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ljos")
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
+        return PathBuf::from(run).join("ljos");
+    }
+    let dir = runtime_fallback(
+        &std::env::temp_dir(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        euid(),
+    );
+    if !dir.exists() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir);
+    }
+    dir
+}
+
+/// This process's effective user id.
+fn euid() -> u32 {
+    // SAFETY: geteuid has no arguments and only reads the process identity.
+    unsafe { libc::geteuid() }
+}
+
+/// The runtime directory when `XDG_RUNTIME_DIR` is unset: `ljos-UID` under
+/// the temporary directory, so two users on one host never read each
+/// other's holds, seat records or approvals. A `ljos-UID` that is a
+/// symlink, or that another user made first, is not used; the seat then
+/// keeps its records under `~/.cache/ljos/run`.
+#[must_use]
+pub fn runtime_fallback(tmp: &Path, home: Option<&Path>, uid: u32) -> PathBuf {
+    use std::os::unix::fs::MetadataExt as _;
+    let mine = tmp.join(format!("ljos-{uid}"));
+    match std::fs::symlink_metadata(&mine) {
+        Err(_) => mine,
+        Ok(m) if m.is_dir() && m.uid() == uid => mine,
+        Ok(_) => home.map_or_else(
+            || tmp.join(format!("ljos-{uid}-own")),
+            |h| h.join(".cache/ljos/run"),
+        ),
+    }
 }
 
 /// The record a server leaves for the shells the same runner opens.
@@ -1670,6 +1774,14 @@ pub fn seat_name() -> String {
     whoami().seat
 }
 
+/// Whether a conversation under a runner may accept a proposal: only one
+/// another conversation filed, such as a worker it started. `proposer` is
+/// the holder the proposal's atom names, `holder` this conversation's.
+#[must_use]
+pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> bool {
+    proposer.is_some_and(|p| !p.trim().is_empty() && p.trim() != holder.trim())
+}
+
 /// The name this conversation's claims are held under.
 #[must_use]
 pub fn holder_name() -> String {
@@ -2295,12 +2407,32 @@ pub fn onboard_in(
         host_key_step(dry),
     ];
     let mut steps: Vec<Step> = shipped_step.into_iter().collect();
+    // The Cursor plugin carries the server, the hooks and the skill.
+    let plugin = (h.hooks_format.as_deref() == Some("cursor"))
+        .then(|| cursor_plugin_in(&expand("~/.cursor/plugins")))
+        .flatten();
+    if let Some(dir) = &plugin {
+        let hooks = expand(h.hooks.as_deref().unwrap_or("~/.cursor/hooks.json"));
+        steps.push(cursor_plugin_step(dir, &hooks));
+        if let Some(dir) = &h.agents {
+            steps.push(agents_step(
+                &expand(dir),
+                &personas_from_pack().unwrap_or_default(),
+                dry,
+            ));
+        }
+        steps.extend(dependencies);
+        return Ok(steps);
+    }
     steps.push(register_step(h, &server, dry));
     if let Some(file) = &h.hooks {
         steps.push(match (&h.hooks_named, h.hooks_format.as_deref()) {
             (Some(name), _) => named_hook_step(&expand(file), name, dry),
             (None, Some("cursor")) => {
                 cursor_hook_step(&expand(file), &expand("~/.claude/settings.json"), dry)
+            }
+            (None, Some(runner)) if runner_hooks::is_runner(runner) => {
+                runner_hooks::hook_step(runner, &expand(file), &hook_command(), dry)
             }
             (None, _) => hook_step(&expand(file), &hook_events_of(h), dry),
         });
@@ -2805,6 +2937,66 @@ fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
         .map(|event| (*event).to_string())
         .collect();
     hook_installed(cursor, &only) && claude_has_seat_hook(claude)
+}
+
+/// The ljos Cursor plugin under Cursor's plugins directory, when installed:
+/// a clone in `local/ljos`, or a marketplace or `/add-plugin` install in
+/// `cache/<marketplace>/ljos/<commit>`.
+#[must_use]
+pub fn cursor_plugin_in(plugins: &Path) -> Option<PathBuf> {
+    let manifest = |dir: &Path| dir.join(".cursor-plugin/plugin.json").is_file();
+    let local = plugins.join("local/ljos");
+    if manifest(&local) {
+        return Some(local);
+    }
+    let markets = std::fs::read_dir(plugins.join("cache")).ok()?;
+    markets
+        .flatten()
+        .map(|market| market.path().join("ljos"))
+        .filter_map(|plugin| std::fs::read_dir(plugin).ok())
+        .flat_map(|commits| commits.flatten().map(|c| c.path()))
+        .find(|commit| manifest(commit))
+}
+
+/// Whether a hooks file carries the seat's hook on any event.
+fn file_has_seat_hook(file: &Path) -> bool {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| {
+            v["hooks"].as_object().is_some_and(|events| {
+                events
+                    .values()
+                    .flat_map(|e| e.as_array().into_iter().flatten())
+                    .any(is_seat_hook)
+            })
+        })
+}
+
+/// The step that stands in for the tool server, the hooks and the skill
+/// when the Cursor plugin carries them. Writing them as well would run every
+/// hook twice and list the tool server twice. A hooks file an earlier
+/// onboard wrote is named, since Cursor still runs it.
+fn cursor_plugin_step(plugin: &Path, hooks: &Path) -> Step {
+    let mut detail = format!(
+        "the ljos Cursor plugin at {} carries the tool server, the hooks and the skill, \
+         so onboard wrote none of them",
+        plugin.display()
+    );
+    let earlier = file_has_seat_hook(hooks);
+    if earlier {
+        detail.push_str(&format!(
+            "; {} still carries the seat's hook from an earlier onboard. Remove those \
+             entries and the ljos entry in ~/.cursor/mcp.json; until then a hook call \
+             the two make together is answered once",
+            hooks.display()
+        ));
+    }
+    Step {
+        what: "cursor plugin".into(),
+        detail,
+        ok: true,
+    }
 }
 
 fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
@@ -3721,10 +3913,58 @@ fn cue_content_words(text: &str) -> Vec<String> {
     words
 }
 
+/// Three-letter words that sit in most sentences, prompts and lessons
+/// alike. Tool names of three letters (`npm`, `pip`, `git`, `sql`) are
+/// not on it: a prompt names its tool, and so does the preference about
+/// that tool.
+const CUE_STOP_SHORT: &[&str] = &[
+    "add", "all", "and", "any", "are", "but", "can", "did", "few", "for", "get", "got", "had",
+    "has", "her", "him", "his", "how", "its", "let", "may", "new", "not", "now", "off", "old",
+    "one", "our", "out", "own", "put", "run", "say", "see", "set", "she", "the", "too", "try",
+    "two", "use", "via", "was", "way", "who", "why", "yes", "yet", "you",
+];
+
+/// A word with a plural `s` taken off: `migrations` reads as
+/// `migration`, `dependencies` as `dependency`. `class` and `status`
+/// keep theirs.
+fn singular(w: &str) -> String {
+    if w.len() > 4 && w.ends_with("ies") {
+        return format!("{}y", &w[..w.len() - 3]);
+    }
+    if w.len() > 3
+        && w.ends_with('s')
+        && !w.ends_with("ss")
+        && !w.ends_with("us")
+        && !w.ends_with("is")
+    {
+        return w[..w.len() - 1].to_string();
+    }
+    w.to_string()
+}
+
+/// The words a prompt and a claim are matched on: three letters or
+/// more, singular, not a stop word. A prompt says `npm` or `migration`
+/// where the preference says `npm` or `migrations`.
+fn prompt_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| !CUE_STOP.contains(&w.as_str()) && !CUE_STOP_SHORT.contains(&w.as_str()))
+        .map(|w| singular(&w))
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
 /// Whether a lesson names something the cue names.
 /// A high search score on a vague sentence is not that.
 fn names_the_cue(text: &str, cue: &str) -> bool {
-    shared_cue_words(text, cue) > 0
+    let have = prompt_words(text);
+    prompt_words(cue)
+        .iter()
+        .any(|w| have.binary_search(w).is_ok())
 }
 
 /// How many content words a lesson and a cue share.
@@ -3937,27 +4177,35 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         // filters. When none does, no memory can reach the prompt, and
         // the second stage, a few hundred milliseconds a prompt, is not
         // run.
-        if rerank {
-            if let Ok(pool) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-                packset_search_opts(cue, RERANK_POOL, false)
-            }) {
-                let could = |h: &Hit| {
-                    !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                        && agreed(h)
-                        && names_the_cue(&h.text, cue)
-                        && is_refresher(h)
-                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
-                };
-                if !pool.iter().any(could) {
-                    return (nudge, pending);
-                }
+        let pool = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+            packset_search_opts(cue, RERANK_POOL, false)
+        })
+        .ok();
+        if let Some(pool) = &pool {
+            let could = |h: &Hit| {
+                !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                    && agreed(h)
+                    && names_the_cue(&h.text, cue)
+                    && is_refresher(h)
+                    && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+            };
+            if !pool.iter().any(could) {
+                return (nudge, pending);
             }
         }
-        let reranked = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-            packset_search_opts(cue, 10, rerank)
-        });
-        let Ok(found) = reranked.or_else(|_| packset_search(cue)) else {
-            return (nudge, pending);
+        // The pack client gives a reranked search at least a minute, so
+        // the budget is kept here: past it the fused pool answers. A
+        // writer that is still fetching its cross-encoder on the first
+        // prompt then costs the budget, not the whole hook deadline.
+        let reranked = if rerank {
+            search_within(cue, 10, HOOK_RERANK_BUDGET_MS)
+        } else {
+            Err(anyhow::anyhow!("search: rerank off"))
+        };
+        let found = match (reranked, pool) {
+            (Ok(found), _) => found,
+            (Err(_), Some(pool)) => pool,
+            (Err(_), None) => return (nudge, pending),
         };
         hits = found;
         let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
@@ -4880,8 +5128,9 @@ pub fn stop_audit(input: &str, stop_active: bool) -> Option<String> {
 }
 
 /// Why a turn is held for one more round. A decision that has not been
-/// sat is held even when an issue is already open. A conversation that
-/// holds no issue and used tools without touching the seat is held too.
+/// sat is held even when an issue is already open. With
+/// [`tracks_work`] on, a conversation that holds no issue and used tools
+/// without touching the seat is held too.
 /// A subagent is left to its brief. The second stop of the same turn is
 /// not held. `None` lets the turn end.
 #[must_use]
@@ -4899,15 +5148,13 @@ pub fn seat_stop_reason(input: &str, stop_active: bool, subagent: bool) -> Optio
     if asks_decision(&turn.request) && !turn.balloted {
         return Some(decision_hold());
     }
-    if held_issue().is_some() || !turn.used_tool || turn.touched_seat {
+    if held_issue().is_some() || !turn.used_tool || turn.touched_seat || !tracks_work() {
         return None;
     }
-    Some(
+    Some(format!(
         "This conversation holds no issue, and this turn used tools without touching the seat. \
-         Work goes on an issue: `ljos file \"TITLE\" -p PROJECT --top` prints an id, then \
-         `ljos sitting ID` opens it."
-            .into(),
-    )
+         {OPEN_AN_ISSUE}"
+    ))
 }
 
 /// The id of the runner's notice that its usage limit is reached, when the
@@ -4976,8 +5223,33 @@ pub fn limit_stop(input: &str, session: Option<&str>) -> Option<String> {
 
 /// Tool calls a conversation that already holds an issue may make without a
 /// word to the seat before the hook reminds it. A conversation that holds
-/// none is told on the first result.
+/// none is told on the first result, when the seat tracks work.
 pub const WORK_NUDGE_EVERY: u64 = 40;
+
+/// A seat setting: the process environment, else `~/.config/ljos/env`.
+fn seat_setting(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        return Some(v);
+    }
+    let text = std::fs::read_to_string(home().ok()?.join(".config/ljos/env")).ok()?;
+    text.lines().find_map(|line| {
+        let (k, v) = line.trim().split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
+/// Whether the hooks ask a conversation that holds no issue to open one.
+/// Off unless `LJOS_TRACK_WORK=on`: a person who installed the seat for its
+/// memory and its guard did not ask for a tracker in every conversation.
+/// A conversation that sat on an issue is reminded either way.
+#[must_use]
+pub fn tracks_work() -> bool {
+    seat_setting("LJOS_TRACK_WORK").is_some_and(|v| matches!(v.trim(), "on" | "1" | "true" | "yes"))
+}
+
+/// What the hooks tell a conversation that holds no issue.
+const OPEN_AN_ISSUE: &str = "Work goes on an issue: `vissue q -p PROJECT \"TITLE\"` prints an id, \
+     then `ljos sitting ID` opens it.";
 
 /// Whether a hook call's cue is the seat's own verbs or tools.
 #[must_use]
@@ -4987,8 +5259,8 @@ pub fn touches_seat(cue: &str) -> bool {
 }
 
 /// Count this conversation's tool calls since it last touched the seat.
-/// With no issue held, the first `PostToolUse` of a stretch says to file
-/// one and sit. With an issue held, a `PostToolUse` that reaches
+/// With no issue held and [`tracks_work`] on, the first `PostToolUse` of a
+/// stretch says to open one and sit; with it off, nothing is said. With an issue held, a `PostToolUse` that reaches
 /// [`WORK_NUDGE_EVERY`] says what to record. A subagent is left to its brief.
 pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
     let session = call.session.as_deref()?;
@@ -5008,12 +5280,15 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
     if call.event != "PostToolUse" {
         return None;
     }
+    let held = held_issue();
+    if held.is_none() && !tracks_work() {
+        return None;
+    }
     let count = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| t.trim().parse::<u64>().ok())
         .unwrap_or(0)
         + 1;
-    let held = held_issue();
     let due = match &held {
         None => count == 1 || count >= WORK_NUDGE_EVERY,
         Some(_) => count >= WORK_NUDGE_EVERY,
@@ -5035,10 +5310,10 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
              that holds next time is `ljos remember \"...\"`, an artifact is `ljos deed {issue} \
              --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
         ),
-        None => "This conversation holds no issue. Work goes on an issue: \
-                 `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
-                 Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
-            .to_string(),
+        None => format!(
+            "This conversation holds no issue. {OPEN_AN_ISSUE} Start subagents that record on \
+             the issue with `ljos vote ID` or `ljos note ID`."
+        ),
     })
 }
 
@@ -5351,6 +5626,43 @@ pub fn hook_already_running(call: &HookCall) -> bool {
         call.session.as_deref().unwrap_or(""),
         call.cue
     ));
+    hook_marker_fresh(&key, std::time::Duration::from_secs(20))
+}
+
+/// Events said once per occurrence, whose twin from a second registration
+/// is dropped by [`hook_twin`]. A tool gate is never dropped: its verdict
+/// must reach the runner from every registration.
+pub const TWIN_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "SubagentStop",
+    "PreCompact",
+    "PostToolUseFailure",
+];
+
+/// Whether this call is the twin of one that started in the last ten
+/// seconds: the same event with the same payload, byte for byte. A Cursor
+/// with the plugin and an earlier onboard, or a runner that also loads
+/// Claude's settings, runs the seat's hook twice for one event, and both
+/// copies get the same payload. A later event of the same kind carries a
+/// new generation, loop count or transcript, and is not a twin.
+pub fn hook_twin(call: &HookCall, input: &str) -> bool {
+    if !TWIN_EVENTS.contains(&call.event.as_str()) {
+        return false;
+    }
+    let key = work_id(&format!(
+        "twin|{}|{}|{}",
+        call.event,
+        call.session.as_deref().unwrap_or(""),
+        input.trim()
+    ));
+    hook_marker_fresh(&key, std::time::Duration::from_secs(10))
+}
+
+/// Make the marker for `key`, or say whether one younger than `window`
+/// already stands. A stale marker is renewed and the call goes on.
+fn hook_marker_fresh(key: &str, window: std::time::Duration) -> bool {
     let dir = runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
     // About one call in sixteen sweeps markers older than a minute.
@@ -5381,7 +5693,7 @@ pub fn hook_already_running(call: &HookCall) -> bool {
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age < std::time::Duration::from_secs(20));
+                .is_some_and(|age| age < window);
             if !fresh {
                 let _ = std::fs::write(&path, "");
             }
@@ -5399,6 +5711,24 @@ pub const HOOK_RERANK_BUDGET_MS: u64 = 2500;
 /// `RERANK_DEPTH`). Its first stage returns this many when asked to
 /// rerank.
 const RERANK_POOL: u32 = 20;
+
+/// The reranked search, or an error once `ms` has passed. The request
+/// runs on its own thread: the pack client gives a reranked search at
+/// least a minute whatever `PACKSET_TIMEOUT_MS` says, and a hook cannot
+/// wait that long. A thread left waiting ends with the hook's process.
+///
+/// # Errors
+///
+/// The search's own error, or the budget running out first.
+pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<Vec<Hit>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let cue = cue.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(packset_search_opts(&cue, limit, true));
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(ms))
+        .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
+}
 
 /// Run `f` with the pack client's request timeout set to `ms`, then put
 /// back whatever it was.
@@ -6546,6 +6876,110 @@ fn load_seat_env() {
     }
 }
 
+/// The port packset listens on when nothing names one.
+const PACK_DEFAULT_PORT: u16 = 8761;
+
+/// Where a seat's writer listens when the default port is another user's:
+/// one port per user id, from 18761 up.
+#[must_use]
+pub fn per_user_pack_port(uid: u32) -> u16 {
+    18761 + u16::try_from(uid % 10_000).unwrap_or(0)
+}
+
+/// The user id that owns the socket listening on TCP `port`, read from the
+/// kernel's socket tables (`/proc/net/tcp`, `/proc/net/tcp6`). `None` when
+/// nothing listens there, or off Linux where the tables are not files.
+fn listener_uid(port: u16) -> Option<u32> {
+    let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    listener_uid_in(&tables, port)
+}
+
+/// [`listener_uid`] over the text of the tables. A row is `sl local remote
+/// state ... uid ...`; the local address ends in `:PORT` in hex, and state
+/// `0A` is a listening socket.
+#[must_use]
+pub fn listener_uid_in(tables: &[String], port: u16) -> Option<u32> {
+    let want = format!(":{port:04X}");
+    tables
+        .iter()
+        .flat_map(|t| t.lines().skip(1))
+        .find_map(|row| {
+            let cols: Vec<&str> = row.split_whitespace().collect();
+            let local = cols.get(1)?;
+            (local.ends_with(&want) && cols.get(3) == Some(&"0A"))
+                .then(|| cols.get(7)?.parse().ok())
+                .flatten()
+        })
+}
+
+/// The port to point the pack client at, or `None` to leave the default.
+/// A port the person named is used as named, unless another user's process
+/// listens on it: that is refused. With nothing named, a writer this user
+/// already runs on the per-user port is used; the default port is used
+/// when it is free or this user's; when another user's writer holds it,
+/// the seat moves to the per-user port, where `packset ensure` starts its
+/// own.
+///
+/// # Errors
+///
+/// The named port, or both the default and the per-user port, are another
+/// user's.
+pub fn pick_pack_port(
+    named: Option<u16>,
+    uid: u32,
+    owner: impl Fn(u16) -> Option<u32>,
+) -> Result<Option<u16>> {
+    let theirs = |port: u16| owner(port).filter(|o| *o != uid);
+    if let Some(port) = named {
+        if let Some(other) = theirs(port) {
+            bail!(
+                "127.0.0.1:{port} is another user's (uid {other}), not this seat's pack writer. \
+                 Set PACKSET_PORT to a port of your own, or unset it and the seat picks \
+                 {}",
+                per_user_pack_port(uid)
+            );
+        }
+        return Ok(None);
+    }
+    let own = per_user_pack_port(uid);
+    if owner(own) == Some(uid) {
+        return Ok(Some(own));
+    }
+    match theirs(PACK_DEFAULT_PORT) {
+        None => Ok(None),
+        Some(other) => {
+            if let Some(squatter) = theirs(own) {
+                bail!(
+                    "127.0.0.1:{PACK_DEFAULT_PORT} is uid {other}'s pack writer and \
+                     127.0.0.1:{own} is uid {squatter}'s. Set PACKSET_PORT to a free port"
+                );
+            }
+            Ok(Some(own))
+        }
+    }
+}
+
+/// Keep the pack client on this user's own writer: see [`pick_pack_port`].
+/// A `PACKSET_URL` is the person's choice and is left alone. The port
+/// picked goes into `PACKSET_PORT`, so `packset ensure` and the other
+/// packset commands this seat runs use it too.
+fn scope_pack_port() -> Result<()> {
+    if std::env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
+        return Ok(());
+    }
+    let named = std::env::var("PACKSET_PORT")
+        .or_else(|_| std::env::var("GROK_MEM_PORT"))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok());
+    if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
+        std::env::set_var("PACKSET_PORT", port.to_string());
+    }
+    Ok(())
+}
+
 /// A transport failure, as distinct from a writer that answered and refused.
 fn writer_unreachable(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
@@ -6692,6 +7126,7 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
 
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
+    scope_pack_port()?;
     let workspace = std::env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
@@ -6823,6 +7258,8 @@ fn post_claim_horizon(
 /// `horizon:standing` or `horizon:transient` on a claim as it is written.
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
+/// `ljos remember` typed by the person says standing; see
+/// [`remember_horizon`].
 fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>) {
     let transient = match (kind, force) {
         ("preference", _) => false,
@@ -6835,6 +7272,35 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
         "horizon:standing"
     };
     add_entities(atom, [tag.to_string()]);
+}
+
+/// The horizon `ljos remember` writes when neither `--transient` nor
+/// `--standing` is given. The person typing it is the review, so the lesson
+/// takes effect at once, like `prefer` and `rule`. Run under an agent runner it is
+/// the agent's lesson: an episode, shown once a review promotes it.
+#[must_use]
+pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
+    if transient {
+        Some(true)
+    } else if standing || !under_runner {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The line `ljos remember` prints after the write, saying when the hook
+/// shows the lesson.
+#[must_use]
+pub fn remember_note(body: &Value) -> &'static str {
+    let standing = body["entities"]
+        .as_array()
+        .is_some_and(|e| e.iter().any(|v| v == "horizon:standing"));
+    if standing {
+        "standing: the hook shows it from the next prompt it bears on"
+    } else {
+        "episode: written from an agent runner, so the hook shows it once `ljos due` and `ljos graded` promote it; the person's `ljos remember` or `ljos accept` takes effect at once"
+    }
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
@@ -7193,7 +7659,7 @@ pub const RUBRIC: &str = "\
 const SIT_BODY: &str = "\
 A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
 
-1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, claim.
+1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, reclaim, claim.
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Lessons are `ljos remember` in two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
@@ -8004,7 +8470,7 @@ pub fn seat_panel(
     }
     let through_island: Vec<Persona> = all
         .iter()
-        .filter(|p| by_domain(p, island) && names_the_cue(&p.view, title))
+        .filter(|p| by_domain(p, island) && shared_cue_words(&p.view, title) > 0)
         .cloned()
         .collect();
     if !through_island.is_empty() {
@@ -8822,6 +9288,55 @@ fn reads_script_on_stdin(segment: &str) -> bool {
             || w.starts_with('<')
             || w == ">"
     })
+}
+
+/// The interpreter a segment runs on a program from standard input, with
+/// the flag that takes a program as its next word: `python3 -`, `python3`,
+/// `node`, `perl` or `ruby` with no script file, as in `python3 - <<EOF`.
+fn reads_program_on_stdin(segment: &str) -> Option<(String, &'static str)> {
+    let words = shell_words(segment);
+    let (at, _) = prefix_end(&words);
+    let name = words.get(at)?;
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let flag = if base.starts_with("python") {
+        "-c"
+    } else if matches!(base, "node" | "perl" | "ruby") {
+        "-e"
+    } else {
+        return None;
+    };
+    // Flags and redirections leave stdin as the program: `2>&1` and
+    // `>out` are each a `>` word and the target after it.
+    let mut rest = words[at + 1..].iter();
+    while let Some(w) = rest.next() {
+        if w == ">" {
+            rest.next();
+        } else if !(w.starts_with('-') || w.starts_with('<')) {
+            return None;
+        }
+    }
+    Some((name.clone(), flag))
+}
+
+/// Each here-document `line` feeds an interpreter as its program, as the
+/// argv that runs the same program inline: `python3 - <<EOF` with a body
+/// `B` is `python3 -c B`. ljos-policyd reads such a program for the shell
+/// calls and tree deletes it makes; a rule on the line does not see it.
+fn stdin_programs(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for sub in nested_lines(line, 0) {
+        let mut bodies = Vec::new();
+        split_commands_with(&sub.replace("\\\n", ""), false, &mut bodies);
+        for (body, _, owner) in bodies {
+            if let Some((name, flag)) = raw_segments(&owner)
+                .iter()
+                .find_map(|s| reads_program_on_stdin(s))
+            {
+                out.push(vec![name, flag.to_string(), body]);
+            }
+        }
+    }
+    out
 }
 
 /// The text an `echo` or `printf` segment writes, as a shell would read it
@@ -9693,7 +10208,7 @@ pub enum PushTier {
     /// A branch push to an unreleased repository of the person's own.
     Free,
     /// A push to the person's own repository that is released or shared:
-    /// it runs when it cites a settled decision or a current deed.
+    /// it runs when it cites a settled decision.
     Cite(String),
     /// Somebody else's remote, tags, a mirror or a force: the person runs it.
     Person(String),
@@ -10031,53 +10546,45 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
     Ok(dropped)
 }
 
-/// Whether a cite stands: a deed accession `deedar current` takes, or an
-/// issue whose ballots settle (`vissue consensus --gate`) or that closed
-/// as a decision, either one backed by a seat other than the one
-/// pushing. The text says what it stood on.
+/// Whether a cite stands: a tracker issue its seat ballots decide
+/// ([`seats_decide`]), open or closed. The text says which ballots it
+/// counted. A deed alone does not stand: the pushing seat can mint one
+/// with `deedar create` a moment before the push, so the decision has to
+/// be on an issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
-    let ok = |bin: &str, args: &[&str]| {
-        std::process::Command::new(bin)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    };
     if let Ok(v) = tracker_show_json(cite) {
-        if ok("vissue", &["consensus", cite, "--gate"]) {
-            settled_by_seats(cite)?;
-            return Ok(format!("{cite} settles"));
-        }
-        if v["state"].as_str() == Some("DONE") && is_decision(&v) {
-            let choice = decided_on_tracker(cite)?;
-            return Ok(format!("{cite} closed as a decision on {choice}"));
-        }
-        return Err(format!(
-            "{cite} neither settles (`vissue consensus {cite} --gate`) nor closed as a decision"
+        let (ballots, personas) = cite_ballots(cite)?;
+        let d = seats_decide(cite, &ballots, &personas, &seat_name())?;
+        let closed = if v["state"].as_str() == Some("DONE") && is_decision(&v) {
+            ", closed as a decision"
+        } else {
+            ""
+        };
+        return Ok(format!(
+            "{cite} decides {}{closed}; counted {}",
+            d.choice, d.counted
         ));
     }
-    if ok("deedar", &["current", cite]) {
-        return Ok(format!("deed {cite} is current"));
+    let current = std::process::Command::new("deedar")
+        .args(["current", cite])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if current {
+        return Err(deed_alone(cite));
     }
-    Err(format!(
-        "{cite} is neither a tracker issue nor a current deed"
-    ))
+    Err(format!("{cite} is not a tracker issue"))
 }
 
-/// The option an issue settled on, from `vissue consensus --json`: the
-/// choice the consensus weighs most.
+/// Why a deed cited on its own does not let a push through.
 #[must_use]
-pub fn settled_choice(consensus: &Value) -> Option<String> {
-    let choices = consensus["choices"].as_array()?;
-    let weights = consensus["consensus"].as_array()?;
-    let (i, _) = weights
-        .iter()
-        .filter_map(Value::as_f64)
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(&b.1))?;
-    choices.get(i)?.as_str().map(str::to_string)
+pub fn deed_alone(cite: &str) -> String {
+    format!(
+        "{cite} is a deed, and a deed alone does not stand for a push: the pushing seat can mint one. \
+         Cite the issue that records the decision, with a ballot from another seat"
+    )
 }
 
 /// The ballots that count toward a push cite, as `(agent, choice)`. A
@@ -10094,103 +10601,72 @@ fn seat_ballots<'a>(
         .collect()
 }
 
-/// Whether a cite's settle stands on seat ballots alone, persona and Jev
-/// ballots left out (see [`seat_ballots`]). What is left has to hold at
-/// least one ballot from a seat other than `pusher`, the seat asking to
-/// push, and every one of them for `choice`. A seat that votes alone on
-/// its own issue has not been checked by anyone.
+/// What a push cite stood on: the option, and the ballots counted for it
+/// in words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatDecision {
+    pub choice: String,
+    pub counted: String,
+}
+
+/// The option an issue's seat ballots decide for a push cite. Only seat
+/// ballots count: persona ballots and Jev ballots (`judge:MODEL`) are
+/// left out before anything is weighed, so they can neither pass a push
+/// nor block one. The seats that voted have to agree, and at least one of
+/// them has to be a seat other than `pusher`, the seat asking to push: a
+/// seat that votes alone on its own issue has not been checked by anyone.
+/// Every answer names the seat ballots counted and how many were left out.
 ///
 /// # Errors
 ///
-/// The refusal, naming the ballots it looked at.
-pub fn settles_on_seats(
+/// The refusal, naming the seat ballots it counted.
+pub fn seats_decide(
     cite: &str,
     ballots: &[Value],
-    choice: &str,
     personas: &std::collections::BTreeSet<String>,
     pusher: &str,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<SeatDecision, String> {
     let seats = seat_ballots(ballots, personas);
-    if seats.is_empty() {
-        return Err(format!(
-            "{cite} settles on persona ballots alone, and those do not count toward a push cite; \
-             a seat has to vote {choice}"
-        ));
-    }
-    let against: Vec<String> = seats
+    let advice = ballots
         .iter()
-        .filter(|(_, c)| *c != choice)
-        .map(|(a, c)| format!("{a} for {c}"))
-        .collect();
-    if !against.is_empty() {
+        .filter(|b| b["agent"].as_str().is_some() && b["choice"].as_str().is_some())
+        .count()
+        - seats.len();
+    let left_out = match advice {
+        0 => String::new(),
+        1 => "; 1 persona or judge ballot left out".to_string(),
+        n => format!("; {n} persona and judge ballots left out"),
+    };
+    let counted = if seats.is_empty() {
+        "no seat ballot".to_string()
+    } else {
+        seats
+            .iter()
+            .map(|(a, c)| format!("{a} for {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some(&(_, choice)) = seats.first() else {
         return Err(format!(
-            "without its persona ballots {cite} does not settle on {choice}: {}",
-            against.join(", ")
+            "no seat voted on {cite}, so it decides nothing for a push{left_out}; \
+             a seat votes, or the person approves this push"
+        ));
+    };
+    if seats.iter().any(|(_, c)| *c != choice) {
+        return Err(format!(
+            "the seats on {cite} split, so it decides nothing for a push: counted {counted}{left_out}"
         ));
     }
     if seats.iter().all(|(a, _)| *a == pusher) {
         return Err(format!(
-            "{cite} settles on the ballot of {pusher}, the seat pushing, alone; \
+            "the only seat ballot on {cite} is from {pusher}, the seat pushing: counted {counted}{left_out}; \
              another seat votes {choice}, or the person approves this push"
         ));
     }
-    Ok(())
-}
-
-/// Whether an issue closed as a decision stands as a push cite. The
-/// tracker does not record who closed an issue, so the close alone says
-/// nothing: the pushing seat, or a persona it wrote, could have closed
-/// it. It stands when a seat other than `pusher` voted on it and every
-/// seat ballot names the same option, persona and Jev ballots left out.
-/// The person backs a push by approving it, or by voting.
-///
-/// # Errors
-///
-/// The refusal, naming the ballots it looked at.
-pub fn decided_by_another_seat(
-    cite: &str,
-    ballots: &[Value],
-    personas: &std::collections::BTreeSet<String>,
-    pusher: &str,
-) -> std::result::Result<String, String> {
-    let seats = seat_ballots(ballots, personas);
-    let Some(&(by, choice)) = seats.iter().find(|(a, _)| *a != pusher) else {
-        return Err(format!(
-            "{cite} closed as a decision, but no seat other than {pusher} voted on it, \
-             and a close does not say who made it; another seat votes, \
-             or the person approves this push"
-        ));
-    };
-    let against: Vec<String> = seats
-        .iter()
-        .filter(|(_, c)| *c != choice)
-        .map(|(a, c)| format!("{a} for {c}"))
-        .collect();
-    if !against.is_empty() {
-        return Err(format!(
-            "{cite} closed as a decision, but its seats split: {by} for {choice}, {}",
-            against.join(", ")
-        ));
-    }
-    Ok(choice.to_string())
-}
-
-/// [`settles_on_seats`] for an issue on the tracker. A count or a roster
-/// that cannot be read does not stand.
-fn settled_by_seats(cite: &str) -> std::result::Result<(), String> {
-    let consensus = vissue_json(&["consensus", cite, "--json"])
-        .map_err(|e| format!("{cite}: the settle is not readable: {e}"))?;
-    let choice =
-        settled_choice(&consensus).ok_or_else(|| format!("{cite}: the settle names no option"))?;
-    let (ballots, personas) = cite_ballots(cite)?;
-    settles_on_seats(cite, &ballots, &choice, &personas, &seat_name())
-}
-
-/// [`decided_by_another_seat`] for an issue on the tracker. Ballots or a
-/// roster that cannot be read do not stand.
-fn decided_on_tracker(cite: &str) -> std::result::Result<String, String> {
-    let (ballots, personas) = cite_ballots(cite)?;
-    decided_by_another_seat(cite, &ballots, &personas, &seat_name())
+    Ok(SeatDecision {
+        choice: choice.to_string(),
+        counted: format!("{counted}{left_out}"),
+    })
 }
 
 fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
@@ -10611,8 +11087,8 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
             Some(Err(e)) => Some(ruled(format!("{why}; the cite does not stand: {e}"))),
             None => Some(ruled(format!(
                 "{why}, so the push cites the decision behind it: run it as `LJOS_CITE=ISSUE {}`, \
-                 where ISSUE settles (`vissue consensus ISSUE --gate`) or closed as a decision, \
-                 with a ballot from another seat, or LJOS_CITE=ACCESSION for a current deed",
+                 where the seats that voted on ISSUE agree and one of them is not this seat \
+                 (persona and judge ballots do not count)",
                 line.trim()
             ))),
         },
@@ -12027,6 +12503,12 @@ fn panes_row() -> Habitat {
 /// version and which law it runs (`phronesis`, or the `host table` built
 /// into it). Without the binary nothing judges them unless
 /// `POLICYD_REQUIRED` refuses every command instead.
+/// What the policy row says of an `ljos-policyd` built without phronesis.
+/// The seat runs on it, and the doctor marks the row `warn`: the table
+/// alone refuses less than the table with phronesis after it.
+const POLICY_TABLE_ONLY: &str =
+    "phronesis is not linked; install an ljos-policyd release built with it";
+
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
@@ -12048,11 +12530,11 @@ fn policy_row() -> Habitat {
                         bin.display()
                     ),
                     Some(_) => format!(
-                        "{line} at {}: each pipeline is judged by its built-in table; phronesis is not linked",
+                        "{line} at {}: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}",
                         bin.display()
                     ),
                     None => format!(
-                        "{line} at {}: this version does not name its backend; 0.2.5 and later do",
+                        "{line} at {}: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}",
                         bin.display()
                     ),
                 })
@@ -12224,11 +12706,13 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
-    load_seat_env();
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     out.push(
-        match PacksetClient::from_env().and_then(|c| c.status(None)) {
+        match pack()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .and_then(|c| c.status(None).map_err(anyhow::Error::from))
+        {
             Ok(status) => {
                 let available = status["embedder"]["available"].as_bool().unwrap_or(false);
                 let answering = status["embedder"]["answering"].as_bool();
@@ -12269,9 +12753,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 ok: false,
             },
         },
-        Err(_) => Habitat {
+        Err(e) => Habitat {
             name: "pack",
-            state: "PACKSET_URL=off: no pack on purpose".into(),
+            state: e.to_string(),
             ok: false,
         },
     });
@@ -12717,8 +13201,8 @@ fn unpushed_drift(root: &Path, up: &str) -> Option<(String, bool)> {
 }
 
 /// The kernel, its OOM kills since boot, and the ljos-mcp servers this
-/// login runs with their resident memory. Fails on any OOM kill: one kill
-/// took the encoder, the next the compositor.
+/// login runs with their resident memory. A kill within a day turns the
+/// row to `warn`: one kill took the encoder, the next the compositor.
 fn host_row() -> Habitat {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
@@ -12865,6 +13349,30 @@ pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
 /// and they do not fail `ljos doctor`.
 const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
 
+/// Rows about the machine the seat runs on. They fail neither `ljos doctor`
+/// nor a sitting, and print `warn` so the agent reads them before it adds
+/// load. The host row printed `no` beside an exit of 0, and a sitting
+/// opened under it, so the word and the gate disagreed.
+const WARN_ROWS: &[&str] = &["host"];
+
+/// The line a sitting prints under its doctor when a `warn` row failed:
+/// what the row means for the work that follows.
+#[must_use]
+pub fn sitting_warn_line(rows: &[Habitat]) -> Option<String> {
+    let names: Vec<&str> = rows
+        .iter()
+        .filter(|h| !h.ok && WARN_ROWS.contains(&h.name))
+        .map(|h| h.name)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n",
+        names.join(", ")
+    ))
+}
+
 /// A seat binary doctor lists but the seat runs without (`ljos-hud`,
 /// `ljos-consensus`, `packset-mcp`): absent, its row is `info`, the same
 /// as [`healthy`] already treated it. It said `no` before, beside an exit
@@ -12873,14 +13381,19 @@ fn optional_bin(name: &str) -> bool {
     SEAT_BINS.iter().any(|(bin, _)| *bin == name) && !REQUIRED.contains(&name)
 }
 
-/// `ok` when the row answers, `info` when it is optional and absent,
-/// `no` when a required row failed.
+/// `ok` when the row answers, `warn` when the policy row names an
+/// `ljos-policyd` without phronesis, `info` when the row is optional and
+/// absent, `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
-    if row.ok {
+    if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
+        "warn"
+    } else if row.ok {
         "ok"
     } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
+    } else if WARN_ROWS.contains(&row.name) {
+        "warn"
     } else {
         "no"
     }
@@ -12928,7 +13441,17 @@ pub fn enclose(needs: Vec<String>, cited: &str) -> Vec<String> {
 
 /// Pack a slice of the seat into `out`: the tracker's satchel, the pack's
 /// atoms, the deeds both cite, sealed, and signed when a host key is set.
-pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Vec<String>> {
+///
+/// `since_size` is the log size the receiver kept from the last handover
+/// (the `size=` in the head file `ljos receive --keep` wrote). With it the
+/// bag carries `data/deeds/bridge.txt`, the consistency path from that size
+/// to the head in this bag, which `ljos receive --since` checks.
+pub fn handover(
+    out: &Path,
+    projects: &[String],
+    issues: &[String],
+    since_size: Option<u64>,
+) -> Result<Vec<String>> {
     if projects.is_empty() && issues.is_empty() {
         bail!("handover: name a project or an issue");
     }
@@ -12949,7 +13472,7 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     lines.push(run_captured("vissue", &args)?.stdout.trim_end().to_string());
 
     let mut cited = String::new();
-    match PacksetClient::from_env() {
+    match pack() {
         Ok(client) => {
             let atoms_dir = out.join("data").join("atoms");
             match run_captured(
@@ -12968,7 +13491,7 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
                 Err(e) => lines.push(format!("atoms not enclosed: {e}")),
             }
         }
-        Err(_) => lines.push("no pack: PACKSET_URL=off, atoms not enclosed".into()),
+        Err(e) => lines.push(format!("no pack ({e}), atoms not enclosed")),
     }
 
     let description = std::fs::read_to_string(out.join("data").join("satchel.json"))
@@ -12976,6 +13499,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     let deeds = enclose(needs_of(&description)?, &cited);
     if deeds.is_empty() {
         lines.push("no deeds cited".into());
+        if since_size.is_some() {
+            lines.push("no bridge: no deeds travel, so there is no log to bridge".into());
+        }
     } else {
         let deeds_dir = out.join("data").join("deeds");
         let said = run_fed(
@@ -12991,6 +13517,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
             ),
         )?;
         lines.push(said.stdout.trim_end().to_string());
+        if let Some(size) = since_size {
+            lines.push(write_bridge(&deeds_dir, size)?);
+        }
     }
 
     lines.push(
@@ -13018,9 +13547,35 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     Ok(lines)
 }
 
+/// Put the bridge from a log of `size` entries to this store's head into
+/// `deeds_dir/bridge.txt`, where `deedar check` looks for it.
+fn write_bridge(deeds_dir: &Path, size: u64) -> Result<String> {
+    let bridge =
+        run_captured("deedar", &["log", "bridge", &size.to_string()]).with_context(|| {
+            format!("handover: deedar could not bridge from a log of {size} entries")
+        })?;
+    let path = deeds_dir.join("bridge.txt");
+    std::fs::write(&path, &bridge.stdout)
+        .with_context(|| format!("handover: writing {}", path.display()))?;
+    Ok(format!(
+        "bridge from {size} entries in {}; the receiver passes the head it kept to `ljos receive --since`",
+        path.display()
+    ))
+}
+
 /// Check a satchel that arrived: manifest, deed receipts, signature, and what
 /// the atoms hold; with `import`, POST the atoms into this seat's pack.
-pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<String>> {
+///
+/// `since` is the head this seat kept from the last handover by the same
+/// sender, as `keep` wrote it. deedar then needs the bridge in the bag to
+/// start at that head and end at the bag's own, so a sender who rewrote the
+/// log is caught. `keep` writes the bag's head for next time.
+pub fn receive(
+    dir: &Path,
+    since: Option<&Path>,
+    keep: Option<&Path>,
+    import: bool,
+) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     lines.push(
         run_captured(
@@ -13033,9 +13588,13 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
     );
     if dir.join("data").join("deeds").is_dir() {
         let mut args = vec!["check".to_string(), dir.display().to_string()];
-        if let Some(bridge) = since {
+        if let Some(kept) = since {
             args.push("--since".into());
-            args.push(bridge.display().to_string());
+            args.push(kept.display().to_string());
+        }
+        if let Some(path) = keep {
+            args.push("--keep".into());
+            args.push(path.display().to_string());
         }
         lines.push(run_captured("deedar", &args)?.stdout.trim_end().to_string());
     } else {
@@ -14219,12 +14778,41 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
 #[must_use]
 pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
     format!(
-        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
+        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held. To help without a sitting, `ljos note {node} TEXT` adds to its logbook and `ljos send {} TEXT` reaches the holder",
         hold.assignee,
         hold.seat,
         hold.since,
-        hold.assignee
+        hold.assignee,
+        hold.seat
     )
+}
+
+/// The line `ljos note` adds when another seat holds the issue. A note
+/// from outside the sitting is an assist: it goes in the logbook, which
+/// the holder reads at its next sitting, and `ljos send` reaches the
+/// holder now. `None` when nobody holds the issue live, when this seat
+/// holds it, or when no record on this host names the holder's seat.
+/// Reads only; a node the claim graph lacks is not minted.
+#[must_use]
+pub fn assist_note_line(issue: &str) -> Option<String> {
+    let got = run_captured("claimdag", &["get", &work_id(issue)]).ok()?;
+    let line = got.stdout.lines().next().unwrap_or_default();
+    let live = matches!(line.split_whitespace().nth(1), Some("claimed" | "running"));
+    if !live {
+        return None;
+    }
+    let hold = read_hold(&holder_of(line)?)?;
+    assist_line(issue, &hold, &seat_name())
+}
+
+/// [`assist_note_line`] for one hold record and this seat's name.
+fn assist_line(issue: &str, hold: &Hold, seat: &str) -> Option<String> {
+    (hold.seat != seat).then(|| {
+        format!(
+            "{} holds {issue} (since {}). This note is an assist, not a sitting: it is in the logbook the holder reads, and `ljos send {} TEXT` reaches the holder now\n",
+            hold.seat, hold.since, hold.seat
+        )
+    })
 }
 
 fn holder_of(get_output: &str) -> Option<String> {
@@ -14519,10 +15107,75 @@ fn taken_first(text: &str) -> bool {
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
-    let said = run_captured("claimdag", &["release", &id, "--actor", &actor])?;
+    let said = match run_captured("claimdag", &["release", &id, "--actor", &actor]) {
+        Ok(said) => said,
+        Err(e) if e.to_string().contains("not assignee") => {
+            let Some((holder, hold)) = same_seat_hold(&id, &actor) else {
+                return Err(e);
+            };
+            let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
+            drop_hold(&holder);
+            drop_playbook(node);
+            return Ok(format!(
+                "{}{}",
+                same_seat_note(node, "released", &hold),
+                said.stdout
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     drop_hold(&actor);
     drop_playbook(node);
     Ok(said.stdout)
+}
+
+/// The holder and hold record of node `id` when another conversation of
+/// this seat holds it: a background worker the seat started, or the
+/// conversation that started this worker. The seat owns its
+/// conversations, so it may finish or hand back what any of them holds.
+/// `None` when `actor` holds it, when no record on this host names the
+/// holder, or when the record names another seat or another claim graph.
+fn same_seat_hold(id: &str, actor: &str) -> Option<(String, Hold)> {
+    let holder = run_captured("claimdag", &["get", id])
+        .ok()
+        .and_then(|g| holder_of(&g.stdout))?;
+    if holder == actor {
+        return None;
+    }
+    let hold = read_hold(&holder)?;
+    let graph = hold_graph(&holder);
+    (hold.seat == seat_name() && graph.is_none_or(|g| g == claim_graph_scope()))
+        .then_some((holder, hold))
+}
+
+/// The claim graph a hold record names on its seventh line; `None` for a
+/// record written before that line existed.
+fn hold_graph(actor: &str) -> Option<String> {
+    std::fs::read_to_string(hold_record_path(actor))
+        .ok()?
+        .lines()
+        .nth(6)
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .map(str::to_string)
+}
+
+/// The line that says the seat acted on a node another of its
+/// conversations held.
+fn same_seat_note(node: &str, verb: &str, hold: &Hold) -> String {
+    let name = hold
+        .assignee
+        .strip_suffix(&format!(":{}", node.trim()))
+        .unwrap_or(&hold.assignee);
+    let state = if hold_alive(hold) {
+        "still running"
+    } else {
+        "gone"
+    };
+    format!(
+        "{verb} {node} under {name}, another conversation of seat {} ({state}, held since {})\n",
+        hold.seat, hold.since
+    )
 }
 
 /// What a conversation left beside the claim graph when it took a node:
@@ -15077,6 +15730,9 @@ pub fn sitting_gated(
             "encoder down: the pack ranks by words alone and a weak island is not fired\n",
         );
     }
+    if let Some(line) = sitting_warn_line(&rows) {
+        out.push_str(&line);
+    }
     // Other machines' memories of this scope arrive before the island is
     // walked, or the sitting orients on half the seat.
     out.push_str("== sync\n");
@@ -15136,10 +15792,123 @@ pub fn sitting_gated(
     // timeline` prints them all.
     out.push_str("== timeline\n");
     out.push_str(&timeline(issue, SITTING_TIMELINE)?);
+    // A lease runs out only when somebody hands it back, and nothing else
+    // in the seat does, so the sitting does it before it takes work.
+    out.push_str("== reclaim\n");
+    out.push_str(&reclaim_expired(lease_secs()));
     out.push_str("== claim\n");
     out.push_str(&claim(issue, assignee)?);
     out.push_str(&persist_tracker(issue, "claimed"));
     Ok(out)
+}
+
+/// The lease a sitting applies before it claims: `LJOS_LEASE_SECS`, else
+/// claimdag's default of 900 seconds. Zero turns the step off.
+fn lease_secs() -> u64 {
+    std::env::var("LJOS_LEASE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(900)
+}
+
+/// A claim on the graph that has been quiet longer than the lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expired {
+    /// The node, 32 hex.
+    pub id: String,
+    /// The actor holding it, 32 hex.
+    pub holder: String,
+    /// The node's summary: the tracker id for a node a sitting minted.
+    pub summary: String,
+    /// Seconds since the claim last moved.
+    pub quiet: u64,
+}
+
+/// The claimed or running nodes in a `claimdag list --json` answer that
+/// have been quiet for at least `lease` seconds at `now`, oldest first.
+#[must_use]
+pub fn expired_claims(rows: &[Value], now: u64, lease: u64) -> Vec<Expired> {
+    let mut out: Vec<Expired> = rows
+        .iter()
+        .filter(|r| matches!(r["status"].as_str(), Some("claimed" | "running")))
+        .filter_map(|r| {
+            let id = r["id"].as_str()?.to_string();
+            let holder = r["assignee"].as_str()?.to_string();
+            if holder.len() != 32 || holder.bytes().all(|b| b == b'0') {
+                return None;
+            }
+            let quiet = now.saturating_sub(r["updated_unix"].as_u64()?);
+            (quiet >= lease).then(|| Expired {
+                id,
+                holder,
+                summary: r["summary"].as_str().unwrap_or("").trim().to_string(),
+                quiet,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.quiet.cmp(&a.quiet).then(a.id.cmp(&b.id)));
+    out
+}
+
+/// Hand back every claim past `lease` whose conversation is not running.
+///
+/// A claim whose hold record on this host names a runner that is still
+/// alive is kept: ljos does not renew a lease while a conversation works,
+/// so quiet is not the same as gone. A claim whose runner is gone, or that
+/// no record on this host names, goes back to ready under its holder's own
+/// actor, which moves the generation and fences a holder that comes back.
+/// The report is one line per node; a graph that does not answer is said
+/// and never stops the sitting.
+fn reclaim_expired(lease: u64) -> String {
+    if lease == 0 {
+        return "off (LJOS_LEASE_SECS=0)\n".to_string();
+    }
+    let listed = match run_captured("claimdag", &["list", "--json"]) {
+        Ok(said) => said.stdout,
+        Err(e) => return format!("skipped: the claim graph did not list: {e:#}\n"),
+    };
+    let rows: Vec<Value> = serde_json::from_str(listed.trim()).unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let expired = expired_claims(&rows, now, lease);
+    if expired.is_empty() {
+        return format!("no claim quiet longer than {lease}s\n");
+    }
+    let mut out = String::new();
+    for e in expired {
+        let name = if e.summary.is_empty() {
+            &e.id
+        } else {
+            &e.summary
+        };
+        let hold = read_hold(&e.holder);
+        let why = match &hold {
+            Some(h) if hold_alive(h) => {
+                out.push_str(&format!(
+                    "kept {name}: quiet {}s, but {} (seat {}) is still running\n",
+                    e.quiet, h.assignee, h.seat
+                ));
+                continue;
+            }
+            Some(h) => format!("{} (seat {}) is gone", h.assignee, h.seat),
+            None => "no conversation on this host holds it".to_string(),
+        };
+        match run_captured("claimdag", &["release", &e.id, "--actor", &e.holder]) {
+            Ok(said) => {
+                if hold.is_some() {
+                    drop_hold(&e.holder);
+                }
+                out.push_str(&format!(
+                    "handed back {name}: quiet {}s and {why}; {}\n",
+                    e.quiet,
+                    said.stdout.trim()
+                ));
+            }
+            Err(err) => out.push_str(&format!("could not hand back {name}: {err:#}\n")),
+        }
+    }
+    out
 }
 
 /// Close a sitting: remember the lesson when there is one, fire the island
@@ -15167,21 +15936,36 @@ pub fn complete(
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     let gen_s = live_gen(&id, gen)?.to_string();
-    let mut args = vec![
-        "complete",
-        id.as_str(),
-        "--actor",
-        actor.as_str(),
-        "--gen",
-        gen_s.as_str(),
-    ];
-    if let Some(s) = status {
-        args.push("--status");
-        args.push(s);
-    }
-    let said = match run_captured("claimdag", &args) {
+    let run = |actor: &str| {
+        let mut args = vec![
+            "complete",
+            id.as_str(),
+            "--actor",
+            actor,
+            "--gen",
+            gen_s.as_str(),
+        ];
+        if let Some(s) = status {
+            args.push("--status");
+            args.push(s);
+        }
+        run_captured("claimdag", &args)
+    };
+    let said = match run(&actor) {
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
+            // A worker this seat started, or the conversation that started
+            // this worker, holds it: the seat finishes its own work.
+            if let Some((holder, hold)) = same_seat_hold(&id, &actor) {
+                let said = run(&holder)?;
+                drop_hold(&holder);
+                drop_playbook(node);
+                return Ok(format!(
+                    "{}{}",
+                    same_seat_note(node, "completed", &hold),
+                    said.stdout
+                ));
+            }
             let hold = run_captured("claimdag", &["get", id.as_str()])
                 .ok()
                 .and_then(|g| holder_of(&g.stdout))
@@ -15287,7 +16071,10 @@ pub fn finish(
                 tags.push(format!("scope:{scope}"));
             }
             add_entities(&mut atom, tags);
-            stamp_horizon(&mut atom, "lesson", text, None);
+            // Standing once accepted: the person's `ljos accept` is the
+            // review, so the hook shows the lesson from the next prompt.
+            // Until then the writer holds it and no search returns it.
+            stamp_horizon(&mut atom, "lesson", text, Some(false));
             let filed = admit::propose_atom(&client, atom)?;
             out.push_str(&format!(
                 "proposed {} as agent-derived; `ljos accept {}` writes it\n",
@@ -15917,8 +16704,14 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     // command is one word, and a download piped into a shell is one call.
     // The substitutions and scripts inside the line run too, so each of
     // their pipelines is judged as well: `echo $(git push -f)` is a push.
-    for seg in nested_lines(line, 0).iter().flat_map(|l| pipelines(l)) {
-        let argv = shell_words(&seg);
+    // A here-document fed to `python3 -` or `node` is that program, sent
+    // as `python3 -c BODY`, so a shell call inside it is judged.
+    let argvs = nested_lines(line, 0)
+        .into_iter()
+        .flat_map(|l| pipelines(&l))
+        .map(|seg| shell_words(&seg))
+        .chain(stdin_programs(line));
+    for argv in argvs {
         if argv.is_empty() {
             continue;
         }
@@ -16097,7 +16890,11 @@ pub fn settle_in_words(
         }
         out.push('\n');
     }
-    if v["settled"].as_bool() == Some(false) {
+    // ljos-consensus 0.8 reports a tie as not settled and keeps the
+    // iteration's own state in `converged`; an older one has only
+    // `settled`, which is that state.
+    let converged = v["converged"].as_bool().or_else(|| v["settled"].as_bool());
+    if converged == Some(false) {
         out.push_str("the iteration stopped before it settled; read the shares as a trend\n");
     }
     if agents.len() == influence.len() && !agents.is_empty() {
@@ -16154,56 +16951,99 @@ pub fn voters_of(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The count split the way a push cite reads it: seat ballots, which are
-/// all `LJOS_CITE` counts, then persona and Jev (`judge:`) ballots, which
-/// are advice. `None` when there are no ballots or no persona voted, so
-/// the count the tracker prints already says it all.
+/// The reputation step's JSON in words, for the voters on this issue only.
+/// EigenTrust runs over every trust row about the topic, so its standing
+/// names personas and seats that never voted here; listing them beside
+/// the settle read as influence they did not have. Those are counted, not
+/// named. `None` when the text is not reputation JSON.
 #[must_use]
-pub fn seat_count_in_words(
-    rows: &[Value],
-    personas: &std::collections::BTreeSet<String>,
-) -> Option<String> {
-    let mut seats: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
-    let mut advice: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
-    for r in rows {
-        let (Some(agent), Some(choice)) = (r["agent"].as_str(), r["choice"].as_str()) else {
+pub fn standing_in_words(json: &str, voters: &[String]) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let standing = v["standing"].as_object()?;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut named = Vec::new();
+    for voter in voters.iter().map(|v| v.trim()) {
+        if voter.is_empty() || seen.contains(&voter) {
             continue;
-        };
-        let agent = agent.trim();
-        let side = if personas.contains(agent) || agent.starts_with("judge:") {
-            &mut advice
-        } else {
-            &mut seats
-        };
-        side.entry(choice).or_default().push(agent);
+        }
+        seen.push(voter);
+        named.push(match standing.get(voter).and_then(Value::as_f64) {
+            Some(s) => format!("{voter} {s:.3}"),
+            None => format!("{voter} (no trust row)"),
+        });
     }
-    if advice.is_empty() {
-        return None;
-    }
-    let line = |m: &std::collections::BTreeMap<&str, Vec<&str>>| {
-        let mut rows: Vec<(&&str, &Vec<&str>)> = m.iter().collect();
-        rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-        rows.iter()
-            .map(|(c, who)| format!("{c} {} ({})", who.len(), who.join(", ")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut out = String::new();
-    if seats.is_empty() {
-        out.push_str(
-            "seats: none voted, so no push can cite this issue; persona ballots are advice\n",
-        );
+    let others = standing
+        .keys()
+        .filter(|k| !seen.contains(&k.as_str()))
+        .count();
+    let mut out = if named.is_empty() {
+        "standing in the trust rows: nobody voted on this issue\n".to_string()
     } else {
+        format!(
+            "standing in the trust rows (EigenTrust), voters on this issue: {}\n",
+            named.join(", ")
+        )
+    };
+    if others > 0 {
         out.push_str(&format!(
-            "seats, the only ballots a push cite counts: {}\n",
-            line(&seats)
+            "the rows name {others} more {} with no ballot here; `ljos consensus --json` lists them\n",
+            if others == 1 { "agent" } else { "agents" }
         ));
     }
-    out.push_str(&format!(
-        "personas and judges, advice that does not settle a push cite: {}\n",
-        line(&advice)
-    ));
     Some(out)
+}
+
+/// What the push gate makes of an issue, the first lines `ljos consensus`
+/// prints: whether a push citing it stands for `pusher`, on which seat
+/// ballots ([`seats_decide`]), then what the ballots' confidence does.
+/// The JSON beside the words carries the same answer.
+#[must_use]
+pub fn push_cite_reading(
+    issue: &str,
+    rows: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+) -> (String, Value) {
+    let (mut words, json) = match seats_decide(issue, rows, personas, pusher) {
+        Ok(d) => (
+            format!(
+                "push cite: {issue} decides {} for a push by {pusher}; counted {}\n",
+                d.choice, d.counted
+            ),
+            serde_json::json!({"push_cite": {
+                "issue": issue, "pusher": pusher, "stands": true,
+                "choice": d.choice, "counted": d.counted,
+            }}),
+        ),
+        Err(e) => (
+            format!("push cite: does not stand for {pusher}: {e}\n"),
+            serde_json::json!({"push_cite": {
+                "issue": issue, "pusher": pusher, "stands": false, "refusal": e,
+            }}),
+        ),
+    };
+    if let Some(line) = confidence_in_words(rows) {
+        words.push_str(&line);
+    }
+    (words, json)
+}
+
+/// What a ballot's confidence does, said when any ballot states one: it
+/// is recorded, `ljos learn` scores it once an outcome is named, and
+/// nothing else reads it. `None` when no ballot states one.
+#[must_use]
+pub fn confidence_in_words(rows: &[Value]) -> Option<String> {
+    let stated = rows
+        .iter()
+        .filter(|r| !r["confidence"].is_null() && r.get("confidence").is_some())
+        .count();
+    (stated > 0).then(|| {
+        format!(
+            "confidence: stated on {stated} of {} ballots and recorded; no settle and no push cite \
+             weighs it. `ljos learn ID --outcome OPTION` scores it once the outcome is known\n",
+            rows.len()
+        )
+    })
 }
 
 /// The steps [`consensus_steps_anchored`] builds, under the anchors
@@ -16754,6 +17594,8 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         let lesson = finding_lesson(&campaign, f);
         let mut atom = atom_body("lesson", &lesson, &workspace);
         add_entities(&mut atom, finding_entities(&campaign, f));
+        // Standing once the person accepts it, like a finish lesson.
+        stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
         let result = match admit::propose_atom(&client, atom) {
             Ok(filed) => format!("proposed {}", filed.id),
             Err(e) => format!("refused: {e}"),
@@ -17149,6 +17991,88 @@ mod tests {
 
     /// A slow pre-push hook does not hold the sitting: the push outlives the
     /// wait and the line says so; a quick one reports the push.
+    #[test]
+    fn a_listener_s_owner_is_read_off_the_socket_table() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:2239 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4242 1 0000000000000000 100 0 0 10 0\n   1: 0100007F:2239 0100007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 4343 1 0000000000000000 20 4 30 10 -1\n".to_string();
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000000000000000000001000000:4B72 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 99 1 0000000000000000 100 0 0 10 0\n".to_string();
+        let tables = [tcp, tcp6];
+        assert_eq!(
+            listener_uid_in(&tables, 8761),
+            Some(1001),
+            "the listener, not the connection"
+        );
+        assert_eq!(
+            listener_uid_in(&tables, 19314),
+            Some(1000),
+            "tcp6 rows count"
+        );
+        assert_eq!(listener_uid_in(&tables, 9999), None);
+    }
+
+    #[test]
+    fn another_user_s_writer_is_never_this_seat_s() {
+        let me = 1000;
+        let own = per_user_pack_port(me);
+        assert_eq!(own, 19761);
+        let nobody = |_: u16| None;
+        assert_eq!(
+            pick_pack_port(None, me, nobody).unwrap(),
+            None,
+            "the default when free"
+        );
+        let mine = |p: u16| (p == 8761).then_some(me);
+        assert_eq!(
+            pick_pack_port(None, me, mine).unwrap(),
+            None,
+            "the default when ours"
+        );
+        let theirs = |p: u16| (p == 8761).then_some(1001);
+        assert_eq!(
+            pick_pack_port(None, me, theirs).unwrap(),
+            Some(own),
+            "another user's default moves the seat to its own port"
+        );
+        let both = |p: u16| (p == 8761 || p == own).then_some(1001);
+        assert!(pick_pack_port(None, me, both).is_err());
+        let earlier = |p: u16| (p == own).then_some(me);
+        assert_eq!(
+            pick_pack_port(None, me, earlier).unwrap(),
+            Some(own),
+            "a writer this user runs on its own port is kept"
+        );
+        let err = pick_pack_port(Some(8761), me, theirs)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("uid 1001") && err.contains("PACKSET_PORT"),
+            "{err}"
+        );
+        assert_eq!(pick_pack_port(Some(18000), me, theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn the_runtime_fallback_is_this_user_s_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let mine = tmp.path().join(format!("ljos-{uid}"));
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        std::fs::create_dir(&mine).unwrap();
+        assert_eq!(runtime_fallback(tmp.path(), Some(home.path()), uid), mine);
+        std::fs::remove_dir(&mine).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &mine).unwrap();
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(home.path()), uid),
+            home.path().join(".cache/ljos/run"),
+            "a symlink planted at the name is not followed"
+        );
+        assert_eq!(
+            runtime_fallback(tmp.path(), Some(home.path()), uid + 1),
+            tmp.path().join(format!("ljos-{}", uid + 1))
+        );
+    }
+
     #[test]
     fn a_slow_tracker_push_finishes_in_the_background() {
         let _env = env_guard();
@@ -17891,6 +18815,28 @@ mod tests {
         assert!(said.contains("not by brio"), "{said}");
     }
 
+    /// Another seat sits on the issue: a note is an assist and says so,
+    /// and the sitting refusal names the note and the message as the ways
+    /// to help. This seat's own hold adds nothing.
+    #[test]
+    fn a_note_on_another_seats_issue_says_it_is_an_assist() {
+        let hold = Hold {
+            assignee: "eessi-1:proj-jz8x".into(),
+            seat: "eessi".into(),
+            pid: 1,
+            comm: "node".into(),
+            since: "2026-10-10T21:00:00.000Z".into(),
+        };
+        let line = super::assist_line("proj-jz8x", &hold, "inky").unwrap();
+        assert!(line.starts_with("eessi holds proj-jz8x"), "{line}");
+        assert!(line.contains("an assist, not a sitting"), "{line}");
+        assert!(line.contains("`ljos send eessi TEXT`"), "{line}");
+        assert!(super::assist_line("proj-jz8x", &hold, "eessi").is_none());
+        let refused = super::held_by_another_message("proj-jz8x", "inky-2", &hold, "still running");
+        assert!(refused.contains("`ljos note proj-jz8x TEXT`"), "{refused}");
+        assert!(refused.contains("`ljos send eessi TEXT`"), "{refused}");
+    }
+
     /// Two seats on one ticket: LJOS_SEAT plus a distinct session id each.
     #[test]
     fn two_seats_with_distinct_session_ids_are_distinct_holders() {
@@ -18005,6 +18951,29 @@ mod tests {
     }
 
     #[test]
+    fn doctor_warns_on_a_policyd_without_phronesis() {
+        let row = |state: String| Habitat {
+            name: "policy",
+            state,
+            ok: true,
+        };
+        let table = row(format!(
+            "ljos-policyd 0.3.0 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
+        ));
+        let old = row(format!(
+            "ljos-policyd 0.2.0 at /bin/ljos-policyd: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}"
+        ));
+        let linked = row(
+            "ljos-policyd 0.4.0 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
+        );
+        assert_eq!(doctor_word(&table), "warn");
+        assert_eq!(doctor_word(&old), "warn");
+        assert_eq!(doctor_word(&linked), "ok");
+        // A warning does not fail the doctor.
+        assert!(healthy(&[table, old]));
+    }
+
+    #[test]
     fn doctor_lists_ljos_hud_but_does_not_require_it() {
         assert!(SEAT_BINS
             .iter()
@@ -18024,6 +18993,29 @@ mod tests {
         assert!(healthy(std::slice::from_ref(&hud)));
         assert_eq!(doctor_word(&embed), "no");
         assert!(!healthy(&[embed]));
+    }
+
+    #[test]
+    fn a_recent_oom_kill_warns_and_the_sitting_says_so() {
+        let host = Habitat {
+            name: "host",
+            state: "6.12.94+; 70 OOM kills since boot, the last within a day".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&host), "warn");
+        let rows = [host];
+        assert!(healthy(&rows));
+        assert!(failing_for_sitting(&rows).is_empty());
+        let line = sitting_warn_line(&rows).expect("a warn line");
+        assert!(line.starts_with("host: the kernel killed"), "{line}");
+        assert!(line.contains("one build or test suite at a time"), "{line}");
+        let calm = Habitat {
+            name: "host",
+            state: "6.12.94+; no OOM kills since boot".into(),
+            ok: true,
+        };
+        assert_eq!(doctor_word(&calm), "ok");
+        assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
     /// the tarball the release workflow uploads for each target is the one
@@ -18805,6 +19797,15 @@ mod tests {
             session: Some("work-test".into()),
             shape: HookShape::Asks,
         };
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "off") };
+        for _ in 0..=WORK_NUDGE_EVERY {
+            assert!(
+                work_nudge(&call("cargo test", "PostToolUse"), false).is_none(),
+                "a seat that does not track work is never told to open an issue"
+            );
+        }
+        let _ = std::fs::remove_file(dir.path().join("ljos/work-work-test"));
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let said = work_nudge(&call("cargo test", "PostToolUse"), false)
             .expect("the first result with no issue says to sit");
         assert!(
@@ -18834,7 +19835,9 @@ mod tests {
             .expect("a new stretch opens on the next result");
         assert!(fresh.contains("ljos sitting"), "{fresh}");
         assert!(
-            fresh.contains("ljos file") && fresh.contains("subagents"),
+            fresh.contains("vissue q")
+                && !fresh.contains("ljos file")
+                && fresh.contains("subagents"),
             "{fresh}"
         );
         work_nudge_delivered(Some("work-test"));
@@ -18864,6 +19867,7 @@ mod tests {
         assert!(touches_seat("use_tool ljos__ljos_sitting"));
         assert!(!touches_seat("cargo build --release"));
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        unsafe { std::env::remove_var("LJOS_TRACK_WORK") };
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
@@ -18895,6 +19899,88 @@ mod tests {
             "another prompt answers"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// An event said once is answered once when two registrations run it
+    /// with the same payload. The next stop of the same session carries a
+    /// new loop count and is answered, and a tool gate is never dropped.
+    #[test]
+    fn a_twin_stop_or_session_end_is_answered_once() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let call = |event: &str| HookCall {
+            event: event.into(),
+            cue: String::new(),
+            session: Some("conv-1".into()),
+            shape: HookShape::Cursor,
+        };
+        let stop = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","generation_id":"g-1","hook_event_name":"stop","status":"completed","loop_count":0}"#;
+        assert!(!hook_twin(&call("Stop"), stop), "the first answers");
+        assert!(hook_twin(&call("Stop"), stop), "its twin returns");
+        let next = stop.replace("\"loop_count\":0", "\"loop_count\":1");
+        assert!(!hook_twin(&call("Stop"), &next), "the next stop answers");
+        let end = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","hook_event_name":"sessionEnd","reason":"completed"}"#;
+        assert!(!hook_twin(&call("SessionEnd"), end));
+        assert!(hook_twin(&call("SessionEnd"), end));
+        let gate = r#"{"cursor_version":"3.2.0","conversation_id":"conv-1","hook_event_name":"beforeShellExecution","command":"git push -f"}"#;
+        assert!(!hook_twin(&call("PreToolUse"), gate));
+        assert!(
+            !hook_twin(&call("PreToolUse"), gate),
+            "a gate always answers"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// Onboarding Cursor finds the plugin in either place Cursor keeps it,
+    /// and says so instead of writing a second server and second hooks. A
+    /// hooks file an earlier onboard wrote is named.
+    #[test]
+    fn onboard_leaves_cursor_to_an_installed_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join(".cursor/plugins");
+        assert_eq!(cursor_plugin_in(&plugins), None);
+        let cached = plugins.join("cache/leidarljos/ljos/0123abc");
+        std::fs::create_dir_all(cached.join(".cursor-plugin")).unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), None, "no manifest yet");
+        std::fs::write(
+            cached.join(".cursor-plugin/plugin.json"),
+            r#"{"name":"ljos"}"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), Some(cached.clone()));
+        let local = plugins.join("local/ljos");
+        std::fs::create_dir_all(local.join(".cursor-plugin")).unwrap();
+        std::fs::write(
+            local.join(".cursor-plugin/plugin.json"),
+            r#"{"name":"ljos"}"#,
+        )
+        .unwrap();
+        assert_eq!(cursor_plugin_in(&plugins), Some(local.clone()));
+
+        let hooks = dir.path().join(".cursor/hooks.json");
+        let clean = cursor_plugin_step(&local, &hooks);
+        assert!(
+            clean.ok && clean.detail.contains("wrote none"),
+            "{}",
+            clean.detail
+        );
+        assert!(
+            !clean.detail.contains("earlier onboard"),
+            "{}",
+            clean.detail
+        );
+        std::fs::write(
+            &hooks,
+            r#"{"version":1,"hooks":{"stop":[{"command":"/b/ljos hook","timeout":15}]}}"#,
+        )
+        .unwrap();
+        let earlier = cursor_plugin_step(&local, &hooks);
+        assert!(
+            earlier.detail.contains("earlier onboard"),
+            "{}",
+            earlier.detail
+        );
     }
 
     #[test]
@@ -19048,6 +20134,37 @@ mod tests {
             &serde_json::json!({"live": 5, "closed": 0, "applied": true, "pairs": []}),
         );
         assert_eq!(applied, "0 of 5 live memories closed\n");
+    }
+
+    #[test]
+    fn a_prompt_names_a_short_tool_or_a_plural() {
+        assert!(names_the_cue(
+            "Use pnpm, never npm, in this repo.",
+            "add lodash with npm"
+        ));
+        assert!(names_the_cue(
+            "Use uv instead of pip for Python packages.",
+            "pip install requests"
+        ));
+        assert!(names_the_cue(
+            "Run the SQL migrations with sqlx, not by hand.",
+            "write the migration for the users table"
+        ));
+        assert!(names_the_cue(
+            "Pin the dependencies in Cargo.lock.",
+            "bump a dependency"
+        ));
+        assert!(!names_the_cue(
+            "The CI cache key must include Cargo.lock or builds go stale.",
+            "add a new SQL migration"
+        ));
+        assert!(!names_the_cue(
+            "Use pnpm, never npm, in this repo.",
+            "how do you set the new one up for all of them"
+        ));
+        assert_eq!(singular("status"), "status");
+        assert_eq!(singular("class"), "class");
+        assert_eq!(singular("tags"), "tag");
     }
 
     #[test]
@@ -19676,6 +20793,36 @@ mod tests {
         assert_eq!(steps[1].args[0], "reputation");
     }
 
+    /// The standing beside a settle names the voters on the issue and only
+    /// counts the rest of the trust rows: four personas that never voted
+    /// once showed up beside eessi and inky.
+    #[test]
+    fn standing_names_only_the_voters_on_the_issue() {
+        let json = r#"{"alpha":0.15,"standing":{"eessi":0.33,"inky":0.31,"pyos-editor":0.0807,"rohit-voice":0.0807,"scipy-maintainer":0.0807,"voice-reader":0.0807}}"#;
+        let voters = vec!["eessi".to_string(), "inky".to_string()];
+        let words = standing_in_words(json, &voters).unwrap();
+        assert!(
+            words.contains("voters on this issue: eessi 0.330, inky 0.310"),
+            "{words}"
+        );
+        assert!(
+            words.contains("4 more agents with no ballot here"),
+            "{words}"
+        );
+        for persona in [
+            "pyos-editor",
+            "rohit-voice",
+            "scipy-maintainer",
+            "voice-reader",
+        ] {
+            assert!(!words.contains(persona), "{words}");
+        }
+        let only = standing_in_words(r#"{"standing":{"eessi":1.0}}"#, &voters).unwrap();
+        assert!(only.contains("inky (no trust row)"), "{only}");
+        assert!(!only.contains("more"), "{only}");
+        assert!(standing_in_words("not json", &voters).is_none());
+    }
+
     /// A scoped row applies when the issue is about one of its domains; an
     /// unscoped row applies everywhere; a scoped learn starts from the
     /// unscoped row and leaves it standing.
@@ -19863,6 +21010,24 @@ mod tests {
         assert!(words.contains("no option leads"), "{words}");
         assert!(!words.contains("anchors"), "{words}");
         assert!(settle_in_words("not json", &anchors).is_none());
+        // A 1-1 tie on opposite options, as ljos-consensus 0.7 printed it
+        // (settled beside tie) and as 0.8 prints it (a tie is not settled,
+        // and `converged` says the iteration finished). Neither reads as a
+        // lead, and neither says the iteration stopped short.
+        let old = r#"{"options":["drop","keep"],"shares":[0.5,0.5],"rounds":1,"settled":true,"engine":"degroot-fj","polarization":0.0,"disagreement":0.0,"agents":["eessi","inky"],"influence":[0.5,0.5],"margin":0.0,"tie":true}"#;
+        let new = r#"{"options":["drop","keep"],"shares":[0.5,0.5],"rounds":1,"settled":false,"converged":true,"engine":"degroot-fj","polarization":0.0,"disagreement":0.0,"agents":["eessi","inky"],"influence":[0.5,0.5],"margin":0.0,"tie":true}"#;
+        for raw in [old, new] {
+            let words = settle_in_words(raw, &Default::default()).unwrap();
+            assert!(
+                words.contains("no option leads: the settle is a tie"),
+                "{words}"
+            );
+            assert!(!words.contains("leads by"), "{words}");
+            assert!(!words.contains("stopped before it settled"), "{words}");
+        }
+        let short = r#"{"options":["a","b"],"shares":[0.6,0.4],"settled":false,"converged":false,"engine":"degroot-fj","agents":["x","y"],"tie":false}"#;
+        let words = settle_in_words(short, &Default::default()).unwrap();
+        assert!(words.contains("stopped before it settled"), "{words}");
     }
 
     /// Under Friedkin-Johnsen the share of its ballot a voter keeps is its
@@ -19888,36 +21053,73 @@ mod tests {
         assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
     }
 
-    /// The count a push cite reads is printed beside the settle: seat
-    /// ballots, then persona and judge ballots as advice. A ballot of
-    /// seats alone adds nothing, and one of personas alone says no push
-    /// can cite it.
+    /// The anchor floor and the push cite meet: a persona written below
+    /// 0.5 still settles at the seat's anchor, and its ballot neither
+    /// passes nor blocks the push the seats agreed on.
     #[test]
-    fn the_settle_names_which_ballots_a_push_cite_counts() {
+    fn a_floored_persona_does_not_decide_the_push_cite() {
+        let rock = Persona {
+            name: "rock".into(),
+            anchor: 0.0,
+            view: "Never moves.".into(),
+            entities: vec![],
+            runner: None,
+        };
+        let voters: Vec<String> = ["ljos-bot", "inky", "rock"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let anchors = settle_anchors(&[rock], &voters);
+        assert_eq!(anchors.get("rock"), Some(&DEFAULT_ANCHOR));
+        let personas: std::collections::BTreeSet<String> = ["rock".to_string()].into();
+        let rows = [
+            serde_json::json!({"agent": "ljos-bot", "choice": "ship"}),
+            serde_json::json!({"agent": "inky", "choice": "ship"}),
+            serde_json::json!({"agent": "rock", "choice": "hold"}),
+        ];
+        let d = seats_decide("x-1", &rows, &personas, "ljos-bot").unwrap();
+        assert_eq!(d.choice, "ship");
+        assert_eq!(
+            d.counted,
+            "ljos-bot for ship, inky for ship; 1 persona or judge ballot left out"
+        );
+    }
+
+    /// `ljos consensus` opens with what the push gate decides, on seat
+    /// ballots only, and says what confidence does when a ballot states
+    /// one; the JSON carries the same answer.
+    #[test]
+    fn consensus_opens_with_what_the_push_gate_decides() {
         let rows: Vec<Value> = serde_json::from_str(
-            r#"[{"agent":"ljos-bot","choice":"guard-fix"},{"agent":"hn-skeptic","choice":"guard-fix"},
-                {"agent":"agent-daily-user","choice":"install"},{"agent":"judge:qwen","choice":"install"}]"#,
+            r#"[{"agent":"ljos-bot","choice":"guard-fix","confidence":"0.6"},
+                {"agent":"hn-skeptic","choice":"guard-fix","confidence":"0.75"},
+                {"agent":"agent-daily-user","choice":"install"},
+                {"agent":"judge:qwen","choice":"install"},
+                {"agent":"inky","choice":"guard-fix"}]"#,
         )
         .unwrap();
         let personas: std::collections::BTreeSet<String> = ["hn-skeptic", "agent-daily-user"]
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let said = seat_count_in_words(&rows, &personas).unwrap();
+        let (words, json) = push_cite_reading("x-1", &rows, &personas, "ljos-bot");
         assert_eq!(
-            said,
-            "seats, the only ballots a push cite counts: guard-fix 1 (ljos-bot)\n\
-             personas and judges, advice that does not settle a push cite: \
-             install 2 (agent-daily-user, judge:qwen), guard-fix 1 (hn-skeptic)\n"
+            words,
+            "push cite: x-1 decides guard-fix for a push by ljos-bot; counted ljos-bot for guard-fix, \
+             inky for guard-fix; 3 persona and judge ballots left out\n\
+             confidence: stated on 2 of 5 ballots and recorded; no settle and no push cite weighs it. \
+             `ljos learn ID --outcome OPTION` scores it once the outcome is known\n"
         );
-        assert_eq!(voters_of(&rows).len(), 4);
-        assert!(seat_count_in_words(&rows[..1], &personas).is_none());
-        assert!(seat_count_in_words(&[], &personas).is_none());
-        let alone = seat_count_in_words(&rows[1..3], &personas).unwrap();
+        assert_eq!(json["push_cite"]["stands"], true);
+        assert_eq!(json["push_cite"]["choice"], "guard-fix");
+        let (words, json) = push_cite_reading("x-1", &rows[..4], &personas, "ljos-bot");
         assert!(
-            alone.starts_with("seats: none voted, so no push can cite this issue"),
-            "{alone}"
+            words.starts_with("push cite: does not stand for ljos-bot: the only seat ballot on x-1 is from ljos-bot"),
+            "{words}"
         );
+        assert_eq!(json["push_cite"]["stands"], false);
+        assert_eq!(voters_of(&rows).len(), 5);
+        assert!(confidence_in_words(&rows[2..]).is_none());
     }
 
     /// Playbooks are kind playbook, latest per name, unreviewed; sitting
@@ -20590,8 +21792,17 @@ mod tests {
             r#"{{"transcriptPath":"{}","stopHookActive":false}}"#,
             transcript.display()
         );
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "off") };
+        assert!(
+            seat_stop_reason(&input, false, false).is_none(),
+            "a seat that does not track work lets the turn end"
+        );
+        unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let reason = seat_stop_reason(&input, false, false).expect("held");
-        assert!(reason.contains("ljos sitting"), "{reason}");
+        assert!(
+            reason.contains("ljos sitting") && reason.contains("vissue q"),
+            "{reason}"
+        );
         assert!(seat_stop_reason(&input, true, false).is_none());
         assert!(seat_stop_reason(&input, false, true).is_none());
         std::fs::write(
@@ -20602,6 +21813,7 @@ mod tests {
         .unwrap();
         assert!(seat_stop_reason(&input, false, false).is_none());
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        unsafe { std::env::remove_var("LJOS_TRACK_WORK") };
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
@@ -20908,7 +22120,7 @@ mod tests {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
-        assert_eq!(all.harness.len(), 20);
+        assert_eq!(all.harness.len(), 25);
         assert!(all.harness[3..].iter().all(|h| h.shell
             || h.register.len()
                 + usize::from(h.config.is_some())
@@ -21760,6 +22972,61 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_accepts_only_another_s_proposal() {
+        assert!(accepts_another_conversation(
+            Some("claude-worker-2"),
+            "claude-parent-1"
+        ));
+        assert!(!accepts_another_conversation(
+            Some("claude-parent-1"),
+            "claude-parent-1"
+        ));
+        assert!(!accepts_another_conversation(Some(" "), "claude-parent-1"));
+        assert!(!accepts_another_conversation(None, "claude-parent-1"));
+    }
+
+    #[test]
+    fn the_person_s_remember_stands_and_an_agent_s_waits() {
+        assert_eq!(remember_horizon(false, false, false), Some(false));
+        assert_eq!(remember_horizon(false, false, true), None);
+        assert_eq!(remember_horizon(true, false, false), Some(true));
+        assert_eq!(remember_horizon(false, true, true), Some(false));
+        let mut person = atom_body("lesson", "Run the linter before the push.", "w");
+        stamp_horizon(
+            &mut person,
+            "lesson",
+            "",
+            remember_horizon(false, false, false),
+        );
+        let mut agent = atom_body("lesson", "Run the linter before the push.", "w");
+        stamp_horizon(
+            &mut agent,
+            "lesson",
+            "",
+            remember_horizon(false, false, true),
+        );
+        assert!(remember_note(&person).starts_with("standing"));
+        assert!(remember_note(&agent).starts_with("episode"));
+        let hit = |atom: &Value| Hit {
+            id: None,
+            text: "Run the linter before the push.".into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            ballots: None,
+            of: None,
+        };
+        assert!(is_refresher(&hit(&person)), "the hook shows it at once");
+        assert!(!is_refresher(&hit(&agent)), "a review promotes it first");
+    }
+
+    #[test]
     fn remember_is_lesson_prefer_is_preference() {
         assert_eq!(atom_kind("Remember").unwrap(), "lesson");
         assert_eq!(atom_kind("Prefer").unwrap(), "preference");
@@ -22290,29 +23557,55 @@ mod tests {
     }
 
     #[test]
-    fn persona_ballots_do_not_settle_a_push_cite() {
-        let consensus = serde_json::json!({
-            "choices": ["hold", "ship"], "consensus": [0.2, 0.8]
-        });
-        assert_eq!(settled_choice(&consensus).as_deref(), Some("ship"));
+    fn persona_ballots_neither_pass_nor_block_a_push_cite() {
         let personas: std::collections::BTreeSet<String> =
             ["reviewer".to_string(), "reader".to_string()].into();
         let ballot =
             |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        // Personas and a judge alone: nothing counted, so nothing stands.
         let only = [
             ballot("reviewer", "ship"),
             ballot("reader", "ship"),
             ballot("judge:grok-4", "ship"),
         ];
-        let err = settles_on_seats("surf-ab12", &only, "ship", &personas, "grok").unwrap_err();
-        assert!(err.contains("persona ballots alone"), "{err}");
-        let mut seat = only.to_vec();
-        seat.push(ballot("grok", "ship"));
-        assert!(settles_on_seats("surf-ab12", &seat, "ship", &personas, "codex").is_ok());
-        let mut split = seat.clone();
-        split.push(ballot("codex", "hold"));
-        let err = settles_on_seats("surf-ab12", &split, "ship", &personas, "grok").unwrap_err();
-        assert!(err.contains("codex for hold"), "{err}");
+        let err = seats_decide("surf-ab12", &only, &personas, "grok").unwrap_err();
+        assert_eq!(
+            err,
+            "no seat voted on surf-ab12, so it decides nothing for a push; \
+             3 persona and judge ballots left out; a seat votes, or the person approves this push"
+        );
+        // One seat for ship against every persona for hold: the personas
+        // do not block it. Before, the settle over all ballots named hold
+        // and the seat was refused.
+        let outvoted = [
+            ballot("codex", "ship"),
+            ballot("reviewer", "hold"),
+            ballot("reader", "hold"),
+            ballot("judge:grok-4", "hold"),
+        ];
+        let d = seats_decide("surf-ab12", &outvoted, &personas, "grok").unwrap();
+        assert_eq!(d.choice, "ship");
+        assert_eq!(
+            d.counted,
+            "codex for ship; 3 persona and judge ballots left out"
+        );
+        // Seats that split decide nothing, and the refusal names them.
+        let mut split = outvoted.to_vec();
+        split.push(ballot("rgoswami", "hold"));
+        let err = seats_decide("surf-ab12", &split, &personas, "grok").unwrap_err();
+        assert_eq!(
+            err,
+            "the seats on surf-ab12 split, so it decides nothing for a push: \
+             counted codex for ship, rgoswami for hold; 3 persona and judge ballots left out"
+        );
+        // No advice on the ballot: nothing said about it.
+        let plain = [ballot("codex", "ship")];
+        assert_eq!(
+            seats_decide("surf-ab12", &plain, &personas, "grok")
+                .unwrap()
+                .counted,
+            "codex for ship"
+        );
     }
 
     #[test]
@@ -22321,37 +23614,23 @@ mod tests {
         let ballot =
             |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
         let own = [ballot("grok", "ship"), ballot("reviewer", "ship")];
-        let err = settles_on_seats("surf-ab12", &own, "ship", &personas, "grok").unwrap_err();
-        assert!(err.contains("the seat pushing, alone"), "{err}");
+        let err = seats_decide("surf-ab12", &own, &personas, "grok").unwrap_err();
+        assert_eq!(
+            err,
+            "the only seat ballot on surf-ab12 is from grok, the seat pushing: \
+             counted grok for ship; 1 persona or judge ballot left out; \
+             another seat votes ship, or the person approves this push"
+        );
         let mut seen = own.to_vec();
         seen.push(ballot("codex", "ship"));
-        assert!(settles_on_seats("surf-ab12", &seen, "ship", &personas, "grok").is_ok());
-    }
-
-    #[test]
-    fn a_closed_decision_stands_on_another_seats_ballot() {
-        let personas: std::collections::BTreeSet<String> = ["reviewer".to_string()].into();
-        let ballot =
-            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
-        let err = decided_by_another_seat("surf-ab12", &[], &personas, "grok").unwrap_err();
-        assert!(err.contains("no seat other than grok"), "{err}");
-        let own = [
-            ballot("grok", "ship"),
-            ballot("reviewer", "ship"),
-            ballot("judge:grok-4", "ship"),
-        ];
-        let err = decided_by_another_seat("surf-ab12", &own, &personas, "grok").unwrap_err();
-        assert!(err.contains("no seat other than grok"), "{err}");
-        let mut seen = own.to_vec();
-        seen.push(ballot("rgoswami", "ship"));
+        let d = seats_decide("surf-ab12", &seen, &personas, "grok").unwrap();
         assert_eq!(
-            decided_by_another_seat("surf-ab12", &seen, &personas, "grok").as_deref(),
-            Ok("ship")
+            d.counted,
+            "grok for ship, codex for ship; 1 persona or judge ballot left out"
         );
-        let mut split = seen.clone();
-        split.push(ballot("codex", "hold"));
-        let err = decided_by_another_seat("surf-ab12", &split, &personas, "grok").unwrap_err();
-        assert!(err.contains("codex for hold"), "{err}");
+        assert!(seats_decide("surf-ab12", &[], &personas, "grok")
+            .unwrap_err()
+            .starts_with("no seat voted on surf-ab12"));
     }
 
     #[test]
@@ -23334,6 +24613,57 @@ mod tests {
         assert_eq!(back.harness.len(), 1);
         assert_eq!(back.harness[0].name, "claude");
         assert_eq!(back.harness[0].resume, ["claude", "--continue"]);
+    }
+
+    #[test]
+    fn a_heredoc_fed_to_an_interpreter_goes_to_policyd_as_its_program() {
+        let line = "python3 - <<'PY'\nimport os\nos.system('git push -f')\nPY";
+        assert_eq!(
+            stdin_programs(line),
+            [vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "import os\nos.system('git push -f')\n".to_string()
+            ]]
+        );
+        assert_eq!(
+            stdin_programs("cd x && node <<EOF\nrequire('fs')\nEOF")[0][..2],
+            ["node".to_string(), "-e".to_string()]
+        );
+        assert!(
+            stdin_programs("python3 gen.py <<EOF\nx\nEOF").is_empty(),
+            "a script file reads the body as data"
+        );
+        assert!(stdin_programs("cat <<EOF\nos.system('x')\nEOF").is_empty());
+    }
+
+    #[test]
+    fn a_redirection_after_the_heredoc_word_keeps_stdin_the_program() {
+        let body = "import os\nos.system('git push -f')\n";
+        for line in [
+            "python3 - <<EOF 2>&1\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<EOF >out\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<'EOF' > out.log 2>/dev/null\nimport os\nos.system('git push -f')\nEOF",
+            "python3 - <<EOF &>>log\nimport os\nos.system('git push -f')\nEOF",
+        ] {
+            assert_eq!(
+                stdin_programs(line),
+                [vec![
+                    "python3".to_string(),
+                    "-c".to_string(),
+                    body.to_string()
+                ]],
+                "{line}"
+            );
+        }
+        assert!(
+            stdin_programs("python3 gen.py <<EOF >out\nx\nEOF").is_empty(),
+            "a script file after a redirection still reads the body as data"
+        );
+        assert!(
+            stdin_programs("python3 >out gen.py <<EOF\nx\nEOF").is_empty(),
+            "a script file after a redirection target is still a script file"
+        );
     }
 
     #[test]
@@ -24630,6 +25960,86 @@ mod tests {
         drop(held);
     }
 
+    /// A writer that answers a plain search at once and holds a reranked
+    /// one, as packsetd does while it fetches its cross-encoder.
+    fn serve_slow_rerank() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                std::thread::spawn(move || {
+                    let req = read_http(&mut s);
+                    let first = req.lines().next().unwrap_or("").to_string();
+                    let (status, body) = if first.contains("/v1/search") {
+                        if first.contains("rerank=1") {
+                            std::thread::sleep(std::time::Duration::from_secs(20));
+                        }
+                        (
+                            "200 OK",
+                            r#"{"hits":[{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"ballots":3,"of":3}]}"#.to_string(),
+                        )
+                    } else {
+                        ("404 Not Found", r#"{"error":"not here"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                });
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_slow_rerank_leaves_the_prompt_its_memory() {
+        let _env = env_guard();
+        let url = serve_slow_rerank();
+        let _held = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "how should I tag the release?".into(),
+            session: None,
+            shape: HookShape::default(),
+        };
+        let started = std::time::Instant::now();
+        let (note, _) = hook_note(&call, 5);
+        let took = started.elapsed();
+        assert!(note.contains("Tag a release"), "{note:?}");
+        assert!(
+            took < std::time::Duration::from_millis(HOOK_DEADLINE_MS - 2000),
+            "the prompt waited {took:?} on a rerank"
+        );
+    }
+
+    #[test]
+    fn a_deed_the_pusher_minted_does_not_carry_a_push() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for (name, body) in [
+            ("deedar", "#!/bin/sh\nexit 0\n"),
+            ("vissue", "#!/bin/sh\nexit 1\n"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let tracker = dir.path().join("tracker");
+        std::fs::create_dir_all(&tracker).unwrap();
+        let _held = HoldEnv::set(&[
+            ("PATH", bin.to_str().unwrap()),
+            ("VISSUE_ROOT", tracker.to_str().unwrap()),
+        ]);
+        let said = cite_stands("deed-file-self-minted").unwrap_err();
+        assert!(said.contains("a deed alone does not stand"), "{said}");
+        assert!(said.contains("another seat"), "{said}");
+    }
+
     #[test]
     fn a_busy_writer_is_not_an_absent_one() {
         let refused = anyhow::Error::new(packset_client::Error::Bad(
@@ -25110,6 +26520,62 @@ mod tests {
         log
     }
 
+    /// A fake `deedar` that logs its arguments and prints a bridge.
+    fn fake_deedar(dir: &std::path::Path) -> std::path::PathBuf {
+        let log = dir.join("deedar.log");
+        let script = format!(
+            "#!/bin/sh\necho \"deedar $*\" >> '{}'\ncase \"$1\" in\n  log) echo 'from size=3 root=aa'; echo 'to size=5 root=bb' ;;\n  check) echo '2 deeds proven against a log of 5 entries, root bb' ;;\nesac\nexit 0\n",
+            log.display()
+        );
+        let path = dir.join("deedar");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        log
+    }
+
+    #[test]
+    fn handover_writes_the_bridge_from_the_kept_size() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = fake_deedar(dir.path());
+        let deeds = dir.path().join("bag").join("data").join("deeds");
+        std::fs::create_dir_all(&deeds).unwrap();
+        let said = with_fake_on_path(dir.path(), || write_bridge(&deeds, 3)).unwrap();
+        assert!(said.contains("bridge from 3 entries"), "{said}");
+        let bridge = std::fs::read_to_string(deeds.join("bridge.txt")).unwrap();
+        assert!(bridge.starts_with("from size=3"), "{bridge}");
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("deedar log bridge 3"), "{calls}");
+    }
+
+    #[test]
+    fn receive_hands_the_kept_head_and_keep_to_deedar() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _tracker = fake_vissue(dir.path(), true, true);
+        let log = fake_deedar(dir.path());
+        let bag = dir.path().join("bag");
+        std::fs::create_dir_all(bag.join("data").join("deeds")).unwrap();
+        let kept = dir.path().join("peer.head");
+        let next = dir.path().join("peer.next");
+        // Whatever the rest of the bag says, the deed check comes first.
+        let _ = with_fake_on_path(dir.path(), || {
+            receive(&bag, Some(&kept), Some(&next), false)
+        });
+        let calls = std::fs::read_to_string(log).unwrap();
+        let want = format!(
+            "deedar check {} --since {} --keep {}",
+            bag.display(),
+            kept.display(),
+            next.display()
+        );
+        assert!(calls.contains(&want), "{calls}");
+    }
+
     /// Run `f` with `dir` first on PATH, then put PATH back.
     fn with_fake_on_path<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
         let old = std::env::var_os("PATH").unwrap_or_default();
@@ -25220,6 +26686,90 @@ mod tests {
         }
     }
 
+    /// A background worker of this seat holds the node, and is gone. The
+    /// seat completes it, and hands it back, under the worker's name. A
+    /// worker of another seat is still refused, with its name.
+    #[test]
+    fn the_seat_finishes_what_its_own_worker_holds() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("claimdag.log");
+        let worker = work_id("worker-1:proj-cccc");
+        let script = format!(
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  get) echo \"$2  claimed  task  gen=3  assignee={worker}\" ;;\n  complete|release) [ \"$4\" = '{worker}' ] || {{ echo \"$1: not assignee\" >&2; exit 1; }}; echo ok ;;\nesac\n",
+            log = log.display(),
+        );
+        let fake = dir.path().join("claimdag");
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let saved: Vec<_> = ["XDG_RUNTIME_DIR", "LJOS_SEAT", "CLAIMDAG_DIR"]
+            .into_iter()
+            .map(|k| (k, std::env::var_os(k)))
+            .collect();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEAT", "alice");
+            std::env::remove_var("CLAIMDAG_DIR");
+        }
+        let hold = dir.path().join("ljos").join(format!("hold-{worker}"));
+        std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+        let write_hold_of = |seat: &str| {
+            std::fs::write(
+                &hold,
+                format!("worker-1:proj-cccc\n{seat}\n999999999\nnode\n2026-10-10T12:00:00Z\nproj-cccc\n-\n"),
+            )
+            .unwrap();
+        };
+        let (done, released, refused) = with_fake_on_path(dir.path(), || {
+            write_hold_of("alice");
+            let done = complete("proj-cccc", Some("done"), "parent-1", Some(3));
+            let dropped = !hold.exists();
+            write_hold_of("alice");
+            let released = release("proj-cccc", "parent-1");
+            write_hold_of("bob");
+            let refused = complete("proj-cccc", Some("done"), "parent-1", Some(3));
+            (done.map(|d| (d, dropped)), released, refused)
+        });
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        let (done, dropped) = done.unwrap();
+        assert!(
+            done.starts_with(
+                "completed proj-cccc under worker-1, another conversation of seat alice"
+            ),
+            "{done}"
+        );
+        assert!(
+            dropped,
+            "the worker's hold record stays after the seat completed"
+        );
+        let released = released.unwrap();
+        assert!(
+            released.starts_with("released proj-cccc under worker-1"),
+            "{released}"
+        );
+        let refused = format!("{:#}", refused.unwrap_err());
+        assert!(refused.contains("held by worker-1 (seat bob"), "{refused}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!(
+                "complete {} --actor {worker} --gen 3 --status done",
+                work_id("proj-cccc")
+            )),
+            "{calls}"
+        );
+    }
+
     /// Another conversation took the asker's first node.
     #[test]
     fn claiming_next_moves_past_a_taken_node_and_completes_by_name() {
@@ -25266,6 +26816,96 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no completion: {calls}"));
         assert_eq!(held, finished, "{calls}");
+    }
+
+    #[test]
+    fn only_claims_past_the_lease_are_expired() {
+        let holder = "a".repeat(32);
+        let rows: Vec<Value> = serde_json::from_value(serde_json::json!([
+            {"id": "1".repeat(32), "status": "claimed", "assignee": holder, "updated_unix": 100, "summary": "proj-old"},
+            {"id": "2".repeat(32), "status": "running", "assignee": holder, "updated_unix": 950, "summary": "proj-new"},
+            {"id": "3".repeat(32), "status": "ready", "assignee": "0".repeat(32), "updated_unix": 0, "summary": ""},
+            {"id": "4".repeat(32), "status": "claimed", "assignee": "0".repeat(32), "updated_unix": 0, "summary": ""},
+            {"id": "5".repeat(32), "status": "running", "assignee": holder, "updated_unix": 50, "summary": ""}
+        ]))
+        .unwrap();
+        let got = expired_claims(&rows, 1000, 900);
+        let ids: Vec<&str> = got.iter().map(|e| e.summary.as_str()).collect();
+        assert_eq!(ids, ["", "proj-old"], "{got:?}");
+        assert_eq!(got[0].quiet, 950);
+        assert!(expired_claims(&rows, 1000, 5000).is_empty());
+    }
+
+    /// Three claims past the lease: one whose runner is this test (alive),
+    /// one whose runner is gone, one no record names. Only the first stays.
+    #[test]
+    fn a_sitting_hands_back_expired_claims_whose_runner_is_gone() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (alive, gone, orphan) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+        let log = dir.path().join("claimdag.log");
+        let script = format!(
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log}'\ncase \"$1\" in\n  list) echo '[{{\"id\":\"{n1}\",\"status\":\"claimed\",\"assignee\":\"{alive}\",\"updated_unix\":1,\"summary\":\"proj-live\"}},{{\"id\":\"{n2}\",\"status\":\"claimed\",\"assignee\":\"{gone}\",\"updated_unix\":1,\"summary\":\"proj-dead\"}},{{\"id\":\"{n3}\",\"status\":\"running\",\"assignee\":\"{orphan}\",\"updated_unix\":1,\"summary\":\"proj-none\"}}]' ;;\n  release) echo gen=3 ;;\nesac\n",
+            log = log.display(),
+            n1 = "1".repeat(32),
+            n2 = "2".repeat(32),
+            n3 = "3".repeat(32),
+        );
+        let fake = dir.path().join("claimdag");
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let holds = dir.path().join("ljos");
+        std::fs::create_dir_all(&holds).unwrap();
+        let me = std::process::id();
+        let my_comm = parent_and_comm(me).map(|(_, c)| c).unwrap_or_default();
+        std::fs::write(
+            holds.join(format!("hold-{alive}")),
+            format!("alice\nljos-bot\n{me}\n{my_comm}\n2026-10-10T00:00:00Z\nproj-live\n-\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            holds.join(format!("hold-{gone}")),
+            "bob\nljos-bot\n4194303\nno-such-runner\n2026-10-10T00:00:00Z\nproj-dead\n-\n",
+        )
+        .unwrap();
+        let said = with_fake_on_path(dir.path(), || reclaim_expired(900));
+        let gone_hold_left = holds.join(format!("hold-{gone}")).exists();
+        let alive_hold_left = holds.join(format!("hold-{alive}")).exists();
+        unsafe {
+            match runtime {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+        if cfg!(target_os = "linux") {
+            assert!(said.contains("kept proj-live"), "{said}");
+            assert!(alive_hold_left, "the live conversation's hold was dropped");
+        }
+        assert!(said.contains("handed back proj-dead"), "{said}");
+        assert!(said.contains("bob (seat ljos-bot) is gone"), "{said}");
+        assert!(said.contains("handed back proj-none"), "{said}");
+        assert!(!gone_hold_left, "the gone conversation's hold was kept");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!("release {} --actor {gone}", "2".repeat(32))),
+            "{calls}"
+        );
+        assert!(
+            calls.contains(&format!("release {} --actor {orphan}", "3".repeat(32))),
+            "{calls}"
+        );
+        assert!(!calls.contains(&format!("--actor {alive}")), "{calls}");
+    }
+
+    #[test]
+    fn a_zero_lease_turns_the_reclaim_off() {
+        assert!(reclaim_expired(0).starts_with("off"));
     }
 
     /// The Claude Code plugin in the repository root is the seat onboard
