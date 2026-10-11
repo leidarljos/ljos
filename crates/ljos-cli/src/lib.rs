@@ -15610,6 +15610,45 @@ pub fn timeline(issue: &str, limit: usize) -> Result<String> {
 
 /// The reader's seconds east of UTC at the instant `secs`. The tracker
 /// writes org stamps in local wall time; a timeline reads every store in it.
+/// `deedar evidence` as a person reads it: after each `time=` line in
+/// seconds since the epoch, an `at=` line with the same instant in
+/// ISO 8601 with the reader's UTC offset. The `time=` line stays as it
+/// is, since the timeline and scripts read it.
+#[must_use]
+pub fn evidence_in_words(said: &str, offset_of: fn(i64) -> i64) -> String {
+    let mut out = String::new();
+    for line in said.lines() {
+        out.push_str(line);
+        out.push('\n');
+        let Some(secs) = line
+            .strip_prefix("time=")
+            .and_then(|t| t.trim().parse::<i64>().ok())
+        else {
+            continue;
+        };
+        let Some(zone) = i32::try_from(offset_of(secs))
+            .ok()
+            .and_then(chrono::FixedOffset::east_opt)
+        else {
+            continue;
+        };
+        if let Some(at) = chrono::DateTime::from_timestamp(secs, 0) {
+            out.push_str(&format!(
+                "at={}\n",
+                at.with_timezone(&zone)
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+            ));
+        }
+    }
+    out
+}
+
+/// [`evidence_in_words`] in this machine's zone.
+#[must_use]
+pub fn evidence_here(said: &str) -> String {
+    evidence_in_words(said, local_offset)
+}
+
 fn local_offset(secs: i64) -> i64 {
     use chrono::{Local, Offset, TimeZone};
     Local
@@ -19121,6 +19160,30 @@ mod tests {
             .collect();
         assert!(off.contains(&"quick-install"), "{off:?}");
         assert!(!off.contains(&"compile"), "{off:?}");
+    }
+
+    #[test]
+    fn evidence_names_its_time_in_iso_8601_with_the_offset() {
+        let said = "id=deed-file-survey ok\nproducedBy=saddle -\ntime=1791667470\n";
+        fn chicago(_: i64) -> i64 {
+            -5 * 3600
+        }
+        fn utc(_: i64) -> i64 {
+            0
+        }
+        let here = evidence_in_words(said, chicago);
+        assert_eq!(
+            here,
+            "id=deed-file-survey ok\nproducedBy=saddle -\ntime=1791667470\nat=2026-10-10T16:24:30-05:00\n"
+        );
+        assert!(evidence_in_words(said, utc).ends_with("at=2026-10-10T21:24:30+00:00\n"));
+        // The timeline still reads the epoch line.
+        assert!(deed_event("deed-file-survey", &here, utc).is_some());
+        // A refusal passes through unchanged.
+        assert_eq!(
+            evidence_in_words("deed not found: x\n", utc),
+            "deed not found: x\n"
+        );
     }
 
     #[test]
