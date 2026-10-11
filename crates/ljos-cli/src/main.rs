@@ -86,6 +86,9 @@ enum Cmd {
         /// Ask the pack as it stood then (YYYY-MM-DD or RFC 3339): what the seat knew at that time, withdrawn memories included, later ones left out.
         #[arg(long, value_name = "TIME")]
         as_of: Option<String>,
+        /// Open with what the score and the fraction mean, and what an empty answer means.
+        #[arg(long)]
+        explain: bool,
     },
     /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
     Conflicts {
@@ -945,15 +948,14 @@ fn run_command() -> Result<()> {
             limit,
             rerank,
             as_of,
+            explain,
         } => {
             print!(
                 "{}",
-                format_hits(&packset_search_as_of(
-                    &join(&query),
-                    limit,
-                    as_of.as_deref(),
-                    rerank
-                )?)
+                format_hits(
+                    &packset_search_as_of(&join(&query), limit, as_of.as_deref(), rerank)?,
+                    explain
+                )
             );
         }
         Cmd::Evidence { accession } => {

@@ -19147,10 +19147,18 @@ pub fn search_reading(n: usize) -> &'static str {
 /// One line per hit: score, how many scorers named it out of how many
 /// ran, kind, id, age, text. The age is the one column a reader needs to
 /// lay the hits on a timeline; the count is what the hook keys on.
-pub fn format_hits(hits: &[Hit]) -> String {
+/// `explain` (`ljos search --explain`) opens with [`search_reading`]; without
+/// it the hits come alone, and an empty answer is the one line `No hits.`
+pub fn format_hits(hits: &[Hit], explain: bool) -> String {
     let now = now_utc();
     let mine = seat_name();
-    let mut out = format!("{}\n", search_reading(hits.len()));
+    let mut out = if explain {
+        format!("{}\n", search_reading(hits.len()))
+    } else if hits.is_empty() {
+        "No hits.\n".to_string()
+    } else {
+        String::new()
+    };
     for h in hits {
         let id = h.id.as_deref().unwrap_or("-");
         let named = match (h.ballots, h.of) {
@@ -31424,6 +31432,26 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let _url = PackUrl::set(&url);
         retire_persona("eon-chemist", false).unwrap();
         assert_eq!(deletes(&seen), 1, "{:?}", seen.lock().unwrap());
+    }
+
+    /// A search prints its hits alone. The note on what the score means
+    /// comes under `--explain`, and an empty answer is one line.
+    #[test]
+    fn a_search_prints_its_hits_and_explains_the_score_on_request() {
+        let _g = env_guard();
+        let hits = [signal_hit("preference", "Use pnpm instead of npm.", 0.9, 2)];
+        let plain = format_hits(&hits, false);
+        assert!(plain.starts_with("0.9000\t2/3\tpreference\t"), "{plain}");
+        assert!(!plain.contains("Score is how"), "{plain}");
+        assert_eq!(plain.lines().count(), 1, "{plain}");
+        let explained = format_hits(&hits, true);
+        assert!(
+            explained.starts_with("Score is how the scorers ranked"),
+            "{explained}"
+        );
+        assert!(explained.ends_with(&plain), "{explained}");
+        assert_eq!(format_hits(&[], false), "No hits.\n");
+        assert!(format_hits(&[], true).contains("A failure would say"));
     }
 
     /// A pack that refuses the lesson after the work is done leaves the

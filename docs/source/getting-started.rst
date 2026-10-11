@@ -41,7 +41,6 @@ so git needs an identity (``git config --global user.email``).
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    $ ljos prefer "CombMNZ over RRF for fusing two ballots."
    $ ljos search "which fusion"
-   Score is how the scorers ranked this query. The fraction is how many of them named the hit.
    2.0000  1/3 lesson  ... today   The lexical default is BM25+. It beat BM25 by two points on turns.
    1.0000  1/3 preference  ... today   CombMNZ over RRF for fusing two ballots.
 
