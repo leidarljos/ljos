@@ -206,6 +206,10 @@ enum Cmd {
         /// The vissue issue this message is about. A reply keeps it.
         #[arg(long)]
         issue: Option<String>,
+        /// Write to a seat this pack has not heard from yet. Without it, a
+        /// seat the pack does not know is refused, with the seats it knows.
+        #[arg(long)]
+        new_seat: bool,
     },
     /// Mail this seat has not read. Listing does not write a receipt.
     /// `ljos hook --prompt` writes a receipt for each message it shows.
@@ -989,6 +993,7 @@ fn main() -> Result<()> {
             group,
             interrupt,
             issue,
+            new_seat,
         } => {
             let (seat, text) = if group.is_some() {
                 (None, words.join(" "))
@@ -1008,6 +1013,7 @@ fn main() -> Result<()> {
                     text: &text,
                     interrupt,
                     issue: issue.as_deref(),
+                    new_seat,
                 })?
             );
         }

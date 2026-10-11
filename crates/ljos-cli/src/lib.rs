@@ -26860,6 +26860,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 } else if line.starts_with("GET /v1/atoms") {
                     if kind == "down" {
                         (500, r#"{"error":"the store is down"}"#)
+                    } else if kind == "roster" {
+                        (
+                            200,
+                            r#"{"atoms":[{"kind":"lesson","text":"a lesson","entities":["seat:saddle"],"source":{"harness":"saddle"}}]}"#,
+                        )
                     } else {
                         (200, r#"{"atoms":[]}"#)
                     }
@@ -26955,6 +26960,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             text: "hello",
             interrupt: false,
             issue: None,
+            new_seat: false,
         })
         .unwrap_err();
         let text = format!("{err:#}");
@@ -27038,6 +27044,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             text: "hello",
             interrupt: false,
             issue: None,
+            new_seat: true,
         })
         .unwrap();
         assert!(sent.starts_with("sent "), "{sent}");
@@ -27047,6 +27054,37 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             1,
             "only the message is posted"
         );
+    }
+
+    /// Mail to a seat the pack has never heard from is refused with the
+    /// seats it knows, and posts nothing (Software-mwy5).
+    #[test]
+    fn a_send_to_a_seat_the_pack_does_not_know_is_refused() {
+        let _g = env_guard();
+        let (url, posts) = serve_pack("roster");
+        let _held = PackUrl::set(&url);
+        let send = |seat: &'static str, new_seat: bool| {
+            super::mail::send(&super::mail::Send {
+                seat: Some(seat),
+                group: None,
+                text: "New ljos bug",
+                interrupt: false,
+                issue: None,
+                new_seat,
+            })
+        };
+        let err = send("ljos", false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.starts_with("send: no seat named ljos"), "{text}");
+        assert!(text.contains("saddle"), "names the seats it knows: {text}");
+        assert!(text.contains("--new-seat"), "{text}");
+        assert_eq!(posts.load(Ordering::SeqCst), 0, "nothing is posted");
+
+        let sent = send("saddle", false).unwrap();
+        assert!(sent.contains("saddle"), "{sent}");
+        let first = send("eessi", true).unwrap();
+        assert!(first.contains("eessi"), "{first}");
+        assert_eq!(posts.load(Ordering::SeqCst), 2);
     }
 
     #[test]
