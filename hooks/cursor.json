@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 5
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 20
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 10
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 10
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 15
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 5
+      }
+    ]
+  }
+}
