@@ -170,6 +170,18 @@ pub fn ask_pack_verdict(line: &str) -> Option<Rule> {
     ask_pack_verdict_with(line, std::env::var(ASK_PACK_ENV).ok().as_deref())
 }
 
+/// The ask the pack would give the line with every class on, when the
+/// setting in `LJOS_ASK_PACK` turned that class off, with the setting.
+#[must_use]
+pub fn ask_pack_switched_off(line: &str) -> Option<(Rule, String)> {
+    let setting = std::env::var(ASK_PACK_ENV).ok()?;
+    if ask_pack_verdict_with(line, Some(&setting)).is_some() {
+        return None;
+    }
+    let rule = ask_pack_verdict_with(line, None)?;
+    Some((rule, format!("{ASK_PACK_ENV}={setting}")))
+}
+
 /// [`ask_pack_verdict`] with the setting passed in.
 #[must_use]
 pub fn ask_pack_verdict_with(line: &str, setting: Option<&str>) -> Option<Rule> {

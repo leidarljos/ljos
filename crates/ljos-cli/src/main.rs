@@ -1583,6 +1583,13 @@ fn run_command() -> Result<()> {
                 )
             };
             let verdict = tcb_rule.as_ref().or(gated.as_ref());
+            // A command the ask pack would have asked about runs because a
+            // setting turned that class off: the bypass log keeps a row.
+            if verdict.is_none() && call.event == "PreToolUse" {
+                if let Some((rule, how)) = ljos_cli::ask_pack::ask_pack_switched_off(&call.cue) {
+                    ljos_cli::log_bypass("switch", &how, &call.cue, &rule);
+                }
+            }
             // Ids are marked after stdout is flushed. A runner that kills
             // the hook before it reads the answer must see the same note
             // on the next call.
