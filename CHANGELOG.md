@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos brief` and `ljos panel` hand a persona ljos's own principles and arena rubric only on ljos's own issues: an `ljos-` id, a tracker project named `ljos`, or an `ljos` tag. A brief on a numerical-methods ballot or a logo review printed the eight rubric items about plugins and pack atoms, and a persona starting from it reasoned from them. Another project's brief keeps its playbook and says no product rubric applies.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
