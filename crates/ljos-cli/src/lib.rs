@@ -7568,19 +7568,110 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     Ok(atom)
 }
 
+/// How a persona write treats a live persona of the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonaWrite {
+    /// `ljos persona NAME`: refused when another seat, or another holder
+    /// of this seat, defined the name.
+    Define,
+    /// `ljos persona NAME --replace`: takes the name over.
+    Replace,
+    /// A settle moved the anchor. The owner and the date stay.
+    Learned,
+}
+
+/// Who defined a persona, from its atom: seat, holder and the date it was
+/// defined. `None` on a persona written before personas had owners.
+#[must_use]
+pub fn persona_owner(atom: &Value) -> Option<(String, String, String)> {
+    let field = |k: &str| {
+        atom.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let owner = field("owner");
+    if owner.is_empty() {
+        return None;
+    }
+    Some((owner, field("holder"), field("since")))
+}
+
+/// The latest persona atom per name.
+fn latest_persona_atoms(atoms: &[Value]) -> std::collections::BTreeMap<String, Value> {
+    let mut latest: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for atom in atoms {
+        if atom.get("kind").and_then(Value::as_str) != Some("persona") {
+            continue;
+        }
+        let Some(name) = atom.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let ts = atom.get("ts").and_then(Value::as_str).unwrap_or("");
+        let newer = latest
+            .get(name)
+            .is_none_or(|seen| seen.get("ts").and_then(Value::as_str).unwrap_or("") <= ts);
+        if newer {
+            latest.insert(name.to_string(), atom.clone());
+        }
+    }
+    latest
+}
+
+/// POST one persona, defined by this seat. See [`write_persona_as`].
+///
+/// # Errors
+///
+/// As [`write_persona_as`] with [`PersonaWrite::Define`].
+pub fn write_persona(p: &Persona) -> Result<Value> {
+    write_persona_as(p, PersonaWrite::Define)
+}
+
 /// POST one persona. A persona of the same name already in the pack is
 /// superseded, so a rewrite moves the roster without leaving the old view
-/// live. Every persona is owed one unscoped inbound trust row; `--about`
-/// on a later trust row only adds weight, it does not replace that floor.
-pub fn write_persona(p: &Persona) -> Result<Value> {
+/// live. Each persona names the seat and holder that defined it and when.
+/// Personas are shared by every seat on the pack, so redefining a name
+/// someone else defined is refused unless the write is a replace. Every
+/// persona is owed one unscoped inbound trust row; `--about` on a later
+/// trust row only adds weight, it does not replace that floor.
+///
+/// # Errors
+///
+/// The pack not answering, an invalid persona, or a name another seat or
+/// holder defined, under [`PersonaWrite::Define`].
+pub fn write_persona_as(p: &Persona, how: PersonaWrite) -> Result<Value> {
     let client = pack()?;
     let workspace = client.workspace();
     let mut atom = persona_atom(p, &workspace)?;
-    let previous: Vec<Value> = client
+    let name = p.name.trim();
+    let same: Vec<Value> = client
         .atoms_of_kind(&workspace, "persona")
         .unwrap_or_default()
         .into_iter()
-        .filter(|a| a.get("name").and_then(Value::as_str) == Some(p.name.trim()))
+        .filter(|a| a.get("name").and_then(Value::as_str) == Some(name))
+        .collect();
+    let live = latest_persona_atoms(&same).remove(name);
+    let (seat, holder) = (seat_name(), holder_name());
+    let owner = match (how, live.as_ref().and_then(persona_owner)) {
+        (PersonaWrite::Learned, Some(kept)) => kept,
+        (PersonaWrite::Define, Some((owner, by, since)))
+            if owner != seat || (!by.is_empty() && by != holder) =>
+        {
+            bail!(
+                "persona: {name} was defined by seat {owner}{}{}, and personas are shared by every seat on this pack. \
+                 Pass --replace to take it over, or pick another name. Nothing was written",
+                if by.is_empty() { String::new() } else { format!(" ({by})") },
+                if since.is_empty() { String::new() } else { format!(" on {since}") },
+            );
+        }
+        (PersonaWrite::Define, Some(kept)) => kept,
+        _ => (seat, holder, now_utc()),
+    };
+    atom["owner"] = Value::String(owner.0);
+    atom["holder"] = Value::String(owner.1);
+    atom["since"] = Value::String(owner.2);
+    let previous: Vec<Value> = same
+        .iter()
         .filter_map(|a| {
             a.get("id")
                 .and_then(Value::as_str)
@@ -7595,6 +7686,46 @@ pub fn write_persona(p: &Persona) -> Result<Value> {
         .context("persona: POST /v1/atoms failed")?;
     ensure_unscoped_inbound(p)?;
     Ok(posted)
+}
+
+/// `ljos personas`: one line per live persona, with the seat that defined
+/// it and when.
+///
+/// # Errors
+///
+/// The pack not answering.
+pub fn personas_listing() -> Result<String> {
+    let client = pack()?;
+    let atoms = client
+        .atoms_of_kind(&client.workspace(), "persona")
+        .context("persona: GET /v1/atoms?kind=persona failed")?;
+    let owners = latest_persona_atoms(&atoms);
+    let mut out = String::new();
+    for line in format_personas(&personas_of(&atoms)).lines() {
+        let name = line.split_whitespace().next().unwrap_or("");
+        let by = owners.get(name).and_then(persona_owner).map_or_else(
+            || "  (no owner recorded)".to_string(),
+            |(owner, holder, since)| {
+                let holder = if holder.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({holder})")
+                };
+                let since = since
+                    .get(..10)
+                    .map(|d| format!(" since {d}"))
+                    .unwrap_or_default();
+                format!("  by {owner}{holder}{since}")
+            },
+        );
+        if owners.is_empty() {
+            out.push_str(line);
+        } else {
+            out.push_str(&format!("{line}{by}"));
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// The unscoped inbound row a persona is owed: the seat weighs it at 1,
@@ -11723,7 +11854,7 @@ pub fn learn_and_write(
         )?;
     }
     for p in &moved {
-        write_persona(p)?;
+        write_persona_as(p, PersonaWrite::Learned)?;
     }
     write_outcome(issue, outcome)?;
     Ok((rows, moved, calibration))
@@ -27312,6 +27443,96 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no completion: {calls}"));
         assert_eq!(held, finished, "{calls}");
+    }
+
+    /// The pack's address, its request lines and its posted atoms.
+    type Served = (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Value>>>);
+
+    /// A pack serving one persona, `eon-chemist`, defined by seat
+    /// `saddle` in another conversation. Records every request line and
+    /// every posted atom.
+    fn serve_owned_persona() -> Served {
+        let posted = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&posted);
+        let (url, seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-chem","kind":"persona","name":"eon-chemist","anchor":0.4,"text":"Reads a saddle search as a chemist.","owner":"saddle","holder":"sand-subagent-0e61","since":"2026-10-11T09:58:00Z","ts":"2026-10-11T09:58:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else if line.starts_with("POST /v1/atoms") {
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                slot.lock().unwrap().push(atom.clone());
+                (200, atom.to_string())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        (url, seen, posted)
+    }
+
+    fn chemist(view: &str) -> Persona {
+        Persona {
+            name: "eon-chemist".into(),
+            anchor: 0.5,
+            view: view.into(),
+            entities: vec!["eon".into()],
+            runner: None,
+        }
+    }
+
+    /// Two seats on one pack share its personas. Redefining a name another
+    /// seat defined is refused, names who defined it, and writes nothing.
+    #[test]
+    fn redefining_another_seat_s_persona_is_refused() {
+        let _g = env_guard();
+        let (url, seen, posted) = serve_owned_persona();
+        let _url = PackUrl::set(&url);
+        let err = write_persona(&chemist("Reads every result as a chemist would."))
+            .expect_err("another seat's persona was overwritten");
+        let text = format!("{err:#}");
+        assert!(text.contains("saddle"), "{text}");
+        assert!(text.contains("--replace"), "{text}");
+        assert!(
+            posted.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    /// `--replace` takes the name over under this seat. A settle that moves
+    /// the anchor keeps the owner. The listing names the owner.
+    #[test]
+    fn a_replace_takes_the_persona_over_and_a_settle_keeps_its_owner() {
+        let _g = env_guard();
+        let (url, _seen, posted) = serve_owned_persona();
+        let _url = PackUrl::set(&url);
+        write_persona_as(
+            &chemist("Reads every result as a chemist would."),
+            PersonaWrite::Replace,
+        )
+        .unwrap();
+        write_persona_as(
+            &chemist("Reads a saddle search as a chemist."),
+            PersonaWrite::Learned,
+        )
+        .unwrap();
+        let atoms = posted.lock().unwrap().clone();
+        let personas: Vec<&Value> = atoms.iter().filter(|a| a["kind"] == "persona").collect();
+        assert_eq!(personas.len(), 2, "{atoms:?}");
+        assert_eq!(personas[0]["owner"], "inky", "{:?}", personas[0]);
+        assert_eq!(personas[0]["supersedes"][0], "atom-chem");
+        assert_eq!(personas[1]["owner"], "saddle", "{:?}", personas[1]);
+        assert_eq!(personas[1]["since"], "2026-10-11T09:58:00Z");
+        let listing = personas_listing().unwrap();
+        assert!(
+            listing.contains("by saddle (sand-subagent-0e61) since 2026-10-11"),
+            "{listing}"
+        );
     }
 
     /// A pack that refuses the lesson after the work is done leaves the
