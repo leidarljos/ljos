@@ -16196,6 +16196,41 @@ pub fn not_assignee_message(
     }
 }
 
+/// File the lesson of a finished sitting as a proposal. A lesson
+/// learned on an issue belongs to the scope of the repository that holds
+/// the issue, wherever it was written. It is a proposal until `ljos
+/// accept`, or until the person types the same words. Called after the
+/// node completed, so a refusal is a line that names the pack's reason
+/// and the command that keeps the lesson, never an error.
+fn finish_lesson(issue: &str, text: &str) -> String {
+    let filed = (|| {
+        let scope = sync::scope_for_issue(issue);
+        let client = pack()?;
+        let workspace = client.workspace();
+        let mut atom = atom_body("lesson", text, &workspace);
+        let mut tags = vec![format!("issue:{}", issue.trim())];
+        if let Some(scope) = scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            tags.push(format!("scope:{scope}"));
+        }
+        add_entities(&mut atom, tags);
+        // Standing once accepted: the person's `ljos accept` is the
+        // review, so the hook shows the lesson from the next prompt.
+        // Until then the writer holds it and no search returns it.
+        stamp_horizon(&mut atom, "lesson", text, Some(false));
+        admit::propose_atom(&client, atom)
+    })();
+    match filed {
+        Ok(filed) => format!(
+            "proposed {} as agent-derived; `ljos accept {}` writes it\n",
+            filed.id, filed.id
+        ),
+        Err(e) => format!(
+            "the lesson was not kept: {e:#}. The node stays completed. Reword the lesson and keep it with: ljos remember {}\n",
+            tools::sh_quote(text)
+        ),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "The public finish signature preserves its independent command options"
@@ -16225,65 +16260,46 @@ pub fn finish(
             );
         }
     }
-    let mut out = String::new();
-    match lesson.map(str::trim).filter(|l| !l.is_empty()) {
-        Some(text) => {
-            // A lesson learned on an issue belongs to the scope of the
-            // repository that holds the issue, wherever it was written.
-            // It is a proposal until `ljos accept`, or until the person
-            // types the same words.
-            let scope = sync::scope_for_issue(issue);
-            let client = pack()?;
-            let workspace = client.workspace();
-            let mut atom = atom_body("lesson", text, &workspace);
-            let mut tags = vec![format!("issue:{}", issue.trim())];
-            if let Some(scope) = scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                tags.push(format!("scope:{scope}"));
-            }
-            add_entities(&mut atom, tags);
-            // Standing once accepted: the person's `ljos accept` is the
-            // review, so the hook shows the lesson from the next prompt.
-            // Until then the writer holds it and no search returns it.
-            stamp_horizon(&mut atom, "lesson", text, Some(false));
-            let filed = admit::propose_atom(&client, atom)?;
-            out.push_str(&format!(
-                "proposed {} as agent-derived; `ljos accept {}` writes it\n",
-                filed.id, filed.id
-            ));
-        }
-        None => out.push_str(
-            "no lesson remembered this sitting; `ljos remember` takes one in two sentences\n",
-        ),
-    }
-    let title = issue_title(issue)?;
-    let island = packset_island(&title, true)?;
-    if island["weak"].as_bool().unwrap_or(false) {
-        out.push_str(&format!(
-            "did not fire the island for {title:?}: its seeds are hits no two scorers agreed on{}; wiring them would tighten the wrong links\n",
-            if island["dense"].as_bool().unwrap_or(true) { "" } else { " (the encoder is down, ranking is lexical only)" }
-        ));
-    } else if island["held"].as_bool().unwrap_or(false) {
-        // Another sitting on this issue, or another persona's, fired the
-        // same claims within the hour; the pack tightened them once.
-        out.push_str(&format!(
-            "the island for {title:?} fired within the hour; not fired again\n"
-        ));
-    } else {
-        let fired = island["island"].as_array().map_or(0, Vec::len);
-        out.push_str(&format!(
-            "fired the island for {title:?}: {fired} memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.\n"
-        ));
-    }
     let terminal = ["done", "failed", "cancelled"];
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
     }
-    complete(issue, Some(status), assignee, gen)?;
-    out.push_str(&format!(
-        "completed the session node for {issue} as {status}\n"
-    ));
+    let title = issue_title(issue)?;
+    // The node completes first. A pack that refuses the lesson or the
+    // island afterwards is reported, and the sitting stays finished.
+    complete(issue, Some(status), assignee, gen)
+        .with_context(|| format!("finish: the session node for {issue} was not completed"))?;
+    let mut out = format!("completed the session node for {issue} as {status}\n");
+    match lesson.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(text) => out.push_str(&finish_lesson(issue, text)),
+        None => out.push_str(
+            "no lesson remembered this sitting; `ljos remember` takes one in two sentences\n",
+        ),
+    }
+    match packset_island(&title, true) {
+        Err(e) => out.push_str(&format!(
+            "did not fire the island for {title:?}: {e:#}\n"
+        )),
+        Ok(island) if island["weak"].as_bool().unwrap_or(false) => out.push_str(&format!(
+            "did not fire the island for {title:?}: its seeds are hits no two scorers agreed on{}; wiring them would tighten the wrong links\n",
+            if island["dense"].as_bool().unwrap_or(true) { "" } else { " (the encoder is down, ranking is lexical only)" }
+        )),
+        // Another sitting on this issue, or another persona's, fired the
+        // same claims within the hour; the pack tightened them once.
+        Ok(island) if island["held"].as_bool().unwrap_or(false) => out.push_str(&format!(
+            "the island for {title:?} fired within the hour; not fired again\n"
+        )),
+        Ok(island) => {
+            let fired = island["island"].as_array().map_or(0, Vec::len);
+            out.push_str(&format!(
+                "fired the island for {title:?}: {fired} memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.\n"
+            ));
+        }
+    }
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
-        let said = run_captured("vissue", &["vote", issue, "--json"])?;
+        let said = run_captured("vissue", &["vote", issue, "--json"]).with_context(|| {
+            format!("finish: the session node for {issue} is completed; reading its ballots failed, `ljos learn {issue} --outcome {option}` retries")
+        })?;
         let forecasts = forecasts_from_json(&said.stdout)?;
         if forecasts.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
@@ -27282,6 +27298,95 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no completion: {calls}"));
         assert_eq!(held, finished, "{calls}");
+    }
+
+    /// A pack that refuses the lesson after the work is done leaves the
+    /// node completed. Finish says why the lesson was not kept and how to
+    /// keep it, and it does not fail.
+    #[test]
+    fn a_refused_lesson_leaves_the_node_completed() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* STARTED [#B] Finish a sitting\n:PROPERTIES:\n:ID:         probe-f1n5\n:END:\n",
+        )
+        .unwrap();
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        let (url, seen) = serve_http(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("POST /v1/atoms") {
+                (
+                    400,
+                    r#"{"error":"readability grade 14.72 exceeds 14"}"#.into(),
+                )
+            } else if line.contains("/v1/activate") {
+                (200, r#"{"island":[],"fired":0}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let state = dir.path().join("state");
+        let runtime = dir.path().join("run");
+        let config = dir.path().join("config");
+        for d in [&state, &runtime, &config] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let lesson = "A lesson whose sentences ran long enough that the readability gate of the pack turned it away.";
+        let said = with_fake_on_path(dir.path(), || {
+            finish(
+                "probe-f1n5",
+                "done",
+                Some(lesson),
+                None,
+                false,
+                LEARN_BETA,
+                "alice",
+                Some(2),
+                false,
+            )
+        })
+        .unwrap_or_else(|e| panic!("finish failed after the work was done: {e:#}"));
+        let log = std::fs::read_to_string(&calls).unwrap();
+        let node = work_id("probe-f1n5");
+        assert!(
+            log.contains(&format!("claimdag complete {node} --actor ")),
+            "the node was not completed: {log}"
+        );
+        assert!(
+            said.contains("completed the session node for probe-f1n5 as done"),
+            "{said}"
+        );
+        assert!(said.contains("the lesson was not kept"), "{said}");
+        assert!(
+            said.contains("readability grade 14.72 exceeds 14"),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
+            "{said}"
+        );
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("POST /v1/atoms")),
+            "the lesson never reached the pack"
+        );
     }
 
     #[test]

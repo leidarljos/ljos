@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos finish` completes the session node before it files the lesson. When the pack refused the `--lesson` text, for example on its readability grade, the whole finish stopped with exit 1 and the node stayed open, though the work was done. Now the node completes, the refusal is a line with the pack's reason and the `ljos remember` command that keeps the lesson once reworded, and finish exits non-zero only when the completion itself fails. A pack that does not answer the island no longer fails the finish either.
 - `ljos evidence` prints the time a deed was produced as an `at=` line in ISO 8601 with this machine's UTC offset (`at=2026-10-10T16:24:30-05:00`), after deedar's `time=` line in seconds since the epoch. The `time=` line is unchanged, so the timeline and scripts that read it keep working.
 
 - `ljos send` and `ljos reply` carry a message longer than 500 characters. The pack refuses an atom whose text passes 500, so a long message bounced with `atom text exceeds soft cap 500`. The atom's text now carries the envelope and the start of the body, cut with an ellipsis, and the whole body rides in the atom's `body` field, which `ljos inbox` shows. The prompt hook still shows the first 160 characters, and now says how long the body is and that `ljos inbox --all` shows it. A body past 16,000 characters is refused before anything is sent, with the `deedar create file` line that sends it as a deed.
