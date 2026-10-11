@@ -559,10 +559,57 @@ pub fn check_known(seat: &str, known: &BTreeSet<String>, new_seat: bool) -> Resu
     } else {
         known.iter().cloned().collect::<Vec<_>>().join(", ")
     };
+    let guess = closest_seat(seat, known)
+        .map(|s| format!("Did you mean {s}? "))
+        .unwrap_or_default();
     bail!(
         "send: no seat named {seat} has written to this pack, so the message would wait unread. \
-         Seats this pack knows: {list}. Pass --new-seat to write to a seat that has not started yet"
+         {guess}Seats this pack knows: {list}. Pass --new-seat to write to a seat that has not started yet"
     )
+}
+
+/// The known seat a mistyped name most likely meant: one that starts with
+/// it or holds it (`ljos` for `ljos-bot`), else the nearest by edits, at
+/// most two away. `None` when nothing is that close.
+#[must_use]
+pub fn closest_seat<'a>(seat: &str, known: &'a BTreeSet<String>) -> Option<&'a str> {
+    let lower = seat.to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let holds = known
+        .iter()
+        .filter(|k| k.to_lowercase().contains(&lower) || lower.contains(&k.to_lowercase()))
+        .min_by_key(|k| (k.len().abs_diff(seat.len()), k.as_str()));
+    if let Some(k) = holds {
+        return Some(k.as_str());
+    }
+    known
+        .iter()
+        .map(|k| (edits(&lower, &k.to_lowercase()), k))
+        .filter(|(d, _)| *d <= 2)
+        .min()
+        .map(|(_, k)| k.as_str())
+}
+
+/// Levenshtein distance, in characters.
+fn edits(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == *cb {
+                prev
+            } else {
+                1 + prev.min(cur).min(row[j])
+            };
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 /// Who a send addresses. A group send leaves the sender off the list.
@@ -743,7 +790,30 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let mut atom = message_atom(&outgoing, &workspace_of(Some(&client.workspace())));
     stamp_source(&mut atom);
     post(&atom, "send")?;
-    Ok(format!("sent {} to {}\n", outgoing.id, to.join(", ")))
+    let mut said = format!("sent {} to {}\n", outgoing.id, to.join(", "));
+    said.push_str(&wake_after(&outgoing));
+    Ok(said)
+}
+
+/// Start the wake of each recipient that set one, and say which. The
+/// message is already written, so a wake that fails changes nothing here.
+fn wake_after(m: &Outgoing) -> String {
+    let events: Vec<super::wake::Event> =
+        m.to.iter()
+            .map(|seat| super::wake::Event {
+                seat: seat.clone(),
+                from: m.from.clone(),
+                msg: m.id.clone(),
+                issue: m.issue.clone(),
+                interrupt: m.interrupt,
+            })
+            .collect();
+    let woken = super::wake::spawn(&events);
+    if woken.is_empty() {
+        String::new()
+    } else {
+        format!("waking {}\n", woken.join(", "))
+    }
 }
 
 /// Unread mail for this seat, then receipts on what it sent that it has not
@@ -883,6 +953,7 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     if let Some(issue) = &outgoing.issue {
         line.push_str(&format!("issue {issue}\n"));
     }
+    line.push_str(&wake_after(&outgoing));
     Ok(line)
 }
 
@@ -1023,6 +1094,39 @@ pub fn prompt_note() -> (String, Vec<String>) {
         .filter(|r| !seen.contains(&r.key))
         .collect();
     prompt_lines(&letters, &receipts)
+}
+
+/// The line a held stop opens with, before the mail it carries.
+pub const STOP_MAIL_HEAD: &str =
+    "Mail marked interrupt reached this seat while you worked. Read it before you stop:";
+
+/// Unread interrupt mail for a stop hook, and the ids to receipt once the
+/// runner has it. A running session takes it as one more round before it
+/// goes idle, so a sender's interrupt does not wait for a prompt that may
+/// never come. Plain mail waits for the next prompt or the seat's wake. A
+/// pack that does not answer says nothing here: holding a stop on an
+/// error would keep every turn open.
+#[must_use]
+pub fn stop_note() -> (String, Vec<String>) {
+    let Some(atoms) = load_quiet() else {
+        return (String::new(), Vec::new());
+    };
+    stop_lines(&atoms, &super::seat_name())
+}
+
+/// [`stop_note`] over atoms already read.
+#[must_use]
+pub fn stop_lines(atoms: &[Value], seat: &str) -> (String, Vec<String>) {
+    let hot: Vec<Letter> = inbox_letters(atoms, seat, false)
+        .into_iter()
+        .filter(|l| l.interrupt)
+        .collect();
+    let (lines, ids) = prompt_lines(&hot, &[]);
+    if lines.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let reply = "Answer with `ljos reply ID TEXT`.";
+    (format!("{STOP_MAIL_HEAD}\n{lines}\n{reply}"), ids)
 }
 
 /// Receipts for messages a runner was just shown, and a local mark for
@@ -1260,6 +1364,50 @@ mod tests {
         assert!(text.contains("2 more in ljos inbox"), "{text}");
         assert_eq!(ids.iter().filter(|id| id.starts_with("mail:")).count(), 8);
         assert!(!ids.iter().any(|id| id == "mail:m7" || id == "mail:m8"));
+    }
+
+    #[test]
+    fn a_misspelt_seat_is_answered_with_the_seat_it_meant() {
+        let known: BTreeSet<String> = ["ljos-bot", "saddle", "inky"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(closest_seat("ljos", &known), Some("ljos-bot"));
+        assert_eq!(closest_seat("sadle", &known), Some("saddle"));
+        assert_eq!(closest_seat("eessi", &known), None);
+        let err = check_known("ljos", &known, false).unwrap_err().to_string();
+        assert!(err.contains("Did you mean ljos-bot?"), "{err}");
+        let err = check_known("eessi", &known, false).unwrap_err().to_string();
+        assert!(!err.contains("Did you mean"), "{err}");
+        assert!(check_known("eessi", &known, true).is_ok());
+    }
+
+    #[test]
+    fn a_stop_carries_unread_interrupt_mail_only() {
+        let plain = outgoing("plain", "grok", &["claude"], "when you can");
+        let mut hot = outgoing("hot", "grok", &["claude"], "take Software-d9n6 now");
+        hot.interrupt = true;
+        hot.issue = Some("Software-d9n6".into());
+        let atoms = [
+            atom(&plain, "2026-10-11T00:00:00Z"),
+            atom(&hot, "2026-10-11T00:00:01Z"),
+        ];
+        let (text, ids) = stop_lines(&atoms, "claude");
+        assert!(text.starts_with(STOP_MAIL_HEAD), "{text}");
+        assert!(
+            text.contains("! hot from grok on Software-d9n6: take Software-d9n6 now"),
+            "{text}"
+        );
+        assert!(!text.contains("when you can"), "{text}");
+        assert_eq!(ids, ["mail:hot"]);
+        let read = json!({
+            "kind": "receipt",
+            "text": "read hot\nby claude\nat 2026-10-11T00:00:02Z\nmsg r1",
+            "entities": ["seat:claude", "from:claude", "to:grok", "receipt:hot", "msg:r1"],
+        });
+        let after = [atoms[0].clone(), atoms[1].clone(), read];
+        assert_eq!(stop_lines(&after, "claude"), (String::new(), Vec::new()));
+        assert_eq!(stop_lines(&atoms, "grok"), (String::new(), Vec::new()));
     }
 
     #[test]

@@ -25,4 +25,10 @@ In Cursor, a message the prompt hook finds is handed to the agent with the
 next tool result, since Cursor does not pass a prompt hook's text to the
 model.
 
+An agent that is idle sees mail only when something starts its next turn.
+`ljos wake --command CMD` sets a command that runs when mail reaches your seat, such as `claude -p --resume`, `codex exec resume` or `agent -p --resume`, and `ljos wake --webhook URL --key-file FILE` wakes a Grok Bot through its routine's webhook.
+`ljos send` starts the recipient's wake for you.
+An agent still working gets interrupt mail when it is about to stop, so use `--interrupt` when the work cannot wait.
+A seat name ljos has never seen is refused with the closest one it knows.
+
 Keep messages short and about the work: what you need, which ticket, by when.
