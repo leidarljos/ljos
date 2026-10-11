@@ -35,16 +35,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. It is stored as an episode until a recalled review promotes it.
+    /// Remember one lesson. Typed by the person it takes effect at once; from an agent runner it is an episode until a review promotes it.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Store this as an episode. It is kept, and it is not a refresher. This is the default.
+        /// Store this as an episode. It is kept, and it is not a refresher. The default under an agent runner.
         #[arg(long)]
         transient: bool,
-        /// Store this as a standing rule now, without waiting for a review.
+        /// Store this as a standing rule now, without waiting for a review. The default when the person types it.
         #[arg(long)]
         standing: bool,
     },
@@ -55,7 +55,7 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
-    /// Write one agent proposal into the pack. Until then it is not a memory.
+    /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
@@ -736,15 +736,11 @@ fn main() -> Result<()> {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
-            let horizon = if transient {
-                Some(true)
-            } else if standing {
-                Some(false)
-            } else {
-                None
-            };
+            let horizon =
+                ljos_cli::remember_horizon(transient, standing, ljos_cli::under_a_runner());
             let body = packset_write_as("Remember", &join(&text), as_persona.as_deref(), horizon)?;
             println!("{}", format_write_ack(&body));
+            eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
                 eprintln!(
                     "revises {} earlier memor{}, now closed: {}",
@@ -763,6 +759,22 @@ fn main() -> Result<()> {
             println!("{}", format_write_ack(&body));
         }
         Cmd::Accept { id } => {
+            // The agent proposed the lesson; accepting it is a review by
+            // someone else. Under a runner that is the conversation that
+            // started a worker, reviewing the worker's proposal; an agent
+            // that accepted its own proposal would skip the review.
+            if ljos_cli::under_a_runner()
+                && !ljos_cli::accepts_another_conversation(
+                    ljos_cli::admit::proposed_by(&id).as_deref(),
+                    &ljos_cli::holder_name(),
+                )
+            {
+                bail!(
+                    "accept: this conversation filed {id}, or the proposal names no conversation, \
+                     and an agent can't accept its own proposal. The person runs `ljos accept {id}` \
+                     in a terminal of their own, or the conversation that started this worker runs it"
+                );
+            }
             print!("{}", ljos_cli::admit::accept(&id)?);
         }
         Cmd::Forget { id, why, json } => {

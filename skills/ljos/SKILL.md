@@ -114,9 +114,10 @@ Every piece of work has an issue before it has a claim.
   Citing a deed names it; the bytes stay in deedar.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
-- A lesson is one `ljos remember` of two short sentences at most. It is
-  stored as an episode and is not a refresher until `ljos graded ID`
-  recalls it, or until consolidation finds it replaced an earlier claim.
+- A lesson is one `ljos remember` of two short sentences at most. Run by
+  you, the agent, it is stored as an episode and is not a refresher until
+  `ljos graded ID` recalls it, or until consolidation finds it replaced an
+  earlier claim. The person's own `ljos remember` takes effect at once.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
@@ -304,7 +305,9 @@ ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 ```
 
 It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
-writes that lesson into the pack and records that the person accepted it.
+writes that lesson into the pack as a standing lesson and records that the
+person accepted it. The person runs it; under an agent runner it accepts only a proposal
+another conversation filed, such as a worker you started.
 A lesson the person types with `ljos remember` stays `user-declared`, and
 the same words satisfy the open proposal. The verb then fires the island,
 completes the session node, and learns from a named outcome. Without

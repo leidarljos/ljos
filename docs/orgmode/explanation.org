@@ -265,8 +265,9 @@ the pack when someone says to keep it with =remember= or =prefer=, and
 that write is origin =user-declared=. =finish --lesson= and
 =findings --remember= file origin =agent-derived= as proposals. The
 prompt hook files a correction as a proposal and does not write it.
-=ljos accept= writes a proposal, and so does the same text typed with
-=remember= or =prefer=. An import from =receive= or =sync= is origin
+=ljos accept= writes a proposal as a standing lesson, and so does the same
+text typed with =remember= or =prefer=. The person runs =accept=; under an
+agent runner it refuses. An import from =receive= or =sync= is origin
 =peer=. None of these paths reads a runner's own memory, so the seat
 and that memory sit side by side without either writing the other.
 
