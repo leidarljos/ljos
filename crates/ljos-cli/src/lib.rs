@@ -17046,7 +17046,8 @@ pub fn packset_search(query: &str) -> Result<Vec<Hit>> {
 /// [`packset_search`] with a limit and the cross-encoder rerank: the
 /// writer scores the top hits against the query with its reranker, which
 /// costs a model call and buys precision. For a brief or a person reading,
-/// not for the hook.
+/// not for the hook. A claim the fused ranking and the encoder both
+/// placed first stays at the head; the reranker reorders the rest.
 pub fn packset_search_opts(query: &str, limit: u32, rerank: bool) -> Result<Vec<Hit>> {
     packset_search_as_of(query, limit, None, rerank)
 }
@@ -17076,13 +17077,51 @@ pub fn packset_search_as_of(
         Some(at) => Some(at.to_string()),
         None => None,
     };
-    with_writer(|| {
+    let found = with_writer(|| {
         let client = pack()?;
         let workspace = client.workspace();
         client
             .search_opts(&workspace, q, limit, stamp.as_deref(), rerank)
             .context("search: GET /v1/search failed")
-    })
+    })?;
+    // The cross-encoder replaces the head. When the fused leader is also
+    // the encoder's first hit, that agreement stays in front and the
+    // cross-encoder's order stands under it. A dated search is left as
+    // the writer returned it: the encoder's ballot describes the pack
+    // now, and the signal read below asks for now.
+    if !rerank || stamp.is_some() {
+        return Ok(found);
+    }
+    let Some((leader, signal)) = search_with_signals(q, limit)
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+    else {
+        return Ok(found);
+    };
+    Ok(pin_encoder_leader(found, leader, signal.rank))
+}
+
+/// Keep `leader` at the front when `rank` is [`DENSE_ALONE_RANK`]: the
+/// fused ranking and the encoder named the same claim first. The list
+/// stays the same length. Any other rank leaves the cross-encoder's
+/// order as it stands.
+#[must_use]
+pub fn pin_encoder_leader(mut reranked: Vec<Hit>, leader: Hit, rank: Option<u32>) -> Vec<Hit> {
+    if rank != Some(DENSE_ALONE_RANK) {
+        return reranked;
+    }
+    let same = |a: &Hit, b: &Hit| match (&a.id, &b.id) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.text == b.text,
+    };
+    if reranked.first().is_some_and(|hit| same(hit, &leader)) {
+        return reranked;
+    }
+    let keep = reranked.len();
+    reranked.retain(|hit| !same(hit, &leader));
+    reranked.insert(0, leader);
+    reranked.truncate(keep);
+    reranked
 }
 
 /// The actor id in a `claimdag get` line (`assignee=HEX`), if any.
@@ -23264,6 +23303,134 @@ mod tests {
         let mut untagged = lesson.clone();
         untagged.entities.clear();
         assert!(!admits_local(&untagged, sure, long, 1.0, DENSE_ALONE_AT));
+    }
+
+    fn pin_hit(id: &str, text: &str) -> Hit {
+        Hit {
+            id: Some(id.into()),
+            text: text.into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec![],
+            ballots: Some(2),
+            of: Some(3),
+        }
+    }
+
+    #[test]
+    fn an_agreed_leader_stays_ahead_of_the_reranker() {
+        let leader = pin_hit("lead", "the agreed claim");
+        let other = pin_hit("other", "the reranker's pick");
+        let tail = pin_hit("tail", "the third");
+        let reranked = vec![other.clone(), tail.clone(), leader.clone()];
+        let pinned = pin_encoder_leader(reranked, leader.clone(), Some(DENSE_ALONE_RANK));
+        assert_eq!(pinned[0].id.as_deref(), Some("lead"));
+        assert_eq!(pinned.len(), 3);
+        assert_eq!(pinned[1].id.as_deref(), Some("other"));
+        // Already first: the list is left alone.
+        let already = vec![leader.clone(), other.clone()];
+        let same = pin_encoder_leader(already.clone(), leader.clone(), Some(1));
+        assert_eq!(same[0].id, already[0].id);
+        assert_eq!(same[1].id, already[1].id);
+        // The encoder ranked someone else first: the reranker's order stands.
+        let disagreed = vec![other.clone(), leader.clone()];
+        let left = pin_encoder_leader(disagreed, leader.clone(), Some(2));
+        assert_eq!(left[0].id.as_deref(), Some("other"));
+        let unknown = pin_encoder_leader(vec![other.clone(), leader.clone()], leader, None);
+        assert_eq!(unknown[0].id.as_deref(), Some("other"));
+        // No id on either side: the text is the identity, and a leader the
+        // window dropped still takes the first place within the same length.
+        let mut dropped = pin_hit("gone", "kept by the encoder");
+        dropped.id = None;
+        let mut stranger = pin_hit("x", "stranger");
+        stranger.id = None;
+        let window = vec![stranger.clone(), tail];
+        let restored = pin_encoder_leader(window, dropped.clone(), Some(1));
+        assert_eq!(restored[0].text, dropped.text);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[1].text, stranger.text);
+        assert!(restored[1].id.is_none());
+    }
+
+    /// A reranked search whose fused leader is also the encoder's first
+    /// hit comes back with that hit in front. A leader the encoder ranked
+    /// lower stays where the reranker put it, and a dated search is the
+    /// writer's order.
+    #[test]
+    fn a_reranked_search_keeps_the_encoder_s_first_hit() {
+        let _env = env_guard();
+        let row = |id: &str, text: &str, rank: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "entities": ["horizon:standing"], "ballots": 2, "of": 3,
+                "dense_rank": rank, "cosine": 0.73
+            })
+        };
+        let (url, seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let hits = if first.contains("rerank=1") {
+                serde_json::json!([
+                    row("other", "the reranker's pick", 4),
+                    row("tail", "the third", 2),
+                    row("lead", "the agreed claim", 1),
+                ])
+            } else {
+                serde_json::json!([
+                    row("lead", "the agreed claim", 1),
+                    row("other", "the reranker's pick", 4),
+                    row("tail", "the third", 2),
+                ])
+            };
+            (200, serde_json::json!({ "hits": hits }).to_string())
+        });
+        let _url = PackUrl::set(&url);
+        let found = packset_search_opts("tag the release", 3, true).unwrap();
+        assert_eq!(found[0].id.as_deref(), Some("lead"), "{found:?}");
+        assert_eq!(found.len(), 3);
+        drop(_url);
+        drop(seen);
+
+        let (url, _seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let hits = if first.contains("rerank=1") {
+                serde_json::json!([
+                    row("other", "the reranker's pick", 1),
+                    row("fused", "the fused leader", 4),
+                ])
+            } else {
+                serde_json::json!([
+                    row("fused", "the fused leader", 4),
+                    row("other", "the reranker's pick", 1),
+                ])
+            };
+            (200, serde_json::json!({ "hits": hits }).to_string())
+        });
+        let _url = PackUrl::set(&url);
+        let found = packset_search_opts("which database", 3, true).unwrap();
+        assert_eq!(found[0].id.as_deref(), Some("other"));
+        drop(_url);
+
+        let (url, seen) = serve_http(move |_req| {
+            let hits = serde_json::json!([
+                row("other", "the reranker's pick", 1),
+                row("lead", "the agreed claim", 1),
+            ]);
+            (200, serde_json::json!({ "hits": hits }).to_string())
+        });
+        let _url = PackUrl::set(&url);
+        let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
+        assert_eq!(found[0].id.as_deref(), Some("other"));
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("rerank=1"), "{lines:?}");
+        assert!(lines[0].contains("as_of="), "{lines:?}");
     }
 
     /// A pack whose search sends the encoder's rank and cosine on each hit.
