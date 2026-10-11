@@ -62,14 +62,25 @@ fn an_issue_with_no_ballots_does_not_settle() {
     assert!(err.contains("holds no ballots"), "{err}");
 }
 
+fn one_document(stdout: &[u8]) -> serde_json::Value {
+    let text = String::from_utf8(stdout.to_vec()).unwrap();
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("not one JSON document ({e}): {text}"))
+}
+
 #[test]
 fn json_is_one_document() {
     let (dir, home) = fakes(r#"[{"agent":"alice","choice":"rrf"},{"agent":"bob","choice":"rrf"}]"#);
     let out = consensus(dir.path(), &home, &["proj-v0te", "--json"]);
     assert!(out.status.success(), "{out:?}");
-    let text = String::from_utf8(out.stdout).unwrap();
-    let doc: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("not one JSON document ({e}): {text}"));
-    assert_eq!(doc["settle"]["winner"], "rrf", "{text}");
-    assert_eq!(doc["tracker"], "consensus: rrf 2 of 2, settled", "{text}");
+    let doc = one_document(&out.stdout);
+    assert_eq!(doc["push_cite"]["stands"], true, "{doc}");
+    assert_eq!(doc["push_cite"]["choice"], "rrf", "{doc}");
+    assert_eq!(doc["settle"]["winner"], "rrf", "{doc}");
+    assert!(doc.get("tracker").is_none(), "{doc}");
+
+    let compared = consensus(dir.path(), &home, &["proj-v0te", "--json", "--compare"]);
+    assert!(compared.status.success(), "{compared:?}");
+    let doc = one_document(&compared.stdout);
+    assert_eq!(doc["settle"]["winner"], "rrf", "{doc}");
+    assert_eq!(doc["tracker"], "consensus: rrf 2 of 2, settled", "{doc}");
 }

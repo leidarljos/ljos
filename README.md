@@ -47,7 +47,7 @@ refuses the command before it runs. `ljos-policyd` answers first, with the
 rules it ships:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
 ```
 
 `sh -c "cd repo && git push -f origin main"` gets the same answer. A command
@@ -65,12 +65,14 @@ you run `ljos accept ID` in your own terminal; then it shows at once too. An
 `ljos remember` that an agent runs from inside its runner is an episode: the
 hook shows it once a review promotes it, and `ljos due` lists those.
 
-The hooks also keep the work on the tracker. A conversation with no issue
-gets told, on the first tool result, to file one and sit. A conversation that
-has an issue waits forty tool calls before the reminder to record the work.
-Where the runner registers `Stop`, the hook also blocks a turn once if it
-used tools and never touched the seat. Of the shapes ljos carries, `grok` and
-`antigravity` register it. For `claude` or `codex`, add `Stop` to that
+The hooks also keep the work on the tracker once a conversation sits on an
+issue: after forty tool calls without a word to the seat, they remind it to
+record the work. With `LJOS_TRACK_WORK=on` in the environment or in
+`~/.config/ljos/env`, a conversation with no issue is told on the first tool
+result to open one with `vissue q` and sit, and `Stop` blocks that turn once
+if it used tools and never touched the seat. Without it, a conversation that
+never sits hears nothing about the tracker. Of the shapes ljos carries, `grok` and
+`antigravity` register `Stop`. For `claude` or `codex`, add `Stop` to that
 runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
 
 ## What you get
@@ -119,6 +121,8 @@ copied before recall. Without `--playbook`, the sitting takes a name already
 bound, then a closed-set token in the title, then `sit`. The playbook name
 lives as a tracker note until finish or release, and `ljos panel` refuses to
 run until one is bound.
+The sitting prints a short report: whether ljos is ready, what needs action, what the seat remembers for the task, and the claim.
+`--verbose` prints every section in full.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
 goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
@@ -324,7 +328,8 @@ ljos habit                                     # every habit as it stands, the c
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
-ljos doctor
+ljos doctor                                    # whether ljos is ready, and only the rows that need action
+ljos doctor --all                              # every row
 ljos protocol
 ljos onboard                                   # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes

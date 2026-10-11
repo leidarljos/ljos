@@ -650,6 +650,22 @@ fn catch_up(root: &Path) -> String {
 /// A scope file that does not parse, the pack not answering, or age
 /// refusing to seal.
 pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
+    sync_repos(pull_import, export_log, true)
+}
+
+/// [`sync_repo`] as the sitting and finish run it: a repository with no
+/// scope file is skipped without a word. Sync is opt-in, and a hint on
+/// every sitting pointed agents at a remote the person had not asked for.
+/// `ljos sync` by hand still names the missing file.
+///
+/// # Errors
+///
+/// As [`sync_repo`].
+pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<String> {
+    sync_repos(pull_import, export_log, false)
+}
+
+fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
     let listed = local().repos;
     let roots: Vec<PathBuf> = if listed.is_empty() {
         vec![tracker_root()?]
@@ -658,14 +674,17 @@ pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
     };
     let mut out = String::new();
     for root in roots {
-        out.push_str(&sync_one(&root, pull_import, export_log)?);
+        out.push_str(&sync_one(&root, pull_import, export_log, asked)?);
     }
     Ok(out)
 }
 
-fn sync_one(root: &Path, pull_import: bool, export_log: bool) -> Result<String> {
+fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
     let root = root.to_path_buf();
     let Some(scope) = scope_of_repo(&root)? else {
+        if !asked {
+            return Ok(String::new());
+        }
         return Ok(format!(
             "sync: {} names no scope; write .ljos/sync.toml with name and recipients (`ljos sync --key` prints this machine's)\n",
             root.display()
@@ -692,6 +711,17 @@ mod tests {
     fn atom(id: &str, text: &str, entities: &[&str]) -> Value {
         serde_json::json!({"id": id, "text": text, "kind": "lesson",
             "entities": entities, "embedding": [0.1, 0.2]})
+    }
+
+    #[test]
+    fn a_repository_with_no_scope_is_named_only_when_sync_is_asked_for() {
+        let root = std::env::temp_dir().join(format!("ljos-sync-noscope-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let asked = sync_one(&root, true, false, true).unwrap();
+        assert!(asked.contains("names no scope"), "{asked}");
+        assert_eq!(sync_one(&root, true, false, false).unwrap(), "");
+        assert_eq!(sync_one(&root, false, true, false).unwrap(), "");
+        let _ = std::fs::remove_dir(&root);
     }
 
     #[test]
