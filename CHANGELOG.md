@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- A name passed to `--assignee` on the command line holds the claim, the seat's own name too. `ljos sitting ISSUE --assignee saddle` from seat `saddle` claimed under the conversation's holder, a session id, so the tracker's `CLAIMED_BY` named that id and a board filtered by seat missed the claim. `sitting`, `finish`, `claim`, `complete` and `release` now take the name as given; with no `--assignee`, or `seat`, `you` or `agent`, the holder is the conversation's as before. A tool call's `assignee` field still reads the seat's own name as the conversation, since runners echo it.
 - `ljos finish` completes the session node before it files the lesson. When the pack refused the `--lesson` text, for example on its readability grade, the whole finish stopped with exit 1 and the node stayed open, though the work was done. Now the node completes, the refusal is a line with the pack's reason and the `ljos remember` command that keeps the lesson once reworded, and finish exits non-zero only when the completion itself fails. A pack that does not answer the island no longer fails the finish either.
 - `ljos evidence` prints the time a deed was produced as an `at=` line in ISO 8601 with this machine's UTC offset (`at=2026-10-10T16:24:30-05:00`), after deedar's `time=` line in seconds since the epoch. The `time=` line is unchanged, so the timeline and scripts that read it keep working.
 

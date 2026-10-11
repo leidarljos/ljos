@@ -1861,6 +1861,20 @@ pub fn resolve_assignee(passed: Option<&str>) -> String {
     }
 }
 
+/// Resolve a command line `--assignee`. A name typed on the command line
+/// is taken as given, the seat's own name too, so `ljos sitting ISSUE
+/// --assignee saddle` claims as saddle and a board filtered by seat finds
+/// it. Empty or a pronoun (`seat`, `you`, `agent`) is the conversation's
+/// holder. A tool call's field keeps [`resolve_assignee`], where a runner
+/// echoing its own seat name means itself.
+#[must_use]
+pub fn cli_assignee(passed: Option<&str>) -> String {
+    match passed.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(n) if !omitted_actor_name(n) => n.to_string(),
+        _ => holder_name(),
+    }
+}
+
 /// Occupancy is always `{name}:{issue}`. One live claim per name is what
 /// made two conversations unseat each other; the issue is already
 /// exclusive. Already-scoped names (they contain `:`) are left alone.

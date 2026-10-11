@@ -3,8 +3,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, complete, conflicts,
-    consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, complete,
+    conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
     format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
     format_hubs, format_island, format_personas, format_playbooks, format_readings,
     format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
@@ -13,12 +13,11 @@ use ljos_cli::{
     packset_consolidate, packset_forget, packset_hubs, packset_island_as, packset_search_as_of,
     packset_write_as, panel, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
     policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign,
-    receive, release, remember_findings, resolve_assignee, rows_about, rules_from_pack, run,
-    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami,
-    with_discount, withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB,
-    PROTOCOL,
+    receive, release, remember_findings, rows_about, rules_from_pack, run, run_as, run_captured,
+    session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words,
+    tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami, with_discount,
+    withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule, write_trust,
+    Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -661,7 +660,7 @@ enum Cmd {
     Sitting {
         /// The tracker id of the issue.
         issue: String,
-        /// Occupancy name. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
+        /// Occupancy name, taken as given, the seat's own name too. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
         #[arg(long)]
         assignee: Option<String>,
         /// Where the cards are read from.
@@ -1231,7 +1230,7 @@ fn main() -> Result<()> {
             role,
             slack,
         } => {
-            let assignee = resolve_assignee(assignee.as_deref());
+            let assignee = cli_assignee(assignee.as_deref());
             if next || node.is_empty() {
                 print!("{}", claim_next(&assignee, role.as_deref(), slack)?);
             } else {
@@ -1239,10 +1238,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Release { node, assignee } => {
-            print!(
-                "{}",
-                release(&node, &resolve_assignee(assignee.as_deref()))?
-            );
+            print!("{}", release(&node, &cli_assignee(assignee.as_deref()))?);
             print!("{}", ljos_cli::persist_tracker(&node, "released"));
         }
         Cmd::Complete {
@@ -1255,7 +1251,7 @@ fn main() -> Result<()> {
             complete(
                 &node,
                 status.as_deref(),
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 gen
             )?
         ),
@@ -1900,7 +1896,7 @@ fn main() -> Result<()> {
             "{}",
             sitting_gated(
                 &issue,
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 &cards_dir,
                 anyway,
                 playbook.as_deref()
@@ -1925,7 +1921,7 @@ fn main() -> Result<()> {
                 outcome.as_deref(),
                 new_option,
                 beta,
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 gen,
                 close
             )?
