@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub mod admit;
 pub mod approval;
+pub mod ask_pack;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -11593,6 +11594,17 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
         .or_else(|| rules.iter().find(|r| r.verdict == "ask" && fires(r)))
 }
 
+/// The verdict a shell line gets before it runs: the pack's own rules
+/// first ([`verdict_for`]), then the built-in ask pack
+/// ([`ask_pack::ask_pack_verdict`]), so a person's `deny` or `ask` on the
+/// same line wins.
+#[must_use]
+pub fn ruled_verdict(rules: &[Rule], line: &str) -> Option<Rule> {
+    verdict_for(rules, line)
+        .cloned()
+        .or_else(|| ask_pack::ask_pack_verdict(line))
+}
+
 /// The refusal of a line nested past [`NESTED_DEPTH`]: it is not read to
 /// the bottom, so no rule can say it is clean.
 fn too_deep_rule() -> &'static Rule {
@@ -17646,7 +17658,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         .ok()
         .map(|d| d.display().to_string());
     let gated = redirect_seat_verb(
-        gate_push(verdict_for(&rules, &line), &line, cwd.as_deref()),
+        gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
         &line,
     );
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());

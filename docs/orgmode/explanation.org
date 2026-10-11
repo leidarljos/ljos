@@ -33,7 +33,7 @@ store answers for it.
 * How a shell command is judged
 
 Before an agent's shell command runs, the runner's hook hands it to
-=ljos hook=, which asks four layers, in the order below. No later layer can allow
+=ljos hook=, which asks five layers, in the order below. No later layer can allow
 what an earlier one refused, so the first refusal wins.
 
 - *The seat guard.* It refuses a command that writes the seat's own
@@ -53,6 +53,15 @@ what an earlier one refused, so the first refusal wins.
    of the line. A quoted sentence or a heredoc body counts as data.
    The rules last read are kept under =$XDG_DATA_HOME/ljos=, and they
    stand when the pack is down or switched off.
+- *The ask pack.* It is built into ljos and on by default, and asks the person
+   before a command that drops or resets a database, tears down
+   infrastructure, deletes cluster or cloud resources, prunes containers
+   or volumes, publishes or yanks a package, prints a secret, or empties a
+   file. Each ask gives the reason and a safer form. A seat rule on the
+   same command comes first. ~LJOS_ASK_PACK=off~ in the runner's environment
+   turns the pack off, and a list such as ~LJOS_ASK_PACK=db,cloud~ keeps
+   only those classes: =db=, =cloud=, =containers=, =publish=, =secrets= and
+   =files=.
 - *The push check.* A =git push= is free to a repository the account
    owns alone and has never released; to any other it needs
    =LJOS_CITE= set to the issue that records the decision behind it.

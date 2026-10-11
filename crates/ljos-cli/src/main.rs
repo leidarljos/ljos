@@ -15,10 +15,10 @@ use ljos_cli::{
     personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
     prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about, run,
     run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami,
-    with_discount, withdraw_prediction, write_outcome, write_persona_as, write_prediction,
-    write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE,
-    LEARN_BETA, POLICY_TCB, PROTOCOL,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, whoami, with_discount,
+    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
+    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -1491,7 +1491,7 @@ fn main() -> Result<()> {
             } else {
                 ljos_cli::redirect_seat_verb(
                     ljos_cli::gate_push(
-                        verdict_for(&rules, &call.cue),
+                        ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
                         &call.cue,
                         cwd.as_ref().ok().and_then(|p| p.to_str()),
                     ),
