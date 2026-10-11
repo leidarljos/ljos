@@ -121,9 +121,9 @@ const INSTRUCTIONS_CORE: &str =
      ljos_doctor when another tool fails, and ljos_request_approval for a command the hook \
      held. LJOS_MCP_TOOLS=all in the server's environment lists the other tools. A tool \
      that fails means a habitat refused or is not running; it is not an empty answer. \
-     The seat is named after the client that connected. The holder is any `*_SESSION_ID` \
-     the runner stamped, the whole value, else that name tagged with the runner's \
-     process; a shell the runner opens finds the same names, so no field here needs an \
+     The seat is named after the client that connected. The holder is that name and a \
+     short tag for the `*_SESSION_ID` the runner stamped, else that name tagged with the \
+     runner's process; a shell the runner opens finds the same names, so no field here needs an \
      assignee.";
 
 /// The instructions for this server's tool set: `all` with every tool
@@ -2515,8 +2515,8 @@ impl ServerHandler for LjosServer {
              ljos_release hands one back unfinished. A \
              tool that fails means a habitat refused or is not running; it is not \
              an empty answer. The seat is named after the client that connected. \
-             The holder is any `*_SESSION_ID` the runner stamped, the whole value, \
-             else that name tagged with the runner's process; a shell the runner \
+             The holder is that name and a short tag for the `*_SESSION_ID` the \
+             runner stamped, else that name tagged with the runner's process; a shell the runner \
              opens finds the same names, so no field here needs an assignee.",
         ))
     }
