@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos consensus` names the standing of the issue's voters only. The EigenTrust step runs over every trust row about the topic, and its JSON beside the settle listed personas that never voted, at 0.0807 each on one issue, as if they had weight there. The others are now counted on one line, and `--json` and the `ljos_consensus` tool still return the full JSON.
 - A refusal from `ljos-policyd` says what the command would have done and what to run instead. The hook passed on the check's token alone, so a runner showed ``git-force-push (seat rule `ljos-policyd`)`` and the agent had to guess the next step. The token still comes first, so logs and scripts that look for it keep working. A token this build does not know is passed through as before. A missing `ljos-policyd` under `POLICYD_REQUIRED` names the install line.
 - `ljos complete`, `ljos finish` and `ljos release` act on a claim that another conversation of the same seat took: a background worker the conversation started, or the conversation that started the worker. Before, a seat could not complete or close the claims its finished workers left, and a worker could not finish its parent's claim; both failed with `not assignee`. The output names that conversation. A claim of another seat is still refused.
 - The integration page has a table of what each runner does when its hook fails, times out or prints something that is not JSON, with the source for each cell, and names the cells no source documents.

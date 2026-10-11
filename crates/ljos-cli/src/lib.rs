@@ -16917,6 +16917,48 @@ pub fn voters_of(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// The reputation step's JSON in words, for the voters on this issue only.
+/// EigenTrust runs over every trust row about the topic, so its standing
+/// names personas and seats that never voted here; listing them beside
+/// the settle read as influence they did not have. Those are counted, not
+/// named. `None` when the text is not reputation JSON.
+#[must_use]
+pub fn standing_in_words(json: &str, voters: &[String]) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let standing = v["standing"].as_object()?;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut named = Vec::new();
+    for voter in voters.iter().map(|v| v.trim()) {
+        if voter.is_empty() || seen.contains(&voter) {
+            continue;
+        }
+        seen.push(voter);
+        named.push(match standing.get(voter).and_then(Value::as_f64) {
+            Some(s) => format!("{voter} {s:.3}"),
+            None => format!("{voter} (no trust row)"),
+        });
+    }
+    let others = standing
+        .keys()
+        .filter(|k| !seen.contains(&k.as_str()))
+        .count();
+    let mut out = if named.is_empty() {
+        "standing in the trust rows: nobody voted on this issue\n".to_string()
+    } else {
+        format!(
+            "standing in the trust rows (EigenTrust), voters on this issue: {}\n",
+            named.join(", ")
+        )
+    };
+    if others > 0 {
+        out.push_str(&format!(
+            "the rows name {others} more {} with no ballot here; `ljos consensus --json` lists them\n",
+            if others == 1 { "agent" } else { "agents" }
+        ));
+    }
+    Some(out)
+}
+
 /// What the push gate makes of an issue, the first lines `ljos consensus`
 /// prints: whether a push citing it stands for `pusher`, on which seat
 /// ballots ([`seats_decide`]), then what the ballots' confidence does.
@@ -20641,6 +20683,36 @@ mod tests {
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].args[0], "surprising");
         assert_eq!(steps[1].args[0], "reputation");
+    }
+
+    /// The standing beside a settle names the voters on the issue and only
+    /// counts the rest of the trust rows: four personas that never voted
+    /// once showed up beside eessi and inky.
+    #[test]
+    fn standing_names_only_the_voters_on_the_issue() {
+        let json = r#"{"alpha":0.15,"standing":{"eessi":0.33,"inky":0.31,"pyos-editor":0.0807,"rohit-voice":0.0807,"scipy-maintainer":0.0807,"voice-reader":0.0807}}"#;
+        let voters = vec!["eessi".to_string(), "inky".to_string()];
+        let words = standing_in_words(json, &voters).unwrap();
+        assert!(
+            words.contains("voters on this issue: eessi 0.330, inky 0.310"),
+            "{words}"
+        );
+        assert!(
+            words.contains("4 more agents with no ballot here"),
+            "{words}"
+        );
+        for persona in [
+            "pyos-editor",
+            "rohit-voice",
+            "scipy-maintainer",
+            "voice-reader",
+        ] {
+            assert!(!words.contains(persona), "{words}");
+        }
+        let only = standing_in_words(r#"{"standing":{"eessi":1.0}}"#, &voters).unwrap();
+        assert!(only.contains("inky (no trust row)"), "{only}");
+        assert!(!only.contains("more"), "{only}");
+        assert!(standing_in_words("not json", &voters).is_none());
     }
 
     /// A scoped row applies when the issue is about one of its domains; an
