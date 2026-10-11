@@ -2273,6 +2273,104 @@ pub fn onboard(harness: &str, dry: bool) -> Result<Vec<Step>> {
 ///
 /// Same as [`onboard`]. A shell runner with no skills directory, in the
 /// table or in `skills`, is an error.
+/// Commands that show a runner is installed, besides its own name.
+const RUNNER_COMMANDS: &[(&str, &[&str])] = &[
+    ("cursor", &["cursor-agent", "cursor"]),
+    ("factory", &["droid"]),
+    ("antigravity", &["agy", "antigravity"]),
+    ("vscode", &["code"]),
+    ("amazonq", &["q"]),
+];
+
+/// The runners among `shapes` this machine has: a runner's command is on
+/// the PATH, or the directory its MCP config or its hooks file sits in
+/// exists under `home`. Shell-only runners and the example shapes are
+/// never found, since nothing on disk tells them apart.
+#[must_use]
+pub fn detect_runners(
+    shapes: &[Harness],
+    home: &Path,
+    on_path: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let under_home =
+        |p: &str| -> Option<PathBuf> { p.strip_prefix("~/").map(|rest| home.join(rest)) };
+    let mut found: Vec<String> = Vec::new();
+    for h in shapes {
+        if h.shell || h.name.starts_with("runner-with-") || found.contains(&h.name) {
+            continue;
+        }
+        let extra = RUNNER_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == h.name)
+            .map_or(&[][..], |(_, cmds)| *cmds);
+        let by_command = on_path(&h.name) || extra.iter().any(|c| on_path(c));
+        let by_dir = [&h.config, &h.config_json, &h.hooks, &h.hooks_named]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| under_home(p))
+            .any(|p| p.parent().is_some_and(Path::is_dir));
+        if by_command || by_dir {
+            found.push(h.name.clone());
+        }
+    }
+    found
+}
+
+/// Onboard every runner [`detect_runners`] finds, from the shapes ljos
+/// ships and the ones `harnesses.toml` names. Each runner's steps follow a
+/// line naming it, a runner that fails is said and the rest go on, and a
+/// step two runners share (the pack, the host key) is said once.
+///
+/// # Errors
+///
+/// The home directory is unknown.
+pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
+    let file = harnesses_path();
+    let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
+    let mut shapes = harnesses_from(&file).map(|h| h.harness).unwrap_or_default();
+    shapes.extend(shipped.harness);
+    let found = detect_runners(&shapes, &home()?, &|c| on_path(c));
+    if found.is_empty() {
+        return Ok(vec![Step {
+            what: "runners".into(),
+            detail: "found no coding tool on this machine; `ljos onboard --harness NAME` \
+                     names one, and `ljos onboard --example` lists the shapes ljos knows"
+                .into(),
+            ok: true,
+        }]);
+    }
+    let mut steps = vec![Step {
+        what: "runners".into(),
+        detail: format!("found {}", found.join(", ")),
+        ok: true,
+    }];
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for name in &found {
+        steps.push(Step {
+            what: "runner".into(),
+            detail: name.clone(),
+            ok: true,
+        });
+        match onboard_in(&file, name, dry, skills) {
+            Ok(done) => {
+                for step in done {
+                    let key = (step.what.clone(), step.detail.clone());
+                    if !seen.contains(&key) {
+                        seen.push(key);
+                        steps.push(step);
+                    }
+                }
+            }
+            Err(e) => steps.push(Step {
+                what: name.clone(),
+                detail: format!("{e:#}"),
+                ok: false,
+            }),
+        }
+    }
+    Ok(steps)
+}
+
 pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
     onboard_in(&harnesses_path(), harness, dry, skills)
 }
@@ -21132,6 +21230,21 @@ mod tests {
             "{}",
             earlier.detail
         );
+    }
+
+    #[test]
+    fn a_bare_onboard_finds_the_runners_on_this_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        let shapes: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap();
+        let on_path = |c: &str| c == "claude";
+        let found = detect_runners(&shapes.harness, home, &on_path);
+        assert_eq!(found, ["claude", "codex", "cursor"], "{found:?}");
+        // Nothing installed, nothing found; shell runners never are.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(detect_runners(&shapes.harness, empty.path(), &|_| false).is_empty());
     }
 
     #[test]

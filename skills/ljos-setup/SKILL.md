@@ -26,8 +26,8 @@ Check the programs first.
 4. Tell the person to start a new chat, or reload the window, so the hooks and
    the tool server pick up the programs.
 
-Do not run `ljos onboard --harness cursor` when this plugin is installed. The
-plugin already registers the hooks and the tool server, and onboarding would
-register them a second time in `~/.cursor/hooks.json`.
+`ljos onboard`, bare or with `--harness cursor`, sees this plugin and leaves
+Cursor to it. The plugin already registers the hooks and the tool server, so
+onboarding writes nothing to `~/.cursor/hooks.json` and each hook runs once.
 
 The binaries go to `~/.cargo/bin`. The plugin also looks in `~/.local/bin`.
