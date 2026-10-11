@@ -14,12 +14,14 @@ Command line
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``calibrate -p PROJECT [--rounds N]``                                                                                                     | consensus, pack           | trust rows from the project's voting history (Dawid-Skene accuracy)                                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``remember TEXT [--as PERSONA] [--transient\vert--standing]``                                                                             | pack                      | one lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; ``--transient`` (the default) stores an episode that |
-|                                                                                                                                           |                           | is kept and is not a refresher; ``--standing`` stores a standing rule at once, with no review                                                                                          |
+| ``remember TEXT [--as PERSONA] [--transient\vert--standing]``                                                                             | pack                      | one lesson, stored as written, origin ``user-declared``; as a persona, it carries that persona's entity and opens its next brief; typed by the person it is standing at once, and the  |
+|                                                                                                                                           |                           | hook shows it from the next prompt it bears on; run under an agent runner it is an episode, kept and not a refresher until a review promotes it; ``--transient`` or ``--standing``     |
+|                                                                                                                                           |                           | picks one either way                                                                                                                                                                   |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``prefer TEXT``                                                                                                                           | pack                      | one standing preference, origin ``user-declared``                                                                                                                                      |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``accept ID``                                                                                                                             | pack                      | write one open proposal into the pack; a proposal the same text already wrote with ``remember`` or ``prefer`` is not written again                                                     |
+| ``accept ID``                                                                                                                             | pack                      | write one open proposal into the pack as a standing lesson; under an agent runner, only a proposal another conversation filed; a proposal the same text already wrote with             |
+|                                                                                                                                           |                           | ``remember`` or ``prefer`` is not written again                                                                                                                                        |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``forget ID [--why DEED]``                                                                                                                | pack                      | tombstone a claim, naming the deed that withdrew it                                                                                                                                    |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -109,8 +111,8 @@ Command line
 | ``rule PATTERN [--verdict deny\vert ask] --why TEXT``                                                                                     | pack                      | argv law the hook and ``policy`` enforce: a glob, or a regular expression (``re:`` or a ``\\b``, ``\\s`` or ``(a\vert b)`` in it) anchored at the start, tried on the whole line and   |
 |                                                                                                                                           |                           | on each command it runs; What a rule reads lists which those are                                                                                                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``consensus ID``                                                                                                                          | consensus, tracker        | settle under the pack's rows that apply to the issue, with every persona's anchor; an issue tagged ``broad`` runs bounded confidence; once five issues have an outcome, voters shown   |
-|                                                                                                                                           |                           | to err together are discounted                                                                                                                                                         |
+| ``consensus ID [--compare]``                                                                                                              | consensus, tracker        | first what a push cite on the issue decides, from seat ballots alone; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue  |
+|                                                                                                                                           |                           | tagged ``broad`` runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle                   |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]``                                                                       | claim graph               | claim a session node. With ``--next``, or with no id, it claims the first ready node in claimdag's order for the name, the way ``claim ID`` claims one; ``--role`` and ``--slack`` set |
 |                                                                                                                                           |                           | the affinity and the depth slack. A busy refusal names what the name has still claimed                                                                                                 |
@@ -171,7 +173,9 @@ and still exits 0. A shell seat polls ``ljos inbox``.
 
 ``remember`` and ``prefer`` write origin ``user-declared``. ``finish --lesson``
 and ``findings --remember`` file origin ``agent-derived`` and do not write
-the atom. ``ljos accept ID`` writes the held atom. The writer records the
+the atom. ``ljos accept ID`` writes the held atom as a standing lesson,
+and under an agent runner accepts only a proposal another
+conversation filed, such as a worker's. The writer records the
 acceptance. The same text typed with ``remember`` or ``prefer`` writes it
 as ``user-declared`` and satisfies the proposal, and the held proposal is
 closed. An atom taken by ``receive --import`` or by ``sync`` has origin
@@ -179,6 +183,15 @@ closed. An atom taken by ``receive --import`` or by ``sync`` has origin
 
 The claim graph records the held ticket too: a tracker id maps to one node
 (FNV-1a 128 of the id) and a name to one actor; a 32-hex id passes through.
+
+On Linux the pack client reads who owns the socket on its port from
+``/proc/net/tcp``. A ``PACKSET_PORT`` that another user listens on is
+refused. With nothing set and 8761 another user's, the seat uses port
+18761 plus its user id modulo 10000 and exports it as ``PACKSET_PORT``, so
+``packset ensure`` starts its writer there. ``PACKSET_URL`` is used as given.
+Without ``XDG_RUNTIME_DIR``, the hud socket and seat records go in
+``ljos-UID`` under the temporary directory, mode 0700, or in
+``~/.cache/ljos/run`` when that name is another user's or a symlink.
 
 MCP tools
 =========
@@ -194,19 +207,31 @@ Writers: ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Every tool description opens with
 when to call it.
 
+By default the server lists the core set: ``ljos_remember``, ``ljos_search``,
+``ljos_prefer``, ``ljos_rule``, ``ljos_file``, ``ljos_note``, ``ljos_sitting``,
+``ljos_finish``, ``ljos_claim``, ``ljos_release``, ``ljos_send``, ``ljos_inbox``,
+``ljos_reply``, ``ljos_vote``, ``ljos_consensus``, ``ljos_doctor`` and
+``ljos_request_approval``. ``LJOS_MCP_TOOLS=all`` lists every tool above.
+``LJOS_MCP_TOOLS`` also takes names split on commas or spaces, with or
+without the ``ljos_`` prefix, where ``core`` stands for the core set. A call
+to a tool the server does not list is refused with the shell command to
+run instead. A tool that fails answers with ``isError`` set and the reason
+as text, so the model reads it as a tool result.
+
 Environment
 ===========
 
 =========================================================== ================================================================================================================================================================================
 Variable                                                    Read by
 =========================================================== ================================================================================================================================================================================
-``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port); ``off`` means no pack
+``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port), or this user's own port when 8761 is another user's; ``off`` means no pack
 ``PACKSET_WORKSPACE``                                       the pack workspace; unset, ``seat``
 ``LJOS_SEAT``                                               override for who is sitting; unset, the seat is the MCP client that connected or the program above the shell, and the holder is that seat tagged with the conversation's process
 ``VISSUE_ROOT``, ``VISSUE_AGENT``                           the tracker
 ``DEEDAR_URL``, ``DEEDAR_HOST_SIGNING_KEY``                 the deed store; the key signs handovers, and ``~/.config/deedar/host.key`` is used when the variable is unset
 ``CLAIMDAG_DIR``                                            the claim graph
 ``LJOS_CARDS_DIR``                                          the server's cards directory
+``LJOS_MCP_TOOLS``                                          the tools ``ljos-mcp`` lists; unset, the core set (see MCP tools); ``all`` lists every tool; else names split on commas or spaces
 ``LJOS_HUD_BIN``                                            path to ``ljos-hud``; else sibling of ``ljos``, then PATH
 ``LJOS_HUD_SOCKET``                                         summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``
 ``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org`` without pushing; ``off`` skips the commit and push; unset, commit and push
@@ -351,16 +376,13 @@ the forge, the hook raises the claim when a command names the
 repository, and the review clock brings it back. A wrong claim is
 forgotten with ``ljos forget ID``, and the next push asks the forge again.
 
-+---------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| Push                                                                                                                | Needs                                                                                                                                                                                                                                                                                 |
-+=====================================================================================================================+=======================================================================================================================================================================================================================================================================================+
-| a branch, to the person's own account, no other collaborator, no releases or tags                                   | nothing; it runs                                                                                                                                                                                                                                                                      |
-+---------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name | ``LJOS_CITE=ISSUE`` where ``ISSUE`` settles (``vissue consensus ISSUE --gate``) on seat ballots alone (persona and Jev ballots do not count here), or closed as a decision with seat ballots that agree, either one with a ballot from a seat other than the one pushing; a deed      |
-|                                                                                                                     | cited alone is refused, since the pushing seat can mint one; the pass is noted on ``ISSUE``                                                                                                                                                                                           |
-+---------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| a remote the person cannot push to, ``--tags``, ``--follow-tags``, ``--mirror``, ``--all``, ``refs/tags/``, a force | the person runs it                                                                                                                                                                                                                                                                    |
-+---------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+=================================================================================================================== ============================================================================================================================================================================================================================================================================================================
+Push                                                                                                                Needs
+=================================================================================================================== ============================================================================================================================================================================================================================================================================================================
+a branch, to the person's own account, no other collaborator, no releases or tags                                   nothing; it runs
+a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name ``LJOS_CITE=ISSUE`` where the seats that voted on ``ISSUE`` agree and one of them is not the seat pushing (persona and Jev ballots neither pass nor block it; open or closed does not matter); a deed cited alone is refused, since the pushing seat can mint one; the pass is noted on ``ISSUE``
+a remote the person cannot push to, ``--tags``, ``--follow-tags``, ``--mirror``, ``--all``, ``refs/tags/``, a force the person runs it
+=================================================================================================================== ============================================================================================================================================================================================================================================================================================================
 
 The remote is the one the command names, else the branch's upstream,
 else ``origin``, read in the directory a ``cd`` or ``git -C`` before the push
@@ -477,8 +499,19 @@ seats and tie a 2-to-1 vote on its own. Trust rows still weigh voters as
 they say. Before the default, the seat sat at 1, so any anchored persona
 took the whole settle. The settle prints in words: the shares, who leads
 and by how much, polarization, each voter's influence, the share of its
-own ballot each voter keeps, and, when a persona or judge voted, the seat
-ballots a push cite counts beside the ballots that are advice. ``consensus ID --json`` prints the model crate's JSON instead.
+own ballot each voter keeps. Above the settle, ``consensus`` prints what a
+push cite on the issue decides: the option every seat ballot names and the
+seat ballots it counted, or why it decides nothing, with the persona and
+judge ballots it left out. The settle below is advice and decides no push.
+``consensus ID --json`` prints the push cite's JSON, then the model crate's.
+``consensus ID --compare`` also runs ``vissue consensus``, the tracker's
+settle. A vissue with ``--file-dissent`` files dissent children only under
+that flag; an older one files them on every run.
+
+A ballot's ``--confidence`` is recorded and weighs no settle and no push
+cite. ``consensus`` says on how many ballots it was stated. ``learn ID
+--outcome OPTION`` scores it once the outcome is known: Brier and log score
+and calibration per voter.
 
 Without an outcome, ``calibrate`` estimates each voter's accuracy from the
 project's issues with two or more ballots, by expectation maximisation
