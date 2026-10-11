@@ -9,7 +9,9 @@ description: >
 One seat, five stores, five questions. Ask the store that owns the question.
 `ljos` is the one command in front of them; `ljos-mcp` serves the same verbs
 over the Model Context Protocol (MCP). Every verb below has a tool of the same
-name with the prefix `ljos_`.
+name with the prefix `ljos_`. The server lists the core tools unless
+`LJOS_MCP_TOOLS=all` is in its environment; a verb with no tool listed runs
+as `ljos VERB` in the shell.
 
 | question | store | verbs |
 |---|---|---|
@@ -114,9 +116,10 @@ Every piece of work has an issue before it has a claim.
   Citing a deed names it; the bytes stay in deedar.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
-- A lesson is one `ljos remember` of two short sentences at most. It is
-  stored as an episode and is not a refresher until `ljos graded ID`
-  recalls it, or until consolidation finds it replaced an earlier claim.
+- A lesson is one `ljos remember` of two short sentences at most. Run by
+  you, the agent, it is stored as an episode and is not a refresher until
+  `ljos graded ID` recalls it, or until consolidation finds it replaced an
+  earlier claim. The person's own `ljos remember` takes effect at once.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
@@ -308,7 +311,9 @@ ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 ```
 
 It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
-writes that lesson into the pack and records that the person accepted it.
+writes that lesson into the pack as a standing lesson and records that the
+person accepted it. The person runs it; under an agent runner it accepts only a proposal
+another conversation filed, such as a worker you started.
 A lesson the person types with `ljos remember` stays `user-declared`, and
 the same words satisfy the open proposal. The verb then fires the island,
 completes the session node, and learns from a named outcome. Without
@@ -439,8 +444,8 @@ and for a group membership.
 
 ## Identity and environment
 
-Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`
-and the seat's memory is one workspace, `seat`, whatever directory you
+Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`,
+or on this user's own port when another user's writer holds 8761, and the seat's memory is one workspace, `seat`, whatever directory you
 stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
 graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`

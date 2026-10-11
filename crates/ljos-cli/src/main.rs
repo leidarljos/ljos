@@ -34,16 +34,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. It is stored as an episode until a recalled review promotes it.
+    /// Remember one lesson. Typed by the person it takes effect at once; from an agent runner it is an episode until a review promotes it.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Store this as an episode. It is kept, and it is not a refresher. This is the default.
+        /// Store this as an episode. It is kept, and it is not a refresher. The default under an agent runner.
         #[arg(long)]
         transient: bool,
-        /// Store this as a standing rule now, without waiting for a review.
+        /// Store this as a standing rule now, without waiting for a review. The default when the person types it.
         #[arg(long)]
         standing: bool,
     },
@@ -60,7 +60,7 @@ enum Cmd {
         #[arg(long, value_name = "PATTERN")]
         ask: Vec<String>,
     },
-    /// Write one agent proposal into the pack. Until then it is not a memory.
+    /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
@@ -257,7 +257,9 @@ enum Cmd {
         /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
-        /// Probability in (0, 1] that the choice is the outcome.
+        /// Probability in (0, 1] that the choice is the outcome. Recorded;
+        /// `ljos learn` scores it once the outcome is named, and no settle
+        /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
         /// Deed accessions this ballot used, comma-separated, or `none`.
@@ -508,14 +510,19 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
         runner: Option<String>,
     },
-    /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
-    /// The settle prints in words: shares, who leads, influence, and what
-    /// each anchor did.
+    /// What the push gate decides on the issue, from seat ballots alone,
+    /// then the weighted settle over every ballot as advice: shares, who
+    /// leads, influence, and what each anchor did.
     Consensus {
         id: String,
-        /// Print the settle's JSON as the model crate wrote it, not the words.
+        /// Print JSON: the push gate's answer, then the settle's JSON as the
+        /// model crate wrote it.
         #[arg(long)]
         json: bool,
+        /// Also run the tracker's own settle (`vissue consensus`), whose
+        /// numbers can differ from the model crate's once trust rows exist.
+        #[arg(long)]
+        compare: bool,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -658,7 +665,7 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
@@ -751,15 +758,11 @@ fn main() -> Result<()> {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
-            let horizon = if transient {
-                Some(true)
-            } else if standing {
-                Some(false)
-            } else {
-                None
-            };
+            let horizon =
+                ljos_cli::remember_horizon(transient, standing, ljos_cli::under_a_runner());
             let body = packset_write_as("Remember", &join(&text), as_persona.as_deref(), horizon)?;
             println!("{}", format_write_ack(&body));
+            eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
                 eprintln!(
                     "revises {} earlier memor{}, now closed: {}",
@@ -787,6 +790,22 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Accept { id } => {
+            // The agent proposed the lesson; accepting it is a review by
+            // someone else. Under a runner that is the conversation that
+            // started a worker, reviewing the worker's proposal; an agent
+            // that accepted its own proposal would skip the review.
+            if ljos_cli::under_a_runner()
+                && !ljos_cli::accepts_another_conversation(
+                    ljos_cli::admit::proposed_by(&id).as_deref(),
+                    &ljos_cli::holder_name(),
+                )
+            {
+                bail!(
+                    "accept: this conversation filed {id}, or the proposal names no conversation, \
+                     and an agent can't accept its own proposal. The person runs `ljos accept {id}` \
+                     in a terminal of their own, or the conversation that started this worker runs it"
+                );
+            }
             print!("{}", ljos_cli::admit::accept(&id)?);
         }
         Cmd::Forget { id, why, json } => {
@@ -1329,6 +1348,11 @@ fn main() -> Result<()> {
             // from both: its verdict must not be lost to a clock. Exiting
             // at the deadline writes no deny, and the runner then allows
             // the command.
+            // The same holds for an event said once, such as a stop or the
+            // end of a session: its twin is answered with nothing.
+            if ljos_cli::hook_twin(&call, &input) {
+                return Ok(());
+            }
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
                 if ljos_cli::hook_already_running(&call) {
                     return Ok(());
@@ -1626,7 +1650,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Consensus { id, json } => {
+        Cmd::Consensus { id, json, compare } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -1644,14 +1668,30 @@ fn main() -> Result<()> {
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
             let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
+            // The model crate's settle is the one printed; the tracker's
+            // runs under --compare, or when the model crate is not there.
+            let have_model = on_path("ljos-consensus");
             let mut steps = consensus_steps_for(
                 &id,
-                on_path("ljos-consensus"),
-                on_path("vissue"),
+                have_model,
+                on_path("vissue") && (compare || !have_model),
                 &trust,
                 &anchors,
                 &tags,
             )?;
+            // First what the push gate decides: seat ballots only.
+            let names: std::collections::BTreeSet<String> =
+                personas.iter().map(|p| p.name.trim().to_string()).collect();
+            let (gate, gate_json) =
+                ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&gate_json)?);
+            } else {
+                print!("{gate}");
+                println!(
+                    "advice, which does not decide a push: the weighted settle over every ballot"
+                );
+            }
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             if let Some((discount, line)) = settle_discount(&atoms) {
@@ -1669,10 +1709,6 @@ fn main() -> Result<()> {
                 match ljos_cli::settle_in_words(&said.stdout, &anchors) {
                     Some(words) => print!("{words}"),
                     None => print!("{}", said.stdout),
-                }
-                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
-                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
-                    print!("{split}");
                 }
             }
             // Beside the settle: the surprisingly popular answer when two
