@@ -1495,10 +1495,51 @@ const SESSION: &[&str] = &[
     "tmux", "screen", "zellij", "herdr", "systemd", "init", "sshd", "login",
 ];
 
+/// Terminal emulators, by the name the kernel keeps for the process (at
+/// most fifteen bytes, so `gnome-terminal-server` reads `gnome-terminal-`).
+/// A shell a person opens in one of these has no program above it but the
+/// terminal, and the terminal is not a seat: without this list a person
+/// typing `ljos sitting` became the seat `gnome-terminal-server`, and each
+/// window of a terminal that runs one process per window held under its
+/// own name, so a finish typed in a second window was refused. Matched
+/// whole, since several names are short words.
+const TERMINALS: &[&str] = &[
+    "gnome-terminal-",
+    "kgx",
+    "ptyxis-agent",
+    "konsole",
+    "yakuake",
+    "kitty",
+    "alacritty",
+    "wezterm-gui",
+    "ghostty",
+    "foot",
+    "footclient",
+    "xterm",
+    "uxterm",
+    "urxvt",
+    "urxvtd",
+    "rxvt",
+    "terminator",
+    "tilix",
+    "xfce4-terminal",
+    "mate-terminal",
+    "lxterminal",
+    "qterminal",
+    "terminology",
+    "sakura",
+    "guake",
+    "tabby",
+    "contour",
+    "cool-retro-term",
+    "deepin-terminal",
+];
+
 /// Whether a process is the person's session rather than a program in it:
-/// a multiplexer, a login, the init system. Many conversations share one.
+/// a multiplexer, a login, the init system, a terminal emulator. Many
+/// conversations share one.
 fn is_session(comm: &str) -> bool {
-    SESSION.iter().any(|s| comm.starts_with(s))
+    SESSION.iter().any(|s| comm.starts_with(s)) || TERMINALS.contains(&comm)
 }
 
 /// The ancestors that belong to this conversation alone: the chain up to,
@@ -22087,6 +22128,37 @@ mod tests {
             "a holder named outright still matches"
         );
         assert!(is_session("herdr") && is_session("tmux: server") && !is_session("acme"));
+    }
+
+    /// A shell in a terminal window belongs to the person: the terminal
+    /// ends the tree like a multiplexer does, so no terminal becomes a seat
+    /// and the person is their login user. A runner started in that
+    /// terminal still sits below it and is found first.
+    #[test]
+    fn a_terminal_emulator_is_the_person_s_session() {
+        for comm in [
+            "gnome-terminal-",
+            "konsole",
+            "kitty",
+            "alacritty",
+            "wezterm-gui",
+            "ghostty",
+            "foot",
+            "xterm",
+            "tilix",
+            "xfce4-terminal",
+        ] {
+            assert!(is_session(comm), "{comm}");
+        }
+        for comm in [
+            "claude", "codex", "grok", "cursor", "node", "kitten", "footb", "code",
+        ] {
+            assert!(!is_session(comm), "{comm}");
+        }
+        assert!(
+            TERMINALS.iter().all(|t| t.len() <= 15),
+            "the kernel keeps fifteen bytes of a process name"
+        );
     }
 
     /// one graph directory, named three ways, is one scope.
