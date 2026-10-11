@@ -55,6 +55,12 @@ enum Cmd {
         /// Prefer as this persona.
         #[arg(long = "as")]
         as_persona: Option<String>,
+        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook refuses what the preference forbids. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        deny: Vec<String>,
+        /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        ask: Vec<String>,
     },
     /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
@@ -475,6 +481,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The seat rules the hook and `policy` judge by: verdict, pattern and reason, one a line.
+    Rules {
+        /// Print them as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Record the person's explicit consent for one pending hook request.
     Approve {
         /// The request id printed by the hook. Approve only after the person agrees.
@@ -810,10 +822,19 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Prefer { text, as_persona } => {
-            let body =
-                packset_write_as("Prefer", &join(&text), as_persona.as_deref(), Some(false))?;
+        Cmd::Prefer {
+            text,
+            as_persona,
+            deny,
+            ask,
+        } => {
+            let text = join(&text);
+            let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
+            let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
             println!("{}", write_ack(&body));
+            for rule in &rules {
+                println!("{}", ljos_cli::atom_out(&write_rule(rule)?, false)?);
+            }
         }
         Cmd::Accept { id } => {
             let id = ljos_cli::admit::resolve_id(&id)?;
@@ -1334,6 +1355,12 @@ fn main() -> Result<()> {
             })?;
             println!("{}", ljos_cli::atom_out(&body, json)?);
         }
+        Cmd::Rules { json } => {
+            print!(
+                "{}",
+                ljos_cli::format_rules(&ljos_cli::rules_from_pack()?, json)
+            );
+        }
         Cmd::Approve { id } => {
             print!("{}", ljos_cli::approval::approve(&id)?);
         }
@@ -1393,6 +1420,12 @@ fn main() -> Result<()> {
             }
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
                 if ljos_cli::hook_already_running(&call) {
+                    if ljos_cli::replays_its_copy(&call) {
+                        let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
+                        if let Some(answer) = ljos_cli::replay_hook_answer(&call, wait) {
+                            print!("{answer}");
+                        }
+                    }
                     return Ok(());
                 }
                 std::thread::spawn(|| {
@@ -1619,7 +1652,12 @@ fn main() -> Result<()> {
                 _ => {
                     // The person's prompt is the chat's consent channel; the
                     // grant goes first, ahead of the hook's deadline.
-                    let granted = (call.event == "UserPromptSubmit")
+                    // Only the person's own prompt grants, saves or
+                    // corrects: a subagent's brief or an unattended run's
+                    // prompt is an agent's words in that channel.
+                    let person = call.event == "UserPromptSubmit"
+                        && ljos_cli::capture::not_the_person(&input).is_none();
+                    let granted = person
                         .then(|| {
                             ljos_cli::approval::approve_from_prompt(
                                 &call.cue,
@@ -1631,13 +1669,13 @@ fn main() -> Result<()> {
                     // words before the note is read, so the note does not
                     // repeat it and the correction hook does not file it
                     // again as a proposal.
-                    let captured = if call.event == "UserPromptSubmit" {
+                    let captured = if person {
                         ljos_cli::capture::note_latest_prompt(&call.cue);
                         ljos_cli::capture::capture_stated(&call)
                     } else {
                         None
                     };
-                    if call.event == "UserPromptSubmit" {
+                    if person {
                         ljos_cli::store_correction(&call);
                     }
                     let (mut ctx, mut ids) = hook_note(&call, limit);
@@ -1701,6 +1739,7 @@ fn main() -> Result<()> {
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
             print!("{output}");
             let _ = std::io::Write::flush(&mut std::io::stdout());
+            ljos_cli::keep_hook_answer(&call, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
                 ljos_cli::mail::ack_delivered(&seen_later);

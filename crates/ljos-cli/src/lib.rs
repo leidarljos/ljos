@@ -6130,13 +6130,81 @@ pub fn encoder_warming() -> bool {
 /// hook twice for one event, and both queue on the pack's one reranker.
 /// The first call makes the marker and answers; the second returns at once.
 pub fn hook_already_running(call: &HookCall) -> bool {
-    let key = work_id(&format!(
+    hook_marker_fresh(&running_key(call), std::time::Duration::from_secs(20))
+}
+
+fn running_key(call: &HookCall) -> String {
+    work_id(&format!(
         "{}|{}|{}",
         call.event,
         call.session.as_deref().unwrap_or(""),
         call.cue
-    ));
-    hook_marker_fresh(&key, std::time::Duration::from_secs(20))
+    ))
+}
+
+/// Whether a copy of this call gets the first call's answer again rather
+/// than nothing. Codex (the runner whose stdin carries `turn_id`) delivers
+/// every hook event twice, and how it joins the two answers is not
+/// written down, so its copy of a prompt or a tool result says what the
+/// first said. A runner that joins two registrations' answers, such as
+/// Cursor, would show the memories twice, so its copy stays silent.
+#[must_use]
+pub fn replays_its_copy(call: &HookCall) -> bool {
+    call.shape == HookShape::DenyOnly
+        && matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse")
+}
+
+/// Where the first call's answer waits for its copy. The name starts like
+/// the markers, so the same sweep clears it.
+fn hook_answer_path(call: &HookCall) -> PathBuf {
+    runtime_dir().join(format!("hook-once-{}.answer", running_key(call)))
+}
+
+/// Keep the answer the first call printed, for [`replay_hook_answer`].
+/// Readable by its owner only, and written whole before it can be read.
+pub fn keep_hook_answer(call: &HookCall, output: &str) {
+    if !replays_its_copy(call) {
+        return;
+    }
+    let path = hook_answer_path(call);
+    let partial = path.with_extension("partial");
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&partial)
+        .and_then(|mut f| f.write_all(output.as_bytes()));
+    if written.is_ok() {
+        let _ = std::fs::rename(&partial, &path);
+    }
+}
+
+/// The first call's answer, once it is written, waiting up to `wait`.
+/// `None` when it never comes: the copy then answers with nothing, as a
+/// copy on any other runner does, and the first call's answer stands.
+#[must_use]
+pub fn replay_hook_answer(call: &HookCall, wait: std::time::Duration) -> Option<String> {
+    let path = hook_answer_path(call);
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    // An answer older than the marker is an earlier prompt's with the same
+    // words, and is not this one's.
+    let since = modified(&runtime_dir().join(format!("hook-once-{}", running_key(call))));
+    let start = std::time::Instant::now();
+    loop {
+        let current = modified(&path).is_some_and(|at| since.is_none_or(|since| at >= since));
+        if current {
+            if let Ok(answer) = std::fs::read_to_string(&path) {
+                return Some(answer);
+            }
+        }
+        if start.elapsed() >= wait {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Events said once per occurrence, whose twin from a second registration
@@ -9774,6 +9842,52 @@ pub fn write_rule(rule: &Rule) -> Result<Value> {
         .context("rule: POST /v1/atoms failed")
 }
 
+/// The rules a preference carries: one per `--deny` and `--ask` pattern,
+/// each with the preference as its reason, so the person who is stopped
+/// reads the words they wrote. Checked before anything is written, so a
+/// bad pattern leaves neither the preference nor a rule behind.
+pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<Vec<Rule>> {
+    if text.trim().is_empty() && !(deny.is_empty() && ask.is_empty()) {
+        bail!("prefer: the preference is the rule's reason, so it needs words");
+    }
+    let rules: Vec<Rule> = deny
+        .iter()
+        .map(|p| ("deny", p))
+        .chain(ask.iter().map(|p| ("ask", p)))
+        .map(|(verdict, pattern)| Rule {
+            pattern: pattern.trim().to_string(),
+            verdict: verdict.to_string(),
+            reason: text.trim().to_string(),
+        })
+        .collect();
+    if rules.iter().any(|r| r.pattern.is_empty()) {
+        bail!("prefer: a --deny or --ask pattern over the command line is required");
+    }
+    Ok(rules)
+}
+
+/// The rules as `ljos rules` prints them: `verdict\tpattern\treason`, deny
+/// first, or a JSON array.
+#[must_use]
+pub fn format_rules(rules: &[Rule], json: bool) -> String {
+    let mut sorted: Vec<&Rule> = rules.iter().collect();
+    sorted.sort_by_key(|r| r.verdict != "deny");
+    if json {
+        let rows: Vec<Value> = sorted
+            .iter()
+            .map(|r| serde_json::json!({"pattern": r.pattern, "verdict": r.verdict, "reason": r.reason}))
+            .collect();
+        return format!("{}\n", Value::Array(rows));
+    }
+    if sorted.is_empty() {
+        return "no rules; `ljos rule PATTERN --verdict deny --why TEXT` writes one\n".to_string();
+    }
+    sorted
+        .iter()
+        .map(|r| format!("{}\t{}\t{}\n", r.verdict, r.pattern, r.reason))
+        .collect()
+}
+
 /// The live rules in a set of atoms.
 pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
     atoms
@@ -10332,11 +10446,129 @@ fn plain_command(segment: &str) -> Option<String> {
         .unwrap_or(&name)
         .to_string();
     drop_git_options(&mut words);
+    drop_tool_options(&mut words);
     if words.is_empty() {
         return None;
     }
     let plain = words.join(" ");
     (plain != strip_prefixes(segment).join(" ")).then_some(plain)
+}
+
+/// The options a tool takes before its subcommand that carry a value in
+/// the next word. An option not listed here and not written `--opt=value`
+/// ends the skipping, so a tool this does not know is matched as written.
+const TOOL_OPTIONS: &[(&[&str], &[&str])] = &[
+    (&["terraform", "tofu"], &[]),
+    (
+        &["kubectl", "oc"],
+        &[
+            "-n",
+            "--namespace",
+            "--context",
+            "--cluster",
+            "--user",
+            "--kubeconfig",
+            "-s",
+            "--server",
+            "--token",
+            "--as",
+            "--as-group",
+            "--request-timeout",
+            "-v",
+        ],
+    ),
+    (
+        &["helm"],
+        &[
+            "-n",
+            "--namespace",
+            "--kube-context",
+            "--kubeconfig",
+            "--registry-config",
+            "--repository-config",
+            "--repository-cache",
+        ],
+    ),
+    (
+        &["docker", "podman"],
+        &[
+            "-H",
+            "--host",
+            "-c",
+            "--context",
+            "--connection",
+            "--config",
+            "-l",
+            "--log-level",
+            "--url",
+            "--root",
+            "--runroot",
+        ],
+    ),
+    (
+        &["aws"],
+        &[
+            "--profile",
+            "--region",
+            "--output",
+            "--endpoint-url",
+            "--query",
+            "--color",
+            "--ca-bundle",
+            "--cli-read-timeout",
+            "--cli-connect-timeout",
+        ],
+    ),
+    (
+        &["gcloud"],
+        &[
+            "--project",
+            "--account",
+            "--configuration",
+            "--verbosity",
+            "--format",
+            "--billing-project",
+            "--impersonate-service-account",
+        ],
+    ),
+    (&["az"], &["--subscription", "-o", "--output", "--query"]),
+];
+
+/// A cloud or cluster tool's own options before its subcommand off, as
+/// git's are: `terraform -chdir=infra destroy` is `terraform destroy`,
+/// `kubectl --context prod -n web delete ns web` is `kubectl delete ns web`
+/// and `aws --profile prod s3 rb s3://b` is `aws s3 rb s3://b`. Terraform's
+/// `apply -destroy` is its `destroy` and reads as one.
+fn drop_tool_options(words: &mut Vec<String>) {
+    let Some(valued) = words.first().and_then(|tool| {
+        TOOL_OPTIONS
+            .iter()
+            .find(|(names, _)| names.contains(&tool.as_str()))
+            .map(|(_, valued)| *valued)
+    }) else {
+        return;
+    };
+    let mut i = 1;
+    while let Some(w) = words.get(i) {
+        if valued.contains(&w.as_str()) {
+            i += 2;
+        } else if w.starts_with('-') && w.len() > 1 {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    words.drain(1..i.min(words.len()));
+    if matches!(words[0].as_str(), "terraform" | "tofu")
+        && words.get(1).map(String::as_str) == Some("apply")
+        && words
+            .iter()
+            .skip(2)
+            .any(|w| w == "-destroy" || w == "--destroy")
+    {
+        words[1] = "destroy".to_string();
+        words.retain(|w| w != "-destroy" && w != "--destroy");
+    }
 }
 
 /// Git's own options before the subcommand off: `git -C repo -c k=v push`
@@ -11894,6 +12126,8 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
         let mut words = plain_words(seg);
         cues.push(words.join(" "));
         drop_git_options(&mut words);
+        cues.push(words.join(" "));
+        drop_tool_options(&mut words);
         cues.push(words.join(" "));
     }
     cues.extend(command_segments(line));
@@ -21608,6 +21842,59 @@ mod tests {
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 
+    /// Codex's copy of a prompt event says what the first delivery said,
+    /// once that answer is written, and nothing is run twice. A Cursor
+    /// copy keeps quiet.
+    #[test]
+    fn a_codex_copy_replays_the_first_answer() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let call = |shape: HookShape| HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "From now on always use bun".into(),
+            session: Some("019a-root".into()),
+            shape,
+        };
+        let codex = call(HookShape::DenyOnly);
+        assert!(!hook_already_running(&codex), "the first runs");
+        assert!(hook_already_running(&codex), "the copy does not");
+        let quick = std::time::Duration::from_millis(100);
+        assert_eq!(
+            replay_hook_answer(&codex, quick),
+            None,
+            "nothing written yet"
+        );
+        keep_hook_answer(&codex, "{\"hookSpecificOutput\":{}}\n");
+        assert_eq!(
+            replay_hook_answer(&codex, quick).as_deref(),
+            Some("{\"hookSpecificOutput\":{}}\n")
+        );
+        let cursor = call(HookShape::Cursor);
+        assert!(!replays_its_copy(&cursor));
+        keep_hook_answer(&cursor, "x");
+        assert_eq!(
+            replay_hook_answer(&codex, quick).as_deref(),
+            Some("{\"hookSpecificOutput\":{}}\n"),
+            "a Cursor call writes no answer"
+        );
+        // The same words a minute on are a new prompt: the old answer is
+        // not replayed to its copy.
+        let marker = dir
+            .path()
+            .join("ljos")
+            .join(format!("hook-once-{}", running_key(&codex)));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(replay_hook_answer(&codex, quick), None);
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
     /// An event said once is answered once when two registrations run it
     /// with the same payload. The next stop of the same session carries a
     /// new loop count and is answered, and a tool gate is never dropped.
@@ -26815,6 +27102,86 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         std::fs::write(&path, "not json").unwrap();
         assert!(kept_rules(&path).is_empty());
+    }
+
+    #[test]
+    fn a_preference_carries_the_rules_that_enforce_it() {
+        let text = "never tear down the terraform stack";
+        let rules = preference_rules(
+            text,
+            &["terraform destroy*".to_string()],
+            &["re:^terraform apply .*-destroy".to_string()],
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].verdict, "deny");
+        assert_eq!(rules[0].reason, text);
+        assert_eq!(rules[1].verdict, "ask");
+        assert_eq!(
+            verdict_for(&rules, "cd infra && terraform destroy -auto-approve")
+                .map(|r| r.verdict.as_str()),
+            Some("deny")
+        );
+        assert!(preference_rules(text, &[], &[]).unwrap().is_empty());
+        assert!(preference_rules(text, &[" ".to_string()], &[]).is_err());
+        assert!(preference_rules(" ", &["x*".to_string()], &[]).is_err());
+        let listed = format_rules(&rules, false);
+        assert!(
+            listed.starts_with("deny\tterraform destroy*\tnever"),
+            "{listed}"
+        );
+        let json: Value = serde_json::from_str(&format_rules(&rules, true)).unwrap();
+        assert_eq!(json[1]["verdict"], "ask");
+        assert!(format_rules(&[], false).starts_with("no rules"));
+    }
+
+    #[test]
+    fn a_rule_sees_past_a_cloud_tool_s_own_options() {
+        let rule = |pattern: &str| Rule {
+            pattern: pattern.into(),
+            verdict: "deny".into(),
+            reason: "the person runs this".into(),
+        };
+        let rules = vec![
+            rule("terraform destroy*"),
+            rule("kubectl delete ns*"),
+            rule("helm uninstall*"),
+            rule("docker system prune*"),
+            rule("podman system prune*"),
+            rule("aws s3 rb*"),
+            rule("gcloud projects delete*"),
+            rule("az group delete*"),
+        ];
+        for line in [
+            "terraform -chdir=infra destroy -auto-approve",
+            "terraform apply -destroy -auto-approve",
+            "terraform -chdir=infra apply -auto-approve -destroy",
+            "cd infra && TF_LOG=1 terraform -chdir=. destroy",
+            "kubectl --context prod -n web delete ns web",
+            "kubectl --kubeconfig=/k -v 6 delete ns web",
+            "helm -n web --kube-context prod uninstall api",
+            "docker --context remote system prune -af",
+            "podman --connection box system prune -a",
+            "aws --profile prod --region us-east-1 s3 rb s3://b --force",
+            "gcloud --project p projects delete p",
+            "az --subscription s group delete -n rg --yes",
+            "sudo -E kubectl -n web delete ns web",
+        ] {
+            assert!(verdict_for(&rules, line).is_some(), "{line}");
+        }
+        for line in [
+            "terraform -chdir=infra plan",
+            "terraform plan -destroy",
+            "terraform apply -auto-approve",
+            "kubectl --context prod -n web get ns",
+            "kubectl delete pod web-1",
+            "docker --context remote ps",
+            "aws --profile prod s3 ls s3://b",
+            "gcloud --project p projects list",
+            "echo terraform destroy is the command",
+        ] {
+            assert!(verdict_for(&rules, line).is_none(), "{line}");
+        }
     }
 
     #[test]
