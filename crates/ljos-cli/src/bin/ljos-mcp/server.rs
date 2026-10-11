@@ -852,6 +852,10 @@ pub struct SendMailArgs {
     /// The vissue issue this message is about. A reply keeps it.
     #[serde(default)]
     pub issue: Option<String>,
+    /// Write to a seat this pack has not heard from yet. Without it, a
+    /// seat the pack does not know is refused, with the seats it knows.
+    #[serde(default)]
+    pub new_seat: Option<bool>,
 }
 
 /// Whether the inbox includes mail already read.
@@ -1574,6 +1578,7 @@ impl LjosServer {
         // As the CLI: a persona on the ballot settles under its anchor and
         // every other voter under the default one.
         let ballots = ljos_cli::ballot_rows(&args.issue);
+        ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         // As the CLI: the model crate's settle, and the tracker's only on
         // `compare` or when the model crate is not there.
@@ -2091,7 +2096,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to write to another seat, or to every other member of a group. Pass seat or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. The id in the answer is what ljos_read and ljos_reply take.",
+        description = "Call this to write to another seat, or to every other member of a group. Pass seat or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. A seat this pack has never heard from is refused with the seats it knows; pass new_seat to write to one that has not started yet. The id in the answer is what ljos_read and ljos_reply take.",
         annotations(
             title = "Send",
             read_only_hint = false,
@@ -2110,6 +2115,7 @@ impl LjosServer {
             text: &args.text,
             interrupt: args.interrupt.unwrap_or(false),
             issue: args.issue.as_deref(),
+            new_seat: args.new_seat.unwrap_or(false),
         }))
     }
 

@@ -112,7 +112,8 @@ Command line
 |                                                                                                                                           |                           | on each command it runs; What a rule reads lists which those are                                                                                                                       |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``consensus ID [--compare]``                                                                                                              | consensus, tracker        | first what a push cite on the issue decides, from seat ballots alone; then the settle under the pack's rows that apply to the issue, with every persona's anchor, as advice; an issue  |
-|                                                                                                                                           |                           | tagged ``broad`` runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle                   |
+|                                                                                                                                           |                           | tagged ``broad`` runs bounded confidence; once five issues have an outcome, voters shown to err together are discounted; ``--compare`` adds the tracker's own settle, and so does a    |
+|                                                                                                                                           |                           | missing model crate; an issue with no ballots is refused before a settle runs; ``--json`` prints one JSON document, the push cite at the top level and each reading under its own key  |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``claim [ID] [--next] [--role ROLE] [--slack N] [--assignee NAME]``                                                                       | claim graph               | claim a session node. With ``--next``, or with no id, it claims the first ready node in claimdag's order for the name, the way ``claim ID`` claims one; ``--role`` and ``--slack`` set |
 |                                                                                                                                           |                           | the affinity and the depth slack. A busy refusal names what the name has still claimed                                                                                                 |
@@ -161,8 +162,10 @@ Command line
 |                                                                                                                                           |                           | no hook                                                                                                                                                                                |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-``send SEAT TEXT`` writes to one seat. ``send --group NAME TEXT`` writes to
-the other members of that group. ``--interrupt`` leads the next prompt.
+``send SEAT TEXT`` writes to one seat. A seat the pack has never heard
+from is refused, with the seats it knows, since mail waits under the name
+it was sent to; ``--new-seat`` writes to one that has not started yet.
+``send --group NAME TEXT`` writes to the other members of that group. ``--interrupt`` leads the next prompt.
 ``--issue ID`` threads the message on that vissue issue, and the atom takes
 the issue's scope so ``ljos sync`` carries it in that repository's sealed
 log. ``inbox`` lists unread mail and writes no receipt. A pack that does
@@ -507,9 +510,22 @@ own ballot each voter keeps. Above the settle, ``consensus`` prints what a
 push cite on the issue decides: the option every seat ballot names and the
 seat ballots it counted, or why it decides nothing, with the persona and
 judge ballots it left out. The settle below is advice and decides no push.
-``consensus ID --json`` prints the push cite's JSON, then the model crate's.
+When trust rows exist, the standing beside the settle names the voters on
+this issue; the other names in the rows are counted, and ``--json`` lists
+them.
+``consensus ID --json`` prints one JSON document, and nothing else on
+stdout. The push cite stays at the top level under ``push_cite``, with the
+keys it already uses (``issue``, ``pusher``, ``stands``, and ``choice`` with
+``counted``, or ``refusal``). The model crate's settle is under ``settle``.
+``surprising`` and ``reputation`` are present when those readings ran.
 ``consensus ID --compare`` also runs ``vissue consensus``, the tracker's
-settle. A vissue with ``--file-dissent`` files dissent children only under
+settle, and that output is under ``tracker`` in the same document. The
+tracker also runs when ``ljos-consensus`` is not installed. Without
+``--compare``, and with the model crate installed, the document has no
+``tracker`` key. An issue with no ballots is refused before any settle
+runs, in the command and in the MCP tool, and the message says how to
+cast one (``ljos vote ID --for OPTION``, or ``ljos panel ID``).
+A vissue with ``--file-dissent`` files dissent children only under
 that flag; an older one files them on every run.
 
 A ballot's ``--confidence`` is recorded and weighs no settle and no push
