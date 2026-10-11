@@ -13,12 +13,12 @@ use ljos_cli::{
     now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
     packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
     personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
-    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about,
-    rules_from_pack, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
-    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
-    uncite_deed, whoami, with_discount, withdraw_prediction, write_outcome, write_persona_as,
-    write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust,
-    HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about, run,
+    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, whoami, with_discount,
+    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
+    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -1459,7 +1459,7 @@ fn main() -> Result<()> {
             // On a tool call the pack's rules give a verdict; on a prompt
             // there is nothing to stop, only something to know.
             let rules = if call.event == "PreToolUse" || call.event == "argv" {
-                rules_from_pack().unwrap_or_default()
+                ljos_cli::rules_for_gate()
             } else {
                 Vec::new()
             };
