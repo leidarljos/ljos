@@ -955,6 +955,9 @@ fn main() -> Result<()> {
         }
         Cmd::Note { issue, text } => {
             run("vissue", &["note", &issue, &text.join(" ")])?;
+            if let Some(line) = ljos_cli::assist_note_line(&issue) {
+                print!("{line}");
+            }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
         Cmd::Send {
