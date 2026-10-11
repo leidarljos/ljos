@@ -12966,6 +12966,17 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
     )
 }
 
+/// The line a write prints when the pack stored the person's words over a
+/// prose warning: what the gate said, and that shorter sentences are
+/// recalled better. `None` when the pack gave no warning.
+#[must_use]
+pub fn prose_warning_line(body: &Value) -> Option<String> {
+    let warning = body["prose"]["warning"].as_str()?.trim();
+    (!warning.is_empty()).then(|| {
+        format!("stored as written; the pack's prose check said: {warning}. Shorter sentences are recalled better.")
+    })
+}
+
 /// One line after a pack write: id, kind, due, text. Not the embedding.
 #[must_use]
 pub fn format_write_ack(body: &serde_json::Value) -> String {
@@ -29072,6 +29083,24 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{calls}"
         );
         assert!(!calls.contains(&format!("--actor {alive}")), "{calls}");
+    }
+
+    #[test]
+    fn a_prose_warning_is_one_line_and_its_absence_is_none() {
+        let warned = serde_json::json!({"id": "a", "prose": {"grade": 14.78,
+            "warning": "readability grade 14.78 exceeds 14; use shorter sentences and shorter words"}});
+        let line = prose_warning_line(&warned).unwrap();
+        assert!(line.starts_with("stored as written"), "{line}");
+        assert!(
+            line.contains("readability grade 14.78 exceeds 14"),
+            "{line}"
+        );
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            prose_warning_line(&serde_json::json!({"prose": {"grade": 8.0}})),
+            None
+        );
+        assert_eq!(prose_warning_line(&serde_json::json!({"id": "b"})), None);
     }
 
     #[test]

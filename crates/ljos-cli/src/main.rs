@@ -759,6 +759,12 @@ enum Cmd {
 /// The write acknowledgement: the plain sentence for a person at a
 /// terminal, the tab-separated row for a pipe.
 fn write_ack(body: &serde_json::Value) -> String {
+    // The pack keeps a person's hard sentence and says why it would have
+    // refused it; that goes to stderr, so the one line a script reads
+    // stays one line.
+    if let Some(note) = ljos_cli::prose_warning_line(body) {
+        eprintln!("{note}");
+    }
     if std::io::stdout().is_terminal() {
         ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
     } else {
