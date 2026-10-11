@@ -4258,11 +4258,85 @@ fn prompt_words(text: &str) -> Vec<String> {
     words
 }
 
-/// Whether a lesson names something the cue names.
-/// A high search score on a vague sentence is not that.
+/// Words that sit in standing rules of every kind. "Never push to main"
+/// and "never write secrets into .env" share `never`, and a prompt that
+/// says "always use bun" is about neither.
+const RULE_WORDS: &[&str] = &[
+    "always", "never", "every", "ever", "repo", "here", "keep", "going", "forward", "instead",
+    "sure", "first",
+];
+
+/// Names that mean one tool or one thing. A prompt that says `golang`
+/// or `virtualenv` names what a rule about Go files or `uv` names.
+/// Each group is matched as one word.
+const CUE_ALIASES: &[&[&str]] = &[
+    &["go", "golang", "gofmt"],
+    &[
+        "javascript",
+        "js",
+        "node",
+        "npm",
+        "pnpm",
+        "yarn",
+        "bun",
+        "npx",
+    ],
+    &[
+        "python",
+        "pip",
+        "uv",
+        "venv",
+        "virtualenv",
+        "pipx",
+        "poetry",
+    ],
+    &["secret", "key", "token", "credential", "password", "apikey"],
+    &["trunk", "master", "main"],
+    &["whitespace", "indentation", "indent", "tab"],
+];
+
+/// Words that name an alias group only on the claim's side. `go` in a
+/// prompt is the verb as often as the language.
+const CLAIM_ONLY_ALIASES: &[&str] = &["go"];
+
+/// The alias groups a text names, as `alias:N`. `claim` is true for the
+/// stored text, where [`CLAIM_ONLY_ALIASES`] count too.
+fn alias_words(text: &str, claim: bool) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| singular(&w.to_lowercase()))
+        .filter(|w| claim || !CLAIM_ONLY_ALIASES.contains(&w.as_str()))
+        .filter_map(|w| {
+            CUE_ALIASES
+                .iter()
+                .position(|group| group.contains(&w.as_str()))
+                .map(|i| format!("alias:{i}"))
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The words a claim and a prompt are matched on: [`prompt_words`]
+/// without [`RULE_WORDS`], plus the alias groups each names.
+fn cue_terms(text: &str, claim: bool) -> Vec<String> {
+    let mut words: Vec<String> = prompt_words(text)
+        .into_iter()
+        .filter(|w| !RULE_WORDS.contains(&w.as_str()))
+        .collect();
+    words.extend(alias_words(text, claim));
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
+/// Whether a lesson names something the cue names, directly or through
+/// [`CUE_ALIASES`]. A high search score on a vague sentence is not that.
 fn names_the_cue(text: &str, cue: &str) -> bool {
-    let have = prompt_words(text);
-    prompt_words(cue)
+    let have = cue_terms(text, true);
+    cue_terms(cue, false)
         .iter()
         .any(|w| have.binary_search(w).is_ok())
 }
@@ -4468,58 +4542,92 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
             .collect()
     } else {
-        // The judge did not answer, so the local cross-encoder reranks.
-        // A skip, a timeout and a spent cap all take this path.
-        let rerank = hook_uses_rerank(false);
-        // The cross-encoder only reorders the fused top twenty, and every
-        // filter below but the score floor reads fields it leaves alone.
-        // Reordering cannot change which of the twenty pass those
-        // filters. When none does, no memory can reach the prompt, and
-        // the second stage, a few hundred milliseconds a prompt, is not
-        // run.
+        // The judge did not answer. A skip, a timeout and a spent cap all
+        // take this path.
         let pool = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-            packset_search_opts(cue, RERANK_POOL, false)
+            search_with_signals(cue, RERANK_POOL)
         })
         .ok();
-        if let Some(pool) = &pool {
-            let could = |h: &Hit| {
-                !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                    && agreed(h)
-                    && names_the_cue(&h.text, cue)
-                    && is_refresher(h)
-                    && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+        // A pack that sends the encoder's cosine has a judge of meaning:
+        // it admits what the encoder ranked near the top even when no word
+        // is shared, and it stands in for the two-scorer agreement when a
+        // word is. The cross-encoder is not asked then; on the 20-memory
+        // set it moved more targets out of the top three than in.
+        if let Some(pool) = pool
+            .as_ref()
+            .filter(|p| p.iter().any(|(_, s)| s.cosine.is_some()))
+        {
+            let top = pool.iter().map(|(h, _)| h.score).fold(0.0_f64, f64::max);
+            let best = pool
+                .iter()
+                .filter_map(|(_, s)| s.cosine)
+                .fold(0.0_f64, f64::max);
+            let mut admitted: Vec<(Hit, f64)> = pool
+                .iter()
+                .filter(|(h, s)| admits_local(h, *s, cue, top, best))
+                .filter(|(h, _)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+                .map(|(h, s)| (h.clone(), s.cosine.unwrap_or(0.0)))
+                .collect();
+            admitted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // The cosine ranks what the encoder judged.
+            hits = admitted
+                .into_iter()
+                .map(|(mut h, c)| {
+                    h.score = c;
+                    h
+                })
+                .collect();
+            hits.iter().collect()
+        } else {
+            let pool: Option<Vec<Hit>> = pool.map(|p| p.into_iter().map(|(h, _)| h).collect());
+            // The local cross-encoder reranks.
+            let rerank = hook_uses_rerank(false);
+            // The cross-encoder only reorders the fused top twenty, and every
+            // filter below but the score floor reads fields it leaves alone.
+            // Reordering cannot change which of the twenty pass those
+            // filters. When none does, no memory can reach the prompt, and
+            // the second stage, a few hundred milliseconds a prompt, is not
+            // run.
+            if let Some(pool) = &pool {
+                let could = |h: &Hit| {
+                    !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                        && agreed(h)
+                        && names_the_cue(&h.text, cue)
+                        && is_refresher(h)
+                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+                };
+                if !pool.iter().any(could) {
+                    return (nudge, pending);
+                }
+            }
+            // The pack client gives a reranked search at least a minute, so
+            // the budget is kept here: past it the fused pool answers. A
+            // writer that is still fetching its cross-encoder on the first
+            // prompt then costs the budget, not the whole hook deadline.
+            let reranked = if rerank {
+                search_within(cue, 10, HOOK_RERANK_BUDGET_MS)
+            } else {
+                Err(anyhow::anyhow!("search: rerank off"))
             };
-            if !pool.iter().any(could) {
+            let found = match (reranked, pool) {
+                (Ok(found), _) => found,
+                (Err(_), Some(pool)) => pool,
+                (Err(_), None) => return (nudge, pending),
+            };
+            hits = found;
+            let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
+            if top <= 0.0 {
                 return (nudge, pending);
             }
+            hits.iter()
+                .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
+                .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
+                .filter(|h| agreed(h))
+                .filter(|h| names_the_cue(&h.text, cue))
+                .filter(|h| is_refresher(h))
+                .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+                .collect()
         }
-        // The pack client gives a reranked search at least a minute, so
-        // the budget is kept here: past it the fused pool answers. A
-        // writer that is still fetching its cross-encoder on the first
-        // prompt then costs the budget, not the whole hook deadline.
-        let reranked = if rerank {
-            search_within(cue, 10, HOOK_RERANK_BUDGET_MS)
-        } else {
-            Err(anyhow::anyhow!("search: rerank off"))
-        };
-        let found = match (reranked, pool) {
-            (Ok(found), _) => found,
-            (Err(_), Some(pool)) => pool,
-            (Err(_), None) => return (nudge, pending),
-        };
-        hits = found;
-        let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
-        if top <= 0.0 {
-            return (nudge, pending);
-        }
-        hits.iter()
-            .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-            .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
-            .filter(|h| agreed(h))
-            .filter(|h| names_the_cue(&h.text, cue))
-            .filter(|h| is_refresher(h))
-            .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-            .collect()
     };
     // Jev's probability ranks what it judged; the search score ranks the rest.
     let weight = |h: &Hit| -> f64 {
@@ -4531,16 +4639,19 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             })
             .unwrap_or(h.score)
     };
+    // The cap keeps the strongest, whatever their kind: a weak preference
+    // that shares one word with the prompt does not push out the lesson
+    // the prompt repeats. Preferences are then read first.
     rows.sort_by(|a, b| {
-        let pa = a.kind == "preference";
-        let pb = b.kind == "preference";
-        pb.cmp(&pa).then(
-            weight(b)
-                .partial_cmp(&weight(a))
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
+        weight(b)
+            .partial_cmp(&weight(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut rows: Vec<&Hit> = rows.into_iter().take(limit).collect();
+    let mut rows: Vec<&Hit> = rows
+        .into_iter()
+        .take(limit.min(HOOK_MAX_MEMORIES))
+        .collect();
+    rows.sort_by_key(|h| h.kind != "preference");
     // Preferences stay in front by score; the lessons behind them run
     // oldest to newest, so what was learnt last is read last and nearest
     // the action, and a later lesson that revises an earlier one reads as
@@ -4628,6 +4739,106 @@ pub fn admits_judged(h: &Hit, bears: bool, p: f64, cue: &str, top: f64) -> bool 
         && (names_the_cue(&h.text, cue) || p >= JEV_ALONE_AT)
         && agreed(h)
         && h.score >= top * HOOK_SCORE_FLOOR
+}
+
+/// The most memories one prompt is handed. Past three, the ones that
+/// bear on the prompt are read among the ones that do not.
+pub const HOOK_MAX_MEMORIES: usize = 3;
+
+/// What the pack's encoder said about one hit: its rank on the dense
+/// ballot (from 1) and its cosine with the prompt. Both are absent on a
+/// pack that does not send them, or on a hit the encoder did not name.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DenseSignal {
+    pub rank: Option<u32>,
+    pub cosine: Option<f64>,
+}
+
+/// How far down the dense ballot a hit that shares no word with the
+/// prompt may sit and still be handed over: first only.
+pub const DENSE_ALONE_RANK: u32 = 1;
+
+/// The cosine the encoder's first hit must reach when it shares no word
+/// with the prompt. Set on the 20-memory set: 13 of the 16 paraphrase
+/// targets that the encoder ranked first cleared it, and the first hit on
+/// none of 12 unrelated prompts did (their best was 0.653).
+pub const DENSE_ALONE_AT: f64 = 0.66;
+
+/// How far below the prompt's best cosine a hit that shares a word may
+/// sit, in place of two scorers agreeing. One shared word (`test`,
+/// `build`) on a hit the encoder puts well behind the best is a
+/// coincidence. The cosines of one prompt sit close together, so the
+/// distance from the best tells more than a fixed floor.
+pub const DENSE_WORD_BEHIND: f64 = 0.05;
+
+/// Whether a hit from the fused pool reaches the prompt on a pack that
+/// sends the encoder's cosine. A refresher of a reviewed kind gets in
+/// when the encoder ranked it first at [`DENSE_ALONE_AT`] or more, or
+/// when it names a word of the prompt, clears [`HOOK_SCORE_FLOOR`] of the
+/// top score and sits within [`DENSE_WORD_BEHIND`] of `best`, the
+/// highest cosine in the pool.
+#[must_use]
+pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> bool {
+    if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || !is_refresher(h) {
+        return false;
+    }
+    let Some(cosine) = s.cosine else {
+        return false;
+    };
+    if s.rank.is_some_and(|r| r <= DENSE_ALONE_RANK) && cosine >= DENSE_ALONE_AT {
+        return true;
+    }
+    names_the_cue(&h.text, cue)
+        && h.score >= top * HOOK_SCORE_FLOOR
+        && cosine >= best - DENSE_WORD_BEHIND
+}
+
+/// The fused search with what the encoder said about each hit. A pack
+/// that sends `dense_rank` and `cosine` on its hits fills them in; the
+/// pack client does not read those fields yet, so the request is made
+/// here. Any failure falls back to the client's search with no signals.
+///
+/// # Errors
+///
+/// The fallback search's error.
+pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSignal)>> {
+    let raw = (|| -> Option<Vec<(Hit, DenseSignal)>> {
+        let client = pack().ok()?;
+        let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
+        let ms = std::env::var("PACKSET_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(HOOK_RERANK_BUDGET_MS);
+        let body: Value = ureq::get(&url)
+            .query("workspace", &client.workspace())
+            .query("q", cue)
+            .query("limit", &limit.to_string())
+            .timeout(std::time::Duration::from_millis(ms))
+            .call()
+            .ok()?
+            .into_json()
+            .ok()?;
+        body["hits"]
+            .as_array()?
+            .iter()
+            .map(|v| {
+                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
+                let signal = DenseSignal {
+                    rank: v["dense_rank"].as_u64().and_then(|r| u32::try_from(r).ok()),
+                    cosine: v["cosine"].as_f64(),
+                };
+                Some((hit, signal))
+            })
+            .collect()
+    })();
+    match raw {
+        Some(found) => Ok(found),
+        None => Ok(packset_search_opts(cue, limit, false)?
+            .into_iter()
+            .map(|h| (h, DenseSignal::default()))
+            .collect()),
+    }
 }
 
 /// The local path reranks when the judge did not answer.
@@ -9991,6 +10202,7 @@ fn nested_walk(line: &str, depth: usize, out: &mut Vec<String>) -> bool {
             inner.extend(echoed_text(&segs[k - 1]));
         }
     }
+    inner.extend(carried_lines(&segs, &bodies));
     out.push(line);
     if depth >= NESTED_DEPTH {
         return !inner.is_empty();
@@ -10000,6 +10212,248 @@ fn nested_walk(line: &str, depth: usize, out: &mut Vec<String>) -> bool {
         deep |= nested_walk(&l, depth + 1, out);
     }
     deep
+}
+
+/// What one command on a line hands a later one, read as the commands
+/// that run: a variable's value put in place of `$NAME` (split on `IFS`
+/// when the line sets one), a program copied or linked to a new path and
+/// run from there, a command word that is `` `which git` ``, and a script
+/// written to a file by `echo`, `printf`, `cat` or `tee` and then run.
+/// `x='push -f'; git $x`, `cp /bin/rm /tmp/d && /tmp/d -rf ~` and
+/// `echo 'rm -rf ~' > s.sh && sh s.sh` each read as the call they make.
+fn carried_lines(segs: &[String], bodies: &[Heredoc]) -> Vec<String> {
+    let mut names: Vec<(String, String)> = Vec::new();
+    let mut copies: Vec<(String, String)> = Vec::new();
+    let mut written: Vec<(String, String)> = Vec::new();
+    for (body, _, owner) in bodies {
+        for seg in raw_segments(owner) {
+            let words = shell_words(&seg);
+            let (at, _) = prefix_end(&words);
+            let Some(cmd) = words.get(at) else { continue };
+            match base_name(cmd) {
+                "cat" => written.extend(redirect_target(&words).map(|t| (t, body.clone()))),
+                "tee" => written.extend(
+                    words[at + 1..]
+                        .iter()
+                        .filter(|w| !w.starts_with('-') && !w.starts_with('<') && *w != ">")
+                        .map(|t| (same_path(t), body.clone())),
+                ),
+                _ => {}
+            }
+        }
+    }
+    for seg in segs {
+        let words = shell_words(seg);
+        let assigns = |ws: &[String]| !ws.is_empty() && ws.iter().all(|w| is_name_value(w));
+        let bare = if words.first().is_some_and(|w| w == "export") {
+            &words[1..]
+        } else {
+            &words[..]
+        };
+        if assigns(bare) {
+            for w in bare {
+                if let Some((k, v)) = w.split_once('=') {
+                    names.push((k.to_string(), v.to_string()));
+                }
+            }
+            continue;
+        }
+        let (at, _) = prefix_end(&words);
+        let Some(cmd) = words.get(at) else { continue };
+        let operands: Vec<&String> = {
+            let mut out = Vec::new();
+            let mut it = words[at + 1..].iter();
+            while let Some(w) = it.next() {
+                if w == ">" {
+                    it.next();
+                } else if !w.starts_with('-') {
+                    out.push(w);
+                }
+            }
+            out
+        };
+        match base_name(cmd) {
+            "echo" | "printf" => {
+                if let (Some(t), Some(text)) = (redirect_target(&words), echoed_text(seg)) {
+                    written.push((t, text));
+                }
+            }
+            "cp" | "ln" | "install" if operands.len() == 2 => {
+                copies.push((same_path(operands[1]), operands[0].clone()));
+            }
+            _ => {}
+        }
+    }
+    let ifs = names
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "IFS")
+        .map(|(_, v)| v.clone());
+    let mut out = Vec::new();
+    for seg in segs {
+        let expanded = expand_names(seg, &names, ifs.as_deref());
+        let seg = expanded.clone().unwrap_or_else(|| seg.clone());
+        if let Some(run) = looked_up_head(&seg) {
+            out.push(run);
+            continue;
+        }
+        let mut words = shell_words(&seg);
+        let (at, _) = prefix_end(&words);
+        let mut changed = false;
+        if let Some(w) = words.get(at) {
+            let here = same_path(w);
+            if let Some((_, from)) = copies.iter().rev().find(|(to, _)| *to == here) {
+                words[at] = from.clone();
+                changed = true;
+            }
+        }
+        let ran = words.get(at).and_then(|cmd| {
+            let file = if SHELLS.contains(&base_name(cmd)) || matches!(cmd.as_str(), "." | "source")
+            {
+                words[at + 1..].iter().find(|w| !w.starts_with('-'))?
+            } else {
+                cmd
+            };
+            let file = same_path(file);
+            written
+                .iter()
+                .rev()
+                .find(|(t, _)| *t == file)
+                .map(|(_, text)| text.clone())
+        });
+        out.extend(ran);
+        if changed {
+            out.push(join_shell_words(&words));
+        } else if expanded.is_some() {
+            out.push(seg.trim().to_string());
+        }
+    }
+    out
+}
+
+/// A `NAME=value` word.
+fn is_name_value(w: &str) -> bool {
+    w.split_once('=').is_some_and(|(k, _)| {
+        !k.is_empty()
+            && !k.starts_with(|c: char| c.is_ascii_digit())
+            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn base_name(w: &str) -> &str {
+    w.rsplit('/').next().unwrap_or(w)
+}
+
+/// A path as a later command names it: `./x.sh` and `x.sh` are one file.
+fn same_path(p: &str) -> String {
+    p.strip_prefix("./").unwrap_or(p).to_string()
+}
+
+/// The file a command's `>` or `>>` writes, from its shell words.
+fn redirect_target(words: &[String]) -> Option<String> {
+    let at = words.iter().position(|w| w == ">")?;
+    words.get(at + 1).map(|t| same_path(t))
+}
+
+/// A command whose first word looks a program up and runs it, with that
+/// word put back as the program: `` `which git` push -f ``, `$(which git)
+/// push -f`, `$(command -v git) push -f` and `$(type -P git) push -f` are
+/// each `git push -f`.
+fn looked_up_head(seg: &str) -> Option<String> {
+    let t = seg.trim_start();
+    let (inner, rest) = if let Some(r) = t.strip_prefix('`') {
+        r.split_once('`')?
+    } else {
+        t.strip_prefix("$(")?.split_once(')')?
+    };
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    let name = match parts.as_slice() {
+        ["which", name] | ["command", "-v", name] | ["type", "-P" | "-p", name] => *name,
+        _ => return None,
+    };
+    Some(format!("{name}{rest}").trim().to_string())
+}
+
+/// `seg` with every `$NAME` and `${NAME}` a bare assignment on the line set
+/// replaced by its value, or `None` when it names none of them. Nothing in
+/// single quotes is replaced. Outside double quotes a value is split on the
+/// characters of `IFS`, as the shell splits it.
+fn expand_names(seg: &str, names: &[(String, String)], ifs: Option<&str>) -> Option<String> {
+    if names.is_empty() || !seg.contains('$') {
+        return None;
+    }
+    let chars: Vec<char> = seg.chars().collect();
+    let mut out = String::new();
+    let (mut single, mut double, mut hit) = (false, false, false);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' if !single => {
+                out.push(c);
+                if let Some(n) = chars.get(i + 1) {
+                    out.push(*n);
+                }
+                i += 2;
+                continue;
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '$' if !single => {
+                let braced = chars.get(i + 1) == Some(&'{');
+                let from = i + 1 + usize::from(braced);
+                let mut j = from;
+                while chars
+                    .get(j)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    j += 1;
+                }
+                let name: String = chars[from..j].iter().collect();
+                let closed = !braced || chars.get(j) == Some(&'}');
+                if let Some((_, v)) = names.iter().rev().find(|(k, _)| *k == name) {
+                    if !name.is_empty() && closed {
+                        let v = match ifs {
+                            Some(sep) if !double => v
+                                .chars()
+                                .map(|ch| if sep.contains(ch) { ' ' } else { ch })
+                                .collect(),
+                            _ => v.clone(),
+                        };
+                        out.push_str(&v);
+                        hit = true;
+                        i = j + usize::from(braced);
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+        i += 1;
+    }
+    hit.then_some(out)
+}
+
+/// Shell words joined back into a line, each word with a space, quote or
+/// shell character in it put in single quotes.
+fn join_shell_words(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| {
+            if w == ">"
+                || (!w.is_empty()
+                    && !w
+                        .chars()
+                        .any(|c| c.is_whitespace() || "'\"\\;&|<>()`$*?".contains(c)))
+            {
+                w.clone()
+            } else {
+                format!("'{}'", w.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The shells a script can be handed to.
@@ -22034,6 +22488,209 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_names_a_rule_through_an_alias() {
+        assert!(names_the_cue(
+            "Use tabs for indentation in Go files and gofmt them",
+            "what whitespace style for the golang code"
+        ));
+        assert!(names_the_cue(
+            "Use uv to run Python tools instead of pip or plain python",
+            "set up a virtualenv and install black"
+        ));
+        assert!(names_the_cue(
+            "Keep secrets in 1Password and never write them into .env files",
+            "where do I put the Stripe API key"
+        ));
+        assert!(names_the_cue(
+            "Never push directly to main; open a pull request from a feature branch",
+            "ship this fix straight to the trunk"
+        ));
+        assert!(names_the_cue(
+            "Use pnpm instead of npm for every JavaScript package install in this repo",
+            "From now on always use bun, never yarn, in this repo"
+        ));
+        // `go` the verb names no language.
+        assert!(!names_the_cue(
+            "Use tabs for indentation in Go files and gofmt them",
+            "go ahead and fix the parser"
+        ));
+        // A word every rule uses is no match.
+        assert!(!names_the_cue(
+            "Keep secrets in 1Password and never write them into .env files",
+            "From now on always use bun, never yarn, in this repo"
+        ));
+        assert!(!names_the_cue(
+            "Format SQL migrations with sqlfluff and never edit a migration that has been applied",
+            "From now on always use bun, never yarn, in this repo"
+        ));
+    }
+
+    fn signal_hit(kind: &str, text: &str, score: f64, ballots: u32) -> Hit {
+        Hit {
+            id: Some(format!("id-{}", text.len())),
+            text: text.into(),
+            score,
+            kind: kind.into(),
+            ts: None,
+            entities: vec!["horizon:standing".into()],
+            ballots: Some(ballots),
+            of: Some(3),
+        }
+    }
+
+    #[test]
+    fn the_encoder_admits_a_paraphrase_that_shares_no_word() {
+        let cue = "add the lodash dependency to the web app";
+        let pref = signal_hit(
+            "preference",
+            "Use pnpm instead of npm for every JavaScript package install in this repo",
+            1.0,
+            1,
+        );
+        let near = DenseSignal {
+            rank: Some(1),
+            cosine: Some(DENSE_ALONE_AT + 0.05),
+        };
+        assert!(admits_local(&pref, near, cue, 1.0, 0.71));
+        let far = DenseSignal {
+            rank: Some(1),
+            cosine: Some(DENSE_ALONE_AT - 0.05),
+        };
+        assert!(!admits_local(&pref, far, cue, 1.0, 0.61));
+        let low = DenseSignal {
+            rank: Some(DENSE_ALONE_RANK + 1),
+            cosine: Some(0.9),
+        };
+        assert!(!admits_local(&pref, low, cue, 1.0, 0.95));
+        assert!(!admits_local(&pref, DenseSignal::default(), cue, 1.0, 0.0));
+    }
+
+    #[test]
+    fn a_shared_word_needs_the_encoder_not_two_scorers() {
+        let cue = "the backend URL is wrong after deploying the SPA";
+        let lesson = signal_hit(
+            "lesson",
+            "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
+            1.0,
+            1,
+        );
+        let best = 0.70;
+        let some = DenseSignal {
+            rank: Some(2),
+            cosine: Some(best - DENSE_WORD_BEHIND + 0.01),
+        };
+        assert!(admits_local(&lesson, some, cue, 1.0, best));
+        let behind = DenseSignal {
+            rank: Some(5),
+            cosine: Some(best - DENSE_WORD_BEHIND - 0.01),
+        };
+        assert!(!admits_local(&lesson, behind, cue, 1.0, best));
+        // Below the floor of the top score it stays out.
+        assert!(!admits_local(&lesson, some, cue, 10.0, best));
+        // A word in common and no cosine: the encoder said nothing.
+        assert!(!admits_local(
+            &lesson,
+            DenseSignal::default(),
+            cue,
+            1.0,
+            best
+        ));
+        // An episode stays out whatever the encoder says.
+        let mut episode = lesson.clone();
+        episode.entities = vec!["horizon:transient".into()];
+        let sure = DenseSignal {
+            rank: Some(1),
+            cosine: Some(0.95),
+        };
+        assert!(!admits_local(&episode, sure, cue, 1.0, 0.95));
+    }
+
+    /// A pack whose search sends the encoder's rank and cosine on each hit.
+    fn serve_signal_pack(hits: Value) -> String {
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({ "hits": hits }).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        url
+    }
+
+    /// The prompt hook hands over a paraphrase the encoder ranked first
+    /// with no word in common, leaves out what the encoder barely named,
+    /// and hands over three memories at most.
+    #[test]
+    fn the_hook_delivers_a_paraphrase_and_at_most_three() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, kind: &str, text: &str, score: f64, rank: u32, cos: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": kind,
+                "ts": "2026-10-11T15:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 1, "of": 3, "dense_rank": rank, "cosine": cos
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "p1",
+                "preference",
+                "Use pnpm instead of npm for every JavaScript package install in this repo",
+                2.0,
+                1,
+                0.71
+            ),
+            hit(
+                "p2",
+                "preference",
+                "Keep secrets in 1Password and never write them into .env files",
+                1.9,
+                2,
+                0.21
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "add the lodash dependency to the web app".into(),
+            session: Some("para-one".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("Use pnpm instead of npm"), "{note}");
+        assert!(!note.contains("1Password"), "{note}");
+        drop(_url);
+
+        let many: Vec<Value> = (0..6)
+            .map(|i| {
+                hit(
+                    &format!("m{i}"),
+                    "preference",
+                    &format!("Run the lint step number {i} before every commit"),
+                    2.0 - f64::from(i) * 0.01,
+                    i + 1,
+                    0.8,
+                )
+            })
+            .collect();
+        let url = serve_signal_pack(Value::Array(many));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "I'm about to commit, anything to check first?".into(),
+            session: Some("cap-one".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert_eq!(note.matches("Run the lint step").count(), 3, "{note}");
+    }
+
+    #[test]
     fn the_hook_keeps_what_two_scorers_agreed_on() {
         let hit = |ballots, of| Hit {
             id: None,
@@ -24768,6 +25425,51 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_line_reads_what_one_command_hands_the_next() {
+        let carried = |line: &str| nested_lines(line, 0);
+        for (line, runs) in [
+            ("x='push -f'; git $x origin main", "git push -f origin main"),
+            (
+                "IFS=,; cmd=rm,-rf,/home/u/proj; $cmd",
+                "rm -rf /home/u/proj",
+            ),
+            ("`which git` push -f", "git push -f"),
+            ("$(command -v git) push -f", "git push -f"),
+            (
+                "ln -s /usr/bin/git /tmp/g && /tmp/g push -f",
+                "/usr/bin/git push -f",
+            ),
+            (
+                "cp /bin/rm /tmp/del && /tmp/del -rf ~/projects",
+                "/bin/rm -rf ~/projects",
+            ),
+            ("echo 'rm -rf ~' > /tmp/y.sh && sh /tmp/y.sh", "rm -rf ~"),
+            (
+                "cat > /tmp/x.sh <<'EOF'\nrm -rf ~/projects\nEOF\nbash /tmp/x.sh",
+                "rm -rf ~/projects\n",
+            ),
+            ("printf 'git push -f\\n' > go.sh; ./go.sh", "git push -f\n"),
+        ] {
+            let lines = carried(line);
+            assert!(lines.iter().any(|l| l == runs), "{line:?} -> {lines:?}");
+        }
+        // Text that is only data, or a value in single quotes, stays as it was.
+        for line in [
+            "x=1; echo '$x'",
+            "echo 'rm -rf ~' > notes.txt && cat notes.txt",
+            "cp a.txt b.txt && cat b.txt",
+        ] {
+            let lines = carried(line);
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.contains("rm -rf ~") && !l.contains("echo") || l == "echo 1"),
+                "{line:?} -> {lines:?}"
+            );
+        }
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

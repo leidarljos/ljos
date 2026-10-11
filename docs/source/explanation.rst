@@ -128,9 +128,15 @@ When the seat speaks
 ====================
 
 The hook speaks at a prompt, a failed tool and a stop, and fires its
-memories before a compaction. A prompt gets what it activates: the
+memories before a compaction. A prompt gets what it activates, three
+claims at most. With a pack that sends the encoder's cosine on each hit,
+that is the claim the encoder ranks first at a cosine of 0.66 or more,
+word or no word, and a claim that shares a word with the prompt and sits
+within 0.05 of its best cosine. With an older pack, it is the
 preferences and standing lessons that two scorers named and that share a
-word with it. A claim reaches a session once between compactions. It
+word with it. A word counts through its other names, so "golang" names
+what a rule about Go files names, and "virtualenv" what a rule about
+``uv`` names. A claim reaches a session once between compactions. It
 arrives when it first matters, not on every command after.
 
 A runner that reports a failed tool, as Grok Build does with
@@ -413,7 +419,7 @@ answer, and each answer fed a structure that was already there.
 =========== ================================================== ================================================================ ===============================================
 point       the judgment                                       the local answer                                                 what consumes it
 =========== ================================================== ================================================================ ===============================================
-prompt hook which claims bear on the prompt                    two scorers agree, a score floor, a shared word, a cross-encoder the injected context
+prompt hook which claims bear on the prompt                    the encoder's cosine or two scorers, a floor, a shared word      the injected context
 prompt hook is this a correction, or a choice put to the agent two phrase lists                                                 a proposal, then the nudges
 panel       which option a persona votes for                   one subagent per persona                                         the settle, forecasts, ``learn``, ``calibrate``
 stop        may the agent stop                                 rules on the held issue                                          one more round, once
