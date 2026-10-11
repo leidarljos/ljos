@@ -830,10 +830,40 @@ fn main() -> Result<()> {
         } => {
             let text = join(&text);
             let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
+            // A preference that forbids a command it can name carries an
+            // ask over it. The person typing it gets the rule with the
+            // line that takes it back; an agent is shown the command.
+            let proposed = if deny.is_empty() && ask.is_empty() {
+                ljos_cli::command_prefs::rule_candidates(&text)
+            } else {
+                Vec::new()
+            };
             let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
             println!("{}", write_ack(&body));
             for rule in &rules {
                 println!("{}", ljos_cli::atom_out(&write_rule(rule)?, false)?);
+            }
+            if !proposed.is_empty() && ljos_cli::under_a_runner() {
+                for rule in &proposed {
+                    println!(
+                        "this preference can carry an ask over {}: `ljos rule {} --verdict ask --why {}`",
+                        rule.pattern,
+                        ljos_cli::tools::sh_quote(&rule.pattern),
+                        ljos_cli::tools::sh_quote(&rule.reason)
+                    );
+                }
+            } else {
+                for rule in &proposed {
+                    let written = write_rule(rule)?;
+                    let id = written
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    println!(
+                        "the hook now asks before {}, with this preference as the reason; `ljos forget {id}` takes the rule back",
+                        rule.pattern
+                    );
+                }
             }
         }
         Cmd::Accept { id } => {
@@ -1501,10 +1531,10 @@ fn main() -> Result<()> {
             }
             // On a tool call the pack's rules give a verdict; on a prompt
             // there is nothing to stop, only something to know.
-            let rules = if call.event == "PreToolUse" || call.event == "argv" {
-                ljos_cli::rules_for_gate()
+            let (rules, preferences) = if call.event == "PreToolUse" || call.event == "argv" {
+                ljos_cli::gate_read()
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             // A tool call with no command line (a file read, a search) has
@@ -1555,7 +1585,20 @@ fn main() -> Result<()> {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
                     let _ = ljos_cli::work_nudge(&call, subagent.is_some());
-                    String::new()
+                    // The preferences that name the command about to run
+                    // go with it, once a session each, read from the
+                    // listing the rules came from.
+                    if call.event == "PreToolUse" {
+                        let (note, keys) = ljos_cli::command_preference_note(
+                            &preferences,
+                            &call.cue,
+                            call.session.as_deref(),
+                        );
+                        seen_later.extend(keys);
+                        note
+                    } else {
+                        String::new()
+                    }
                 }
                 "PostToolUse" => {
                     let (mut ctx, ids) = post_hook_stdout(call.shape, call.session.as_deref());

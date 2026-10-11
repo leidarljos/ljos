@@ -53,6 +53,14 @@ what an earlier one refused, so the first refusal wins.
    of the line. A quoted sentence or a heredoc body counts as data.
    The rules last read are kept under =$XDG_DATA_HOME/ljos=, and they
    stand when the pack is down or switched off.
+   A preference that forbids a command it can name carries an ask over
+   it: "Use pnpm instead of npm" asks before =npm install=, and "never
+   push directly to main" before a push to main. Typed by the person,
+   =prefer= writes that rule and prints the =ljos forget= line that takes
+   it back; under an agent it prints the =ljos rule= command instead.
+   The tool-call hook also hands over, once a session, the preferences
+   that name the command about to run, read from the listing the rules
+   came from.
 - *The ask pack.* It is built into ljos and on by default, and asks the person
    before a command that drops or resets a database, tears down
    infrastructure, deletes cluster or cloud resources, prunes containers
