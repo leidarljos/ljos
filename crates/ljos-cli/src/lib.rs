@@ -8378,8 +8378,35 @@ pub fn playbook_opening(issue: &str, name: Option<&str>) -> Result<String> {
     }
 }
 
-/// The three blocks a brief carries: playbook step (full body), named
-/// principles, arena rubric.
+/// Whether an issue is ljos's own work: an id in the `ljos` project, a
+/// tracker project named `ljos`, or an `ljos` or `ljos-*` tag. The named
+/// principles and the arena rubric are ljos's product law, so only such
+/// an issue's brief carries them.
+#[must_use]
+pub fn is_ljos_issue(issue: &str) -> bool {
+    let issue = issue.trim();
+    if issue.to_ascii_lowercase().starts_with("ljos-") {
+        return true;
+    }
+    let Ok(card) = tracker_show_json(issue) else {
+        return false;
+    };
+    let ljos = |w: &str| {
+        let w = w.trim().to_ascii_lowercase();
+        w == "ljos" || w.starts_with("ljos-")
+    };
+    card["project"]
+        .as_str()
+        .is_some_and(|p| p.trim().eq_ignore_ascii_case("ljos"))
+        || card["tags"]
+            .as_array()
+            .is_some_and(|tags| tags.iter().filter_map(Value::as_str).any(ljos))
+}
+
+/// The blocks a brief carries: the playbook step (full body), then, on
+/// ljos's own issues only, the named principles and the arena rubric.
+/// Another project's issue gets its playbook and a line saying no
+/// product rubric applies, so a persona reasons from the issue alone.
 #[must_use]
 pub fn brief_playbook_blocks(issue: &str) -> String {
     let copy = match bound_playbook(issue) {
@@ -8390,7 +8417,13 @@ pub fn brief_playbook_blocks(issue: &str) -> String {
             "none bound; `ljos playbook ISSUE NAME` names one before personas enter.\n".to_string()
         }
     };
-    format!("== playbook\n{copy}\n{PRINCIPLES}\n{RUBRIC}")
+    if is_ljos_issue(issue) {
+        format!("== playbook\n{copy}\n{PRINCIPLES}\n{RUBRIC}")
+    } else {
+        format!(
+            "== playbook\n{copy}\n== rubric\nnone: {issue} is not ljos's own work, so ljos's principles and rubric do not apply. Judge it on the issue's own terms.\n"
+        )
+    }
 }
 
 /// The brief a subagent playing a persona starts from: the persona's view
@@ -21717,10 +21750,13 @@ mod tests {
         let blocks = brief_playbook_blocks("proj-1a2b");
         assert!(blocks.contains("== playbook"), "{blocks}");
         assert!(blocks.contains("Grade due claims"), "{blocks}");
-        assert!(blocks.contains("== principles"), "{blocks}");
-        assert!(blocks.contains("split-fence"), "{blocks}");
-        assert!(blocks.contains("== rubric"), "{blocks}");
-        assert!(blocks.contains("Ledger intact"), "{blocks}");
+        assert!(!blocks.contains("split-fence"), "{blocks}");
+        assert!(!blocks.contains("Ledger intact"), "{blocks}");
+        let own = brief_playbook_blocks("ljos-1a2b");
+        assert!(own.contains("== principles"), "{own}");
+        assert!(own.contains("split-fence"), "{own}");
+        assert!(own.contains("== rubric"), "{own}");
+        assert!(own.contains("Ledger intact"), "{own}");
         drop_playbook("proj-1a2b");
         assert_eq!(bound_playbook("proj-1a2b"), None);
         let none = playbook_opening("proj-1a2b", None).unwrap();
@@ -27443,6 +27479,68 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no completion: {calls}"));
         assert_eq!(held, finished, "{calls}");
+    }
+
+    /// A persona brief on another project's issue carries the issue and
+    /// its playbook, not ljos's own principles and rubric. Checked through
+    /// both doors a persona enters by: `ljos brief` and `ljos panel`.
+    #[test]
+    fn a_brief_on_another_project_carries_no_ljos_rubric() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* TODO [#C] Logo legibility review\n:PROPERTIES:\n:ID:         probe-l0g0\n:END:\n",
+        )
+        .unwrap();
+        let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (url, _seen) = serve_http(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-p","kind":"persona","name":"designer","anchor":0.5,"text":"Reads a mark for legibility at small sizes.","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let runtime = dir.path().join("run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let out = dir.path().join("panel");
+        let (brief_text, panel_text) = with_fake_on_path(dir.path(), || {
+            bind_playbook("probe-l0g0", "company-panel").unwrap();
+            let b = brief("designer", "probe-l0g0").unwrap();
+            panel("probe-l0g0", &out).unwrap();
+            let p = std::fs::read_to_string(out.join("designer.md")).unwrap();
+            (b, p)
+        });
+        for (door, text) in [("brief", &brief_text), ("panel", &panel_text)] {
+            assert!(text.contains("== playbook"), "{door}: {text}");
+            assert!(text.contains("Logo legibility review"), "{door}: {text}");
+            assert!(!text.contains("== principles"), "{door}: {text}");
+            assert!(!text.contains("split-fence"), "{door}: {text}");
+            assert!(!text.contains("Ledger intact"), "{door}: {text}");
+        }
     }
 
     /// The pack's address, its request lines and its posted atoms.
