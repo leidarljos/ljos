@@ -9,7 +9,9 @@ description: >
 One seat, five stores, five questions. Ask the store that owns the question.
 `ljos` is the one command in front of them; `ljos-mcp` serves the same verbs
 over the Model Context Protocol (MCP). Every verb below has a tool of the same
-name with the prefix `ljos_`.
+name with the prefix `ljos_`. The server lists the core tools unless
+`LJOS_MCP_TOOLS=all` is in its environment; a verb with no tool listed runs
+as `ljos VERB` in the shell.
 
 | question | store | verbs |
 |---|---|---|
@@ -48,6 +50,8 @@ tracker as a `playbook:` note until `finish` or `release`.
 
 1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
+   A `warn` on `host` means the kernel killed a process within a day. The
+   sitting opens; run one build or test suite at a time.
 2. `ljos cards`. What the human froze. Read, never write.
 3. `ljos due`. What is due for review: the soonest eight and the total.
    The verb prints a page; it does not grade. Grade it after the sitting:
@@ -81,6 +85,12 @@ tracker as a `playbook:` note until `finish` or `release`.
    node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
    `vissue claims` answers who has it; a tracker that refuses the name
    refuses the sitting, and `ljos release` frees the claim graph.
+   A background worker you start sits under its own conversation's
+   name and the same seat. The conversation that started it can
+   complete, finish or release the worker's claim, and the worker can
+   finish a claim its parent took.
+   Another seat's claim is still refused, and the refusal names who
+   has it.
 
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
@@ -96,7 +106,9 @@ whose `.ljos/sync.toml` names a scope and its age recipients carries one
 sealed log per machine under `.ljos/atoms/`. The sitting pulls and takes
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `ljos sync --key` prints this machine's public key
-for a scope's recipients, and `ljos sync` runs the pull and the push by hand. An
+for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
+A repository with no `.ljos/sync.toml` is not synced, and the sitting and
+finish say nothing about it; only `ljos sync` names the missing file. An
 atom goes to the scope its `scope:NAME` entity names, else the machine's
 `default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
 takes the scope of the repository its issue lives in, and a
@@ -114,9 +126,10 @@ Every piece of work has an issue before it has a claim.
   Citing a deed names it; the bytes stay in deedar.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
-- A lesson is one `ljos remember` of two short sentences at most. It is
-  stored as an episode and is not a refresher until `ljos graded ID`
-  recalls it, or until consolidation finds it replaced an earlier claim.
+- A lesson is one `ljos remember` of two short sentences at most. Run by
+  you, the agent, it is stored as an episode and is not a refresher until
+  `ljos graded ID` recalls it, or until consolidation finds it replaced an
+  earlier claim. The person's own `ljos remember` takes effect at once.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
@@ -169,13 +182,17 @@ Every piece of work has an issue before it has a claim.
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
   still records one on its own. With two or more forecasts
   the settle also names the option whose actual share most exceeds its
-  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows each voter's standing.
+  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows the standing of each voter on the issue.
+  The other names in the trust rows are counted; `--json` lists them.
   When the world says which option was right, `ljos finish ISSUE
   --outcome OPTION` (or `ljos learn`) writes every voter's record of
   outcomes as its weight, so the next settle weighs a voter by what it
   got right. A record's accuracy is first shrunk toward the panel's
   pooled accuracy, and the outcome is kept: once five issues have one, the
-  settle discounts voters who err together.
+  settle discounts voters who err together. When the person's answer was
+  none of the options (a tie broken with a third answer), add
+  `--new-option`: every voter is scored a miss on it. Without the flag an
+  outcome on no ballot is refused, since a typo would score the same.
 - When the work has shown that a kind of command must never run, or must
   be asked about first, write the law: `ljos rule 'PATTERN' --verdict
   deny|ask --why "..."`. The hook stops or asks before the command runs, and
@@ -235,7 +252,10 @@ Every piece of work has an issue before it has a claim.
   `ljos ask NAME "..."` puts a question to it in that session.
 - Work found while sitting is filed with `ljos file "TITLE" -t bug`: a
   child of the held issue, in its project, committed. `--parent ID`
-  names another parent and `--top` none. A board this tracker projects
+  names another parent and `--top` none. A bug in a tool found
+  mid-sitting goes to the tool's project: `-p PROJECT` naming another
+  project than the held issue's files at its top level, and says so.
+  A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
@@ -244,6 +264,9 @@ Every piece of work has an issue before it has a claim.
 - Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
   report is `vissue append ISSUE "..."` (or `--file F`); a tag is
   `vissue update ISSUE -t TAG`.
+- An issue another seat sits on refuses your sitting. To help, `ljos
+  note ISSUE "..."` adds an assist to its logbook, and the note names
+  the seat that has it; `ljos send SEAT "..."` reaches that seat now.
 
 ### A bump, and a build campaign
 
@@ -304,7 +327,9 @@ ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 ```
 
 It files the lesson as a proposal with origin `agent-derived`. `ljos accept ID`
-writes that lesson into the pack and records that the person accepted it.
+writes that lesson into the pack as a standing lesson and records that the
+person accepted it. The person runs it; under an agent runner it accepts only a proposal
+another conversation filed, such as a worker you started.
 A lesson the person types with `ljos remember` stays `user-declared`, and
 the same words satisfy the open proposal. The verb then fires the island,
 completes the session node, and learns from a named outcome. Without
@@ -435,8 +460,8 @@ and for a group membership.
 
 ## Identity and environment
 
-Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`
-and the seat's memory is one workspace, `seat`, whatever directory you
+Nothing here needs a variable set. The pack is found on `127.0.0.1:8761`,
+or on this user's own port when another user's writer holds 8761, and the seat's memory is one workspace, `seat`, whatever directory you
 stand in (`PACKSET_WORKSPACE` names another). The deed store and claim
 graph live in the user's state directories, the tracker at the root
 `vissue identity` prints, and the host key at `~/.config/deedar/host.key`
