@@ -582,7 +582,7 @@ When the campaign ends, its typed findings are the lessons:
 The first prints one line per finding. The second files one lesson per
 finding a person or a seat resolved, under the recipe's name, the
 package and the failure class, with origin ``agent-derived``. It does not
-write the atom. ``ljos accept ID`` writes it, and the command cites the
+write the atom. ``ljos accept ID`` writes it as a standing lesson, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
 past is skipped; ``--all`` takes it too. Once someone accepts the
 proposal, the recipe's next bump recalls this lesson from its island.
@@ -895,8 +895,8 @@ same pair supersedes it.
 Settle under the pack's trust
 =============================
 
-``ljos consensus ID`` reads the live trust rows and passes them to both
-settles. To anchor voters to their own ballots (Friedkin-Johnsen) on the
+``ljos consensus ID`` reads the live trust rows and passes them to the
+settle (and to the tracker's, with ``--compare``). To anchor voters to their own ballots (Friedkin-Johnsen) on the
 model crate alone, pass the rows as JSON tuples:
 
 .. code:: console
