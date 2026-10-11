@@ -280,6 +280,13 @@ as a standing preference and says so with the =ljos forget= line that
 takes it back. =LJOS_CAPTURE=nudge= asks the agent to write it instead,
 and =off= leaves it. An agent's =remember= of the person's words from
 their latest prompt stands at once too.
+A prompt event is not always the person: Codex sends one inside a
+subagent with the parent agent's brief as the prompt. A prompt whose
+payload names a subagent (=agent_id=), or a Codex thread other than the
+session's, saves nothing, grants no approval and files no correction,
+and neither does any prompt while =LJOS_UNATTENDED=1= is set. Codex
+sends each hook event twice; the copy prints the first delivery's
+answer and saves nothing.
 =ljos accept= writes a proposal as a standing lesson, and so does the same
 text typed with =remember= or =prefer=. The person runs =accept=; under an
 agent runner it refuses. An import from =receive= or =sync= is origin
