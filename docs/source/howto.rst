@@ -665,6 +665,8 @@ Start a sitting, and end one
    timeline of proj-1a2b: Ship the fuse change?
    2026-08-30  13 days ago     tracker created
    ...
+   == reclaim
+   no claim quiet longer than 900s
    == claim
    gen=2
 
