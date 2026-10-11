@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos finish` completes the session node before it files the lesson. When the pack refused the `--lesson` text, for example on its readability grade, the whole finish stopped with exit 1 and the node stayed open, though the work was done. Now the node completes, the refusal is a line with the pack's reason and the `ljos remember` command that keeps the lesson once reworded, and finish exits non-zero only when the completion itself fails. A pack that does not answer the island no longer fails the finish either.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
