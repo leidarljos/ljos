@@ -157,8 +157,10 @@ Command line
 |                                                                                                                                           |                           | no hook                                                                                                                                                                                |
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-``send SEAT TEXT`` writes to one seat. ``send --group NAME TEXT`` writes to
-the other members of that group. ``--interrupt`` leads the next prompt.
+``send SEAT TEXT`` writes to one seat. A seat the pack has never heard
+from is refused, with the seats it knows, since mail waits under the name
+it was sent to; ``--new-seat`` writes to one that has not started yet.
+``send --group NAME TEXT`` writes to the other members of that group. ``--interrupt`` leads the next prompt.
 ``--issue ID`` threads the message on that vissue issue, and the atom takes
 the issue's scope so ``ljos sync`` carries it in that repository's sealed
 log. ``inbox`` lists unread mail and writes no receipt. A pack that does

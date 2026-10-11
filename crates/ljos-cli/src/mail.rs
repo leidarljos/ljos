@@ -78,6 +78,8 @@ pub struct Send<'a> {
     pub text: &'a str,
     pub interrupt: bool,
     pub issue: Option<&'a str>,
+    /// Write to a seat this pack has not heard from yet.
+    pub new_seat: bool,
 }
 
 /// One message as a reader sees it.
@@ -474,6 +476,45 @@ fn find_letter(atoms: &[Value], id: &str) -> Result<Letter> {
         .ok_or_else(|| anyhow::anyhow!("no message {id}"))
 }
 
+/// Every seat this pack has heard from: a sender, a reader, a group
+/// member, and the seat any atom was written under.
+#[must_use]
+pub fn known_seats(atoms: &[Value]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for atom in atoms {
+        for prefix in ["seat:", "from:", "member:"] {
+            out.extend(tags(atom, prefix));
+        }
+        if let Some(seat) = atom["source"]["harness"].as_str() {
+            out.insert(seat.to_string());
+        }
+    }
+    out.retain(|s| !s.trim().is_empty());
+    out
+}
+
+/// Refuse a seat the pack has never heard from. Mail waits under the name
+/// it was sent to, so a message to `ljos` sat unread while the seat that
+/// meant to read it was `ljos-bot` (Software-mwy5).
+///
+/// # Errors
+///
+/// `seat` is not in `known` and `new_seat` was not passed.
+pub fn check_known(seat: &str, known: &BTreeSet<String>, new_seat: bool) -> Result<()> {
+    if new_seat || known.contains(seat) {
+        return Ok(());
+    }
+    let list = if known.is_empty() {
+        "none yet".to_string()
+    } else {
+        known.iter().cloned().collect::<Vec<_>>().join(", ")
+    };
+    bail!(
+        "send: no seat named {seat} has written to this pack, so the message would wait unread. \
+         Seats this pack knows: {list}. Pass --new-seat to write to a seat that has not started yet"
+    )
+}
+
 /// Who a send addresses. A group send leaves the sender off the list.
 pub fn recipients(
     from: &str,
@@ -623,6 +664,12 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let to = recipients(from.as_str(), args.seat, group.as_deref(), &roster)?;
     if group.is_none() {
         ensure_mail(&client, "send")?;
+        if !args.new_seat {
+            let known = known_seats(&listed()?);
+            for seat in &to {
+                check_known(seat, &known, false)?;
+            }
+        }
     }
     let issue = args
         .issue
