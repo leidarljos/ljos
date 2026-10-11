@@ -166,7 +166,7 @@ Computing Base (TCB)
 .. code:: console
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
 
 An ``ask`` rule uses the caller's approval UI when that UI is supported.
 Otherwise the hook stops the command and prints a request id. Calling
@@ -665,6 +665,8 @@ Start a sitting, and end one
    timeline of proj-1a2b: Ship the fuse change?
    2026-08-30  13 days ago     tracker created
    ...
+   == reclaim
+   no claim quiet longer than 900s
    == claim
    gen=2
 
@@ -895,8 +897,8 @@ same pair supersedes it.
 Settle under the pack's trust
 =============================
 
-``ljos consensus ID`` reads the live trust rows and passes them to both
-settles. To anchor voters to their own ballots (Friedkin-Johnsen) on the
+``ljos consensus ID`` reads the live trust rows and passes them to the
+settle (and to the tracker's, with ``--compare``). To anchor voters to their own ballots (Friedkin-Johnsen) on the
 model crate alone, pass the rows as JSON tuples:
 
 .. code:: console
