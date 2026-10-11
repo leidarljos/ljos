@@ -658,7 +658,7 @@ gen=2
 
 One verb, in the protocol's order; it stops at the first store that does
 not answer and claims nothing. =--playbook NAME= copies a recipe
-(=sit=, =arena=, =land=, =company-panel=, =overnight=) into the
+(=sit=, =arena=, =land=, =company-panel=, =overnight=, =feature=) into the
 playbook section before recall; absent a name, a closed-set token in the
 title else =sit=. The name is a tracker =playbook:= note until finish or
 release. =ljos panel= refuses until one is bound. The =start_a_sitting= prompt

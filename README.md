@@ -337,7 +337,7 @@ ljos approve <request-id>                       # record explicit consent for on
 ljos consensus vissue-xxxx
 ljos trust alice bob 0.8 --why deed-… [--about docs]
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
-ljos playbooks                                 # sit, arena, land, company-panel, overnight
+ljos playbooks                                 # sit, arena, land, company-panel, overnight, feature
 ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer

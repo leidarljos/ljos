@@ -61,14 +61,19 @@ tracker as a `playbook:` note until `finish` or `release`.
    weak island does not fire. `ljos search TOPIC` and a full
    `ljos island TASK` are during the work, not this opening.
 5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
-   five built-in recipes are `sit`, `arena`, `land`, `company-panel`,
-   `overnight`. Kind `playbook`, weighed not recalled. Pack latest per
-   name is the copy; built-in bodies seed only when the pack has no live
-   atom of that name. Write, list, bind, and copy refuse any other name.
-   `ljos playbooks` lists the five. Absent a name, the sitting matches
-   the title or binds `sit`. Mid-sitting turns re-read the same note; a
-   new task is a new sitting. Finish and release write `playbook:` so
-   the next sitting does not reprint the previous recipe.
+   six built-in recipes are `sit`, `arena`, `land`, `company-panel`,
+   `overnight`, `feature`. Kind `playbook`, weighed not recalled. Pack
+   latest per name is the copy; built-in bodies seed only when the pack
+   has no live atom of that name. Write, list, bind, and copy refuse any
+   other name. `ljos playbooks` lists the six. Absent a name, the sitting
+   matches the title (any name but `feature`) or binds `sit`. Mid-sitting
+   turns re-read the same note; a new task is a new sitting. Finish and
+   release write `playbook:` so the next sitting does not reprint the
+   previous recipe. Feature work runs on a parent issue:
+   `ljos workflow PARENT --start feature` files its design child, and
+   `ljos workflow PARENT` prints the stage and the next step. A sitting
+   on the parent or a child prints the same in `== workflow`, and
+   `ljos finish PARENT --close` is refused until the panel passed.
 6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 7. `ljos timeline ISSUE`. The last twelve dated events across the three

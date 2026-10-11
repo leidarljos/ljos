@@ -407,11 +407,22 @@ enum Cmd {
     Playbook {
         /// The tracker id of the issue.
         issue: String,
-        /// The recipe name: sit, arena, land, company-panel, overnight.
+        /// The recipe name: sit, arena, land, company-panel, overnight, feature.
         name: String,
     },
-    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight.
+    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature.
     Playbooks,
+    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round.
+    Workflow {
+        /// The tracker id of the parent issue.
+        issue: String,
+        /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
+        #[arg(long, value_name = "NAME", conflicts_with = "round")]
+        start: Option<String>,
+        /// File the next panel round once every child is closed.
+        #[arg(long)]
+        round: bool,
+    },
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
         /// A tracker id, or a 32-hex claim-graph id. Omit when claiming next.
@@ -1336,6 +1347,24 @@ fn run_command() -> Result<()> {
         }
         Cmd::Playbooks => {
             print!("{}", format_playbooks(&playbooks_from_pack()?));
+        }
+        Cmd::Workflow {
+            issue,
+            start,
+            round,
+        } => {
+            if let Some(name) = start {
+                print!("{}", ljos_cli::workflow_start(&issue, &name)?);
+            } else if round {
+                print!("{}", ljos_cli::workflow_round(&issue)?);
+            } else {
+                match ljos_cli::workflow_status(&issue)? {
+                    Some(s) => print!("{}", ljos_cli::format_workflow_status(&s)),
+                    None => bail!(
+                        "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
+                    ),
+                }
+            }
         }
         Cmd::Claim {
             node,
