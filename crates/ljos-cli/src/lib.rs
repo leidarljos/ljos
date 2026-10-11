@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub mod admit;
 pub mod approval;
+pub mod ask_pack;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -11759,6 +11760,17 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
         .or_else(|| rules.iter().find(|r| r.verdict == "ask" && fires(r)))
 }
 
+/// The verdict a shell line gets before it runs: the pack's own rules
+/// first ([`verdict_for`]), then the built-in ask pack
+/// ([`ask_pack::ask_pack_verdict`]), so a person's `deny` or `ask` on the
+/// same line wins.
+#[must_use]
+pub fn ruled_verdict(rules: &[Rule], line: &str) -> Option<Rule> {
+    verdict_for(rules, line)
+        .cloned()
+        .or_else(|| ask_pack::ask_pack_verdict(line))
+}
+
 /// The refusal of a line nested past [`NESTED_DEPTH`]: it is not read to
 /// the bottom, so no rule can say it is clean.
 fn too_deep_rule() -> &'static Rule {
@@ -17812,7 +17824,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         .ok()
         .map(|d| d.display().to_string());
     let gated = redirect_seat_verb(
-        gate_push(verdict_for(&rules, &line), &line, cwd.as_deref()),
+        gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
         &line,
     );
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());
@@ -18409,6 +18421,59 @@ pub fn consensus_steps_anchored(
         });
     }
     Ok(steps)
+}
+
+/// Refuse a settle on an issue that holds no ballots. The model reads an
+/// empty ballot as settled with no options, which a caller takes for
+/// agreement.
+///
+/// # Errors
+///
+/// `ballots` is empty.
+pub fn require_ballots(issue: &str, ballots: &[Value]) -> Result<()> {
+    if ballots.is_empty() {
+        bail!(
+            "consensus: {issue} holds no ballots, so there is nothing to settle. \
+             `ljos vote {issue} --for OPTION` casts one, and a panel (`ljos panel {issue}`) casts one per persona"
+        );
+    }
+    Ok(())
+}
+
+/// The key a step's output takes in `ljos consensus --json`: the model
+/// crate's verb (`settle`, `surprising`, `reputation`), or `tracker` for
+/// vissue's own settle.
+#[must_use]
+pub fn consensus_step_label(step: &ConsensusStep) -> String {
+    if step.bin == "vissue" {
+        "tracker".to_string()
+    } else {
+        step.args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| step.bin.to_string())
+    }
+}
+
+/// `ljos consensus --json` as one JSON object. `gate` is the push cite,
+/// and its fields stay at the top level under the keys the push cite
+/// already uses. Each step's output follows under its label (`settle`,
+/// `tracker`, `surprising`, `reputation`), parsed when it is JSON and
+/// kept as text when it is not.
+#[must_use]
+pub fn consensus_document(gate: &Value, said: &[(String, String)]) -> Value {
+    let mut doc = serde_json::Map::new();
+    if let Some(obj) = gate.as_object() {
+        for (k, v) in obj {
+            doc.insert(k.clone(), v.clone());
+        }
+    }
+    for (label, out) in said {
+        let value = serde_json::from_str::<Value>(out.trim())
+            .unwrap_or_else(|_| Value::String(out.trim().to_string()));
+        doc.insert(label.clone(), value);
+    }
+    Value::Object(doc)
 }
 
 pub fn on_path(bin: &str) -> bool {
