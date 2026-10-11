@@ -785,6 +785,16 @@ fn write_ack(body: &serde_json::Value) -> String {
 }
 
 fn main() -> Result<()> {
+    let ran = run_command();
+    if let Err(e) = &ran {
+        // A gate whose hook fails answers deny in the runner's JSON and
+        // exits 2, so a runner that reads silence as allow still refuses.
+        ljos_cli::refuse_failed_gate(&format!("{e:#}"));
+    }
+    ran
+}
+
+fn run_command() -> Result<()> {
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
@@ -830,10 +840,40 @@ fn main() -> Result<()> {
         } => {
             let text = join(&text);
             let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
+            // A preference that forbids a command it can name carries an
+            // ask over it. The person typing it gets the rule with the
+            // line that takes it back; an agent is shown the command.
+            let proposed = if deny.is_empty() && ask.is_empty() {
+                ljos_cli::command_prefs::rule_candidates(&text)
+            } else {
+                Vec::new()
+            };
             let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
             println!("{}", write_ack(&body));
             for rule in &rules {
                 println!("{}", ljos_cli::atom_out(&write_rule(rule)?, false)?);
+            }
+            if !proposed.is_empty() && ljos_cli::under_a_runner() {
+                for rule in &proposed {
+                    println!(
+                        "this preference can carry an ask over {}: `ljos rule {} --verdict ask --why {}`",
+                        rule.pattern,
+                        ljos_cli::tools::sh_quote(&rule.pattern),
+                        ljos_cli::tools::sh_quote(&rule.reason)
+                    );
+                }
+            } else {
+                for rule in &proposed {
+                    let written = write_rule(rule)?;
+                    let id = written
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    println!(
+                        "the hook now asks before {}, with this preference as the reason; `ljos forget {id}` takes the rule back",
+                        rule.pattern
+                    );
+                }
             }
         }
         Cmd::Accept { id } => {
@@ -1412,7 +1452,7 @@ fn main() -> Result<()> {
             // at the same moment is answered once. A tool gate is exempt
             // from both: its verdict must not be lost to a clock. Exiting
             // at the deadline writes no deny, and the runner then allows
-            // the command.
+            // the command; a gate's own deadline, armed below, writes one.
             // The same holds for an event said once, such as a stop or the
             // end of a session: its twin is answered with nothing.
             if ljos_cli::hook_twin(&call, &input) {
@@ -1441,6 +1481,7 @@ fn main() -> Result<()> {
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
             unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+            ljos_cli::arm_gate(&input, event.as_deref());
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());
             // A subagent about to stop is held once while its parent holds
@@ -1501,10 +1542,10 @@ fn main() -> Result<()> {
             }
             // On a tool call the pack's rules give a verdict; on a prompt
             // there is nothing to stop, only something to know.
-            let rules = if call.event == "PreToolUse" || call.event == "argv" {
-                ljos_cli::rules_for_gate()
+            let (rules, preferences) = if call.event == "PreToolUse" || call.event == "argv" {
+                ljos_cli::gate_read()
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             // A tool call with no command line (a file read, a search) has
@@ -1562,7 +1603,20 @@ fn main() -> Result<()> {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
                     let _ = ljos_cli::work_nudge(&call, subagent.is_some());
-                    String::new()
+                    // The preferences that name the command about to run
+                    // go with it, once a session each, read from the
+                    // listing the rules came from.
+                    if call.event == "PreToolUse" {
+                        let (note, keys) = ljos_cli::command_preference_note(
+                            &preferences,
+                            &call.cue,
+                            call.session.as_deref(),
+                        );
+                        seen_later.extend(keys);
+                        note
+                    } else {
+                        String::new()
+                    }
                 }
                 "PostToolUse" => {
                     let (mut ctx, ids) = post_hook_stdout(call.shape, call.session.as_deref());
@@ -1744,8 +1798,7 @@ fn main() -> Result<()> {
                 }
             };
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
-            print!("{output}");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            ljos_cli::answer_gate(&output);
             ljos_cli::keep_hook_answer(&call, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);

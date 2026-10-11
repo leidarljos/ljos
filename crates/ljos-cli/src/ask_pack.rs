@@ -1,16 +1,30 @@
 //! The ask pack: built-in `ask` rules for commands that lose data or reach
 //! past the machine. Database drops and resets, infrastructure and cluster
 //! teardown, cloud and container deletes, publishing a package, reading a
-//! secret, and emptying a file each ask the person first, with a reason and
-//! a safer form. The pack is on by default. `LJOS_ASK_PACK=off` turns it
+//! secret, emptying or deleting a config file, mirroring a delete into the
+//! home directory, dropping a stash, and putting a world-writable directory
+//! ahead of `$PATH` each ask the person first, with a reason and a safer
+//! form. The pack is on by default. `LJOS_ASK_PACK=off` turns it
 //! off, and a list such as `LJOS_ASK_PACK=db,cloud` keeps only those
 //! classes. A seat rule in the pack is read first, so a person's own `deny`
 //! or `ask` on the same line wins.
 
-use super::{command_segments, nested_lines, pipelines, plain_words, raw_segments, Rule};
+use super::{
+    command_segments, nested_lines, pipelines, plain_words, prefix_end, raw_segments, shell_words,
+    Rule,
+};
 
 /// The classes of the pack, in the order a refusal is looked for.
-pub const ASK_PACK_CLASSES: &[&str] = &["db", "cloud", "containers", "publish", "secrets", "files"];
+pub const ASK_PACK_CLASSES: &[&str] = &[
+    "db",
+    "cloud",
+    "containers",
+    "publish",
+    "secrets",
+    "files",
+    "git",
+    "path",
+];
 
 /// The environment variable that turns the pack or its classes off.
 pub const ASK_PACK_ENV: &str = "LJOS_ASK_PACK";
@@ -103,6 +117,33 @@ const FILE_WIPE: Ask = Ask {
            (`mv FILE FILE.bak`), work on a copy under /tmp, or ask the person to run it",
 };
 
+const CONFIG_DELETE: Ask = Ask {
+    class: "files",
+    token: "config-delete",
+    said: "this deletes a config file in the home directory or a system file, and nothing keeps \
+           a copy. Move it aside first (`mv FILE FILE.bak`), or ask the person to run it",
+};
+const MIRROR_DELETE: Ask = Ask {
+    class: "files",
+    token: "mirror-delete",
+    said: "this deletes whatever the source lacks from a directory under the home directory. Run \
+           it with `--dry-run` first to see what goes, or ask the person to run it",
+};
+const STASH_DROP: Ask = Ask {
+    class: "git",
+    token: "stash-drop",
+    said: "this deletes a stash, and the work in it is only in the reflog until git collects it. \
+           Apply it first (`git stash apply`), check it with `git stash show -p`, or ask the \
+           person to run it",
+};
+const PATH_HIJACK: Ask = Ask {
+    class: "path",
+    token: "path-hijack",
+    said: "this puts a directory anyone can write, such as /tmp, ahead of the system's own \
+           programs on PATH, so `git` or `rm` may run whatever was put there. Call the program by \
+           its full path, or ask the person to run it",
+};
+
 /// The classes `LJOS_ASK_PACK` leaves on: every class when unset, empty or
 /// `on`; none for `off`, `0`, `false` or `none`; else the listed ones.
 #[must_use]
@@ -160,6 +201,12 @@ pub fn ask_pack_verdict_with(line: &str, setting: Option<&str>) -> Option<Rule> 
 /// pipeline by pipeline.
 fn asks(line: &str) -> Vec<&'static Ask> {
     let mut out: Vec<&'static Ask> = Vec::new();
+    // Read as written: the command list takes `PATH=...` off the front.
+    for raw in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
+        if let Some(a) = written_ask(&raw) {
+            out.push(a);
+        }
+    }
     for seg in command_segments(line) {
         let words = plain_words(&seg);
         let (words, via_xargs) = past_xargs(&words);
@@ -646,9 +693,127 @@ fn command_ask(words: &[String], seg: &str, via_xargs: bool) -> Option<&'static 
             .iter()
             .any(|o| off_tmp(o))
             .then_some(&FILE_WIPE),
+        "rm" | "unlink" => p(&[])
+            .iter()
+            .any(|o| home_config(o) || system_file(o))
+            .then_some(&CONFIG_DELETE),
+        "rsync" => {
+            let ops = p(&[
+                "-e",
+                "--rsh",
+                "--exclude",
+                "--include",
+                "--filter",
+                "-f",
+                "--files-from",
+                "--exclude-from",
+                "--include-from",
+                "--chmod",
+                "--chown",
+                "--rsync-path",
+            ]);
+            (args.iter().any(|a| a.starts_with("--delete"))
+                && ops.len() >= 2
+                && ops.last().is_some_and(|d| under_home(d)))
+            .then_some(&MIRROR_DELETE)
+        }
+        "git" => {
+            let pos = p(&["-C", "-c", "--git-dir", "--work-tree"]);
+            (pos.starts_with(&["stash", "drop"])).then_some(&STASH_DROP)
+        }
         _ => None,
     };
     ask.or_else(|| reads_secret(words).then_some(&SECRET_READ))
+}
+
+/// The home directory as a line writes it: `~`, `$HOME`, `${HOME}`, or
+/// `/home/NAME` and `/Users/NAME`. The rest of the path, if any, after it.
+fn home_rest(p: &str) -> Option<&str> {
+    for home in ["~", "$HOME", "${HOME}"] {
+        if let Some(rest) = p.strip_prefix(home) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return Some(rest);
+            }
+        }
+    }
+    let user_rest = p
+        .strip_prefix("/home/")
+        .or_else(|| p.strip_prefix("/Users/"))?;
+    Some(user_rest.find('/').map_or("", |at| &user_rest[at..]))
+}
+
+/// A dotfile or dot-directory entry at the top of the home directory:
+/// `~/.bashrc`, `$HOME/.ssh/config`, `/home/u/.gitconfig`.
+fn home_config(p: &str) -> bool {
+    home_rest(p).is_some_and(|rest| rest.starts_with("/.") && !rest.starts_with("/.cache/"))
+}
+
+/// A path at or under the home directory, on this machine.
+fn under_home(p: &str) -> bool {
+    !p.contains(':') && home_rest(p).is_some()
+}
+
+/// A file under a system tree: `/etc`, `/usr`, `/bin`, `/boot` and the like.
+fn system_file(p: &str) -> bool {
+    [
+        "/etc/",
+        "/usr/",
+        "/bin/",
+        "/sbin/",
+        "/lib/",
+        "/lib64/",
+        "/boot/",
+        "/opt/",
+        "/srv/",
+        "/var/lib/",
+        "/System/",
+        "/Library/",
+    ]
+    .iter()
+    .any(|root| p.starts_with(root))
+}
+
+/// What a command writes through its own words: a file emptied by a bare
+/// redirection (`: > FILE`, `> FILE`, `true > FILE`, `cat /dev/null >
+/// FILE`), and a world-writable directory put ahead of PATH by an
+/// assignment (`PATH=/tmp/x:$PATH git status`, `export PATH=/tmp/x:$PATH`).
+fn written_ask(seg: &str) -> Option<&'static Ask> {
+    let words = shell_words(seg);
+    let (at, _) = prefix_end(&words);
+    let assigns = words[..at].iter().map(String::as_str).chain(
+        (words.get(at).map(String::as_str) == Some("export"))
+            .then(|| words[at + 1..].iter().map(String::as_str))
+            .into_iter()
+            .flatten(),
+    );
+    for a in assigns {
+        if let Some(v) = a.strip_prefix("PATH=") {
+            let ahead = v
+                .split(':')
+                .take_while(|e| !matches!(*e, "$PATH" | "${PATH}"));
+            if ahead.into_iter().any(|e| {
+                ["/tmp", "/var/tmp", "/dev/shm"]
+                    .iter()
+                    .any(|t| e == *t || e.starts_with(&format!("{t}/")))
+            }) {
+                return Some(&PATH_HIJACK);
+            }
+        }
+    }
+    let rest = &words[at..];
+    let target = rest
+        .iter()
+        .position(|w| w == ">")
+        .and_then(|i| rest.get(i + 1))?;
+    let empty = match rest.first().map(String::as_str) {
+        Some(">") => true,
+        Some(":" | "true") => rest.len() == 3,
+        Some("cat") => rest.len() == 4 && rest[1] == "/dev/null",
+        _ => false,
+    };
+    // `>>` appends nothing to the file.
+    let appends = seg.contains(">>");
+    (empty && !appends && off_tmp(target) && !target.starts_with("/dev/")).then_some(&FILE_WIPE)
 }
 
 /// The rule a pipeline meets as a whole: SQL that drops data echoed into a
@@ -941,6 +1106,10 @@ mod tests {
             &SECRET_READ,
             &SECRET_SEND,
             &FILE_WIPE,
+            &CONFIG_DELETE,
+            &MIRROR_DELETE,
+            &STASH_DROP,
+            &PATH_HIJACK,
         ] {
             assert!(ASK_PACK_CLASSES.contains(&a.class), "{}", a.token);
             assert!(a.said.starts_with("this "), "{}", a.token);
@@ -950,6 +1119,44 @@ mod tests {
                 a.token
             );
             assert!(!a.said.ends_with('.'), "{}", a.token);
+        }
+    }
+
+    #[test]
+    fn the_pack_asks_before_a_stash_a_config_or_path_goes() {
+        for (line, want) in [
+            ("git stash drop stash@{0}", "stash-drop"),
+            ("git stash drop", "stash-drop"),
+            (": > src/main.rs", "file-wipe"),
+            ("> Cargo.toml", "file-wipe"),
+            ("cat /dev/null > README.md", "file-wipe"),
+            ("unlink ~/.bashrc", "config-delete"),
+            ("rm $HOME/.ssh/config", "config-delete"),
+            ("rm /etc/hosts", "config-delete"),
+            ("rsync -a --delete empty/ ~/projects/", "mirror-delete"),
+            ("PATH=/tmp/evil:$PATH git status", "path-hijack"),
+            ("export PATH=/dev/shm/b:$PATH", "path-hijack"),
+        ] {
+            assert_eq!(token(line).as_deref(), Some(want), "{line}");
+        }
+        for line in [
+            "git stash",
+            "git stash pop",
+            "git stash list",
+            ": >> build.log",
+            "echo hi > out.txt",
+            ": > /tmp/scratch.log",
+            "rm ./notes.txt",
+            "rm ~/Downloads/a.zip",
+            "rm ~/.cache/pip/x.whl",
+            "rsync -a --delete build/ host:/var/www/",
+            "rsync -a --delete build/ /mnt/backup/build/",
+            "rsync -a src/ ~/backup/",
+            "PATH=./node_modules/.bin:$PATH jest",
+            "PATH=$PATH:/tmp/x/bin tool",
+            "export PATH=$HOME/.cargo/bin:$PATH",
+        ] {
+            assert_eq!(token(line), None, "{line}");
         }
     }
 }

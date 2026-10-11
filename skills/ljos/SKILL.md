@@ -201,6 +201,9 @@ Every piece of work has an issue before it has a claim.
   written with the rule it needs: `ljos prefer "..." --deny 'PATTERN'`.
   A preference alone is only recalled, never enforced. `ljos rules` lists
   what the hook enforces.
+  A preference that names the command it forbids, such as "use pnpm
+  instead of npm", prints the `ljos rule` command for its ask: pass it on
+  to the person rather than running it yourself.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
