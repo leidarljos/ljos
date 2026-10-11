@@ -6,7 +6,7 @@ use ljos_cli::{
     age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, compact_sitting,
     complete, conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish,
     forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
-    format_doctor_short, format_findings, format_hits, format_hubs, format_island, format_personas,
+    format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat, format_steps,
     format_write_ack, graded, habit, habits, handover, healthy, hook_note, identity_or_seat,
     island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen,
@@ -17,8 +17,8 @@ use ljos_cli::{
     rules_from_pack, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
     stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
     uncite_deed, verdict_for, whoami, with_discount, withdraw_prediction, write_outcome,
-    write_persona, write_prediction, write_rule, write_trust, Persona, Reading, Rule, Trust,
-    HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
+    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -326,6 +326,9 @@ enum Cmd {
         /// a runner named in harnesses.toml.
         #[arg(long)]
         runner: Option<String>,
+        /// Take over a name another seat, or another holder of this seat, defined.
+        #[arg(long)]
+        replace: bool,
     },
     /// Install a published release's binaries beside this ljos: fetched from the release, checked against its sha256 and its version, the old ones kept.
     Upgrade {
@@ -374,7 +377,7 @@ enum Cmd {
         /// What to ask, in words.
         text: Vec<String>,
     },
-    /// The personas the pack holds: name, anchor, domains and view, one per line.
+    /// The personas the pack holds: name, anchor, domains, view, and the seat that defined each, one per line.
     Personas,
     /// Write every persona as an agent definition in each runner's agents
     /// directory. A runner starts it as a subagent that casts that
@@ -1140,14 +1143,22 @@ fn main() -> Result<()> {
             view,
             about,
             runner,
+            replace,
         } => {
-            let body = write_persona(&Persona {
-                name,
-                anchor,
-                view,
-                entities: about,
-                runner,
-            })?;
+            let body = write_persona_as(
+                &Persona {
+                    name,
+                    anchor,
+                    view,
+                    entities: about,
+                    runner,
+                },
+                if replace {
+                    PersonaWrite::Replace
+                } else {
+                    PersonaWrite::Define
+                },
+            )?;
             println!("{}", format_write_ack(&body));
             ljos_cli::refresh_agents();
         }
@@ -1211,7 +1222,7 @@ fn main() -> Result<()> {
             println!("{}", ljos_cli::ask_persona(&name, &text.join(" "))?);
         }
         Cmd::Personas => {
-            print!("{}", format_personas(&personas_from_pack()?));
+            print!("{}", ljos_cli::personas_listing()?);
         }
         Cmd::Agents { harness, dry_run } => {
             print!(
@@ -1989,7 +2000,7 @@ fn main() -> Result<()> {
                     write_trust(row, &[])?;
                 }
                 for p in &moved {
-                    write_persona(p)?;
+                    write_persona_as(p, PersonaWrite::Learned)?;
                 }
                 write_outcome(&id, &outcome)?;
                 (rows, moved, std::collections::BTreeMap::new())
