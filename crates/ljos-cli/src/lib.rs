@@ -27227,6 +27227,7 @@ mod tests {
                 "done",
                 Some(lesson),
                 None,
+                false,
                 LEARN_BETA,
                 "alice",
                 Some(2),
