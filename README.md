@@ -20,6 +20,7 @@ The first line installs the seat and the programs a sitting calls: packset
 on what), ljos-policyd (the command check) and ljos-consensus (voting).
 `ljos doctor` names any that are missing. `packset-embed` is the encoder packsetd runs beside it.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
+An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 
 ```
 cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
@@ -57,9 +58,12 @@ that rule:
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (seat rule `terraform destroy*`)"}}
 ```
 
-The hook shows a preference from the moment it is written. A lesson
-(`ljos remember`) comes back once a review or a consolidation promotes it, and
-`ljos due` lists the lessons waiting.
+The hook shows what you write from the moment it is written: a preference
+(`ljos prefer`), a rule (`ljos rule`), and a lesson you type with
+`ljos remember`. A lesson the agent proposes at `ljos finish` stays out until
+you run `ljos accept ID` in your own terminal; then it shows at once too. An
+`ljos remember` that an agent runs from inside its runner is an episode: the
+hook shows it once a review promotes it, and `ljos due` lists those.
 
 The hooks also keep the work on the tracker once a conversation sits on an
 issue: after forty tool calls without a word to the seat, they remind it to
@@ -67,7 +71,9 @@ record the work. With `LJOS_TRACK_WORK=on` in the environment or in
 `~/.config/ljos/env`, a conversation with no issue is told on the first tool
 result to open one with `vissue q` and sit, and `Stop` blocks that turn once
 if it used tools and never touched the seat. Without it, a conversation that
-never sits hears nothing about the tracker.
+never sits hears nothing about the tracker. Of the shapes ljos carries, `grok` and
+`antigravity` register `Stop`. For `claude` or `codex`, add `Stop` to that
+runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
 
 ## What you get
 
@@ -81,8 +87,11 @@ never sits hears nothing about the tracker.
   taught. `ljos accept ID` writes that lesson and records the acceptance.
 - A check on shell commands: rules in the pack (`ljos rule`), tried on each
   command a line runs, plus a guard that keeps agents from rewriting the
-  checker's own binaries and hook files. Pushes to your own unreleased
-  repositories go through; a push anywhere else has to cite a decision.
+  checker's own binaries and hook files. With an ask rule on pushes
+  (`ljos rule 'git push*' --verdict ask --why "..."`), a push to your own
+  unreleased repository goes through, a push to a released or shared one
+  has to cite a decision another seat voted on, and anything else goes to
+  you. Without that rule a plain push is not checked.
 - Decisions with more than one defensible answer go to personas, voters with
   a view of their own. They settle by trust-weighted
   [consensus](https://github.com/leidarljos/consensus) that learns from the
@@ -114,8 +123,10 @@ lives as a tracker note until finish or release, and `ljos panel` refuses to
 run until one is bound.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
-goes in as a proposal with origin `agent-derived`. `ljos accept` writes it and
-records that the person accepted it. The island fires, the session node
+goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
+standing lesson and records that the person accepted it. Under an agent runner
+it accepts only a proposal another conversation filed, such as a worker's, so
+an agent can't accept its own proposal. The island fires, the session node
 completes, and a named outcome shrinks the weight of the voters it refuted. A
 lesson typed with `ljos remember` stays `user-declared`, and the same words
 satisfy the open proposal. The ticket stays open unless `--close` is given,
@@ -238,8 +249,8 @@ seat. `ljos seat` prints both names and where they came from. `ljos onboard`
 prints the one MCP entry any runner takes, and `ljos protocol` prints the
 text an agent reads first.
 
-Nothing needs a variable set. `ljos onboard` makes the deed store deedar
-falls back to (`~/.local/share/deedar/store`) and a tracker under
+Nothing needs a variable set. `ljos onboard --harness NAME` makes the deed
+store deedar falls back to (`~/.local/share/deedar/store`) and a tracker under
 `~/.local/share/vissue/tracker` that `~/.config/vissue/config.toml` names,
 unless `DEEDAR_URL` or `VISSUE_ROOT` already names one. `ljos remember`
 starts the writer when none is answering. The seat's memory is the one
@@ -334,9 +345,17 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. It has forty-seven tools, each
-opening with when to call it, plus the protocol at `ljos://protocol`, the
-cards read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the
+`ljos-mcp` serves the same verbs over stdio. By default it lists seventeen
+core tools: `remember`, `search`, `prefer`, `rule`, `file`, `note`,
+`sitting`, `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`,
+`consensus`, `doctor` and `request_approval`, each with the prefix `ljos_`.
+Every listed tool costs its description and schema on every session: about
+6,100 tokens for the core set against 15,000 for all forty-seven (o200k_base
+count). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
+`LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
+with a result marked `isError` that carries the reason, so the model reads
+it. The server also has the protocol at `ljos://protocol`, the cards
+read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the
 soonest eight claims and the total still due. Paste this where the runner
 keeps its servers:
 
