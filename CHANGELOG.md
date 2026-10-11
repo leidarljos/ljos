@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- `ljos vote` and `ljos predict` refuse to cast when nothing named the seat. With no `LJOS_SEAT`, a seat fell back to the program above the shell, and a subagent on the box cast 25 forecasts as `exec-daemon`, the command daemon, with no warning. `LJOS_SEAT`, `VISSUE_AGENT`, an MCP client's name or a runner's record still name the seat, and a person at a terminal is still their login user. The refusal says to set `LJOS_SEAT`, and nothing is written.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
