@@ -178,7 +178,8 @@ Every piece of work has an issue before it has a claim.
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
   still records one on its own. With two or more forecasts
   the settle also names the option whose actual share most exceeds its
-  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows each voter's standing.
+  forecast (Prelec, Seung and McCoy 2017, doi:10.1038/nature21054), and shows the standing of each voter on the issue.
+  The other names in the trust rows are counted; `--json` lists them.
   When the world says which option was right, `ljos finish ISSUE
   --outcome OPTION` (or `ljos learn`) writes every voter's record of
   outcomes as its weight, so the next settle weighs a voter by what it
@@ -253,6 +254,9 @@ Every piece of work has an issue before it has a claim.
 - Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
   report is `vissue append ISSUE "..."` (or `--file F`); a tag is
   `vissue update ISSUE -t TAG`.
+- An issue another seat sits on refuses your sitting. To help, `ljos
+  note ISSUE "..."` adds an assist to its logbook, and the note names
+  the seat that has it; `ljos send SEAT "..."` reaches that seat now.
 
 ### A bump, and a build campaign
 

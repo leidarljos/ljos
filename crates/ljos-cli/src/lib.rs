@@ -14735,12 +14735,41 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
 #[must_use]
 pub fn held_by_another_message(node: &str, assignee: &str, hold: &Hold, running: &str) -> String {
     format!(
-        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held",
+        "claim: {node} is held by another ({}, seat {}, {running}, since {}), not by {assignee} (this one). That conversation frees it with `ljos release {node}` or `ljos complete {node} --gen` from its sitting; when it is gone, `ljos release {node} --assignee {}` releases it under the name it held. To help without a sitting, `ljos note {node} TEXT` adds to its logbook and `ljos send {} TEXT` reaches the holder",
         hold.assignee,
         hold.seat,
         hold.since,
-        hold.assignee
+        hold.assignee,
+        hold.seat
     )
+}
+
+/// The line `ljos note` adds when another seat holds the issue. A note
+/// from outside the sitting is an assist: it goes in the logbook, which
+/// the holder reads at its next sitting, and `ljos send` reaches the
+/// holder now. `None` when nobody holds the issue live, when this seat
+/// holds it, or when no record on this host names the holder's seat.
+/// Reads only; a node the claim graph lacks is not minted.
+#[must_use]
+pub fn assist_note_line(issue: &str) -> Option<String> {
+    let got = run_captured("claimdag", &["get", &work_id(issue)]).ok()?;
+    let line = got.stdout.lines().next().unwrap_or_default();
+    let live = matches!(line.split_whitespace().nth(1), Some("claimed" | "running"));
+    if !live {
+        return None;
+    }
+    let hold = read_hold(&holder_of(line)?)?;
+    assist_line(issue, &hold, &seat_name())
+}
+
+/// [`assist_note_line`] for one hold record and this seat's name.
+fn assist_line(issue: &str, hold: &Hold, seat: &str) -> Option<String> {
+    (hold.seat != seat).then(|| {
+        format!(
+            "{} holds {issue} (since {}). This note is an assist, not a sitting: it is in the logbook the holder reads, and `ljos send {} TEXT` reaches the holder now\n",
+            hold.seat, hold.since, hold.seat
+        )
+    })
 }
 
 fn holder_of(get_output: &str) -> Option<String> {
@@ -16876,6 +16905,48 @@ pub fn voters_of(rows: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// The reputation step's JSON in words, for the voters on this issue only.
+/// EigenTrust runs over every trust row about the topic, so its standing
+/// names personas and seats that never voted here; listing them beside
+/// the settle read as influence they did not have. Those are counted, not
+/// named. `None` when the text is not reputation JSON.
+#[must_use]
+pub fn standing_in_words(json: &str, voters: &[String]) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let standing = v["standing"].as_object()?;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut named = Vec::new();
+    for voter in voters.iter().map(|v| v.trim()) {
+        if voter.is_empty() || seen.contains(&voter) {
+            continue;
+        }
+        seen.push(voter);
+        named.push(match standing.get(voter).and_then(Value::as_f64) {
+            Some(s) => format!("{voter} {s:.3}"),
+            None => format!("{voter} (no trust row)"),
+        });
+    }
+    let others = standing
+        .keys()
+        .filter(|k| !seen.contains(&k.as_str()))
+        .count();
+    let mut out = if named.is_empty() {
+        "standing in the trust rows: nobody voted on this issue\n".to_string()
+    } else {
+        format!(
+            "standing in the trust rows (EigenTrust), voters on this issue: {}\n",
+            named.join(", ")
+        )
+    };
+    if others > 0 {
+        out.push_str(&format!(
+            "the rows name {others} more {} with no ballot here; `ljos consensus --json` lists them\n",
+            if others == 1 { "agent" } else { "agents" }
+        ));
+    }
+    Some(out)
+}
+
 /// What the push gate makes of an issue, the first lines `ljos consensus`
 /// prints: whether a push citing it stands for `pusher`, on which seat
 /// ballots ([`seats_decide`]), then what the ballots' confidence does.
@@ -18753,6 +18824,28 @@ mod tests {
         assert!(said.contains("held by another"), "{said}");
         assert!(said.contains("acme"), "{said}");
         assert!(said.contains("not by brio"), "{said}");
+    }
+
+    /// Another seat sits on the issue: a note is an assist and says so,
+    /// and the sitting refusal names the note and the message as the ways
+    /// to help. This seat's own hold adds nothing.
+    #[test]
+    fn a_note_on_another_seats_issue_says_it_is_an_assist() {
+        let hold = Hold {
+            assignee: "eessi-1:proj-jz8x".into(),
+            seat: "eessi".into(),
+            pid: 1,
+            comm: "node".into(),
+            since: "2026-10-10T21:00:00.000Z".into(),
+        };
+        let line = super::assist_line("proj-jz8x", &hold, "inky").unwrap();
+        assert!(line.starts_with("eessi holds proj-jz8x"), "{line}");
+        assert!(line.contains("an assist, not a sitting"), "{line}");
+        assert!(line.contains("`ljos send eessi TEXT`"), "{line}");
+        assert!(super::assist_line("proj-jz8x", &hold, "eessi").is_none());
+        let refused = super::held_by_another_message("proj-jz8x", "inky-2", &hold, "still running");
+        assert!(refused.contains("`ljos note proj-jz8x TEXT`"), "{refused}");
+        assert!(refused.contains("`ljos send eessi TEXT`"), "{refused}");
     }
 
     /// Two seats on one ticket: LJOS_SEAT plus a distinct session id each.
@@ -20662,6 +20755,36 @@ mod tests {
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].args[0], "surprising");
         assert_eq!(steps[1].args[0], "reputation");
+    }
+
+    /// The standing beside a settle names the voters on the issue and only
+    /// counts the rest of the trust rows: four personas that never voted
+    /// once showed up beside eessi and inky.
+    #[test]
+    fn standing_names_only_the_voters_on_the_issue() {
+        let json = r#"{"alpha":0.15,"standing":{"eessi":0.33,"inky":0.31,"pyos-editor":0.0807,"rohit-voice":0.0807,"scipy-maintainer":0.0807,"voice-reader":0.0807}}"#;
+        let voters = vec!["eessi".to_string(), "inky".to_string()];
+        let words = standing_in_words(json, &voters).unwrap();
+        assert!(
+            words.contains("voters on this issue: eessi 0.330, inky 0.310"),
+            "{words}"
+        );
+        assert!(
+            words.contains("4 more agents with no ballot here"),
+            "{words}"
+        );
+        for persona in [
+            "pyos-editor",
+            "rohit-voice",
+            "scipy-maintainer",
+            "voice-reader",
+        ] {
+            assert!(!words.contains(persona), "{words}");
+        }
+        let only = standing_in_words(r#"{"standing":{"eessi":1.0}}"#, &voters).unwrap();
+        assert!(only.contains("inky (no trust row)"), "{only}");
+        assert!(!only.contains("more"), "{only}");
+        assert!(standing_in_words("not json", &voters).is_none());
     }
 
     /// A scoped row applies when the issue is about one of its domains; an
