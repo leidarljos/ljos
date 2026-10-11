@@ -427,6 +427,9 @@ pub struct PackArgs {
     /// Issues to take, with what they stand on.
     #[serde(default)]
     pub issues: Vec<String>,
+    /// The log size the receiver kept last time; the bag then carries the bridge from it.
+    #[serde(default)]
+    pub since_size: Option<u64>,
 }
 
 /// A satchel that arrived.
@@ -434,8 +437,11 @@ pub struct PackArgs {
 pub struct ReceiveArgs {
     /// The satchel directory.
     pub dir: String,
-    /// A bridge file from the last handover by the same sender.
+    /// The head file `keep` wrote at the last receive from the same sender.
     pub since: Option<String>,
+    /// Write this bag's log head to this file, for `since` next time.
+    #[serde(default)]
+    pub keep: Option<String>,
     /// Put the enclosed atoms into this seat's pack.
     pub import: Option<bool>,
 }
@@ -1450,7 +1456,8 @@ impl LjosServer {
             .unwrap_or_default();
         // As the CLI: a persona on the ballot settles under its anchor and
         // every other voter under the default one.
-        let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::ballot_voters(&args.issue));
+        let ballots = ljos_cli::ballot_rows(&args.issue);
+        let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         let mut steps = consensus_steps_for(
             &args.issue,
             on_path("ljos-consensus"),
@@ -1479,6 +1486,13 @@ impl LjosServer {
                 if let Some(words) = ljos_cli::settle_in_words(&said.text, &anchors) {
                     out.push(Said {
                         text: words,
+                        aside: None,
+                    });
+                }
+                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
+                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
+                    out.push(Said {
+                        text: split,
                         aside: None,
                     });
                 }
@@ -1770,9 +1784,14 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PackArgs>,
     ) -> Result<Json<Rows<String>>, McpError> {
-        handover(Path::new(&args.out), &args.projects, &args.issues)
-            .map(as_rows)
-            .map_err(refused)
+        handover(
+            Path::new(&args.out),
+            &args.projects,
+            &args.issues,
+            args.since_size,
+        )
+        .map(as_rows)
+        .map_err(refused)
     }
 
     #[tool(
@@ -1792,6 +1811,7 @@ impl LjosServer {
         receive(
             Path::new(&args.dir),
             args.since.as_deref().map(Path::new),
+            args.keep.as_deref().map(Path::new),
             args.import.unwrap_or(false),
         )
         .map(as_rows)
@@ -2265,8 +2285,9 @@ impl LjosServer {
              unanswered by the one before it: did it arrive as written (the\n\
              manifest), do the deeds predate the asking (every receipt to the head\n\
              in the bag, and the bridge from a kept head when `since` is given),\n\
-             and who wrote it (the signature, when there is one). Pass `since` when\n\
-             this sender has handed over before.\n\
+             and who wrote it (the signature, when there is one). Pass `since`, the\n\
+             head file `keep` wrote, when this sender has handed over before, and\n\
+             `keep` every time so there is a head for the next one.\n\
              \n\
              Then, for each deed the bag names, `ljos_current`: a deed that arrived\n\
              intact and is no longer the tip is a different finding from one that\n\
