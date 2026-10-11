@@ -16172,7 +16172,11 @@ pub fn settle_in_words(
         }
         out.push('\n');
     }
-    if v["settled"].as_bool() == Some(false) {
+    // ljos-consensus 0.8 reports a tie as not settled and keeps the
+    // iteration's own state in `converged`; an older one has only
+    // `settled`, which is that state.
+    let converged = v["converged"].as_bool().or_else(|| v["settled"].as_bool());
+    if converged == Some(false) {
         out.push_str("the iteration stopped before it settled; read the shares as a trend\n");
     }
     if agents.len() == influence.len() && !agents.is_empty() {
@@ -19963,6 +19967,24 @@ mod tests {
         assert!(words.contains("no option leads"), "{words}");
         assert!(!words.contains("anchors"), "{words}");
         assert!(settle_in_words("not json", &anchors).is_none());
+        // A 1-1 tie on opposite options, as ljos-consensus 0.7 printed it
+        // (settled beside tie) and as 0.8 prints it (a tie is not settled,
+        // and `converged` says the iteration finished). Neither reads as a
+        // lead, and neither says the iteration stopped short.
+        let old = r#"{"options":["drop","keep"],"shares":[0.5,0.5],"rounds":1,"settled":true,"engine":"degroot-fj","polarization":0.0,"disagreement":0.0,"agents":["eessi","inky"],"influence":[0.5,0.5],"margin":0.0,"tie":true}"#;
+        let new = r#"{"options":["drop","keep"],"shares":[0.5,0.5],"rounds":1,"settled":false,"converged":true,"engine":"degroot-fj","polarization":0.0,"disagreement":0.0,"agents":["eessi","inky"],"influence":[0.5,0.5],"margin":0.0,"tie":true}"#;
+        for raw in [old, new] {
+            let words = settle_in_words(raw, &Default::default()).unwrap();
+            assert!(
+                words.contains("no option leads: the settle is a tie"),
+                "{words}"
+            );
+            assert!(!words.contains("leads by"), "{words}");
+            assert!(!words.contains("stopped before it settled"), "{words}");
+        }
+        let short = r#"{"options":["a","b"],"shares":[0.6,0.4],"settled":false,"converged":false,"engine":"degroot-fj","agents":["x","y"],"tie":false}"#;
+        let words = settle_in_words(short, &Default::default()).unwrap();
+        assert!(words.contains("stopped before it settled"), "{words}");
     }
 
     /// Under Friedkin-Johnsen the share of its ballot a voter keeps is its
