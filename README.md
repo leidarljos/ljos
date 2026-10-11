@@ -1,31 +1,49 @@
 # ljos
 
-Memory, a work tracker and a guard on shell commands for coding agents:
-Claude Code, Codex, Grok Build, Cursor, Antigravity's `agy`, opencode, omp and
-hermes.
+Tell your coding agent a rule once. It comes back on every prompt it bears
+on, and the hook refuses the command that breaks it.
 
-An agent forgets what it learned when the session ends, and it runs whatever
-command it decides on. ljos keeps the lessons in a local store and hands the
-ones that bear on a prompt back to the agent before it answers. It records the
-work on a tracker the agent and the person both read. It checks each shell
-command against rules the person wrote before it runs. It plugs into each
-runner through its Model Context Protocol (MCP) server list and its hooks.
-The seat is free software and runs on your machine. Nothing leaves the
-machine unless you turn on a remote judge.
+Coding agents forget what they learned when the session ends, and they run
+whatever shell command they pick. ljos fixes both on your own machine. It
+keeps what you tell the agent in a local store and hands the matching notes
+back before the model reads each prompt. It checks each shell command against
+your rules and a built-in list of destructive commands before the command
+runs. It plugs into the agent through the agent's own hook and MCP settings.
+Nothing leaves the machine unless you turn on a remote judge.
+
+It works with Claude Code, Codex, Cursor, GitHub Copilot CLI, Gemini CLI,
+Windsurf, Factory's Droid, Kiro, Cline, Qwen Code, Crush, Grok Build,
+opencode, omp, hermes and Antigravity's `agy`.
 
 ## Five minutes
 
-The first line installs the seat and the programs a sitting calls: packset
-(memory), vissue (the tracker), deedar (records of work), claimdag (who works
-on what), ljos-policyd (the command check) and ljos-consensus (voting).
-`ljos doctor` names any that are missing. `packset-embed` is the encoder packsetd runs beside it.
+```
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
+```
+
+The installer downloads each program from its GitHub release, checks it
+against the published SHA-256 sum, and builds from source with `cargo` where a
+platform has no release. It then runs `ljos onboard` for every coding agent it
+finds and shows the guard refusing a force push. Its programs are ljos,
+packset (memory), vissue (the tracker), deedar (records of work), claimdag
+(who works on what), ljos-policyd (the command check) and ljos-consensus
+(voting). `--with-embed` adds `packset-embed`, the optional encoder for
+meaning-based search; without it search matches words, and nothing needs ONNX
+Runtime. `ljos doctor` names any part that is missing.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
 An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.3.0 installed without a word, so the doctor marks that row `no` and names the fix.
 
+Each ljos release attaches the script as `install.sh`, starting with the
+first release after 0.28.0. Until that release is out the link is a 404, and
+the hand install below works. Read the script before you run it; it is
+`scripts/install.sh` in this repository. To install by hand:
+
 ```
-cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
+cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
 ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
@@ -33,8 +51,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to r
 
 `--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
 `opencode`, `omp`, `hermes`, `windsurf`, `zed`, `vscode`, `claude-desktop`,
-`gemini`, `amazonq` or `kiro`. Cursor's IDE and its `agent` CLI share
-`~/.cursor/mcp.json`.
+`gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush` or `cline`.
+Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 
 Start a new session and ask for something the preference bears on, such as
 tagging a release. Before the model reads the prompt, the hook adds:
@@ -46,7 +64,7 @@ What this seat already knows that bears on this (from the pack, each with its ag
 
 When the agent then reaches for `git push --force origin main`, the runner
 refuses the command before it runs. `ljos-policyd` answers first, with the
-rules it ships:
+rules it ships, and lets `--force-with-lease` through:
 
 ```
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
@@ -87,8 +105,10 @@ runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
   in a git repository. `ljos sitting ISSUE` opens the work and claims it;
   `ljos finish ISSUE --lesson "..."` closes the loop and files what it
   taught. `ljos accept ID` writes that lesson and records the acceptance.
-- A check on shell commands: rules in the pack (`ljos rule`), tried on each
-  command a line runs, plus a guard that keeps agents from rewriting the
+- A check on shell commands: ljos-policyd's built-in refusals (force push,
+  `rm -rf` outside temp, `git reset --hard` and the like, read through `env`,
+  `timeout`, `xargs` and other wrappers) and your rules in the pack
+  (`ljos rule`), tried on each command a line runs, plus a guard that keeps agents from rewriting the
   checker's own binaries and hook files. With an ask rule on pushes
   (`ljos rule 'git push*' --verdict ask --why "..."`), a push to your own
   unreleased repository goes through, a push to a released or shared one
@@ -319,7 +339,7 @@ ljos playbooks                                 # sit, arena, land, company-panel
 ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer
-ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
+ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the runbook."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
