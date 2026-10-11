@@ -5,6 +5,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ## Unreleased
 
+- A persona names the seat and holder that defined it, and when. Personas are shared by every seat on a pack, and `ljos persona NAME` on an existing name replaced its view and anchor without a word, so two agents on one seat built overlapping panels within minutes. Redefining a name another seat, or another conversation of the same seat, defined is now refused with who defined it; `--replace` takes the name over. A settle that moves an anchor keeps the owner. `ljos personas` shows the owner and the date. A persona written before this has no owner and can be redefined as before.
 - `ljos doctor` marks the policy row `warn` when `ljos-policyd` was built without phronesis, or is too old to say. It said `ok`, so a seat checking commands with the table alone looked the same as one with the full law. The row names the fix, and a warning does not fail the doctor.
 - The install line names `vissue-mcp`. The `vissue` plugin in the Claude Code marketplace runs it as the tracker server, and the line installed `vissue-cli` only, which does not carry it, so that server failed to start. `ljos doctor` lists `vissue-mcp` as optional, with the line that installs it.
 - CI checks formatting and runs clippy with warnings as errors. The three warnings develop carried are gone.
