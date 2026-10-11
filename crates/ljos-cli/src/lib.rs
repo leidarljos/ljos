@@ -1515,10 +1515,51 @@ const SESSION: &[&str] = &[
     "tmux", "screen", "zellij", "herdr", "systemd", "init", "sshd", "login",
 ];
 
+/// Terminal emulators, by the name the kernel keeps for the process (at
+/// most fifteen bytes, so `gnome-terminal-server` reads `gnome-terminal-`).
+/// A shell a person opens in one of these has no program above it but the
+/// terminal, and the terminal is not a seat: without this list a person
+/// typing `ljos sitting` became the seat `gnome-terminal-server`, and each
+/// window of a terminal that runs one process per window held under its
+/// own name, so a finish typed in a second window was refused. Matched
+/// whole, since several names are short words.
+const TERMINALS: &[&str] = &[
+    "gnome-terminal-",
+    "kgx",
+    "ptyxis-agent",
+    "konsole",
+    "yakuake",
+    "kitty",
+    "alacritty",
+    "wezterm-gui",
+    "ghostty",
+    "foot",
+    "footclient",
+    "xterm",
+    "uxterm",
+    "urxvt",
+    "urxvtd",
+    "rxvt",
+    "terminator",
+    "tilix",
+    "xfce4-terminal",
+    "mate-terminal",
+    "lxterminal",
+    "qterminal",
+    "terminology",
+    "sakura",
+    "guake",
+    "tabby",
+    "contour",
+    "cool-retro-term",
+    "deepin-terminal",
+];
+
 /// Whether a process is the person's session rather than a program in it:
-/// a multiplexer, a login, the init system. Many conversations share one.
+/// a multiplexer, a login, the init system, a terminal emulator. Many
+/// conversations share one.
 fn is_session(comm: &str) -> bool {
-    SESSION.iter().any(|s| comm.starts_with(s))
+    SESSION.iter().any(|s| comm.starts_with(s)) || TERMINALS.contains(&comm)
 }
 
 /// The ancestors that belong to this conversation alone: the chain up to,
@@ -5425,6 +5466,43 @@ fn runner_record_holders() -> Vec<String> {
         }
     }
     out
+}
+
+/// Where `ljos file` puts a new issue: its parent, its project, and a line
+/// for the agent when the held issue was passed over. `--top` files with
+/// no parent and `--parent` names one. Otherwise the held issue is the
+/// parent, unless `-p` names another project: a child lives in its
+/// parent's project, so a tool bug filed with `-p` mid-sitting goes to
+/// the top of that project, not under the work being sat on.
+#[must_use]
+pub fn file_placement(
+    top: bool,
+    parent: Option<String>,
+    project: Option<String>,
+    held: Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    fn project_of(id: &str) -> Option<&str> {
+        id.rsplit_once('-').map(|(proj, _)| proj)
+    }
+    let mut passed_over = None;
+    let parent = if top {
+        None
+    } else if parent.is_some() {
+        parent
+    } else {
+        match (held, project.as_deref()) {
+            (Some(held), Some(asked)) if project_of(&held) != Some(asked) => {
+                passed_over = Some(format!(
+                    "filed at the top of {asked}: the held issue {held} is in another project; \
+                     --parent {held} files under it\n"
+                ));
+                None
+            }
+            (held, _) => held,
+        }
+    };
+    let project = project.or_else(|| parent.as_deref().and_then(project_of).map(str::to_string));
+    (parent, project, passed_over)
 }
 
 /// The issue this conversation's holder claimed last and still works: a
@@ -11273,6 +11351,70 @@ pub struct Forecast {
     pub confidence: Option<f64>,
 }
 
+/// The outcome as the ballots spell it, and a line for the reading when it
+/// is on no ballot. An outcome that matches a ballot or one of the issue's
+/// options, ignoring case, takes that spelling. Any other answer scores
+/// every voter a miss, which a typo would do as well, so it is refused
+/// unless `new_option` says the person's answer was none of them: a tie
+/// broken with a third answer is recorded and calibrated like any other.
+///
+/// # Errors
+///
+/// An empty outcome, or one on no ballot and no option without
+/// `new_option`.
+pub fn named_outcome(
+    issue: &str,
+    outcome: &str,
+    forecasts: &[Forecast],
+    options: &[String],
+    new_option: bool,
+) -> Result<(String, Option<String>)> {
+    let outcome = outcome.trim();
+    if outcome.is_empty() {
+        bail!("outcome: an outcome is required");
+    }
+    let mut known: Vec<&str> = forecasts.iter().map(|f| f.choice.as_str()).collect();
+    known.extend(options.iter().map(String::as_str));
+    known.dedup();
+    if let Some(same) = known
+        .iter()
+        .find(|k| **k == outcome)
+        .or_else(|| known.iter().find(|k| k.eq_ignore_ascii_case(outcome)))
+    {
+        return Ok(((*same).to_string(), None));
+    }
+    let mut names: Vec<&str> = known.clone();
+    names.sort_unstable();
+    names.dedup();
+    let named = if names.is_empty() {
+        "nothing".to_string()
+    } else {
+        names.join(", ")
+    };
+    if !new_option {
+        bail!(
+            "outcome: {outcome:?} is on no ballot for {issue}, which named {named}. It would score every \
+             voter a miss, and so would a typo. When the answer was none of them, pass --new-option \
+             (new_option in the tool). Nothing was written"
+        );
+    }
+    Ok((
+        outcome.to_string(),
+        Some(format!(
+            "{outcome} was on no ballot (they named {named}): every voter is scored a miss, and the outcome is kept as the answer.\n"
+        )),
+    ))
+}
+
+/// The options an issue's body puts to a vote, or none when the tracker
+/// does not answer.
+#[must_use]
+pub fn options_of_issue(issue: &str) -> Vec<String> {
+    tracker_show_json(issue)
+        .map(|v| issue_options(v["body"].as_str().unwrap_or("")))
+        .unwrap_or_default()
+}
+
 /// Quadratic score of a stated probability against the outcome.
 ///
 /// `p` is the probability the voter assigned to its own choice being the
@@ -13184,8 +13326,8 @@ fn unpushed_drift(root: &Path, up: &str) -> Option<(String, bool)> {
 }
 
 /// The kernel, its OOM kills since boot, and the ljos-mcp servers this
-/// login runs with their resident memory. Fails on any OOM kill: one kill
-/// took the encoder, the next the compositor.
+/// login runs with their resident memory. A kill within a day turns the
+/// row to `warn`: one kill took the encoder, the next the compositor.
 fn host_row() -> Habitat {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
@@ -13332,6 +13474,30 @@ pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
 /// and they do not fail `ljos doctor`.
 const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
 
+/// Rows about the machine the seat runs on. They fail neither `ljos doctor`
+/// nor a sitting, and print `warn` so the agent reads them before it adds
+/// load. The host row printed `no` beside an exit of 0, and a sitting
+/// opened under it, so the word and the gate disagreed.
+const WARN_ROWS: &[&str] = &["host"];
+
+/// The line a sitting prints under its doctor when a `warn` row failed:
+/// what the row means for the work that follows.
+#[must_use]
+pub fn sitting_warn_line(rows: &[Habitat]) -> Option<String> {
+    let names: Vec<&str> = rows
+        .iter()
+        .filter(|h| !h.ok && WARN_ROWS.contains(&h.name))
+        .map(|h| h.name)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n",
+        names.join(", ")
+    ))
+}
+
 /// A seat binary doctor lists but the seat runs without (`ljos-hud`,
 /// `ljos-consensus`, `packset-mcp`): absent, its row is `info`, the same
 /// as [`healthy`] already treated it. It said `no` before, beside an exit
@@ -13351,6 +13517,8 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         "ok"
     } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
         "info"
+    } else if WARN_ROWS.contains(&row.name) {
+        "warn"
     } else {
         "no"
     }
@@ -15687,10 +15855,18 @@ pub fn sitting_gated(
             "encoder down: the pack ranks by words alone and a weak island is not fired\n",
         );
     }
+    if let Some(line) = sitting_warn_line(&rows) {
+        out.push_str(&line);
+    }
     // Other machines' memories of this scope arrive before the island is
     // walked, or the sitting orients on half the seat.
-    out.push_str("== sync\n");
-    out.push_str(&sync::sync_repo(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    // With no scope configured the section is left out: sync is opt-in.
+    let synced =
+        sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
+    if !synced.is_empty() {
+        out.push_str("== sync\n");
+        out.push_str(&synced);
+    }
     out.push_str("== cards\n");
     out.push_str(&cards(cards_dir)?);
     let title = issue_title(issue)?;
@@ -15990,6 +16166,7 @@ pub fn finish(
     status: &str,
     lesson: Option<&str>,
     outcome: Option<&str>,
+    new_option: bool,
     beta: f64,
     assignee: &str,
     gen: Option<u64>,
@@ -16072,6 +16249,17 @@ pub fn finish(
         if forecasts.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
         } else {
+            let (option, off) = named_outcome(
+                issue,
+                option,
+                &forecasts,
+                &options_of_issue(issue),
+                new_option,
+            )?;
+            let option = option.as_str();
+            if let Some(line) = off {
+                out.push_str(&line);
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
@@ -16103,7 +16291,9 @@ pub fn finish(
     }
     out.push_str(&persist_tracker(issue, "finished"));
     // What this sitting taught leaves the machine with the tracker.
-    out.push_str(&sync::sync_repo(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    out.push_str(
+        &sync::sync_repo_in_passing(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")),
+    );
     Ok(out)
 }
 
@@ -18934,6 +19124,73 @@ mod tests {
     }
 
     #[test]
+    fn an_outcome_off_the_ballot_needs_new_option_and_then_scores_every_voter() {
+        let f = |agent: &str, choice: &str| Forecast {
+            agent: agent.into(),
+            choice: choice.into(),
+            confidence: Some(0.6),
+        };
+        let tie = [f("saddle", "hook"), f("inky", "drop-highway")];
+        // On the ballot, any case: the ballot's spelling, no line.
+        let (named, off) = named_outcome("Demo-sdhm", " Hook ", &tie, &[], false).unwrap();
+        assert_eq!((named.as_str(), off), ("hook", None));
+        // An issue option nobody voted for still counts as an option.
+        let options = vec!["hook".to_string(), "drop-highway".into(), "patch".into()];
+        let (named, off) = named_outcome("Demo-sdhm", "patch", &tie, &options, false).unwrap();
+        assert_eq!((named.as_str(), off), ("patch", None));
+        // A third answer, or a typo, is refused without the flag.
+        let err = named_outcome("Demo-sdhm", "use an easyblock", &tie, &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("on no ballot for Demo-sdhm"), "{err}");
+        assert!(err.contains("drop-highway, hook"), "{err}");
+        assert!(err.contains("--new-option"), "{err}");
+        // With it the answer is kept, and the line says what it scores.
+        let (named, off) = named_outcome("Demo-sdhm", "use an easyblock", &tie, &[], true).unwrap();
+        assert_eq!(named, "use an easyblock");
+        let off = off.expect("a line");
+        assert!(off.contains("every voter is scored a miss"), "{off}");
+        let ballots: Vec<(String, String)> = tie
+            .iter()
+            .map(|t| (t.agent.clone(), t.choice.clone()))
+            .collect();
+        let (_, records) =
+            learn_record(&ballots, &named, &std::collections::BTreeMap::new(), &[]).unwrap();
+        assert_eq!(records["saddle"], (0.0, 1.0));
+        assert_eq!(records["inky"], (0.0, 1.0));
+        assert!(named_outcome("Demo-sdhm", "  ", &tie, &[], true).is_err());
+    }
+
+    #[test]
+    fn file_with_another_project_mid_sitting_goes_to_its_top() {
+        let held = || Some("garden-06v8".to_string());
+        let s = |v: &str| Some(v.to_string());
+        // The default: a child of the held issue, in its project.
+        let (parent, project, said) = file_placement(false, None, None, held());
+        assert_eq!(parent, s("garden-06v8"));
+        assert_eq!(project, s("garden"));
+        assert_eq!(said, None);
+        // The same project named: still a child.
+        let (parent, _, said) = file_placement(false, None, s("garden"), held());
+        assert_eq!(parent, s("garden-06v8"));
+        assert_eq!(said, None);
+        // A tool bug against another project: top level there, and a line
+        // that says how to file under the held issue after all.
+        let (parent, project, said) = file_placement(false, None, s("Tools"), held());
+        assert_eq!(parent, None);
+        assert_eq!(project, s("Tools"));
+        let said = said.expect("a line");
+        assert!(said.contains("filed at the top of Tools"), "{said}");
+        assert!(said.contains("--parent garden-06v8"), "{said}");
+        // --parent and --top still win.
+        let (parent, project, _) = file_placement(false, s("Tools-x6vs"), s("Tools"), held());
+        assert_eq!(parent, s("Tools-x6vs"));
+        assert_eq!(project, s("Tools"));
+        let (parent, project, said) = file_placement(true, None, None, held());
+        assert_eq!((parent, project, said), (None, None, None));
+    }
+
+    #[test]
     fn doctor_warns_on_a_policyd_without_phronesis() {
         let row = |state: String| Habitat {
             name: "policy",
@@ -18976,6 +19233,29 @@ mod tests {
         assert!(healthy(std::slice::from_ref(&hud)));
         assert_eq!(doctor_word(&embed), "no");
         assert!(!healthy(&[embed]));
+    }
+
+    #[test]
+    fn a_recent_oom_kill_warns_and_the_sitting_says_so() {
+        let host = Habitat {
+            name: "host",
+            state: "6.12.94+; 70 OOM kills since boot, the last within a day".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&host), "warn");
+        let rows = [host];
+        assert!(healthy(&rows));
+        assert!(failing_for_sitting(&rows).is_empty());
+        let line = sitting_warn_line(&rows).expect("a warn line");
+        assert!(line.starts_with("host: the kernel killed"), "{line}");
+        assert!(line.contains("one build or test suite at a time"), "{line}");
+        let calm = Habitat {
+            name: "host",
+            state: "6.12.94+; no OOM kills since boot".into(),
+            ok: true,
+        };
+        assert_eq!(doctor_word(&calm), "ok");
+        assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
     /// the tarball the release workflow uploads for each target is the one
@@ -21930,6 +22210,37 @@ mod tests {
             "a holder named outright still matches"
         );
         assert!(is_session("herdr") && is_session("tmux: server") && !is_session("acme"));
+    }
+
+    /// A shell in a terminal window belongs to the person: the terminal
+    /// ends the tree like a multiplexer does, so no terminal becomes a seat
+    /// and the person is their login user. A runner started in that
+    /// terminal still sits below it and is found first.
+    #[test]
+    fn a_terminal_emulator_is_the_person_s_session() {
+        for comm in [
+            "gnome-terminal-",
+            "konsole",
+            "kitty",
+            "alacritty",
+            "wezterm-gui",
+            "ghostty",
+            "foot",
+            "xterm",
+            "tilix",
+            "xfce4-terminal",
+        ] {
+            assert!(is_session(comm), "{comm}");
+        }
+        for comm in [
+            "claude", "codex", "grok", "cursor", "node", "kitten", "footb", "code",
+        ] {
+            assert!(!is_session(comm), "{comm}");
+        }
+        assert!(
+            TERMINALS.iter().all(|t| t.len() <= 15),
+            "the kernel keeps fifteen bytes of a process name"
+        );
     }
 
     /// one graph directory, named three ways, is one scope.

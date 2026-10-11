@@ -141,7 +141,8 @@ enum Cmd {
     },
     /// File work found while sitting: a child of the issue this
     /// conversation holds unless `--parent` names another or `--top` none,
-    /// in the parent's project. Prints the new id.
+    /// in the parent's project. `-p` naming another project files at its
+    /// top level, for a bug in a tool found mid-sitting. Prints the new id.
     File {
         /// The issue's title.
         title: String,
@@ -151,7 +152,8 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted.
+        /// The project; the parent's when omitted. Another project than
+        /// the held issue's files at its top level.
         #[arg(short, long)]
         project: Option<String>,
         /// The type tag: bug, task, feature, decision.
@@ -684,6 +686,9 @@ enum Cmd {
         /// The option that turned out right, when the ballots are in and the world has said.
         #[arg(long)]
         outcome: Option<String>,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long, requires = "outcome")]
+        new_option: bool,
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -718,6 +723,9 @@ enum Cmd {
         /// The option that turned out right.
         #[arg(long)]
         outcome: String,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long)]
+        new_option: bool,
         /// The factor a refuted voter shrinks by.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -900,17 +908,16 @@ fn main() -> Result<()> {
             priority,
             body,
         } => {
-            let parent = if top {
+            let held = if top || parent.is_some() {
                 None
             } else {
-                parent.or_else(ljos_cli::held_issue)
+                ljos_cli::held_issue()
             };
-            let project = project.or_else(|| {
-                parent
-                    .as_deref()
-                    .and_then(|p| p.rsplit_once('-'))
-                    .map(|(proj, _)| proj.to_string())
-            });
+            let (parent, project, passed_over) =
+                ljos_cli::file_placement(top, parent, project, held);
+            if let Some(line) = passed_over {
+                eprint!("{line}");
+            }
             let Some(project) = project else {
                 anyhow::bail!("no project: name one with -p, or a parent with --parent");
             };
@@ -1900,6 +1907,7 @@ fn main() -> Result<()> {
             status,
             lesson,
             outcome,
+            new_option,
             beta,
             gen,
             assignee,
@@ -1911,6 +1919,7 @@ fn main() -> Result<()> {
                 &status,
                 lesson.as_deref(),
                 outcome.as_deref(),
+                new_option,
                 beta,
                 &resolve_assignee(assignee.as_deref()),
                 gen,
@@ -1931,12 +1940,23 @@ fn main() -> Result<()> {
         Cmd::Learn {
             id,
             outcome,
+            new_option,
             beta,
             share,
             rule,
         } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let forecasts = forecasts_from_json(&said.stdout)?;
+            let (outcome, off) = ljos_cli::named_outcome(
+                &id,
+                &outcome,
+                &forecasts,
+                &ljos_cli::options_of_issue(&id),
+                new_option,
+            )?;
+            if let Some(line) = off {
+                print!("{line}");
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
