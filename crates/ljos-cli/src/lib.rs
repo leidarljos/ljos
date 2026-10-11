@@ -12775,7 +12775,8 @@ pub fn atom_out(body: &serde_json::Value, json: bool) -> Result<String> {
     }
 }
 
-/// The habitats the seat needs. Encoder and policyd move with the rest.
+/// The habitats the seat needs. The encoder (`packset-embed`) is not one:
+/// it links ONNX Runtime, and without it the pack ranks by words alone.
 pub const REQUIRED: &[&str] = &[
     "ljos",
     "ljos-mcp",
@@ -12785,9 +12786,7 @@ pub const REQUIRED: &[&str] = &[
     "claimdag",
     "packset",
     "packsetd",
-    "packset-embed",
     "pack",
-    "encoder",
 ];
 
 /// Binary on PATH and the crates.io name it should track.
@@ -13217,9 +13216,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
                          ranking is lexical until packsetd restarts it on the next search"
                             .to_string()
                     } else {
-                        "down; search is lexical. packset-embed links ONNX Runtime 1.28 \
-                         (system or source build): cargo install --locked packset-embed, \
-                         beside packsetd"
+                        "off; search is lexical. The encoder is optional: packset-embed \
+                         links ONNX Runtime 1.28; `cargo binstall --locked packset-embed` \
+                         takes the release build, beside packsetd"
                             .to_string()
                     },
                     ok: available,
@@ -13825,7 +13824,7 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
 
 /// Rows a sitting opens without. With no encoder the pack ranks by words
 /// alone and `finish` declines to fire a weak island, so the loop still
-/// holds; `ljos doctor` keeps failing on them.
+/// holds; `ljos doctor` reports them as `info`.
 const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
 /// The required rows a sitting cannot open without, by name.
@@ -13839,7 +13838,7 @@ pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
 
 /// Rows a fresh seat may lack after the first write. They are reported,
 /// and they do not fail `ljos doctor`.
-const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker"];
+const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker", "encoder"];
 
 /// Rows about the machine the seat runs on. They fail neither `ljos doctor`
 /// nor a sitting, and print `warn` so the agent reads them before it adds
@@ -16523,9 +16522,9 @@ pub fn sitting_gated(
             down.join(", ")
         );
     }
-    if failing(&rows)
+    if rows
         .iter()
-        .any(|name| SITTING_DEGRADED.contains(name))
+        .any(|h| !h.ok && SITTING_DEGRADED.contains(&h.name))
     {
         out.push_str(
             "encoder down: the pack ranks by words alone and a weak island is not fired\n",
@@ -20099,8 +20098,9 @@ mod tests {
         };
         assert_eq!(doctor_word(&hud), "info");
         assert!(healthy(std::slice::from_ref(&hud)));
-        assert_eq!(doctor_word(&embed), "no");
-        assert!(!healthy(&[embed]));
+        // The encoder links ONNX Runtime; a seat without it ranks by words.
+        assert_eq!(doctor_word(&embed), "info");
+        assert!(healthy(&[embed]));
     }
 
     #[test]
@@ -20226,6 +20226,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// the one-command installer copies every binary the doctor requires
+    /// and leaves the encoder to `--with-embed`.
+    #[test]
+    fn the_installer_covers_every_required_binary() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let Ok(script) = std::fs::read_to_string(root.join("scripts/install.sh")) else {
+            return;
+        };
+        let start = script
+            .find("COMPONENTS=\"")
+            .expect("install.sh lists COMPONENTS");
+        let rest = &script[start + "COMPONENTS=\"".len()..];
+        let table = &rest[..rest.find('"').expect("COMPONENTS closes")];
+        let progs: Vec<&str> = table
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(3))
+            .flat_map(|p| p.split(','))
+            .collect();
+        for (bin, _) in SEAT_BINS {
+            if REQUIRED.contains(bin) {
+                assert!(progs.contains(bin), "install.sh does not install {bin}");
+            }
+        }
+        assert!(!progs.contains(&"packset-embed"), "the encoder is opt-in");
+        assert!(script.contains("--with-embed"));
     }
 
     #[test]
@@ -24098,13 +24125,18 @@ mod tests {
         ];
         let short = format_doctor_short(&rows);
         let lines: Vec<&str> = short.lines().collect();
+        // The encoder is optional, so a missing one is an info row, not a
+        // reason the seat is not ready. The short doctor still names the
+        // pack, with its fix.
         assert_eq!(
             lines[0],
-            "ljos is not ready: pack and encoder do not answer. `ljos doctor --all` lists every row."
+            "ljos is not ready: pack does not answer. 1 optional part is off. `ljos doctor --all` lists every row."
         );
-        assert_eq!(lines.len(), 3, "{short}");
+        assert_eq!(lines.len(), 2, "{short}");
         assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
         assert!(!short.contains("tracker"), "{short}");
+        assert!(!short.contains("encoder"), "{short}");
+        assert!(format_doctor(&rows).contains("info\tencoder\t"));
     }
 
     #[test]
@@ -26910,8 +26942,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ok: false,
         }];
         assert!(healthy(&fine));
-        // A default install has no encoder: doctor fails, a sitting opens,
-        // and a refusal names the rows that stopped it.
+        // A default install has no encoder: doctor passes with the rows as
+        // info, a sitting opens, and a refusal names the rows that stopped it.
         let lexical = vec![
             Habitat {
                 name: "packset-embed",
@@ -26924,7 +26956,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 ok: false,
             },
         ];
-        assert!(!healthy(&lexical));
+        assert!(healthy(&lexical));
+        assert!(lexical.iter().all(|h| doctor_word(h) == "info"));
         assert!(super::failing_for_sitting(&lexical).is_empty());
         let mut stopped = lexical.clone();
         stopped.push(sick[0].clone());
