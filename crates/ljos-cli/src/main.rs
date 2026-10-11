@@ -1104,6 +1104,7 @@ fn main() -> Result<()> {
                 }
             }
             Some(c) => {
+                ljos_cli::ballot_seat("vote")?;
                 let used = used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     bail!(
@@ -1289,6 +1290,7 @@ fn main() -> Result<()> {
             expect,
             as_persona,
         } => {
+            ljos_cli::ballot_seat("predict")?;
             let who = as_persona
                 .or_else(|| std::env::var("VISSUE_AGENT").ok())
                 .unwrap_or_else(whoami_tracker);

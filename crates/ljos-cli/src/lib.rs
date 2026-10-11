@@ -1758,6 +1758,13 @@ fn seat_from_tree() -> Option<Seat> {
     if let Some(seat) = seat_from_tree_records() {
         return Some(seat);
     }
+    program_above()
+}
+
+/// The nearest ancestor that is neither a shell nor a wrapper, as a seat
+/// named after the program. No record is read: this is the name a seat
+/// falls back to when nothing named one.
+fn program_above() -> Option<Seat> {
     let chain = ancestry();
     for (pid, comm) in &chain {
         let name = comm.as_str();
@@ -1887,6 +1894,33 @@ fn login_user() -> String {
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| "seat".to_string())
+}
+
+/// The seat a ballot or a forecast counts for. Refused when nothing named
+/// the seat and it is only the program above this shell: a subagent with
+/// no `LJOS_SEAT` cast 25 forecasts as `exec-daemon`, the box's command
+/// daemon, and nothing said so (Software-o9bu). `LJOS_SEAT`,
+/// `VISSUE_AGENT`, an MCP client's name or a runner's record name a seat;
+/// a person at a terminal is their login user, as before.
+///
+/// # Errors
+///
+/// The seat is a process name nobody chose.
+pub fn ballot_seat(verb: &str) -> Result<String> {
+    let who = whoami();
+    let named = CALL_SEAT.try_with(|_| ()).is_ok()
+        || ANNOUNCED.get().is_some()
+        || named_var("LJOS_SEAT").is_some()
+        || named_var("VISSUE_AGENT").is_some()
+        || seat_from_tree_records().is_some();
+    if !named && program_above().is_some_and(|p| p.seat == who.seat) {
+        bail!(
+            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        );
+    }
+    Ok(who.seat)
 }
 
 /// The name this seat remembers, votes and earns trust under.
