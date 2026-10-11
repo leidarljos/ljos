@@ -9960,6 +9960,72 @@ pub fn preferences_of(atoms: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// How the stored preferences stand against the rules: how many a rule
+/// enforces (a rule whose reason is the preference, as `ljos prefer
+/// --deny` and `--ask` write), how many more name a command they forbid
+/// and could carry one, and how many there are.
+#[must_use]
+pub fn preferences_enforced(
+    preferences: &[(String, String)],
+    rules: &[Rule],
+) -> (usize, usize, usize) {
+    let mut enforced = 0;
+    let mut could = 0;
+    for (_, text) in preferences {
+        let text = text.trim();
+        if rules
+            .iter()
+            .any(|r| matches!(r.verdict.as_str(), "deny" | "ask") && r.reason.trim() == text)
+        {
+            enforced += 1;
+        } else if !command_prefs::rule_candidates(text).is_empty() {
+            could += 1;
+        }
+    }
+    (enforced, could, preferences.len())
+}
+
+/// The doctor's preferences line from [`preferences_enforced`].
+#[must_use]
+pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
+    if total == 0 {
+        return "no preferences stored".to_string();
+    }
+    let mut line = format!(
+        "{enforced} of {total} preference{} enforced by a rule",
+        if total == 1 { "" } else { "s" }
+    );
+    if could > 0 {
+        line.push_str(&format!(
+            "; {could} more name{} a command {} forbid{} and can carry an ask \
+             (`ljos prefer TEXT --ask PATTERN`, or `ljos rule PATTERN --verdict ask --why TEXT`)",
+            if could == 1 { "s" } else { "" },
+            if could == 1 { "it" } else { "they" },
+            if could == 1 { "s" } else { "" },
+        ));
+    }
+    line
+}
+
+fn preferences_row() -> Habitat {
+    let listed = pack().and_then(|client| {
+        atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
+    });
+    let state = match listed {
+        Ok(atoms) => {
+            let (enforced, could, total) =
+                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
+            preferences_line(enforced, could, total)
+        }
+        Err(e) => format!("not counted: {e:#}"),
+    };
+    Habitat {
+        name: "preferences",
+        state,
+        ok: true,
+    }
+}
+
 /// How many preferences one command hears at most.
 pub const COMMAND_PREFERENCES: usize = 2;
 
@@ -14220,6 +14286,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    // How many stored preferences the hook enforces: a preference with no
+    // rule is recalled and never holds the agent to it.
+    out.push(preferences_row());
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     out.push(
@@ -25469,6 +25538,44 @@ mod tests {
                 "{line:?} -> {lines:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_doctor_counts_the_preferences_a_rule_enforces() {
+        let prefs: Vec<(String, String)> = [
+            "Use pnpm instead of npm for every JavaScript package install in this repo",
+            "Never push directly to main; open a pull request from a feature branch",
+            "Use tabs for indentation in Go files and gofmt them",
+            "Run terraform destroy only by hand, never terraform destroy from an agent",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (format!("p{i}"), (*t).to_string()))
+        .collect();
+        let rule = |pattern: &str, verdict: &str, reason: &str| Rule {
+            pattern: pattern.into(),
+            verdict: verdict.into(),
+            reason: reason.into(),
+        };
+        let rules = vec![
+            rule("npm install*", "ask", &prefs[0].1),
+            rule("git push*main*", "deny", &format!("  {}  ", prefs[1].1)),
+            rule("gofmt*", "allow", &prefs[2].1),
+            rule("rm -rf*", "deny", "an unrelated reason"),
+        ];
+        let (enforced, could, total) = preferences_enforced(&prefs, &rules);
+        assert_eq!((enforced, could, total), (2, 1, 4));
+        assert_eq!(
+            preferences_line(enforced, could, total),
+            "2 of 4 preferences enforced by a rule; 1 more names a command it forbids and can \
+             carry an ask (`ljos prefer TEXT --ask PATTERN`, or `ljos rule PATTERN --verdict ask \
+             --why TEXT`)"
+        );
+        assert_eq!(
+            preferences_line(6, 0, 10),
+            "6 of 10 preferences enforced by a rule"
+        );
+        assert_eq!(preferences_line(0, 0, 0), "no preferences stored");
     }
     use std::io::{Read, Write};
     use std::net::TcpListener;
