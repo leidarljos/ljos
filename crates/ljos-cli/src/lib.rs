@@ -15,6 +15,7 @@ pub mod admit;
 pub mod approval;
 pub mod ask_pack;
 pub mod capture;
+pub mod command_prefs;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -3220,10 +3221,32 @@ fn claude_has_seat_hook(claude_settings: &Path) -> bool {
         })
 }
 
+/// Whether every seat hook on a Cursor permission event carries
+/// `failClosed`. Without it, a seat hook that fails lets the call run.
+fn cursor_gates_fail_closed(cursor: &Path) -> bool {
+    let Some(doc) = std::fs::read_to_string(cursor)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return true;
+    };
+    CURSOR_FAIL_CLOSED.iter().all(|event| {
+        doc["hooks"][*event].as_array().is_none_or(|entries| {
+            entries
+                .iter()
+                .filter(|e| is_seat_hook(e))
+                .all(|e| e["failClosed"] == true)
+        })
+    })
+}
+
 /// Cursor's file is the memory hook when it carries every Cursor event,
 /// or the events Claude's file does not name while Claude's file has the
 /// seat hook.
 fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
+    if !cursor_gates_fail_closed(cursor) {
+        return false;
+    }
     let all: Vec<String> = CURSOR_HOOK_EVENTS
         .iter()
         .map(|(event, _)| (*event).to_string())
@@ -3332,6 +3355,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     };
     let command = hook_command();
     let mut added = Vec::new();
+    let mut closed: Vec<&str> = Vec::new();
     for (event, timeout) in CURSOR_HOOK_EVENTS {
         if claude_has_seat && !CURSOR_ONLY_EVENTS.contains(event) {
             continue;
@@ -3342,7 +3366,13 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         let Some(entries) = entries.as_array_mut() else {
             continue;
         };
-        if entries.iter().any(is_seat_hook) {
+        if let Some(seat) = entries.iter_mut().find(|e| is_seat_hook(e)) {
+            // A hook an earlier onboard wrote without `failClosed` lets the
+            // call run when the hook fails in the IDE.
+            if CURSOR_FAIL_CLOSED.contains(event) && seat["failClosed"] != true {
+                seat["failClosed"] = serde_json::json!(true);
+                closed.push(*event);
+            }
             continue;
         }
         let mut entry = serde_json::json!({"command": command, "timeout": timeout});
@@ -3352,21 +3382,24 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         entries.push(entry);
         added.push(*event);
     }
-    if added.is_empty() {
+    if added.is_empty() && closed.is_empty() {
         return Step {
             what,
             detail: format!("{} carries the seat's hook", file.display()),
             ok: true,
         };
     }
+    let mut change = Vec::new();
+    if !added.is_empty() {
+        change.push(format!("the seat's hook on {}", added.join(", ")));
+    }
+    if !closed.is_empty() {
+        change.push(format!("failClosed on {}", closed.join(", ")));
+    }
     if dry {
         return Step {
             what,
-            detail: format!(
-                "would add the seat's hook on {} in {}",
-                added.join(", "),
-                file.display()
-            ),
+            detail: format!("would add {} in {}", change.join(" and "), file.display()),
             ok: true,
         };
     }
@@ -3382,11 +3415,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     match written {
         Ok(()) => Step {
             what,
-            detail: format!(
-                "added the seat's hook on {} in {}",
-                added.join(", "),
-                file.display()
-            ),
+            detail: format!("added {} in {}", change.join(" and "), file.display()),
             ok: true,
         },
         Err(e) => Step {
@@ -6622,6 +6651,121 @@ fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Strin
         _ => serde_json::json!({ "injectSteps": [{ "ephemeralMessage": context }] }),
     };
     out.to_string() + "\n"
+}
+
+/// Whether a hook event is a gate: a tool call the runner holds until the
+/// hook answers.
+#[must_use]
+pub fn is_gate_event(event: &str) -> bool {
+    matches!(
+        event,
+        "PreToolUse" | "beforeMCPExecution" | "beforeReadFile"
+    )
+}
+
+/// Set once the hook has written a gate's answer.
+static GATE_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The gate call this process is answering: its input and `--event`.
+static GATE_CALL: std::sync::OnceLock<(String, Option<String>)> = std::sync::OnceLock::new();
+
+/// How long a Cursor gate waits on the seat before the seat refuses the
+/// call itself: under the 10 seconds onboard registers, so the refusal is
+/// written before Cursor gives up on the hook.
+pub const CURSOR_GATE_DEADLINE_MS: u64 = 8_000;
+
+/// The exit status of a gate the seat refused because the hook failed.
+/// Cursor, Claude Code and Codex each read exit 2 from a tool hook as a
+/// deny; any other failing status lets the call run on Cursor's CLI.
+pub const GATE_REFUSED_EXIT: i32 = 2;
+
+/// A gate's refusal when the hook fails before it reaches a verdict: an
+/// error, a panic, or no verdict by the deadline. Cursor's IDE reads a
+/// permission hook that prints nothing as a deny when `failClosed` is set,
+/// and Cursor's CLI reads the same silence as an allow, so the seat says
+/// deny in the runner's own JSON and both refuse. `None` on an event that
+/// is not a gate: a prompt or a session event that fails lets the work go
+/// on.
+#[must_use]
+pub fn hook_failure_output(input: &str, event: Option<&str>, error: &str) -> Option<String> {
+    let call = hook_call_as(input, event);
+    if !is_gate_event(&call.event) {
+        return None;
+    }
+    let error: String = error
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let rule = Rule {
+        pattern: "ljos hook".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "the seat's hook failed before it reached a verdict ({}), so the call is refused \
+             rather than let through. Run `ljos doctor`, or ask the person to run it",
+            error.trim()
+        ),
+    };
+    let out = hook_output_ruled(&call, "", Some(&rule));
+    (!out.trim().is_empty()).then_some(out)
+}
+
+/// Write the gate's refusal for `error` and exit with
+/// [`GATE_REFUSED_EXIT`], unless this process is not answering a gate or
+/// has already answered. Returns when there is nothing to refuse.
+pub fn refuse_failed_gate(error: &str) {
+    let Some((input, event)) = GATE_CALL.get() else {
+        return;
+    };
+    let answered = || GATE_ANSWERED.load(std::sync::atomic::Ordering::SeqCst);
+    if answered() {
+        return;
+    }
+    let Some(text) = hook_failure_output(input, event.as_deref(), error) else {
+        return;
+    };
+    let mut out = std::io::stdout().lock();
+    if answered() {
+        return;
+    }
+    let _ = std::io::Write::write_all(&mut out, text.as_bytes());
+    let _ = std::io::Write::flush(&mut out);
+    eprintln!("ljos hook: {error}; the call is refused");
+    std::process::exit(GATE_REFUSED_EXIT);
+}
+
+/// Write a gate's answer and mark it given, so a failure after it, or the
+/// deadline, writes nothing more.
+pub fn answer_gate(output: &str) {
+    let mut out = std::io::stdout().lock();
+    GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::io::Write::write_all(&mut out, output.as_bytes());
+    let _ = std::io::Write::flush(&mut out);
+}
+
+/// Arm the refusals of a gate call: a panic in the hook writes the deny of
+/// [`hook_failure_output`] and exits 2 (a panic exits 101, which Cursor's
+/// CLI reads as an allow), and on Cursor, a hook with no answer by
+/// [`CURSOR_GATE_DEADLINE_MS`] does the same. A Cursor hook that times out
+/// is a deny in the IDE and an allow in the CLI, so the seat answers first.
+/// Nothing is armed for an event that is not a gate.
+pub fn arm_gate(input: &str, event: Option<&str>) {
+    let call = hook_call_as(input, event);
+    if !is_gate_event(&call.event) {
+        return;
+    }
+    let _ = GATE_CALL.set((input.to_string(), event.map(str::to_string)));
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        refuse_failed_gate(&format!("panic: {info}"));
+    }));
+    if call.shape.is_cursor() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(CURSOR_GATE_DEADLINE_MS));
+            let secs = CURSOR_GATE_DEADLINE_MS / 1000;
+            refuse_failed_gate(&format!("no verdict in {secs} s"));
+        });
+    }
 }
 
 /// The answer that keeps an agent going one more round with `reason`, in
@@ -9919,16 +10063,83 @@ pub fn rules_from_pack() -> Result<Vec<Rule>> {
 /// a deny the person wrote does not lapse because a server did.
 #[must_use]
 pub fn rules_for_gate() -> Vec<Rule> {
+    gate_read().0
+}
+
+/// The rules a gate judges by, as [`rules_for_gate`], and the pack's
+/// preferences as (id, text), from the one listing. The preferences are
+/// empty when the pack does not answer: a reminder is not worth a wait.
+#[must_use]
+pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     let kept = rules_cache_path();
-    match rules_from_pack() {
-        Ok(rules) => {
+    let listed = pack().and_then(|client| {
+        atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
+    });
+    match listed {
+        Ok(atoms) => {
+            let rules = rules_of(&atoms);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
-            rules
+            (rules, preferences_of(&atoms))
         }
-        Err(_) => kept.map(|p| kept_rules(&p)).unwrap_or_default(),
+        Err(_) => (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new()),
     }
+}
+
+/// The live preferences in a set of atoms, as (id, text).
+#[must_use]
+pub fn preferences_of(atoms: &[Value]) -> Vec<(String, String)> {
+    atoms
+        .iter()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
+        .filter_map(|a| {
+            Some((
+                a.get("id")?.as_str()?.to_string(),
+                a.get("text")?.as_str()?.trim().to_string(),
+            ))
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .collect()
+}
+
+/// How many preferences one command hears at most.
+pub const COMMAND_PREFERENCES: usize = 2;
+
+/// The note a tool call carries: the preferences that bear on its command
+/// and that this session has not heard on a command yet, and the keys to
+/// mark seen once it is delivered.
+#[must_use]
+pub fn command_preference_note(
+    preferences: &[(String, String)],
+    line: &str,
+    session: Option<&str>,
+) -> (String, Vec<String>) {
+    let seen = seen_ids(session);
+    let fresh: Vec<(String, String)> = preferences
+        .iter()
+        .filter(|(id, _)| !seen.contains(&format!("cmd-pref:{id}")))
+        .cloned()
+        .collect();
+    let hits = command_prefs::naming_command(&fresh, line, COMMAND_PREFERENCES);
+    if hits.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let lines: Vec<String> = hits
+        .iter()
+        .map(|(_, text)| format!("- The person's preference: {text}"))
+        .collect();
+    let keys = hits
+        .iter()
+        .map(|(id, _)| format!("cmd-pref:{id}"))
+        .collect();
+    (
+        format!(
+            "ljos: before this command, the person said:\n{}",
+            lines.join("\n")
+        ),
+        keys,
+    )
 }
 
 /// `$XDG_DATA_HOME/ljos/rules-<workspace>.json`: one file per workspace,
@@ -13889,6 +14100,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
     out.push(policy_row());
+    out.push(bypass_row());
     out.push(panes_row());
     out
 }
@@ -13969,6 +14181,81 @@ fn below_floor(bin: &str, have: Option<&str>) -> Option<String> {
 /// The oldest Rust that builds the seat from source, the workspace's
 /// `rust-version`.
 pub const RUST_MIN: &str = env!("CARGO_PKG_RUST_VERSION");
+
+/// `$XDG_DATA_HOME/ljos/bypass.jsonl`: one row each time a command ran
+/// that the guard would have stopped.
+#[must_use]
+pub fn bypass_log_path() -> Option<PathBuf> {
+    Some(data_base()?.join("ljos").join("bypass.jsonl"))
+}
+
+/// Write a row when the guard is passed over on a command it would have
+/// stopped: `approval` when a one-use grant let an asked command run, and
+/// `switch` when a setting such as `LJOS_ASK_PACK=off` turned off the rule
+/// that would have asked. `how` says which grant or setting. A row that
+/// cannot be written is skipped; the command's verdict does not wait on it.
+pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
+    let Some(path) = bypass_log_path() else {
+        return;
+    };
+    let row = serde_json::json!({
+        "ts": now_utc(),
+        "kind": kind,
+        "how": how,
+        "command": command,
+        "rule": rule.pattern,
+        "verdict": rule.verdict,
+        "reason": rule.reason.split(':').next().unwrap_or(""),
+        "seat": std::env::var("LJOS_SEAT").ok(),
+    });
+    let _ = path.parent().map(std::fs::create_dir_all);
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{row}");
+    }
+}
+
+/// The doctor's line on the bypass log: how many commands ran past the
+/// guard, and the last one. Passing over the guard is allowed, so the row
+/// stays green; it is there to be read.
+fn bypass_row() -> Habitat {
+    let state =
+        match bypass_log_path().and_then(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
+            None => "no command has run past the guard".to_string(),
+            Some((path, text)) => bypass_summary(&text, &path.display().to_string()),
+        };
+    Habitat {
+        name: "guard bypass",
+        state,
+        ok: true,
+    }
+}
+
+/// [`bypass_row`]'s text from the log's rows.
+#[must_use]
+pub fn bypass_summary(text: &str, path: &str) -> String {
+    let rows: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let Some(last) = rows.last() else {
+        return "no command has run past the guard".to_string();
+    };
+    let s = |k: &str| last[k].as_str().unwrap_or("").to_string();
+    format!(
+        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        local_when(&s("ts")),
+        s("command"),
+        s("rule"),
+        s("how"),
+    )
+}
 
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
@@ -25359,6 +25646,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_bypass_is_logged_and_the_doctor_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], "switch");
+        assert_eq!(rows[0]["reason"], "infra-destroy");
+        assert_eq!(rows[1]["how"], "grant 0a1b");
+        let said = bypass_summary(&text, "LOG");
+        assert!(
+            said.starts_with("2 commands ran past the guard")
+                && said.contains("`terraform destroy` past ask pack: cloud (grant 0a1b)")
+                && said.ends_with("see LOG"),
+            "{said}"
+        );
+        assert_eq!(
+            bypass_summary("", "LOG"),
+            "no command has run past the guard"
+        );
+    }
+
+    #[test]
     fn a_line_reads_what_one_command_hands_the_next() {
         let carried = |line: &str| nested_lines(line, 0);
         for (line, runs) in [
@@ -27056,6 +27377,84 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         std::fs::create_dir_all(dropped_file.parent().unwrap()).unwrap();
         std::fs::write(&dropped_file, serde_json::to_string(&dropped).unwrap()).unwrap();
         assert!(!super::cursor_hooks_satisfy(&dropped_file, &claude));
+    }
+
+    /// A seat hook an earlier onboard wrote on a Cursor permission event
+    /// without `failClosed` gets it, and the file no longer satisfies the
+    /// check until it does.
+    #[test]
+    fn an_old_cursor_gate_is_made_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cursor/hooks.json");
+        let claude = dir.path().join("claude/settings.json");
+        assert!(cursor_hook_step(&file, &claude, false).ok);
+        let mut doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        doc["hooks"]["preToolUse"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("failClosed");
+        std::fs::write(&file, doc.to_string()).unwrap();
+        assert!(!super::cursor_hooks_satisfy(&file, &claude));
+        let dry = cursor_hook_step(&file, &claude, true);
+        assert!(
+            dry.detail.contains("would add failClosed on preToolUse"),
+            "{}",
+            dry.detail
+        );
+        let fixed = cursor_hook_step(&file, &claude, false);
+        assert!(
+            fixed.ok && fixed.detail.contains("failClosed on preToolUse"),
+            "{}",
+            fixed.detail
+        );
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(doc["hooks"]["preToolUse"][0]["failClosed"], true);
+        assert_eq!(doc["hooks"]["preToolUse"].as_array().unwrap().len(), 1);
+        assert!(super::cursor_hooks_satisfy(&file, &claude));
+    }
+
+    /// A gate whose hook fails answers deny in the runner's own JSON, so
+    /// Cursor's CLI, which reads silence as an allow, refuses as the IDE
+    /// does. A prompt or session event that fails says nothing.
+    #[test]
+    fn a_failed_gate_answers_deny_in_the_runners_json() {
+        let cursor_shell = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeShellExecution","command":"git status","cwd":"/w"}"#;
+        let cursor_tool = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"ls"}}"#;
+        for input in [cursor_shell, cursor_tool] {
+            let out = hook_failure_output(input, None, "pack: connection refused").unwrap();
+            let v: Value = serde_json::from_str(out.trim()).unwrap();
+            assert_eq!(v["permission"], "deny", "{out}");
+            assert!(
+                v["agent_message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("pack: connection refused"),
+                "{out}"
+            );
+        }
+        let claude = r#"{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let out = hook_failure_output(claude, None, "boom\nline two").unwrap();
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(!out.trim().contains('\n'));
+        let read = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/a"}"#;
+        assert_eq!(
+            hook_failure_output(read, None, "x").as_deref(),
+            Some("{\"permission\":\"allow\"}\n"),
+            "preToolUse judges a read; the read gate answers, never stays silent"
+        );
+        for quiet in [
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeSubmitPrompt","prompt":"hi"}"#,
+            r#"{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            "git status",
+        ] {
+            assert_eq!(hook_failure_output(quiet, None, "x"), None, "{quiet}");
+        }
+        assert!(CURSOR_HOOK_EVENTS
+            .iter()
+            .filter(|(e, _)| CURSOR_FAIL_CLOSED.contains(e))
+            .all(|(_, t)| *t * 1000 > CURSOR_GATE_DEADLINE_MS));
     }
 
     /// A persona becomes an agent definition. Grok and Claude Code read the
