@@ -121,6 +121,8 @@ copied before recall. Without `--playbook`, the sitting takes a name already
 bound, then a closed-set token in the title, then `sit`. The playbook name
 lives as a tracker note until finish or release, and `ljos panel` refuses to
 run until one is bound.
+The sitting prints a short report: whether ljos is ready, what needs action, what the seat remembers for the task, and the claim.
+`--verbose` prints every section in full.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
 goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
@@ -326,7 +328,8 @@ ljos habit                                     # every habit as it stands, the c
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
-ljos doctor
+ljos doctor                                    # whether ljos is ready, and only the rows that need action
+ljos doctor --all                              # every row
 ljos protocol
 ljos onboard                                   # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes

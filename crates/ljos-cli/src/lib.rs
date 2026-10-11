@@ -13552,6 +13552,204 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
         .collect()
 }
 
+/// The line `ljos doctor` opens with: whether the seat is ready, which
+/// required parts do not answer, and how many optional parts are off.
+#[must_use]
+pub fn doctor_summary(rows: &[Habitat]) -> String {
+    let down = failing(rows);
+    let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
+    summary_line(&down, off)
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn summary_line(down: &[&str], off: usize) -> String {
+    let mut line = if down.is_empty() {
+        "ljos is ready: memory, the tracker and the command guard answer.".to_string()
+    } else {
+        format!(
+            "ljos is not ready: {} {} not answer.",
+            and_list(down),
+            if down.len() == 1 { "does" } else { "do" }
+        )
+    };
+    if off > 0 {
+        line.push_str(&format!(
+            " {off} optional part{} {} off.",
+            if off == 1 { "" } else { "s" },
+            if off == 1 { "is" } else { "are" }
+        ));
+    }
+    line.push_str(" `ljos doctor --all` lists every row.\n");
+    line
+}
+
+/// The short doctor: the summary line, then only the rows that need
+/// action (`no` and `warn`), each with the fix its state names.
+#[must_use]
+pub fn format_doctor_short(rows: &[Habitat]) -> String {
+    let needs: Vec<Habitat> = rows
+        .iter()
+        .filter(|h| matches!(doctor_word(h), "no" | "warn"))
+        .cloned()
+        .collect();
+    format!("{}{}", doctor_summary(rows), format_doctor(&needs))
+}
+
+/// One section of a sitting's report, cut for [`compact_sitting`].
+fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut Vec<String>) {
+    match name {
+        "doctor" => {
+            let mut down = Vec::new();
+            let mut off = 0;
+            let mut act = String::new();
+            for l in lines {
+                let cols: Vec<&str> = l.splitn(3, '\t').collect();
+                match cols.as_slice() {
+                    ["info", _, _] => off += 1,
+                    ["ok", _, _] => {}
+                    [word @ ("no" | "warn"), name, _] => {
+                        if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
+                            down.push(*name);
+                        }
+                        act.push_str(l);
+                        act.push('\n');
+                    }
+                    _ if !l.trim().is_empty() => {
+                        act.push_str(l);
+                        act.push('\n');
+                    }
+                    _ => {}
+                }
+            }
+            out.push_str(&summary_line(&down, off));
+            out.push_str(&act);
+        }
+        "island" => {
+            for l in lines {
+                let cols: Vec<&str> = l.split('\t').collect();
+                if cols.len() == 5 && cols[0].parse::<f64>().is_ok() && memories.len() < 5 {
+                    memories.push(cols[4].to_string());
+                } else if l.starts_with("weak island") {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "due" => {
+            for l in lines {
+                if !l.starts_with("0 due") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "blockers" => {
+            for l in lines {
+                if !l.starts_with("none open") && !l.trim().is_empty() {
+                    out.push_str(&format!("blockers: {l}\n"));
+                }
+            }
+        }
+        "playbook" => {
+            if let Some(first) = lines.first().filter(|l| l.trim() != "sit") {
+                out.push_str(&format!("playbook: {first}\n"));
+            }
+        }
+        "panel" | "cards" => {
+            for l in lines {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        "reclaim" => {
+            for l in lines {
+                if l.starts_with("kept ") || l.starts_with("handed back") {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "claim" => {
+            for l in lines {
+                if !l.starts_with("gen=") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        "sync" => {
+            for l in lines {
+                if !l.contains("names no scope") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        // recall and timeline are for `--verbose`.
+        _ => {}
+    }
+}
+
+/// A sitting's report cut to what a person acts on. The full report goes
+/// section by section (`== doctor`, `== island: TITLE`, ...); this keeps
+/// the doctor's summary and the rows that need action, the memories the
+/// island found, open blockers, the playbook's name, a panel, a reclaim
+/// that moved something, and the claim, then says the issue is held.
+/// `ljos sitting --verbose` prints the full report.
+#[must_use]
+pub fn compact_sitting(full: &str, issue: &str) -> String {
+    let mut out = String::new();
+    let mut memories: Vec<String> = Vec::new();
+    let mut section = "";
+    let mut section_lines: Vec<&str> = Vec::new();
+    for line in full.lines() {
+        if let Some(head) = line.strip_prefix("== ") {
+            compact_section(section, &section_lines, &mut out, &mut memories);
+            section_lines.clear();
+            section = if head.starts_with("island") {
+                "island"
+            } else {
+                match head {
+                    "doctor" => "doctor",
+                    "sync" => "sync",
+                    "cards" => "cards",
+                    "due" => "due",
+                    "blockers" => "blockers",
+                    "playbook" => "playbook",
+                    "panel" => "panel",
+                    "recall" => "recall",
+                    "timeline" => "timeline",
+                    "reclaim" => "reclaim",
+                    "claim" => "claim",
+                    _ => "",
+                }
+            };
+        } else {
+            section_lines.push(line);
+        }
+    }
+    compact_section(section, &section_lines, &mut out, &mut memories);
+    if !memories.is_empty() {
+        out.push_str("What the seat remembers for this task:\n");
+        for m in &memories {
+            out.push_str(&format!("- {m}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "{issue} is yours. `ljos finish {issue} --lesson \"...\"` closes the sitting; \
+         `ljos sitting {issue} --verbose` prints every section.\n"
+    ));
+    out
+}
+
 /// The accessions a satchel's description says it needs.
 pub fn needs_of(satchel_json: &str) -> Result<Vec<String>> {
     let v: Value = serde_json::from_str(satchel_json).context("satchel.json")?;
@@ -23343,6 +23541,78 @@ mod tests {
         let answer = hook_output_ruled(&call, "", Some(&rule));
         assert!(answer_denies(&answer), "{answer}");
         assert!(answer.contains("--force-with-lease"), "{answer}");
+    }
+
+    fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {
+        Habitat {
+            name,
+            state: state.to_string(),
+            ok,
+        }
+    }
+
+    #[test]
+    fn a_ready_doctor_is_one_line() {
+        let rows = vec![
+            habitat_row("pack", "answers", true),
+            habitat_row("tracker", "answers", true),
+            habitat_row("host key", "none yet", false),
+        ];
+        let short = format_doctor_short(&rows);
+        assert_eq!(
+            short,
+            "ljos is ready: memory, the tracker and the command guard answer. 1 optional part is off. `ljos doctor --all` lists every row.\n"
+        );
+        assert!(format_doctor(&rows).contains("host key"));
+    }
+
+    #[test]
+    fn a_short_doctor_names_what_is_down_with_its_fix() {
+        let rows = vec![
+            habitat_row("pack", "no pack: run packset ensure", false),
+            habitat_row(
+                "encoder",
+                "not installed: cargo binstall packset-embed",
+                false,
+            ),
+            habitat_row("tracker", "answers", true),
+        ];
+        let short = format_doctor_short(&rows);
+        let lines: Vec<&str> = short.lines().collect();
+        assert_eq!(
+            lines[0],
+            "ljos is not ready: pack and encoder do not answer. `ljos doctor --all` lists every row."
+        );
+        assert_eq!(lines.len(), 3, "{short}");
+        assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
+        assert!(!short.contains("tracker"), "{short}");
+    }
+
+    #[test]
+    fn a_compact_sitting_keeps_what_needs_action_and_the_memories() {
+        let full = "== doctor\nok\tpack\tanswers\ninfo\thost key\tnone yet\nencoder down: the pack ranks by words alone\n\
+== sync\nsync: this repository names no scope\n\
+== cards\n\
+== due\n2 due; the soonest: abc\n\
+== island: Fix the guard\nSeat island.\n1.000\tseed\tabcd1234\ttoday\tPrefer plain words in denials.\n0.400\t    \tef567890\t3 days ago\tKeep hooks under 8 s.\n\
+== blockers\nnone open; the issue is workable\n\
+== playbook\nsit\n\
+== recall\nlots of recall\n\
+== timeline\n2026-10-11 noted\n\
+== reclaim\nno claim quiet longer than 900s\n\
+== claim\nclaimed Software-x for ljos-bot@ux-fix\ngen=4\n";
+        let short = compact_sitting(full, "Software-x");
+        assert_eq!(
+            short,
+            "ljos is ready: memory, the tracker and the command guard answer. 1 optional part is off. `ljos doctor --all` lists every row.\n\
+encoder down: the pack ranks by words alone\n\
+2 due; the soonest: abc\n\
+claimed Software-x for ljos-bot@ux-fix\n\
+What the seat remembers for this task:\n\
+- Prefer plain words in denials.\n\
+- Keep hooks under 8 s.\n\
+Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
+        );
     }
 
     /// A removal is an appended ledger event. The heading that already
