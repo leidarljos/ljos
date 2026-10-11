@@ -222,6 +222,66 @@ pub fn statusline(input: &str) -> String {
     line
 }
 
+/// The line a new session hears first: that ljos is on, how many
+/// memories this workspace holds and how many are due, whether the
+/// command guard runs, and up to three of the workspace's preferences.
+/// A pack that does not answer within 400 ms is named with its fix.
+#[must_use]
+pub fn session_start_line() -> String {
+    let atoms = with_pack_timeout(400, || -> Result<Vec<Value>> {
+        let client = pack()?;
+        atoms_lean(&client, &client.workspace())
+    });
+    session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"))
+}
+
+/// [`session_start_line`] from what it read: the workspace's atoms, or
+/// `None` when the pack did not answer, and whether `ljos-policyd` is on
+/// the PATH.
+#[must_use]
+pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) -> String {
+    let guard = if guard {
+        "command guard on"
+    } else {
+        "command guard off (`cargo binstall ljos-policyd` turns it on)"
+    };
+    let Some(atoms) = atoms else {
+        return format!(
+            "ljos is on, but the memory store does not answer (`packset ensure` starts it); {guard}."
+        );
+    };
+    let kept: Vec<&Value> = atoms.iter().filter(|a| reviewable(a)).collect();
+    if kept.is_empty() {
+        return format!(
+            "ljos is on: no memories here yet (`ljos remember` or `ljos prefer` adds one); {guard}."
+        );
+    }
+    let due = due_of(atoms, now).len();
+    let mut line = format!(
+        "ljos is on: {} memor{}, {due} due for review, {guard}.",
+        kept.len(),
+        if kept.len() == 1 { "y" } else { "ies" }
+    );
+    let prefs: Vec<String> = kept
+        .iter()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
+        .filter_map(|a| a.get("text").and_then(Value::as_str))
+        .map(|t| {
+            let t = t.trim().trim_end_matches('.');
+            if t.chars().count() > 80 {
+                format!("{}...", t.chars().take(77).collect::<String>())
+            } else {
+                t.to_string()
+            }
+        })
+        .take(3)
+        .collect();
+    if !prefs.is_empty() {
+        line.push_str(&format!(" Preferences here: {}.", prefs.join("; ")));
+    }
+    line
+}
+
 /// Rewrite the agent definitions after a persona changed, in every agents
 /// directory that harnesses.toml names and that exists on disk. A
 /// directory the file does not name, such as the Grok one a first
@@ -26353,6 +26413,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let error = super::forecasts_from_json(&raw).unwrap_err().to_string();
             assert!(error.contains("probability in (0, 1]"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_session_start_says_ljos_is_on_in_one_line() {
+        let now = "2026-10-11T12:00:00Z";
+        let atoms = vec![
+            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z"}),
+            serde_json::json!({"kind":"lesson","text":"BM25+ beat BM25.","due_at":"2027-01-01T00:00:00Z"}),
+        ];
+        let line = session_start_line_from(Some(&atoms), now, true);
+        assert_eq!(
+            line,
+            "ljos is on: 2 memories, 1 due for review, command guard on. Preferences here: Plain words in denials."
+        );
+        assert!(!line.contains('\n'));
+        let empty = session_start_line_from(Some(&[]), now, false);
+        assert!(
+            empty.starts_with("ljos is on: no memories here yet"),
+            "{empty}"
+        );
+        assert!(empty.contains("cargo binstall ljos-policyd"), "{empty}");
+        let down = session_start_line_from(None, now, true);
+        assert!(down.contains("`packset ensure`"), "{down}");
     }
 
     #[test]

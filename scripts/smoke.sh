@@ -151,6 +151,8 @@ other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolI
 echo '{"hook_event_name":"PreCompact","session_id":"smoke-compact","trigger":"auto"}' | ljos hook >/dev/null
 resumed=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-compact","source":"compact"}' | ljos hook)
 echo "$resumed" | grep -q '"additionalContext":"The conversation was compacted' || { echo "$resumed"; fail "compaction note at SessionStart"; }
+fresh=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-fresh","source":"startup"}' | ljos hook)
+echo "$fresh" | grep -q '"additionalContext":"ljos is on: ' || { echo "$fresh"; fail "the ljos is on line at SessionStart"; }
 
 ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
 echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"

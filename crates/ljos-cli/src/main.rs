@@ -1551,7 +1551,8 @@ fn main() -> Result<()> {
                     String::new()
                 }
                 // A session started from a compaction hears what it holds,
-                // where the runner takes SessionStart context.
+                // and a fresh one hears that ljos is on, where the runner
+                // takes SessionStart context.
                 "SessionStart" => {
                     // A new session starts the encoder loading, so the first
                     // prompt does not wait on it.
@@ -1571,6 +1572,11 @@ fn main() -> Result<()> {
                         let (ctx, ids) = ljos_cli::take_hook_note(call.session.as_deref());
                         seen_later.extend(ids);
                         ctx
+                    } else if !compacted && call.shape != ljos_cli::HookShape::CamelCase {
+                        // A fresh session hears that ljos is on, in one
+                        // line, so the person and the agent know the seat
+                        // is there before the first prompt.
+                        ljos_cli::session_start_line()
                     } else {
                         String::new()
                     }
