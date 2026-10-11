@@ -3,22 +3,22 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, complete, conflicts,
-    consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, complete,
+    conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
     format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
-    format_hubs, format_island, format_playbooks, format_readings, format_remembered, format_seat,
-    format_steps, format_write_ack, graded, habit, habits, handover, healthy, hook_note,
-    identity_or_seat, island_entities, join, learn_anchors, learn_and_write, learn_reading,
-    learn_shared, mark_seen, now_utc, on_path, onboard_to, pack, packset_consolidate,
-    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
-    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
-    post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign, receive, release,
-    remember_findings, resolve_assignee, rows_about, rules_from_pack, run, run_as, run_captured,
-    session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words,
-    tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami, with_discount,
-    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    format_hubs, format_island, format_personas, format_playbooks, format_readings,
+    format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
+    handover, healthy, hook_note, identity_or_seat, island_entities, join, learn_anchors,
+    learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, pack,
+    packset_consolidate, packset_forget, packset_hubs, packset_island_as, packset_search_as_of,
+    packset_write_as, panel, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
+    policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign,
+    receive, release, remember_findings, resolve_assignee, rows_about, rules_from_pack, run,
+    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami,
+    with_discount, withdraw_prediction, write_outcome, write_persona, write_persona_as,
+    write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust,
+    HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::path::PathBuf;
 
@@ -120,7 +120,8 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
-    /// Whether a deed's bytes are intact and its sources are too.
+    /// Whether a deed's bytes are intact and its sources are too. `at=` is
+    /// the produced time in ISO 8601 with this machine's offset.
     Evidence { accession: String },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
@@ -141,7 +142,8 @@ enum Cmd {
     },
     /// File work found while sitting: a child of the issue this
     /// conversation holds unless `--parent` names another or `--top` none,
-    /// in the parent's project. Prints the new id.
+    /// in the parent's project. `-p` naming another project files at its
+    /// top level, for a bug in a tool found mid-sitting. Prints the new id.
     File {
         /// The issue's title.
         title: String,
@@ -151,7 +153,8 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted.
+        /// The project; the parent's when omitted. Another project than
+        /// the held issue's files at its top level.
         #[arg(short, long)]
         project: Option<String>,
         /// The type tag: bug, task, feature, decision.
@@ -252,7 +255,9 @@ enum Cmd {
         /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
-        /// Probability in (0, 1] that the choice is the outcome.
+        /// Probability in (0, 1] that the choice is the outcome. Recorded;
+        /// `ljos learn` scores it once the outcome is named, and no settle
+        /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
         /// Deed accessions this ballot used, comma-separated, or `none`.
@@ -495,15 +500,24 @@ enum Cmd {
         /// so a runner that reads the JSON is unchanged.
         #[arg(long)]
         fail_on_deny: bool,
+        /// Read the payload and answer in this runner's hook contract: copilot,
+        /// gemini, windsurf, factory, kiro, cline, qwen or crush.
+        #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
+        runner: Option<String>,
     },
-    /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
-    /// The settle prints in words: shares, who leads, influence, and what
-    /// each anchor did.
+    /// What the push gate decides on the issue, from seat ballots alone,
+    /// then the weighted settle over every ballot as advice: shares, who
+    /// leads, influence, and what each anchor did.
     Consensus {
         id: String,
-        /// Print the settle's JSON as the model crate wrote it, not the words.
+        /// Print JSON: the push gate's answer, then the settle's JSON as the
+        /// model crate wrote it.
         #[arg(long)]
         json: bool,
+        /// Also run the tracker's own settle (`vissue consensus`), whose
+        /// numbers can differ from the model crate's once trust rows exist.
+        #[arg(long)]
+        compare: bool,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -646,11 +660,11 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
-        /// Occupancy name. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
+        /// Occupancy name, taken as given, the seat's own name too. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
         #[arg(long)]
         assignee: Option<String>,
         /// Where the cards are read from.
@@ -676,6 +690,9 @@ enum Cmd {
         /// The option that turned out right, when the ballots are in and the world has said.
         #[arg(long)]
         outcome: Option<String>,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long, requires = "outcome")]
+        new_option: bool,
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -710,6 +727,9 @@ enum Cmd {
         /// The option that turned out right.
         #[arg(long)]
         outcome: String,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long)]
+        new_option: bool,
         /// The factor a refuted voter shrinks by.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -834,7 +854,10 @@ fn main() -> Result<()> {
                 )?)
             );
         }
-        Cmd::Evidence { accession } => run("deedar", &["evidence", &accession])?,
+        Cmd::Evidence { accession } => {
+            let said = run_captured("deedar", &["evidence", &accession])?;
+            print!("{}", ljos_cli::evidence_here(&said.stdout));
+        }
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
             issue,
@@ -892,17 +915,16 @@ fn main() -> Result<()> {
             priority,
             body,
         } => {
-            let parent = if top {
+            let held = if top || parent.is_some() {
                 None
             } else {
-                parent.or_else(ljos_cli::held_issue)
+                ljos_cli::held_issue()
             };
-            let project = project.or_else(|| {
-                parent
-                    .as_deref()
-                    .and_then(|p| p.rsplit_once('-'))
-                    .map(|(proj, _)| proj.to_string())
-            });
+            let (parent, project, passed_over) =
+                ljos_cli::file_placement(top, parent, project, held);
+            if let Some(line) = passed_over {
+                eprint!("{line}");
+            }
             let Some(project) = project else {
                 anyhow::bail!("no project: name one with -p, or a parent with --parent");
             };
@@ -947,6 +969,9 @@ fn main() -> Result<()> {
         }
         Cmd::Note { issue, text } => {
             run("vissue", &["note", &issue, &text.join(" ")])?;
+            if let Some(line) = ljos_cli::assist_note_line(&issue) {
+                print!("{line}");
+            }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
         Cmd::Send {
@@ -1217,7 +1242,7 @@ fn main() -> Result<()> {
             role,
             slack,
         } => {
-            let assignee = resolve_assignee(assignee.as_deref());
+            let assignee = cli_assignee(assignee.as_deref());
             if next || node.is_empty() {
                 print!("{}", claim_next(&assignee, role.as_deref(), slack)?);
             } else {
@@ -1225,10 +1250,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Release { node, assignee } => {
-            print!(
-                "{}",
-                release(&node, &resolve_assignee(assignee.as_deref()))?
-            );
+            print!("{}", release(&node, &cli_assignee(assignee.as_deref()))?);
             print!("{}", ljos_cli::persist_tracker(&node, "released"));
         }
         Cmd::Complete {
@@ -1241,7 +1263,7 @@ fn main() -> Result<()> {
             complete(
                 &node,
                 status.as_deref(),
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 gen
             )?
         ),
@@ -1286,10 +1308,21 @@ fn main() -> Result<()> {
             event,
             prompt,
             fail_on_deny,
+            runner,
         } => {
             use std::io::Read;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
+            if let Some(runner) = runner.as_deref() {
+                if !ljos_cli::runner_hooks::is_runner(runner) {
+                    anyhow::bail!(
+                        "hook: no runner {runner:?}; --runner takes {}",
+                        ljos_cli::runner_hooks::RUNNERS.join(", ")
+                    );
+                }
+                let code = ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())?;
+                std::process::exit(code);
+            }
             let call = if prompt {
                 ljos_cli::prompt_call(&input)
             } else {
@@ -1613,7 +1646,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Consensus { id, json } => {
+        Cmd::Consensus { id, json, compare } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -1631,14 +1664,30 @@ fn main() -> Result<()> {
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
             let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
+            // The model crate's settle is the one printed; the tracker's
+            // runs under --compare, or when the model crate is not there.
+            let have_model = on_path("ljos-consensus");
             let mut steps = consensus_steps_for(
                 &id,
-                on_path("ljos-consensus"),
-                on_path("vissue"),
+                have_model,
+                on_path("vissue") && (compare || !have_model),
                 &trust,
                 &anchors,
                 &tags,
             )?;
+            // First what the push gate decides: seat ballots only.
+            let names: std::collections::BTreeSet<String> =
+                personas.iter().map(|p| p.name.trim().to_string()).collect();
+            let (gate, gate_json) =
+                ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&gate_json)?);
+            } else {
+                print!("{gate}");
+                println!(
+                    "advice, which does not decide a push: the weighted settle over every ballot"
+                );
+            }
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             if let Some((discount, line)) = settle_discount(&atoms) {
@@ -1657,17 +1706,24 @@ fn main() -> Result<()> {
                     Some(words) => print!("{words}"),
                     None => print!("{}", said.stdout),
                 }
-                let names = personas.iter().map(|p| p.name.trim().to_string()).collect();
-                if let Some(split) = ljos_cli::seat_count_in_words(&ballots, &names) {
-                    print!("{split}");
-                }
             }
             // Beside the settle: the surprisingly popular answer when two
             // or more voters forecast, and the voters' standing when rows
             // exist.
             let predictions = predictions_of(&atoms, &id);
             for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
-                run(step.bin, &step.args)?;
+                if json || step.args.first().map(String::as_str) != Some("reputation") {
+                    run(step.bin, &step.args)?;
+                    continue;
+                }
+                // The rows name every voter on the topic; beside this
+                // settle only the issue's voters are read.
+                let said = run_captured(step.bin, &step.args)?;
+                let voters = ljos_cli::voters_of(&ballots);
+                match ljos_cli::standing_in_words(&said.stdout, &voters) {
+                    Some(words) => print!("{words}"),
+                    None => print!("{}", said.stdout),
+                }
             }
         }
         Cmd::Trust {
@@ -1852,7 +1908,7 @@ fn main() -> Result<()> {
             "{}",
             sitting_gated(
                 &issue,
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 &cards_dir,
                 anyway,
                 playbook.as_deref()
@@ -1863,6 +1919,7 @@ fn main() -> Result<()> {
             status,
             lesson,
             outcome,
+            new_option,
             beta,
             gen,
             assignee,
@@ -1874,8 +1931,9 @@ fn main() -> Result<()> {
                 &status,
                 lesson.as_deref(),
                 outcome.as_deref(),
+                new_option,
                 beta,
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 gen,
                 close
             )?
@@ -1894,12 +1952,23 @@ fn main() -> Result<()> {
         Cmd::Learn {
             id,
             outcome,
+            new_option,
             beta,
             share,
             rule,
         } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let forecasts = forecasts_from_json(&said.stdout)?;
+            let (outcome, off) = ljos_cli::named_outcome(
+                &id,
+                &outcome,
+                &forecasts,
+                &ljos_cli::options_of_issue(&id),
+                new_option,
+            )?;
+            if let Some(line) = off {
+                print!("{line}");
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
