@@ -78,6 +78,7 @@ mkdir -p "$BIN_DIR"
 COMPONENTS="ljos ljos v ljos,ljos-mcp
 packset packset v packset,packsetd,packset-mcp
 vissue vissue-cli dist vissue
+vissue vissue-mcp dist vissue-mcp
 deedar deedar-cli v deedar
 claimdag claimdag-cli v claimdag
 ljos-policyd ljos-policyd v ljos-policyd

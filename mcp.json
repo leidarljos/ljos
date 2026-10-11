@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ljos": {
+      "command": "${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin",
+      "args": ["ljos-mcp"]
+    }
+  }
+}
