@@ -3721,10 +3721,58 @@ fn cue_content_words(text: &str) -> Vec<String> {
     words
 }
 
+/// Three-letter words that sit in most sentences, prompts and lessons
+/// alike. Tool names of three letters (`npm`, `pip`, `git`, `sql`) are
+/// not on it: a prompt names its tool, and so does the preference about
+/// that tool.
+const CUE_STOP_SHORT: &[&str] = &[
+    "add", "all", "and", "any", "are", "but", "can", "did", "few", "for", "get", "got", "had",
+    "has", "her", "him", "his", "how", "its", "let", "may", "new", "not", "now", "off", "old",
+    "one", "our", "out", "own", "put", "run", "say", "see", "set", "she", "the", "too", "try",
+    "two", "use", "via", "was", "way", "who", "why", "yes", "yet", "you",
+];
+
+/// A word with a plural `s` taken off: `migrations` reads as
+/// `migration`, `dependencies` as `dependency`. `class` and `status`
+/// keep theirs.
+fn singular(w: &str) -> String {
+    if w.len() > 4 && w.ends_with("ies") {
+        return format!("{}y", &w[..w.len() - 3]);
+    }
+    if w.len() > 3
+        && w.ends_with('s')
+        && !w.ends_with("ss")
+        && !w.ends_with("us")
+        && !w.ends_with("is")
+    {
+        return w[..w.len() - 1].to_string();
+    }
+    w.to_string()
+}
+
+/// The words a prompt and a claim are matched on: three letters or
+/// more, singular, not a stop word. A prompt says `npm` or `migration`
+/// where the preference says `npm` or `migrations`.
+fn prompt_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .map(str::to_lowercase)
+        .filter(|w| !CUE_STOP.contains(&w.as_str()) && !CUE_STOP_SHORT.contains(&w.as_str()))
+        .map(|w| singular(&w))
+        .collect();
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
 /// Whether a lesson names something the cue names.
 /// A high search score on a vague sentence is not that.
 fn names_the_cue(text: &str, cue: &str) -> bool {
-    shared_cue_words(text, cue) > 0
+    let have = prompt_words(text);
+    prompt_words(cue)
+        .iter()
+        .any(|w| have.binary_search(w).is_ok())
 }
 
 /// How many content words a lesson and a cue share.
@@ -3856,6 +3904,19 @@ pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let mut pending = Vec::new();
     if let Some(key) = due_key {
         pending.push(key);
+    }
+    // While the encoder loads, a search waits on it past the hook's
+    // deadline and the answer is lost. The prompt hears that memory is
+    // starting, once a session, and the search waits for a later prompt.
+    if encoder_warming() {
+        if !seen_ids(call.session.as_deref()).contains(ENCODER_WARMING_KEY) {
+            if !nudge.is_empty() {
+                nudge.push('\n');
+            }
+            nudge.push_str(ENCODER_WARMING_NOTE);
+            pending.push(ENCODER_WARMING_KEY.to_string());
+        }
+        return (nudge, pending);
     }
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
@@ -5022,11 +5083,10 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
              that holds next time is `ljos remember \"...\"`, an artifact is `ljos deed {issue} \
              --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
         ),
-        None => format!(
-            "This conversation holds no issue. Work goes on an issue: \
-             `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
-             Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
-        ),
+        None => "This conversation holds no issue. Work goes on an issue: \
+                 `ljos file \"TITLE\" -p PROJECT --top` prints an id, then `ljos sitting ID` opens it. \
+                 Start subagents that record on the filed issue with `ljos vote ID` or `ljos note ID`."
+            .to_string(),
     })
 }
 
@@ -5207,6 +5267,89 @@ pub fn subagent_stop_reason(
 /// shortest runner cut-off seen is grok's 15 s on a prompt; this leaves it
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
+
+/// What a prompt hears while the pack's encoder loads. On a new machine the
+/// first load downloads the model, which takes longer than a hook may.
+pub const ENCODER_WARMING_NOTE: &str = "ljos memory is starting: the pack is \
+loading its search model, which a new machine downloads first. Memories come \
+back on a later prompt; nothing needs doing.";
+
+/// The seen key that says the warming note went out in this session.
+const ENCODER_WARMING_KEY: &str = "encoder-warming";
+
+/// How long one warm-up stands before another may start.
+const ENCODER_WARM_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether the pack's encoder has not answered since packsetd started: it is
+/// on, its binary is there, and no dense call came back yet. A search then
+/// waits for the model to load, and on a new machine for its download. A
+/// status without the `answering` field, from an older packsetd, says nothing
+/// about it, and is not cold.
+#[must_use]
+pub fn encoder_cold(status: &Value) -> bool {
+    let embedder = &status["embedder"];
+    embedder["available"].as_bool().unwrap_or(false)
+        && embedder.get("answering").is_some_and(Value::is_null)
+}
+
+/// Whether a warm-up may start: no marker, or one older than
+/// [`ENCODER_WARM_EVERY`]. Taking it writes the marker, so a burst of hooks
+/// starts one.
+fn take_warm_turn(marker: &Path) -> bool {
+    let fresh = std::fs::metadata(marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < ENCODER_WARM_EVERY);
+    if fresh {
+        return false;
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(marker, "").is_ok()
+}
+
+/// The warm-up: one reranked search, run by `exe` in its own process group,
+/// so packsetd loads the encoder and the reranker off the hook's clock, and
+/// a runner that kills the hook's group does not stop it.
+#[must_use]
+pub fn warm_command(exe: &Path) -> std::process::Command {
+    use std::process::Stdio;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["search", "-n", "1", "--rerank", "the pack is open"])
+        .env_remove("LJOS_IN_HOOK")
+        .env_remove("PACKSET_TIMEOUT_MS")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
+/// Whether the pack's encoder is still loading. When it is, a warm-up
+/// starts in the background, at most one per [`ENCODER_WARM_EVERY`]. The
+/// status call has half a second; a pack that does not answer in that time
+/// is not called cold, and the search goes on as before.
+pub fn encoder_warming() -> bool {
+    let cold = with_pack_timeout(500, || {
+        pack()
+            .ok()
+            .and_then(|client| client.status(None).ok())
+            .is_some_and(|status| encoder_cold(&status))
+    });
+    if cold && take_warm_turn(&runtime_dir().join("encoder-warming")) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = warm_command(&exe).spawn();
+        }
+    }
+    cold
+}
 
 /// Whether an identical call (event, session, text) started in the last 20
 /// seconds. A runner that loads another runner's hook file runs the same
@@ -5748,10 +5891,16 @@ pub fn shell_exit(fail_on_deny: bool, text: &str) -> i32 {
 /// `allow`. An `ask` that Cursor would not enforce is a deny that says
 /// so. Cursor gives context to the model as `additional_context` after a
 /// tool result, a failed one, or at session start. A held stop is a
-/// `followup_message`.
+/// `followup_message`. `beforeMCPExecution` and `beforeReadFile` are
+/// permission events too, and Cursor blocks the call when such a hook
+/// prints nothing and `failClosed` is set. The seat judges those calls on
+/// `preToolUse`, which Cursor fires for every tool, so here they allow.
 fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
+        "beforeMCPExecution" | "beforeReadFile" => {
+            out.insert("permission".into(), Value::String("allow".into()));
+        }
         "PreToolUse" => {
             let (permission, reason) = match verdict {
                 Some(r) if r.verdict == "ask" && !call.shape.asks() => (
@@ -7866,7 +8015,7 @@ pub fn seat_panel(
     }
     let through_island: Vec<Persona> = all
         .iter()
-        .filter(|p| by_domain(p, island) && names_the_cue(&p.view, title))
+        .filter(|p| by_domain(p, island) && shared_cue_words(&p.view, title) > 0)
         .cloned()
         .collect();
     if !through_island.is_empty() {
@@ -9555,7 +9704,7 @@ pub enum PushTier {
     /// A branch push to an unreleased repository of the person's own.
     Free,
     /// A push to the person's own repository that is released or shared:
-    /// it runs when it cites a settled decision or a current deed.
+    /// it runs when it cites a settled decision.
     Cite(String),
     /// Somebody else's remote, tags, a mirror or a force: the person runs it.
     Person(String),
@@ -9893,9 +10042,11 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
     Ok(dropped)
 }
 
-/// Whether a cite stands: a deed accession `deedar current` takes, or a
-/// tracker issue its seat ballots decide ([`seats_decide`]), open or
-/// closed. The text says which ballots it counted.
+/// Whether a cite stands: a tracker issue its seat ballots decide
+/// ([`seats_decide`]), open or closed. The text says which ballots it
+/// counted. A deed alone does not stand: the pushing seat can mint one
+/// with `deedar create` a moment before the push, so the decision has to
+/// be on an issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         let (ballots, personas) = cite_ballots(cite)?;
@@ -9918,11 +10069,18 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
         .status()
         .is_ok_and(|s| s.success());
     if current {
-        return Ok(format!("deed {cite} is current"));
+        return Err(deed_alone(cite));
     }
-    Err(format!(
-        "{cite} is neither a tracker issue nor a current deed"
-    ))
+    Err(format!("{cite} is not a tracker issue"))
+}
+
+/// Why a deed cited on its own does not let a push through.
+#[must_use]
+pub fn deed_alone(cite: &str) -> String {
+    format!(
+        "{cite} is a deed, and a deed alone does not stand for a push: the pushing seat can mint one. \
+         Cite the issue that records the decision, with a ballot from another seat"
+    )
 }
 
 /// The ballots that count toward a push cite, as `(agent, choice)`. A
@@ -10426,7 +10584,7 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
             None => Some(ruled(format!(
                 "{why}, so the push cites the decision behind it: run it as `LJOS_CITE=ISSUE {}`, \
                  where the seats that voted on ISSUE agree and one of them is not this seat \
-                 (persona and judge ballots do not count), or LJOS_CITE=ACCESSION for a current deed",
+                 (persona and judge ballots do not count)",
                 line.trim()
             ))),
         },
@@ -11645,6 +11803,8 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("ljos-policyd", "ljos-policyd"),
     ("ljos-consensus", "ljos-consensus"),
     ("vissue", "vissue-cli"),
+    // The tracker server the vissue plugin runs; its own crate.
+    ("vissue-mcp", "vissue-mcp"),
     ("deedar", "deedar-cli"),
     ("claimdag", "claimdag-cli"),
     ("packset", "packset"),
@@ -12652,7 +12812,7 @@ pub fn healthy(rows: &[Habitat]) -> bool {
 
 /// The required rows that do not answer, by name.
 #[must_use]
-pub fn failing<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
+pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
         .filter(|h| !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack"))
         .map(|h| h.name)
@@ -12666,7 +12826,7 @@ const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
 /// The required rows a sitting cannot open without, by name.
 #[must_use]
-pub fn failing_for_sitting<'a>(rows: &'a [Habitat]) -> Vec<&'a str> {
+pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
     failing(rows)
         .into_iter()
         .filter(|name| !SITTING_DEGRADED.contains(name))
@@ -12740,7 +12900,17 @@ pub fn enclose(needs: Vec<String>, cited: &str) -> Vec<String> {
 
 /// Pack a slice of the seat into `out`: the tracker's satchel, the pack's
 /// atoms, the deeds both cite, sealed, and signed when a host key is set.
-pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Vec<String>> {
+///
+/// `since_size` is the log size the receiver kept from the last handover
+/// (the `size=` in the head file `ljos receive --keep` wrote). With it the
+/// bag carries `data/deeds/bridge.txt`, the consistency path from that size
+/// to the head in this bag, which `ljos receive --since` checks.
+pub fn handover(
+    out: &Path,
+    projects: &[String],
+    issues: &[String],
+    since_size: Option<u64>,
+) -> Result<Vec<String>> {
     if projects.is_empty() && issues.is_empty() {
         bail!("handover: name a project or an issue");
     }
@@ -12788,6 +12958,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     let deeds = enclose(needs_of(&description)?, &cited);
     if deeds.is_empty() {
         lines.push("no deeds cited".into());
+        if since_size.is_some() {
+            lines.push("no bridge: no deeds travel, so there is no log to bridge".into());
+        }
     } else {
         let deeds_dir = out.join("data").join("deeds");
         let said = run_fed(
@@ -12803,6 +12976,9 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
             ),
         )?;
         lines.push(said.stdout.trim_end().to_string());
+        if let Some(size) = since_size {
+            lines.push(write_bridge(&deeds_dir, size)?);
+        }
     }
 
     lines.push(
@@ -12830,9 +13006,35 @@ pub fn handover(out: &Path, projects: &[String], issues: &[String]) -> Result<Ve
     Ok(lines)
 }
 
+/// Put the bridge from a log of `size` entries to this store's head into
+/// `deeds_dir/bridge.txt`, where `deedar check` looks for it.
+fn write_bridge(deeds_dir: &Path, size: u64) -> Result<String> {
+    let bridge =
+        run_captured("deedar", &["log", "bridge", &size.to_string()]).with_context(|| {
+            format!("handover: deedar could not bridge from a log of {size} entries")
+        })?;
+    let path = deeds_dir.join("bridge.txt");
+    std::fs::write(&path, &bridge.stdout)
+        .with_context(|| format!("handover: writing {}", path.display()))?;
+    Ok(format!(
+        "bridge from {size} entries in {}; the receiver passes the head it kept to `ljos receive --since`",
+        path.display()
+    ))
+}
+
 /// Check a satchel that arrived: manifest, deed receipts, signature, and what
 /// the atoms hold; with `import`, POST the atoms into this seat's pack.
-pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<String>> {
+///
+/// `since` is the head this seat kept from the last handover by the same
+/// sender, as `keep` wrote it. deedar then needs the bridge in the bag to
+/// start at that head and end at the bag's own, so a sender who rewrote the
+/// log is caught. `keep` writes the bag's head for next time.
+pub fn receive(
+    dir: &Path,
+    since: Option<&Path>,
+    keep: Option<&Path>,
+    import: bool,
+) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     lines.push(
         run_captured(
@@ -12845,9 +13047,13 @@ pub fn receive(dir: &Path, since: Option<&Path>, import: bool) -> Result<Vec<Str
     );
     if dir.join("data").join("deeds").is_dir() {
         let mut args = vec!["check".to_string(), dir.display().to_string()];
-        if let Some(bridge) = since {
+        if let Some(kept) = since {
             args.push("--since".into());
-            args.push(bridge.display().to_string());
+            args.push(kept.display().to_string());
+        }
+        if let Some(path) = keep {
+            args.push("--keep".into());
+            args.push(path.display().to_string());
         }
         lines.push(run_captured("deedar", &args)?.stdout.trim_end().to_string());
     } else {
@@ -18835,6 +19041,37 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_names_a_short_tool_or_a_plural() {
+        assert!(names_the_cue(
+            "Use pnpm, never npm, in this repo.",
+            "add lodash with npm"
+        ));
+        assert!(names_the_cue(
+            "Use uv instead of pip for Python packages.",
+            "pip install requests"
+        ));
+        assert!(names_the_cue(
+            "Run the SQL migrations with sqlx, not by hand.",
+            "write the migration for the users table"
+        ));
+        assert!(names_the_cue(
+            "Pin the dependencies in Cargo.lock.",
+            "bump a dependency"
+        ));
+        assert!(!names_the_cue(
+            "The CI cache key must include Cargo.lock or builds go stale.",
+            "add a new SQL migration"
+        ));
+        assert!(!names_the_cue(
+            "Use pnpm, never npm, in this repo.",
+            "how do you set the new one up for all of them"
+        ));
+        assert_eq!(singular("status"), "status");
+        assert_eq!(singular("class"), "class");
+        assert_eq!(singular("tags"), "tag");
+    }
+
+    #[test]
     fn the_hook_keeps_what_two_scorers_agreed_on() {
         let hit = |ballots, of| Hit {
             id: None,
@@ -19670,6 +19907,38 @@ mod tests {
         assert_eq!(anchors.get("rock"), Some(&DEFAULT_ANCHOR));
         assert_eq!(anchors.get("inky"), Some(&DEFAULT_ANCHOR));
         assert_eq!(anchors.get("ljos-bot"), Some(&DEFAULT_ANCHOR));
+    }
+
+    /// The anchor floor and the push cite meet: a persona written below
+    /// 0.5 still settles at the seat's anchor, and its ballot neither
+    /// passes nor blocks the push the seats agreed on.
+    #[test]
+    fn a_floored_persona_does_not_decide_the_push_cite() {
+        let rock = Persona {
+            name: "rock".into(),
+            anchor: 0.0,
+            view: "Never moves.".into(),
+            entities: vec![],
+            runner: None,
+        };
+        let voters: Vec<String> = ["ljos-bot", "inky", "rock"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let anchors = settle_anchors(&[rock], &voters);
+        assert_eq!(anchors.get("rock"), Some(&DEFAULT_ANCHOR));
+        let personas: std::collections::BTreeSet<String> = ["rock".to_string()].into();
+        let rows = [
+            serde_json::json!({"agent": "ljos-bot", "choice": "ship"}),
+            serde_json::json!({"agent": "inky", "choice": "ship"}),
+            serde_json::json!({"agent": "rock", "choice": "hold"}),
+        ];
+        let d = seats_decide("x-1", &rows, &personas, "ljos-bot").unwrap();
+        assert_eq!(d.choice, "ship");
+        assert_eq!(
+            d.counted,
+            "ljos-bot for ship, inky for ship; 1 persona or judge ballot left out"
+        );
     }
 
     /// `ljos consensus` opens with what the push gate decides, on seat
@@ -22606,6 +22875,55 @@ mod tests {
         }
     }
 
+    /// A pack whose encoder never answered since it started is cold, so a
+    /// prompt does not wait on the model; one that answered, one whose
+    /// encoder failed, one without an encoder, and an older status without
+    /// the field are not.
+    #[test]
+    fn a_pack_is_cold_until_its_encoder_answers_once() {
+        let status = |embedder: Value| serde_json::json!({ "embedder": embedder });
+        assert!(super::encoder_cold(&status(serde_json::json!({
+            "enabled": true, "binary": "/x/packset-embed", "available": true, "answering": null
+        }))));
+        for warm in [
+            serde_json::json!({"enabled": true, "available": true, "answering": true}),
+            serde_json::json!({"enabled": true, "available": false, "answering": false}),
+            serde_json::json!({"enabled": true, "binary": null, "available": false, "answering": null}),
+            serde_json::json!({"enabled": true, "available": true}),
+        ] {
+            assert!(!super::encoder_cold(&status(warm.clone())), "{warm}");
+        }
+        assert!(!super::encoder_cold(&serde_json::json!({})));
+    }
+
+    /// One warm-up per window: the first hook takes the turn and writes the
+    /// marker, the next one inside the window does not, and the warm-up is a
+    /// reranked search that does not inherit the hook's clock.
+    #[test]
+    fn a_burst_of_hooks_starts_one_warm_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("run/encoder-warming");
+        assert!(super::take_warm_turn(&marker));
+        assert!(marker.exists());
+        assert!(!super::take_warm_turn(&marker));
+        let command = super::warm_command(std::path::Path::new("/opt/ljos"));
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["search", "-n", "1", "--rerank", "the pack is open"]);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.contains(&"LJOS_IN_HOOK".to_string()), "{removed:?}");
+        assert!(
+            removed.contains(&"PACKSET_TIMEOUT_MS".to_string()),
+            "{removed:?}"
+        );
+    }
+
     /// Cursor is read off its payload, whichever file registered the hook,
     /// and answered in its contract ([`cursor_output`]).
     #[test]
@@ -22648,6 +22966,24 @@ mod tests {
             hook_output_ruled(&post, "a note", None),
             "{\"additional_context\":\"a note\"}\n"
         );
+        for gate in [
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/README.md","content":"x"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_search","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#,
+        ] {
+            // Registered with failClosed, so an empty answer would block
+            // every file read and MCP call.
+            let call = hook_call(gate);
+            assert_eq!(
+                hook_output_ruled(&call, "", None),
+                "{\"permission\":\"allow\"}\n",
+                "{gate}"
+            );
+            assert_eq!(
+                hook_output_ruled(&call, "", Some(&ask)),
+                "{\"permission\":\"allow\"}\n",
+                "{gate}"
+            );
+        }
         let failed = r#"{"cursor_version":"2.4.0","hook_event_name":"postToolUseFailure","error_message":"exit 2"}"#;
         assert_eq!(hook_call(failed).event, "PostToolUseFailure");
         assert_eq!(tool_error(failed), "exit 2");
@@ -24365,6 +24701,32 @@ mod tests {
     }
 
     #[test]
+    fn a_deed_the_pusher_minted_does_not_carry_a_push() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for (name, body) in [
+            ("deedar", "#!/bin/sh\nexit 0\n"),
+            ("vissue", "#!/bin/sh\nexit 1\n"),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let tracker = dir.path().join("tracker");
+        std::fs::create_dir_all(&tracker).unwrap();
+        let _held = HoldEnv::set(&[
+            ("PATH", bin.to_str().unwrap()),
+            ("VISSUE_ROOT", tracker.to_str().unwrap()),
+        ]);
+        let said = cite_stands("deed-file-self-minted").unwrap_err();
+        assert!(said.contains("a deed alone does not stand"), "{said}");
+        assert!(said.contains("another seat"), "{said}");
+    }
+
+    #[test]
     fn a_busy_writer_is_not_an_absent_one() {
         let refused = anyhow::Error::new(packset_client::Error::Bad(
             "http://127.0.0.1:8761/v1/search: 503: packsetd is busy".into(),
@@ -24844,6 +25206,62 @@ mod tests {
         log
     }
 
+    /// A fake `deedar` that logs its arguments and prints a bridge.
+    fn fake_deedar(dir: &std::path::Path) -> std::path::PathBuf {
+        let log = dir.join("deedar.log");
+        let script = format!(
+            "#!/bin/sh\necho \"deedar $*\" >> '{}'\ncase \"$1\" in\n  log) echo 'from size=3 root=aa'; echo 'to size=5 root=bb' ;;\n  check) echo '2 deeds proven against a log of 5 entries, root bb' ;;\nesac\nexit 0\n",
+            log.display()
+        );
+        let path = dir.join("deedar");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        log
+    }
+
+    #[test]
+    fn handover_writes_the_bridge_from_the_kept_size() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let log = fake_deedar(dir.path());
+        let deeds = dir.path().join("bag").join("data").join("deeds");
+        std::fs::create_dir_all(&deeds).unwrap();
+        let said = with_fake_on_path(dir.path(), || write_bridge(&deeds, 3)).unwrap();
+        assert!(said.contains("bridge from 3 entries"), "{said}");
+        let bridge = std::fs::read_to_string(deeds.join("bridge.txt")).unwrap();
+        assert!(bridge.starts_with("from size=3"), "{bridge}");
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("deedar log bridge 3"), "{calls}");
+    }
+
+    #[test]
+    fn receive_hands_the_kept_head_and_keep_to_deedar() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _tracker = fake_vissue(dir.path(), true, true);
+        let log = fake_deedar(dir.path());
+        let bag = dir.path().join("bag");
+        std::fs::create_dir_all(bag.join("data").join("deeds")).unwrap();
+        let kept = dir.path().join("peer.head");
+        let next = dir.path().join("peer.next");
+        // Whatever the rest of the bag says, the deed check comes first.
+        let _ = with_fake_on_path(dir.path(), || {
+            receive(&bag, Some(&kept), Some(&next), false)
+        });
+        let calls = std::fs::read_to_string(log).unwrap();
+        let want = format!(
+            "deedar check {} --since {} --keep {}",
+            bag.display(),
+            kept.display(),
+            next.display()
+        );
+        assert!(calls.contains(&want), "{calls}");
+    }
+
     /// Run `f` with `dir` first on PATH, then put PATH back.
     fn with_fake_on_path<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
         let old = std::env::var_os("PATH").unwrap_or_default();
@@ -25060,6 +25478,25 @@ mod tests {
             vissue_entry["mcpServers"]["vissue"]["command"],
             "vissue-mcp"
         );
+        // The server the vissue plugin runs is its own crate, so every
+        // install line names it and the doctor knows where it comes from.
+        assert!(super::SEAT_BINS.contains(&("vissue-mcp", "vissue-mcp")));
+        for file in [
+            "README.md",
+            "bin/ljos-plugin",
+            "skills/ljos-setup/SKILL.md",
+            "docs/source/getting-started.rst",
+            "docs/source/index.rst",
+            "docs/orgmode/getting-started.org",
+            "docs/orgmode/index.org",
+        ] {
+            let text = read(file);
+            let line = text
+                .lines()
+                .find(|l| l.contains("binstall --locked ljos"))
+                .unwrap_or_else(|| panic!("{file} has no install line"));
+            assert!(line.contains(" vissue-mcp "), "{file}: {line}");
+        }
 
         let command = plugin["mcpServers"]["ljos"]["command"].as_str().unwrap();
         assert_eq!(plugin["mcpServers"]["ljos"]["args"][0], "ljos-mcp");
@@ -25088,6 +25525,117 @@ mod tests {
                 "{rel} contains a home directory path"
             );
             assert!(!text.contains("HaoZeke"), "{rel} names a fork");
+        }
+    }
+
+    /// The same tree is a Cursor plugin: `.cursor-plugin/plugin.json` names
+    /// the seat's version and repository, every path it declares exists and
+    /// stays inside the tree, `mcp.json` starts `ljos-mcp` through the
+    /// launcher, and `hooks/cursor.json` takes the seat's Cursor events in
+    /// Cursor's flat shape. `beforeMCPExecution` and `beforeReadFile` are
+    /// left to `preToolUse`, which Cursor fires for every tool, so an older
+    /// binary that prints nothing on them cannot block a read. The plugin
+    /// adds `sessionStart`, where a missing seat says how to install it.
+    /// Claude's hooks stay in `hooks/hooks.json`, which Cursor does not read
+    /// because the manifest names its own file.
+    #[test]
+    fn the_cursor_plugin_ships_the_seat() {
+        use serde_json::Value;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        let plugin: Value = serde_json::from_str(&read(".cursor-plugin/plugin.json")).unwrap();
+        let claude: Value = serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
+        assert_eq!(plugin["name"], "ljos");
+        assert_eq!(plugin["version"], claude["version"]);
+        assert_eq!(plugin["repository"], claude["repository"]);
+        assert_eq!(plugin["license"], claude["license"]);
+        for key in [
+            "skills",
+            "rules",
+            "agents",
+            "commands",
+            "hooks",
+            "mcpServers",
+            "logo",
+        ] {
+            let rel = plugin[key].as_str().unwrap_or_else(|| panic!("{key}"));
+            assert!(
+                !rel.starts_with('/') && !rel.contains(".."),
+                "{key}: {rel} leaves the tree"
+            );
+            assert!(root.join(rel).exists(), "{key}: {rel} is missing");
+        }
+        assert_eq!(plugin["hooks"], "./hooks/cursor.json");
+
+        let mcp: Value = serde_json::from_str(&read("mcp.json")).unwrap();
+        let server = &mcp["mcpServers"]["ljos"];
+        assert_eq!(server["command"], "${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin");
+        assert_eq!(server["args"][0], "ljos-mcp");
+
+        let hooks: Value = serde_json::from_str(&read("hooks/cursor.json")).unwrap();
+        assert_eq!(hooks["version"], 1);
+        let left_to_pre_tool_use = ["beforeMCPExecution", "beforeReadFile"];
+        let mut want: Vec<(&str, u64)> = vec![("sessionStart", 5)];
+        want.extend(
+            super::CURSOR_HOOK_EVENTS
+                .iter()
+                .filter(|(e, _)| !left_to_pre_tool_use.contains(e))
+                .copied(),
+        );
+        let obj = hooks["hooks"].as_object().expect("hooks object");
+        let mut have: Vec<&str> = obj.keys().map(String::as_str).collect();
+        let mut named: Vec<&str> = want.iter().map(|(e, _)| *e).collect();
+        have.sort_unstable();
+        named.sort_unstable();
+        assert_eq!(have, named);
+        for (event, timeout) in &want {
+            let entries = obj[*event].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{event}");
+            let entry = &entries[0];
+            assert_eq!(
+                entry["command"], "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+                "{event}"
+            );
+            assert_eq!(entry["timeout"], *timeout, "{event}");
+            assert_eq!(
+                entry["failClosed"].as_bool().unwrap_or(false),
+                super::CURSOR_FAIL_CLOSED.contains(event),
+                "{event}"
+            );
+        }
+
+        let front = |rel: &str| {
+            let text = read(rel);
+            let parts: Vec<&str> = text.splitn(3, "---\n").collect();
+            assert!(
+                parts.len() == 3 && parts[0].is_empty(),
+                "{rel} has no front matter"
+            );
+            parts[1].to_string()
+        };
+        for dir in ["skills", "agents", "commands", "rules"] {
+            for e in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+                let rel = if dir == "skills" {
+                    format!("skills/{}/SKILL.md", e.file_name().to_string_lossy())
+                } else {
+                    format!("{dir}/{}", e.file_name().to_string_lossy())
+                };
+                let head = front(&rel);
+                assert!(head.contains("description:"), "{rel}");
+                if dir == "skills" {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    assert!(head.contains(&format!("name: {name}\n")), "{rel}");
+                } else if dir == "rules" {
+                    assert!(head.contains("alwaysApply:"), "{rel}");
+                } else {
+                    assert!(head.contains("name: "), "{rel}");
+                }
+                let text = read(&rel);
+                assert!(!text.contains("/home/"), "{rel} names a home directory");
+                assert!(!text.contains("HaoZeke"), "{rel} names a fork");
+            }
         }
     }
 
