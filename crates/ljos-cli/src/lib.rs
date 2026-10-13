@@ -2404,8 +2404,55 @@ fn grok_hooks_json(ljos: &Path) -> String {
     GROK_HOOKS_JSON.replace("{ljos}", &ljos.display().to_string())
 }
 
+/// The events whose matcher groups in a Claude settings file already run
+/// the seat's hook.
+fn claude_seat_events(claude_settings: &Path) -> Vec<String> {
+    let Some(v) = std::fs::read_to_string(claude_settings)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    v["hooks"]
+        .as_object()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|(_, groups)| {
+                    groups
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+                        .any(is_seat_hook)
+                })
+                .map(|(e, _)| e.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The grok hooks file without the events Grok already runs from
+/// `~/.claude/settings.json`: Grok reads both files, and an event in both
+/// ran the seat's hook twice.
+fn grok_hooks_json_beside(ljos: &Path, claude_settings: &Path) -> String {
+    let skip = claude_seat_events(claude_settings);
+    let text = grok_hooks_json(ljos);
+    if skip.is_empty() {
+        return text;
+    }
+    let Ok(mut v) = serde_json::from_str::<Value>(&text) else {
+        return text;
+    };
+    if let Some(hooks) = v["hooks"].as_object_mut() {
+        hooks.retain(|event, _| !skip.contains(event));
+    }
+    serde_json::to_string_pretty(&v).map_or(text, |t| t + "\n")
+}
+
 fn write_grok_hooks(dry: bool) -> Result<Step> {
     let dest = home()?.join(".grok/hooks/ljos.json");
+    let claude = home()?.join(".claude/settings.json");
     if dry {
         return Ok(Step {
             what: "hook".into(),
@@ -2416,10 +2463,20 @@ fn write_grok_hooks(dry: bool) -> Result<Step> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&dest, grok_hooks_json(&ljos_path()?))?;
+    std::fs::write(&dest, grok_hooks_json_beside(&ljos_path()?, &claude))?;
+    let left = claude_seat_events(&claude);
     Ok(Step {
         what: "hook".into(),
-        detail: format!("wrote {}", dest.display()),
+        detail: if left.is_empty() {
+            format!("wrote {}", dest.display())
+        } else {
+            format!(
+                "wrote {}; {} stay with {}, which Grok also runs",
+                dest.display(),
+                left.join(", "),
+                claude.display()
+            )
+        },
         ok: true,
     })
 }
@@ -25607,6 +25664,34 @@ mod tests {
         assert_eq!(stop["command"], "/opt/seat/bin/ljos hook");
         assert!(!text.contains("{ljos}"), "{text}");
         assert!(!text.contains("\"ljos hook\""), "{text}");
+    }
+
+    #[test]
+    fn grok_leaves_the_events_claude_settings_run_to_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("settings.json");
+        let ljos = Path::new("/opt/seat/bin/ljos");
+        let all = |text: &str| -> Vec<String> {
+            let v: Value = serde_json::from_str(text).unwrap();
+            v["hooks"].as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(
+            all(&super::grok_hooks_json_beside(ljos, &claude)),
+            all(&super::grok_hooks_json(ljos)),
+            "no Claude file, every event"
+        );
+        std::fs::write(
+            &claude,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/x/ljos hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"other"}]}]}}"#,
+        )
+        .unwrap();
+        let keys = all(&super::grok_hooks_json_beside(ljos, &claude));
+        assert!(!keys.contains(&"PreToolUse".to_string()), "{keys:?}");
+        assert!(
+            keys.contains(&"Stop".to_string()),
+            "another command is not the seat's"
+        );
+        assert!(keys.contains(&"UserPromptSubmit".to_string()));
     }
 
     #[test]
