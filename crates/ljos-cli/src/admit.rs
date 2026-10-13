@@ -333,7 +333,10 @@ fn accepted_line(id: &str, kind: &str, posted: &Value) -> String {
 fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result<Value> {
     let url = format!("{}/v1/proposals/accept", client.base());
     let body = serde_json::json!({"workspace": workspace, "id": id});
-    match ureq::post(&url).timeout(http_timeout()).send_json(body) {
+    match packset_client::authorize(ureq::post(&url))
+        .timeout(http_timeout())
+        .send_json(body)
+    {
         Ok(resp) => resp
             .into_json()
             .context("accept: the pack's answer was not json"),

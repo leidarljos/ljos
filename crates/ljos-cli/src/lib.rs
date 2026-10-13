@@ -5098,7 +5098,7 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
-        let body: Value = ureq::get(&url)
+        let body: Value = packset_client::authorize(ureq::get(&url))
             .query("workspace", &client.workspace())
             .query("q", cue)
             .query("limit", &limit.to_string())
@@ -8093,7 +8093,7 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
     let mut tries = 0;
     let answered = loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let got = ureq::get(&url)
+        let got = packset_client::authorize(ureq::get(&url))
             .query("workspace", workspace)
             .query("embedding", "omit")
             .timeout(left.max(std::time::Duration::from_millis(1)))
@@ -14834,6 +14834,21 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ok: false,
         },
     });
+    // The writer's token: packsetd 0.15 answers its owner only, and a seat
+    // with no token meets a 401 on every memory, mail and recall call while
+    // `/health` still says ok.
+    if let Ok(client) = pack() {
+        let refused = client
+            .status(None)
+            .err()
+            .map(|e| format!("{e:#}").contains("401"));
+        out.push(pack_token_row(
+            packset_client::token().is_some(),
+            std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
+            packset_client::token_path(),
+            refused,
+        ));
+    }
     // What the pack holds and what it let go: the seat that lets a pack
     // grow or forget under it reads it here rather than in `packset status`.
     if let Ok(client) = pack() {
@@ -15397,11 +15412,54 @@ pub fn healthy(rows: &[Habitat]) -> bool {
     failing(rows).is_empty()
 }
 
+/// The `pack token` row of `ljos doctor`. `has` says whether a token was
+/// found, `from_env` whether `PACKSET_TOKEN` carried it, `path` is where the
+/// token file is looked for, and `refused` whether the writer answered 401
+/// (`None` when it was not asked or did not answer).
+#[must_use]
+pub fn pack_token_row(
+    has: bool,
+    from_env: bool,
+    path: Option<std::path::PathBuf>,
+    refused: Option<bool>,
+) -> Habitat {
+    let at = path.map_or_else(|| "no pack home".to_string(), |p| p.display().to_string());
+    match (has, refused) {
+        (true, Some(true)) => Habitat {
+            name: "pack token",
+            state: format!(
+                "packsetd refused the token from {}; it belongs to another pack home. Point PACKSET_HOME or PACKSET_TOKEN_FILE at the writer's home",
+                if from_env { "PACKSET_TOKEN".to_string() } else { at }
+            ),
+            ok: false,
+        },
+        (true, _) => Habitat {
+            name: "pack token",
+            state: if from_env { "sent from PACKSET_TOKEN".into() } else { format!("sent from {at}") },
+            ok: true,
+        },
+        (false, Some(true)) => Habitat {
+            name: "pack token",
+            state: format!(
+                "missing: packsetd answers its owner only and no token is at {at}. Set PACKSET_HOME to the writer's pack home, PACKSET_TOKEN_FILE to its token file, or PACKSET_TOKEN"
+            ),
+            ok: false,
+        },
+        (false, _) => Habitat {
+            name: "pack token",
+            state: format!("none at {at}; this writer does not ask for one"),
+            ok: true,
+        },
+    }
+}
+
 /// The required rows that do not answer, by name.
 #[must_use]
 pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
-        .filter(|h| !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack"))
+        .filter(|h| {
+            !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack" || h.name == "pack token")
+        })
         .map(|h| h.name)
         .collect()
 }
@@ -31695,5 +31753,61 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             })
             .max();
         assert_eq!(peak, Some(2), "{seen}");
+    }
+
+    #[test]
+    fn doctor_names_a_missing_pack_token_when_the_writer_refuses() {
+        let path = Some(std::path::PathBuf::from(
+            "/home/u/.local/share/packset/token",
+        ));
+        let missing = pack_token_row(false, false, path.clone(), Some(true));
+        assert!(!missing.ok);
+        assert!(
+            missing.state.contains("/home/u/.local/share/packset/token"),
+            "{}",
+            missing.state
+        );
+        assert!(missing.state.contains("PACKSET_HOME"), "{}", missing.state);
+        assert_eq!(failing(&[missing]), vec!["pack token"]);
+        let sent = pack_token_row(true, false, path.clone(), Some(false));
+        assert!(
+            sent.ok && sent.state.starts_with("sent from /home/u"),
+            "{}",
+            sent.state
+        );
+        let old = pack_token_row(false, false, path.clone(), None);
+        assert!(old.ok, "{}", old.state);
+        let wrong = pack_token_row(true, true, path, Some(true));
+        assert!(
+            !wrong.ok && wrong.state.contains("PACKSET_TOKEN"),
+            "{}",
+            wrong.state
+        );
+    }
+
+    #[test]
+    fn a_pack_request_carries_the_token_from_the_pack_home() {
+        let _env = env_guard();
+        let keys = ["PACKSET_TOKEN", "PACKSET_TOKEN_FILE", "PACKSET_HOME"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("token"), "abc123\n").unwrap();
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("PACKSET_HOME", home.path());
+        }
+        assert_eq!(packset_client::token().as_deref(), Some("abc123"));
+        let req = packset_client::authorize(ureq::get("http://127.0.0.1:1/v1/atoms"));
+        assert_eq!(req.header("Authorization"), Some("Bearer abc123"));
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 }
