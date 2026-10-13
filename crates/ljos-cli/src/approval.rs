@@ -460,7 +460,12 @@ fn consents(answer: &rmcp::model::ElicitResult) -> bool {
 /// Apply a one-use grant only to an ask verdict. Denials reach the caller
 /// unchanged, including denials from the policy binary.
 pub fn hook_output(input: &str, call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
-    hook_output_at(input, call, context, verdict, &root(), now())
+    let mut granted = false;
+    let out = hook_output_at(input, call, context, verdict, &root(), now(), &mut granted);
+    if let (true, Some(rule)) = (granted, verdict) {
+        crate::log_bypass("approval", "one-use grant", &call.cue, rule);
+    }
+    out
 }
 
 fn hook_output_at(
@@ -470,6 +475,7 @@ fn hook_output_at(
     verdict: Option<&Rule>,
     root: &Path,
     now: Result<u64>,
+    granted: &mut bool,
 ) -> String {
     let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") else {
         return hook_output_ruled(call, context, verdict);
@@ -483,7 +489,10 @@ fn hook_output_at(
         Store::open(root, now)?.request_or_consume(scope, now)
     })();
     match result {
-        Ok(None) => hook_output_ruled(call, context, None),
+        Ok(None) => {
+            *granted = true;
+            hook_output_ruled(call, context, None)
+        }
         result => {
             let mut pending = rule.clone();
             let detail = match result {
@@ -522,7 +531,15 @@ mod tests {
     }
 
     fn output(input: &str, rule: &Rule, root: &Path, now: u64) -> String {
-        hook_output_at(input, &hook_call(input), "", Some(rule), root, Ok(now))
+        hook_output_at(
+            input,
+            &hook_call(input),
+            "",
+            Some(rule),
+            root,
+            Ok(now),
+            &mut false,
+        )
     }
 
     fn request_id(output: &str) -> String {

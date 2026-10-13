@@ -298,7 +298,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
 /// `onboard` fills from the shipped shape, is left to `onboard` or
 /// `ljos agents`.
 pub fn refresh_agents() {
-    let Ok(all) = harnesses_from(&harnesses_path()) else {
+    let Ok(all) = harnesses_with_shipped(&harnesses_path()) else {
         return;
     };
     let personas = personas_from_pack().unwrap_or_default();
@@ -457,7 +457,7 @@ fn agents_step(dir: &Path, personas: &[Persona], dry: bool) -> Step {
 /// The runners file is unreadable, no runner in it names an agents
 /// directory, or the pack does not answer.
 pub fn export_agents(harness: Option<&str>, dry: bool) -> Result<Vec<Step>> {
-    let mut all = harnesses_from(&harnesses_path())?;
+    let mut all = harnesses_with_shipped(&harnesses_path())?;
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     for h in shipped.harness {
         if !all.harness.iter().any(|a| a.name == h.name) && harness == Some(h.name.as_str()) {
@@ -930,6 +930,109 @@ pub fn harnesses_from(path: &Path) -> Result<Harnesses> {
     }
 }
 
+/// The shipped shapes, as TOML tables, keyed by runner name. The
+/// placeholder `runner-with-*` shapes are examples, not runners.
+fn shipped_tables() -> Vec<toml::Table> {
+    let doc: toml::Table = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
+    doc.get("harness")
+        .and_then(toml::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(toml::Value::as_table)
+                .filter(|t| {
+                    t.get("name")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|n| !n.starts_with("runner-with-"))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One runner's table with the shipped shape under it, field by field:
+/// a key the file sets wins, a key it leaves out comes from the shape.
+/// A shape added to ljos after the first onboard reaches the runner.
+#[must_use]
+pub fn merge_shipped(user: &toml::Table, shipped: &toml::Table) -> toml::Table {
+    let mut out = shipped.clone();
+    for (k, v) in user {
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
+/// The runners file with each runner it names merged over the shipped
+/// shape of that name ([`merge_shipped`]). An absent file is no runners.
+///
+/// # Errors
+///
+/// A file that is present and not this shape.
+pub fn harnesses_with_shipped(path: &Path) -> Result<Harnesses> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Harnesses::default()),
+        Err(e) => return Err(e).with_context(|| format!("{}", path.display())),
+    };
+    let mut doc: toml::Table =
+        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    let shipped = shipped_tables();
+    if let Some(toml::Value::Array(rows)) = doc.get_mut("harness") {
+        for row in rows.iter_mut() {
+            let toml::Value::Table(t) = row else { continue };
+            let name = t.get("name").and_then(toml::Value::as_str).unwrap_or("");
+            if let Some(s) = shipped
+                .iter()
+                .find(|s| s.get("name").and_then(toml::Value::as_str) == Some(name))
+            {
+                *t = merge_shipped(t, s);
+            }
+        }
+    }
+    toml::Value::Table(doc)
+        .try_into()
+        .with_context(|| format!("{}", path.display()))
+}
+
+/// Where the runners file parts from the shipped shapes: one line per
+/// key the file sets to something other than the shape, as
+/// `runner.key: yours X, shipped Y`. A copy an older onboard wrote shows
+/// here when the shape has moved on.
+#[must_use]
+pub fn shipped_differences(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = toml::from_str::<toml::Table>(&text) else {
+        return Vec::new();
+    };
+    let shipped = shipped_tables();
+    let mut out = Vec::new();
+    for t in doc
+        .get("harness")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+    {
+        let name = t.get("name").and_then(toml::Value::as_str).unwrap_or("");
+        let Some(s) = shipped
+            .iter()
+            .find(|s| s.get("name").and_then(toml::Value::as_str) == Some(name))
+        else {
+            continue;
+        };
+        for (k, v) in t {
+            if let Some(sv) = s.get(k) {
+                if sv != v {
+                    out.push(format!("{name}.{k}: yours {v}, shipped {sv}"));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Where `ljos-mcp` is, as the runner will start it.
 /// The `ljos-mcp` that goes with this `ljos`: the one installed beside it,
 /// else the one on PATH. A shell a runner or ssh opens may lack the
@@ -1384,7 +1487,7 @@ fn seat_for_client(client: &str) -> String {
 /// The harness a client name belongs to, by its `clients` list in the
 /// runners file.
 fn runner_for_client(file: &Path, slug: &str) -> Option<String> {
-    harnesses_from(file)
+    harnesses_with_shipped(file)
         .ok()?
         .harness
         .into_iter()
@@ -1655,7 +1758,7 @@ pub fn under_a_runner() -> bool {
     {
         return true;
     }
-    let mut runners: Vec<String> = harnesses_from(&harnesses_path())
+    let mut runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.harness.into_iter().map(|h| h.name).collect())
         .unwrap_or_default();
     runners.extend(["agy", "antigravity"].map(String::from));
@@ -1855,6 +1958,34 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
+    // A holder a person named wins outright.
+    if let Some(hold) = named_var("LJOS_HOLD") {
+        return Seat {
+            seat: seat_name,
+            holder: hold,
+            source: "LJOS_HOLD".into(),
+        };
+    }
+    // A seat a person named builds the holder: SEAT@TAG of the
+    // conversation, never a bare conversation id a record or a runner's
+    // `*_CONVERSATION_ID` left behind.
+    if let Some((name, key)) = &named {
+        let own = format!("{name}@");
+        if let Some(record) = record.as_ref().filter(|r| r.holder.starts_with(&own)) {
+            return Seat {
+                seat: seat_name,
+                holder: record.holder.clone(),
+                source: record.source.clone(),
+            };
+        }
+        if let Some((holder, keys)) = session_holder(name) {
+            return Seat {
+                holder,
+                seat: seat_name,
+                source: format!("{key}; session {keys}"),
+            };
+        }
+    }
     // The server's record first: it carries the holder the server took,
     // whatever else this shell's environment adds.
     if let Some(record) = record {
@@ -2337,7 +2468,9 @@ pub fn detect_runners(
 pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
     let file = harnesses_path();
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
-    let mut shapes = harnesses_from(&file).map(|h| h.harness).unwrap_or_default();
+    let mut shapes = harnesses_with_shipped(&file)
+        .map(|h| h.harness)
+        .unwrap_or_default();
     shapes.extend(shipped.harness);
     let found = detect_runners(&shapes, &home()?, &|c| on_path(c));
     if found.is_empty() {
@@ -2404,8 +2537,55 @@ fn grok_hooks_json(ljos: &Path) -> String {
     GROK_HOOKS_JSON.replace("{ljos}", &ljos.display().to_string())
 }
 
+/// The events whose matcher groups in a Claude settings file already run
+/// the seat's hook.
+fn claude_seat_events(claude_settings: &Path) -> Vec<String> {
+    let Some(v) = std::fs::read_to_string(claude_settings)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    v["hooks"]
+        .as_object()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|(_, groups)| {
+                    groups
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+                        .any(is_seat_hook)
+                })
+                .map(|(e, _)| e.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The grok hooks file without the events Grok already runs from
+/// `~/.claude/settings.json`: Grok reads both files, and an event in both
+/// ran the seat's hook twice.
+fn grok_hooks_json_beside(ljos: &Path, claude_settings: &Path) -> String {
+    let skip = claude_seat_events(claude_settings);
+    let text = grok_hooks_json(ljos);
+    if skip.is_empty() {
+        return text;
+    }
+    let Ok(mut v) = serde_json::from_str::<Value>(&text) else {
+        return text;
+    };
+    if let Some(hooks) = v["hooks"].as_object_mut() {
+        hooks.retain(|event, _| !skip.contains(event));
+    }
+    serde_json::to_string_pretty(&v).map_or(text, |t| t + "\n")
+}
+
 fn write_grok_hooks(dry: bool) -> Result<Step> {
     let dest = home()?.join(".grok/hooks/ljos.json");
+    let claude = home()?.join(".claude/settings.json");
     if dry {
         return Ok(Step {
             what: "hook".into(),
@@ -2416,10 +2596,20 @@ fn write_grok_hooks(dry: bool) -> Result<Step> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&dest, grok_hooks_json(&ljos_path()?))?;
+    std::fs::write(&dest, grok_hooks_json_beside(&ljos_path()?, &claude))?;
+    let left = claude_seat_events(&claude);
     Ok(Step {
         what: "hook".into(),
-        detail: format!("wrote {}", dest.display()),
+        detail: if left.is_empty() {
+            format!("wrote {}", dest.display())
+        } else {
+            format!(
+                "wrote {}; {} stay with {}, which Grok also runs",
+                dest.display(),
+                left.join(", "),
+                claude.display()
+            )
+        },
         ok: true,
     })
 }
@@ -2606,7 +2796,7 @@ pub fn onboard_in(
     }
     if harness == "grok" {
         let mut steps = vec![write_grok_hooks(dry)?];
-        let declared = harnesses_from(file)
+        let declared = harnesses_with_shipped(file)
             .ok()
             .and_then(|all| all.harness.into_iter().find(|h| h.name == "grok"));
         if let Some(h) = &declared {
@@ -2636,7 +2826,7 @@ pub fn onboard_in(
         steps.extend([pack_step(dry), host_key_step(dry)]);
         return Ok(steps);
     }
-    let all = harnesses_from(file)?;
+    let all = harnesses_with_shipped(file)?;
     // A runner the seat ships a shape for is onboarded from that shape when
     // the file does not name it, and the shape is written into the file so
     // the doctor and persona sessions know the runner too: a first
@@ -2753,11 +2943,29 @@ fn adopt_shipped_shape(file: &Path, h: &Harness, dry: bool) -> Step {
             ok: true,
         };
     }
-    let table = toml::to_string(&Harnesses {
-        harness: vec![h.clone()],
-        tool: Vec::new(),
-    })
-    .unwrap_or_default();
+    // Only the name, and what differs from the shape: the rest is read
+    // from the shape on each run, so a later ljos's shape reaches it.
+    let full: toml::Table = toml::Value::try_from(h)
+        .ok()
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default();
+    let shape = shipped_tables()
+        .into_iter()
+        .find(|s| s.get("name").and_then(toml::Value::as_str) == Some(h.name.as_str()))
+        .unwrap_or_default();
+    let mut own = toml::Table::new();
+    own.insert("name".into(), toml::Value::String(h.name.clone()));
+    for (k, v) in &full {
+        if k != "name" && shape.get(k).is_some_and(|s| s != v) {
+            own.insert(k.clone(), v.clone());
+        }
+    }
+    let mut doc = toml::Table::new();
+    doc.insert(
+        "harness".into(),
+        toml::Value::Array(vec![toml::Value::Table(own)]),
+    );
+    let table = toml::to_string(&doc).unwrap_or_default();
     let mut text = std::fs::read_to_string(file).unwrap_or_default();
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -3221,10 +3429,32 @@ fn claude_has_seat_hook(claude_settings: &Path) -> bool {
         })
 }
 
+/// Whether every seat hook on a Cursor permission event carries
+/// `failClosed`. Without it, a seat hook that fails lets the call run.
+fn cursor_gates_fail_closed(cursor: &Path) -> bool {
+    let Some(doc) = std::fs::read_to_string(cursor)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return true;
+    };
+    CURSOR_FAIL_CLOSED.iter().all(|event| {
+        doc["hooks"][*event].as_array().is_none_or(|entries| {
+            entries
+                .iter()
+                .filter(|e| is_seat_hook(e))
+                .all(|e| e["failClosed"] == true)
+        })
+    })
+}
+
 /// Cursor's file is the memory hook when it carries every Cursor event,
 /// or the events Claude's file does not name while Claude's file has the
 /// seat hook.
 fn cursor_hooks_satisfy(cursor: &Path, claude: &Path) -> bool {
+    if !cursor_gates_fail_closed(cursor) {
+        return false;
+    }
     let all: Vec<String> = CURSOR_HOOK_EVENTS
         .iter()
         .map(|(event, _)| (*event).to_string())
@@ -3333,6 +3563,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     };
     let command = hook_command();
     let mut added = Vec::new();
+    let mut closed: Vec<&str> = Vec::new();
     for (event, timeout) in CURSOR_HOOK_EVENTS {
         if claude_has_seat && !CURSOR_ONLY_EVENTS.contains(event) {
             continue;
@@ -3343,7 +3574,13 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         let Some(entries) = entries.as_array_mut() else {
             continue;
         };
-        if entries.iter().any(is_seat_hook) {
+        if let Some(seat) = entries.iter_mut().find(|e| is_seat_hook(e)) {
+            // A hook an earlier onboard wrote without `failClosed` lets the
+            // call run when the hook fails in the IDE.
+            if CURSOR_FAIL_CLOSED.contains(event) && seat["failClosed"] != true {
+                seat["failClosed"] = serde_json::json!(true);
+                closed.push(*event);
+            }
             continue;
         }
         let mut entry = serde_json::json!({"command": command, "timeout": timeout});
@@ -3353,21 +3590,24 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         entries.push(entry);
         added.push(*event);
     }
-    if added.is_empty() {
+    if added.is_empty() && closed.is_empty() {
         return Step {
             what,
             detail: format!("{} carries the seat's hook", file.display()),
             ok: true,
         };
     }
+    let mut change = Vec::new();
+    if !added.is_empty() {
+        change.push(format!("the seat's hook on {}", added.join(", ")));
+    }
+    if !closed.is_empty() {
+        change.push(format!("failClosed on {}", closed.join(", ")));
+    }
     if dry {
         return Step {
             what,
-            detail: format!(
-                "would add the seat's hook on {} in {}",
-                added.join(", "),
-                file.display()
-            ),
+            detail: format!("would add {} in {}", change.join(" and "), file.display()),
             ok: true,
         };
     }
@@ -3383,11 +3623,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     match written {
         Ok(()) => Step {
             what,
-            detail: format!(
-                "added the seat's hook on {} in {}",
-                added.join(", "),
-                file.display()
-            ),
+            detail: format!("added {} in {}", change.join(" and "), file.display()),
             ok: true,
         },
         Err(e) => Step {
@@ -3655,15 +3891,25 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
                 });
             ("PreToolUse", cue)
         }
-        "PreInvocation" if opens_turn => {
+        "PreInvocation" => {
+            // agy numbers invocations over the whole conversation, so only
+            // the first turn opens at 0 or 1. A later turn opens where the
+            // transcript's last user text is one this conversation has not
+            // seen. The path may start with `~/`.
             let prompt = v["transcriptPath"]
                 .as_str()
-                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|p| std::fs::read_to_string(expand(p)).ok())
                 .map(|t| last_user_text(&t))
                 .unwrap_or_default();
-            ("UserPromptSubmit", prompt)
+            let fresh = session
+                .as_deref()
+                .is_some_and(|s| !prompt.is_empty() && turn_is_new(&runtime_dir(), s, &prompt));
+            if opens_turn || fresh {
+                ("UserPromptSubmit", prompt)
+            } else {
+                ("PostToolUse", String::new())
+            }
         }
-        "PreInvocation" => ("PostToolUse", String::new()),
         "Stop" => ("Stop", String::new()),
         _ => ("TurnEnd", String::new()),
     };
@@ -3673,6 +3919,19 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         session,
         shape: HookShape::Steps,
     }
+}
+
+/// Whether `prompt` is a user turn conversation `session` has not raised
+/// yet: the last one seen is kept under `dir`, and a new one replaces it.
+/// The same words asked twice in a row read as one turn.
+fn turn_is_new(dir: &Path, session: &str, prompt: &str) -> bool {
+    let path = dir.join(format!("agy-turn-{}", session_tag(session)));
+    let seen = std::fs::read_to_string(&path).ok();
+    if seen.as_deref() == Some(prompt) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, prompt));
+    true
 }
 
 /// [`hook_call`] with the event the runner's hooks file named, for a
@@ -5206,7 +5465,7 @@ pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -
             .ok()
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| whoami().seat);
-        let template = harnesses_from(&harnesses_path())
+        let template = harnesses_with_shipped(&harnesses_path())
             .ok()
             .and_then(|all| all.harness.into_iter().find(|h| h.name == runner))
             .or_else(|| {
@@ -6625,6 +6884,121 @@ fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Strin
     out.to_string() + "\n"
 }
 
+/// Whether a hook event is a gate: a tool call the runner holds until the
+/// hook answers.
+#[must_use]
+pub fn is_gate_event(event: &str) -> bool {
+    matches!(
+        event,
+        "PreToolUse" | "beforeMCPExecution" | "beforeReadFile"
+    )
+}
+
+/// Set once the hook has written a gate's answer.
+static GATE_ANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The gate call this process is answering: its input and `--event`.
+static GATE_CALL: std::sync::OnceLock<(String, Option<String>)> = std::sync::OnceLock::new();
+
+/// How long a Cursor gate waits on the seat before the seat refuses the
+/// call itself: under the 10 seconds onboard registers, so the refusal is
+/// written before Cursor gives up on the hook.
+pub const CURSOR_GATE_DEADLINE_MS: u64 = 8_000;
+
+/// The exit status of a gate the seat refused because the hook failed.
+/// Cursor, Claude Code and Codex each read exit 2 from a tool hook as a
+/// deny; any other failing status lets the call run on Cursor's CLI.
+pub const GATE_REFUSED_EXIT: i32 = 2;
+
+/// A gate's refusal when the hook fails before it reaches a verdict: an
+/// error, a panic, or no verdict by the deadline. Cursor's IDE reads a
+/// permission hook that prints nothing as a deny when `failClosed` is set,
+/// and Cursor's CLI reads the same silence as an allow, so the seat says
+/// deny in the runner's own JSON and both refuse. `None` on an event that
+/// is not a gate: a prompt or a session event that fails lets the work go
+/// on.
+#[must_use]
+pub fn hook_failure_output(input: &str, event: Option<&str>, error: &str) -> Option<String> {
+    let call = hook_call_as(input, event);
+    if !is_gate_event(&call.event) {
+        return None;
+    }
+    let error: String = error
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let rule = Rule {
+        pattern: "ljos hook".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "the seat's hook failed before it reached a verdict ({}), so the call is refused \
+             rather than let through. Run `ljos doctor`, or ask the person to run it",
+            error.trim()
+        ),
+    };
+    let out = hook_output_ruled(&call, "", Some(&rule));
+    (!out.trim().is_empty()).then_some(out)
+}
+
+/// Write the gate's refusal for `error` and exit with
+/// [`GATE_REFUSED_EXIT`], unless this process is not answering a gate or
+/// has already answered. Returns when there is nothing to refuse.
+pub fn refuse_failed_gate(error: &str) {
+    let Some((input, event)) = GATE_CALL.get() else {
+        return;
+    };
+    let answered = || GATE_ANSWERED.load(std::sync::atomic::Ordering::SeqCst);
+    if answered() {
+        return;
+    }
+    let Some(text) = hook_failure_output(input, event.as_deref(), error) else {
+        return;
+    };
+    let mut out = std::io::stdout().lock();
+    if answered() {
+        return;
+    }
+    let _ = std::io::Write::write_all(&mut out, text.as_bytes());
+    let _ = std::io::Write::flush(&mut out);
+    eprintln!("ljos hook: {error}; the call is refused");
+    std::process::exit(GATE_REFUSED_EXIT);
+}
+
+/// Write a gate's answer and mark it given, so a failure after it, or the
+/// deadline, writes nothing more.
+pub fn answer_gate(output: &str) {
+    let mut out = std::io::stdout().lock();
+    GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::io::Write::write_all(&mut out, output.as_bytes());
+    let _ = std::io::Write::flush(&mut out);
+}
+
+/// Arm the refusals of a gate call: a panic in the hook writes the deny of
+/// [`hook_failure_output`] and exits 2 (a panic exits 101, which Cursor's
+/// CLI reads as an allow), and on Cursor, a hook with no answer by
+/// [`CURSOR_GATE_DEADLINE_MS`] does the same. A Cursor hook that times out
+/// is a deny in the IDE and an allow in the CLI, so the seat answers first.
+/// Nothing is armed for an event that is not a gate.
+pub fn arm_gate(input: &str, event: Option<&str>) {
+    let call = hook_call_as(input, event);
+    if !is_gate_event(&call.event) {
+        return;
+    }
+    let _ = GATE_CALL.set((input.to_string(), event.map(str::to_string)));
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        refuse_failed_gate(&format!("panic: {info}"));
+    }));
+    if call.shape.is_cursor() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(CURSOR_GATE_DEADLINE_MS));
+            let secs = CURSOR_GATE_DEADLINE_MS / 1000;
+            refuse_failed_gate(&format!("no verdict in {secs} s"));
+        });
+    }
+}
+
 /// The answer that keeps an agent going one more round with `reason`, in
 /// the runner's words for it.
 #[must_use]
@@ -6854,7 +7228,7 @@ pub fn format_steps(steps: &[Step]) -> String {
 /// The runner rows for `doctor`, one pair per runner the file names.
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
-    let all = match harnesses_from(&path) {
+    let all = match harnesses_with_shipped(&path) {
         Ok(all) => all,
         Err(e) => {
             return vec![Habitat {
@@ -6876,6 +7250,19 @@ fn harness_rows() -> Vec<Habitat> {
     }
     let server = server_path().unwrap_or_else(|_| PathBuf::from("ljos-mcp"));
     let mut rows = Vec::new();
+    let differs = shipped_differences(&path);
+    if !differs.is_empty() {
+        rows.push(Habitat {
+            name: "runner settings",
+            state: format!(
+                "{} sets {} key(s) away from the shipped shapes; delete a key to take the shape's: {}",
+                path.display(),
+                differs.len(),
+                differs.join("; ")
+            ),
+            ok: true,
+        });
+    }
     for h in &all.harness {
         let skill = h
             .skills
@@ -14023,6 +14410,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
     out.push(policy_row());
+    out.push(bypass_row());
     out.push(panes_row());
     out
 }
@@ -14030,7 +14418,7 @@ pub fn doctor() -> Vec<Habitat> {
 /// Which tool would open a persona's pane: the first of the declared and
 /// shipped `[[tool]]` shapes that answers here, and the others that do.
 fn panes_row() -> Habitat {
-    let declared = harnesses_from(&harnesses_path())
+    let declared = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.tool)
         .unwrap_or_default();
     let (ok, state) = tools::doctor_state(&declared);
@@ -14103,6 +14491,81 @@ fn below_floor(bin: &str, have: Option<&str>) -> Option<String> {
 /// The oldest Rust that builds the seat from source, the workspace's
 /// `rust-version`.
 pub const RUST_MIN: &str = env!("CARGO_PKG_RUST_VERSION");
+
+/// `$XDG_DATA_HOME/ljos/bypass.jsonl`: one row each time a command ran
+/// that the guard would have stopped.
+#[must_use]
+pub fn bypass_log_path() -> Option<PathBuf> {
+    Some(data_base()?.join("ljos").join("bypass.jsonl"))
+}
+
+/// Write a row when the guard is passed over on a command it would have
+/// stopped: `approval` when a one-use grant let an asked command run, and
+/// `switch` when a setting such as `LJOS_ASK_PACK=off` turned off the rule
+/// that would have asked. `how` says which grant or setting. A row that
+/// cannot be written is skipped; the command's verdict does not wait on it.
+pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
+    let Some(path) = bypass_log_path() else {
+        return;
+    };
+    let row = serde_json::json!({
+        "ts": now_utc(),
+        "kind": kind,
+        "how": how,
+        "command": command,
+        "rule": rule.pattern,
+        "verdict": rule.verdict,
+        "reason": rule.reason.split(':').next().unwrap_or(""),
+        "seat": std::env::var("LJOS_SEAT").ok(),
+    });
+    let _ = path.parent().map(std::fs::create_dir_all);
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{row}");
+    }
+}
+
+/// The doctor's line on the bypass log: how many commands ran past the
+/// guard, and the last one. Passing over the guard is allowed, so the row
+/// stays green; it is there to be read.
+fn bypass_row() -> Habitat {
+    let state =
+        match bypass_log_path().and_then(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
+            None => "no command has run past the guard".to_string(),
+            Some((path, text)) => bypass_summary(&text, &path.display().to_string()),
+        };
+    Habitat {
+        name: "guard bypass",
+        state,
+        ok: true,
+    }
+}
+
+/// [`bypass_row`]'s text from the log's rows.
+#[must_use]
+pub fn bypass_summary(text: &str, path: &str) -> String {
+    let rows: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let Some(last) = rows.last() else {
+        return "no command has run past the guard".to_string();
+    };
+    let s = |k: &str| last[k].as_str().unwrap_or("").to_string();
+    format!(
+        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        local_when(&s("ts")),
+        s("command"),
+        s("rule"),
+        s("how"),
+    )
+}
 
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
@@ -24735,6 +25198,28 @@ mod tests {
     }
 
     #[test]
+    fn the_opencode_plugin_refuses_a_bash_call_the_gate_did_not_answer() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let h = all.harness.iter().find(|h| h.name == "opencode").unwrap();
+        let text = super::plugin_text(h, Path::new("/opt/seat/bin/ljos")).unwrap();
+        let before = &text[text.find("\"tool.execute.before\"").unwrap()..];
+        let refuse = before
+            .find("if (!a.ok) throw")
+            .expect("a failed hook throws");
+        let verdict = before.find("permissionDecision").unwrap();
+        assert!(
+            refuse < verdict,
+            "the refusal comes before the verdict is read"
+        );
+        assert!(text.contains("code !== 0"), "a non-zero exit is a failure");
+        assert!(
+            before.contains("cwd: output.args.workdir ?? directory"),
+            "the payload names the directory"
+        );
+        assert!(!text.contains("lets the work go on"));
+    }
+
+    #[test]
     fn a_plugin_runner_gets_its_bundled_plugin_with_ljos_filled() {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         for name in ["opencode", "omp"] {
@@ -25339,7 +25824,11 @@ mod tests {
             "{env}"
         );
         let saved = std::fs::read_to_string(&file).unwrap();
-        assert!(saved.contains("shell = true"), "{saved}");
+        assert!(saved.contains("name = \"grokbot\""), "{saved}");
+        assert!(
+            super::harnesses_with_shipped(&file).unwrap().harness[0].shell,
+            "the shape's shell = true is read under the file's table"
+        );
         assert!(saved.contains(&skills.display().to_string()), "{saved}");
         assert!(!saved.contains("json_pointer"), "{saved}");
         let again = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
@@ -25460,6 +25949,34 @@ mod tests {
     }
 
     #[test]
+    fn grok_leaves_the_events_claude_settings_run_to_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("settings.json");
+        let ljos = Path::new("/opt/seat/bin/ljos");
+        let all = |text: &str| -> Vec<String> {
+            let v: Value = serde_json::from_str(text).unwrap();
+            v["hooks"].as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(
+            all(&super::grok_hooks_json_beside(ljos, &claude)),
+            all(&super::grok_hooks_json(ljos)),
+            "no Claude file, every event"
+        );
+        std::fs::write(
+            &claude,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/x/ljos hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"other"}]}]}}"#,
+        )
+        .unwrap();
+        let keys = all(&super::grok_hooks_json_beside(ljos, &claude));
+        assert!(!keys.contains(&"PreToolUse".to_string()), "{keys:?}");
+        assert!(
+            keys.contains(&"Stop".to_string()),
+            "another command is not the seat's"
+        );
+        assert!(keys.contains(&"UserPromptSubmit".to_string()));
+    }
+
+    #[test]
     fn the_frozen_grok_hooks_match_the_declared_events() {
         let shipped: super::Harnesses =
             toml::from_str(super::HARNESSES_EXAMPLE).expect("shipped shapes");
@@ -25494,6 +26011,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_bypass_is_logged_and_the_doctor_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["kind"], "switch");
+        assert_eq!(rows[0]["reason"], "infra-destroy");
+        assert_eq!(rows[1]["how"], "grant 0a1b");
+        let said = bypass_summary(&text, "LOG");
+        assert!(
+            said.starts_with("2 commands ran past the guard")
+                && said.contains("`terraform destroy` past ask pack: cloud (grant 0a1b)")
+                && said.ends_with("see LOG"),
+            "{said}"
+        );
+        assert_eq!(
+            bypass_summary("", "LOG"),
+            "no command has run past the guard"
+        );
+    }
 
     #[test]
     fn a_line_reads_what_one_command_hands_the_next() {
@@ -27233,6 +27784,84 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!super::cursor_hooks_satisfy(&dropped_file, &claude));
     }
 
+    /// A seat hook an earlier onboard wrote on a Cursor permission event
+    /// without `failClosed` gets it, and the file no longer satisfies the
+    /// check until it does.
+    #[test]
+    fn an_old_cursor_gate_is_made_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cursor/hooks.json");
+        let claude = dir.path().join("claude/settings.json");
+        assert!(cursor_hook_step(&file, &claude, false).ok);
+        let mut doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        doc["hooks"]["preToolUse"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("failClosed");
+        std::fs::write(&file, doc.to_string()).unwrap();
+        assert!(!super::cursor_hooks_satisfy(&file, &claude));
+        let dry = cursor_hook_step(&file, &claude, true);
+        assert!(
+            dry.detail.contains("would add failClosed on preToolUse"),
+            "{}",
+            dry.detail
+        );
+        let fixed = cursor_hook_step(&file, &claude, false);
+        assert!(
+            fixed.ok && fixed.detail.contains("failClosed on preToolUse"),
+            "{}",
+            fixed.detail
+        );
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(doc["hooks"]["preToolUse"][0]["failClosed"], true);
+        assert_eq!(doc["hooks"]["preToolUse"].as_array().unwrap().len(), 1);
+        assert!(super::cursor_hooks_satisfy(&file, &claude));
+    }
+
+    /// A gate whose hook fails answers deny in the runner's own JSON, so
+    /// Cursor's CLI, which reads silence as an allow, refuses as the IDE
+    /// does. A prompt or session event that fails says nothing.
+    #[test]
+    fn a_failed_gate_answers_deny_in_the_runners_json() {
+        let cursor_shell = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeShellExecution","command":"git status","cwd":"/w"}"#;
+        let cursor_tool = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"ls"}}"#;
+        for input in [cursor_shell, cursor_tool] {
+            let out = hook_failure_output(input, None, "pack: connection refused").unwrap();
+            let v: Value = serde_json::from_str(out.trim()).unwrap();
+            assert_eq!(v["permission"], "deny", "{out}");
+            assert!(
+                v["agent_message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("pack: connection refused"),
+                "{out}"
+            );
+        }
+        let claude = r#"{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let out = hook_failure_output(claude, None, "boom\nline two").unwrap();
+        let v: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(!out.trim().contains('\n'));
+        let read = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/a"}"#;
+        assert_eq!(
+            hook_failure_output(read, None, "x").as_deref(),
+            Some("{\"permission\":\"allow\"}\n"),
+            "preToolUse judges a read; the read gate answers, never stays silent"
+        );
+        for quiet in [
+            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeSubmitPrompt","prompt":"hi"}"#,
+            r#"{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            "git status",
+        ] {
+            assert_eq!(hook_failure_output(quiet, None, "x"), None, "{quiet}");
+        }
+        assert!(CURSOR_HOOK_EVENTS
+            .iter()
+            .filter(|(e, _)| CURSOR_FAIL_CLOSED.contains(e))
+            .all(|(_, t)| *t * 1000 > CURSOR_GATE_DEADLINE_MS));
+    }
+
     /// A persona becomes an agent definition. Grok and Claude Code read the
     /// front matter; the body tells the persona to brief itself, cast one
     /// ballot before it reads the others, note why and stop. A file is
@@ -27717,6 +28346,52 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
+    fn a_named_seat_builds_the_holder_over_a_conversation_id() {
+        let _env = env_guard();
+        let saved: Vec<(&str, Option<String>)> = [
+            "LJOS_SEAT",
+            "LJOS_HOLD",
+            "VISSUE_AGENT",
+            "ACME_CONVERSATION_ID",
+        ]
+        .into_iter()
+        .map(|k| (k, std::env::var(k).ok()))
+        .collect();
+        unsafe { std::env::remove_var("VISSUE_AGENT") };
+        unsafe { std::env::set_var("LJOS_SEAT", "inky") };
+        unsafe {
+            std::env::set_var(
+                "ACME_CONVERSATION_ID",
+                "0f9e8d7c-6b5a-4321-9876-abcdefabcdef",
+            )
+        };
+        let rt = tempfile::tempdir().unwrap();
+        let rt_was = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", rt.path()) };
+        // An MCP call named the thread first and left its id whole as the
+        // holder.
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        let _ = seat_for_thread("0f9e8d7c-6b5a-4321-9876-abcdefabcdef");
+        unsafe { std::env::set_var("LJOS_SEAT", "inky") };
+        let who = whoami();
+        assert_eq!(who.seat, "inky");
+        assert!(who.holder.starts_with("inky@"), "{who:?}");
+        assert!(!who.holder.contains("0f9e8d7c"), "{who:?}");
+        unsafe { std::env::set_var("LJOS_HOLD", "inky@release") };
+        assert_eq!(whoami().holder, "inky@release");
+        match rt_was {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        for (k, v) in saved {
+            match v {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+    }
+
+    #[test]
     fn a_first_onboard_needs_no_runners_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("harnesses.toml");
@@ -27731,10 +28406,42 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             false,
         );
         assert!(step.ok, "{step:?}");
-        let back = harnesses_from(&file).unwrap();
+        let back = harnesses_with_shipped(&file).unwrap();
         assert_eq!(back.harness.len(), 1);
         assert_eq!(back.harness[0].name, "claude");
         assert_eq!(back.harness[0].resume, ["claude", "--continue"]);
+        let raw = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !raw.contains("hook_events"),
+            "the shape stays the shape's: {raw}"
+        );
+    }
+
+    #[test]
+    fn a_runner_onboarded_before_a_shape_moved_gets_the_new_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harnesses.toml");
+        // An older onboard's copy: no hook_events, no fail-closed, and a
+        // skills directory the person moved.
+        std::fs::write(
+            &file,
+            "[[harness]]\nname = \"claude\"\nskills = \"~/elsewhere\"\nhooks = \"~/.claude/settings.json\"\n",
+        )
+        .unwrap();
+        let h = harnesses_with_shipped(&file).unwrap().harness.remove(0);
+        assert_eq!(
+            h.skills.as_deref(),
+            Some("~/elsewhere"),
+            "the person's key wins"
+        );
+        assert!(h.hook_events.iter().any(|e| e == "PreToolUse"), "{h:?}");
+        assert_eq!(h.hook_fail_closed, ["PreToolUse"]);
+        let differs = shipped_differences(&file);
+        assert_eq!(differs.len(), 1, "{differs:?}");
+        assert!(
+            differs[0].starts_with("claude.skills: yours"),
+            "{differs:?}"
+        );
     }
 
     #[test]
@@ -28197,6 +28904,58 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(held["decision"], "continue");
         let asks: Value = serde_json::from_str(&block_output(HookShape::Asks, "why")).unwrap();
         assert_eq!(asks["decision"], "block");
+    }
+
+    #[test]
+    fn an_agy_turn_after_the_first_raises_its_prompt() {
+        let _env = env_guard();
+        let keys = ["HOME", "XDG_RUNTIME_DIR"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let home = tempfile::tempdir().unwrap();
+        let rt = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+        }
+        let t = home.path().join("t.jsonl");
+        let say = |text: &str| {
+            std::fs::write(
+                &t,
+                format!(r#"{{"type":"USER_INPUT","userInput":{{"items":[{{"text":"{text}"}}]}}}}"#),
+            )
+            .unwrap();
+        };
+        let call = |n: u32| {
+            hook_call_as(
+                &format!(
+                    r#"{{"invocationNum":{n},"conversationId":"c-agy-turns","transcriptPath":"~/t.jsonl"}}"#
+                ),
+                Some("PreInvocation"),
+            )
+        };
+        say("first ask");
+        let first = call(1);
+        assert_eq!(
+            (first.event.as_str(), first.cue.as_str()),
+            ("UserPromptSubmit", "first ask")
+        );
+        assert_eq!(call(2).event, "PostToolUse", "the same turn, after a tool");
+        say("second ask");
+        let second = call(7);
+        assert_eq!(
+            (second.event.as_str(), second.cue.as_str()),
+            ("UserPromptSubmit", "second ask"),
+            "a later turn opens at a later invocation, from a ~/ path"
+        );
+        assert_eq!(call(8).event, "PostToolUse");
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]
