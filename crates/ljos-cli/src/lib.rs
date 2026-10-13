@@ -24885,6 +24885,28 @@ mod tests {
     }
 
     #[test]
+    fn the_opencode_plugin_refuses_a_bash_call_the_gate_did_not_answer() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let h = all.harness.iter().find(|h| h.name == "opencode").unwrap();
+        let text = super::plugin_text(h, Path::new("/opt/seat/bin/ljos")).unwrap();
+        let before = &text[text.find("\"tool.execute.before\"").unwrap()..];
+        let refuse = before
+            .find("if (!a.ok) throw")
+            .expect("a failed hook throws");
+        let verdict = before.find("permissionDecision").unwrap();
+        assert!(
+            refuse < verdict,
+            "the refusal comes before the verdict is read"
+        );
+        assert!(text.contains("code !== 0"), "a non-zero exit is a failure");
+        assert!(
+            before.contains("cwd: output.args.workdir ?? directory"),
+            "the payload names the directory"
+        );
+        assert!(!text.contains("lets the work go on"));
+    }
+
+    #[test]
     fn a_plugin_runner_gets_its_bundled_plugin_with_ljos_filled() {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         for name in ["opencode", "omp"] {
