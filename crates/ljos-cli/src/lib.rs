@@ -1950,6 +1950,7 @@ pub fn whoami() -> Seat {
         .get()
         .cloned()
         .or_else(|| record.clone())
+        .or_else(seat_from_runner_env)
         .or_else(seat_from_tree);
     let agent = named_var("VISSUE_AGENT");
     let seat_name = named
@@ -2030,6 +2031,25 @@ pub fn whoami() -> Seat {
     }
 }
 
+/// Runners whose shells cannot see the runner's process, named by a
+/// variable each stamps into every shell. Codex runs its commands in a
+/// sandbox with its own process namespace, so the tree above the shell
+/// ends at the sandbox and the seat fell back to the login user.
+const RUNNER_ENV: &[(&str, &str)] = &[("CODEX_THREAD_ID", "codex"), ("CODEX_SESSION_ID", "codex")];
+
+/// The seat a runner's own variable names ([`RUNNER_ENV`]), tagged with
+/// the conversation id it carries.
+fn seat_from_runner_env() -> Option<Seat> {
+    RUNNER_ENV.iter().find_map(|(key, name)| {
+        let id = named_var(key).filter(|v| v.len() >= 8)?;
+        Some(Seat {
+            seat: (*name).to_string(),
+            holder: holder_for_session(name, &id),
+            source: format!("{key}, the runner's own variable"),
+        })
+    })
+}
+
 /// The person at the terminal, when no program is the seat.
 fn login_user() -> String {
     std::env::var("USER")
@@ -2055,7 +2075,16 @@ pub fn ballot_seat(verb: &str) -> Result<String> {
         || ANNOUNCED.get().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
-        || seat_from_tree_records().is_some();
+        || seat_from_tree_records().is_some()
+        || seat_from_runner_env().is_some();
+    if !named && who.seat == login_user() && under_a_runner() {
+        bail!(
+            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
+             so this ballot would count for {}, the login user. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        );
+    }
     if !named && program_above().is_some_and(|p| p.seat == who.seat) {
         bail!(
             "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
@@ -28236,6 +28265,47 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         let r = redirect_seat_verb(Some(deny), "vissue claim demo-6c3z").unwrap();
         assert!(r.reason.ends_with("Run `ljos sitting demo-6c3z` instead."));
+    }
+
+    #[test]
+    fn a_codex_shell_sits_as_codex_and_a_nameless_runner_shell_cannot_vote() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "CODEX_THREAD_ID",
+            "XDG_RUNTIME_DIR",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let rt = tempfile::tempdir().unwrap();
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+            std::env::set_var("CODEX_THREAD_ID", "019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d");
+        }
+        let who = whoami();
+        assert_eq!(who.seat, "codex", "{who:?}");
+        assert!(who.holder.starts_with("codex@"), "{who:?}");
+        assert_eq!(ballot_seat("vote").unwrap(), "codex");
+        unsafe {
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::set_var("ACME_SESSION_ID", "a-runner-nobody-names-0001");
+        }
+        if whoami().seat == login_user() {
+            let err = ballot_seat("vote").unwrap_err().to_string();
+            assert!(err.contains("nothing names its seat"), "{err}");
+        }
+        unsafe {
+            std::env::remove_var("ACME_SESSION_ID");
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]
