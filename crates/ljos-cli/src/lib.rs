@@ -1855,6 +1855,34 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
+    // A holder a person named wins outright.
+    if let Some(hold) = named_var("LJOS_HOLD") {
+        return Seat {
+            seat: seat_name,
+            holder: hold,
+            source: "LJOS_HOLD".into(),
+        };
+    }
+    // A seat a person named builds the holder: SEAT@TAG of the
+    // conversation, never a bare conversation id a record or a runner's
+    // `*_CONVERSATION_ID` left behind.
+    if let Some((name, key)) = &named {
+        let own = format!("{name}@");
+        if let Some(record) = record.as_ref().filter(|r| r.holder.starts_with(&own)) {
+            return Seat {
+                seat: seat_name,
+                holder: record.holder.clone(),
+                source: record.source.clone(),
+            };
+        }
+        if let Some((holder, keys)) = session_holder(name) {
+            return Seat {
+                holder,
+                seat: seat_name,
+                source: format!("{key}; session {keys}"),
+            };
+        }
+    }
     // The server's record first: it carries the holder the server took,
     // whatever else this shell's environment adds.
     if let Some(record) = record {
@@ -27938,6 +27966,52 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         let r = redirect_seat_verb(Some(deny), "vissue claim demo-6c3z").unwrap();
         assert!(r.reason.ends_with("Run `ljos sitting demo-6c3z` instead."));
+    }
+
+    #[test]
+    fn a_named_seat_builds_the_holder_over_a_conversation_id() {
+        let _env = env_guard();
+        let saved: Vec<(&str, Option<String>)> = [
+            "LJOS_SEAT",
+            "LJOS_HOLD",
+            "VISSUE_AGENT",
+            "ACME_CONVERSATION_ID",
+        ]
+        .into_iter()
+        .map(|k| (k, std::env::var(k).ok()))
+        .collect();
+        unsafe { std::env::remove_var("VISSUE_AGENT") };
+        unsafe { std::env::set_var("LJOS_SEAT", "inky") };
+        unsafe {
+            std::env::set_var(
+                "ACME_CONVERSATION_ID",
+                "0f9e8d7c-6b5a-4321-9876-abcdefabcdef",
+            )
+        };
+        let rt = tempfile::tempdir().unwrap();
+        let rt_was = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", rt.path()) };
+        // An MCP call named the thread first and left its id whole as the
+        // holder.
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        let _ = seat_for_thread("0f9e8d7c-6b5a-4321-9876-abcdefabcdef");
+        unsafe { std::env::set_var("LJOS_SEAT", "inky") };
+        let who = whoami();
+        assert_eq!(who.seat, "inky");
+        assert!(who.holder.starts_with("inky@"), "{who:?}");
+        assert!(!who.holder.contains("0f9e8d7c"), "{who:?}");
+        unsafe { std::env::set_var("LJOS_HOLD", "inky@release") };
+        assert_eq!(whoami().holder, "inky@release");
+        match rt_was {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+        for (k, v) in saved {
+            match v {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
     }
 
     #[test]
