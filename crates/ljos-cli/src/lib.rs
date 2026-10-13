@@ -3683,15 +3683,25 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
                 });
             ("PreToolUse", cue)
         }
-        "PreInvocation" if opens_turn => {
+        "PreInvocation" => {
+            // agy numbers invocations over the whole conversation, so only
+            // the first turn opens at 0 or 1. A later turn opens where the
+            // transcript's last user text is one this conversation has not
+            // seen. The path may start with `~/`.
             let prompt = v["transcriptPath"]
                 .as_str()
-                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|p| std::fs::read_to_string(expand(p)).ok())
                 .map(|t| last_user_text(&t))
                 .unwrap_or_default();
-            ("UserPromptSubmit", prompt)
+            let fresh = session
+                .as_deref()
+                .is_some_and(|s| !prompt.is_empty() && turn_is_new(&runtime_dir(), s, &prompt));
+            if opens_turn || fresh {
+                ("UserPromptSubmit", prompt)
+            } else {
+                ("PostToolUse", String::new())
+            }
         }
-        "PreInvocation" => ("PostToolUse", String::new()),
         "Stop" => ("Stop", String::new()),
         _ => ("TurnEnd", String::new()),
     };
@@ -3701,6 +3711,19 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         session,
         shape: HookShape::Steps,
     }
+}
+
+/// Whether `prompt` is a user turn conversation `session` has not raised
+/// yet: the last one seen is kept under `dir`, and a new one replaces it.
+/// The same words asked twice in a row read as one turn.
+fn turn_is_new(dir: &Path, session: &str, prompt: &str) -> bool {
+    let path = dir.join(format!("agy-turn-{}", session_tag(session)));
+    let seen = std::fs::read_to_string(&path).ok();
+    if seen.as_deref() == Some(prompt) {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, prompt));
+    true
 }
 
 /// [`hook_call`] with the event the runner's hooks file named, for a
@@ -28421,6 +28444,58 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(held["decision"], "continue");
         let asks: Value = serde_json::from_str(&block_output(HookShape::Asks, "why")).unwrap();
         assert_eq!(asks["decision"], "block");
+    }
+
+    #[test]
+    fn an_agy_turn_after_the_first_raises_its_prompt() {
+        let _env = env_guard();
+        let keys = ["HOME", "XDG_RUNTIME_DIR"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let home = tempfile::tempdir().unwrap();
+        let rt = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+        }
+        let t = home.path().join("t.jsonl");
+        let say = |text: &str| {
+            std::fs::write(
+                &t,
+                format!(r#"{{"type":"USER_INPUT","userInput":{{"items":[{{"text":"{text}"}}]}}}}"#),
+            )
+            .unwrap();
+        };
+        let call = |n: u32| {
+            hook_call_as(
+                &format!(
+                    r#"{{"invocationNum":{n},"conversationId":"c-agy-turns","transcriptPath":"~/t.jsonl"}}"#
+                ),
+                Some("PreInvocation"),
+            )
+        };
+        say("first ask");
+        let first = call(1);
+        assert_eq!(
+            (first.event.as_str(), first.cue.as_str()),
+            ("UserPromptSubmit", "first ask")
+        );
+        assert_eq!(call(2).event, "PostToolUse", "the same turn, after a tool");
+        say("second ask");
+        let second = call(7);
+        assert_eq!(
+            (second.event.as_str(), second.cue.as_str()),
+            ("UserPromptSubmit", "second ask"),
+            "a later turn opens at a later invocation, from a ~/ path"
+        );
+        assert_eq!(call(8).event, "PostToolUse");
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]
