@@ -19294,14 +19294,30 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
     use std::io::Read as _;
     let refused = |why: &str| format!("deny\tljos-policyd {why}, so the line is refused");
-    let child = std::process::Command::new(bin)
-        .arg("check")
-        .arg("--")
-        .args(argv)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    // A binary just written, by an install or a test, can be busy for a
+    // moment: another thread's fork still holds the write descriptor until
+    // its exec, and the kernel answers ETXTBSY. That is not a guard that
+    // failed, so the spawn is tried again for a few milliseconds.
+    let spawn = || {
+        std::process::Command::new(bin)
+            .arg("check")
+            .arg("--")
+            .args(argv)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+    let mut child = spawn();
+    for _ in 0..20 {
+        match &child {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                child = spawn();
+            }
+            _ => break,
+        }
+    }
     let Ok(mut child) = child else {
         return refused("did not start");
     };
