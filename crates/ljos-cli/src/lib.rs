@@ -298,7 +298,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
 /// `onboard` fills from the shipped shape, is left to `onboard` or
 /// `ljos agents`.
 pub fn refresh_agents() {
-    let Ok(all) = harnesses_from(&harnesses_path()) else {
+    let Ok(all) = harnesses_with_shipped(&harnesses_path()) else {
         return;
     };
     let personas = personas_from_pack().unwrap_or_default();
@@ -457,7 +457,7 @@ fn agents_step(dir: &Path, personas: &[Persona], dry: bool) -> Step {
 /// The runners file is unreadable, no runner in it names an agents
 /// directory, or the pack does not answer.
 pub fn export_agents(harness: Option<&str>, dry: bool) -> Result<Vec<Step>> {
-    let mut all = harnesses_from(&harnesses_path())?;
+    let mut all = harnesses_with_shipped(&harnesses_path())?;
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     for h in shipped.harness {
         if !all.harness.iter().any(|a| a.name == h.name) && harness == Some(h.name.as_str()) {
@@ -930,6 +930,109 @@ pub fn harnesses_from(path: &Path) -> Result<Harnesses> {
     }
 }
 
+/// The shipped shapes, as TOML tables, keyed by runner name. The
+/// placeholder `runner-with-*` shapes are examples, not runners.
+fn shipped_tables() -> Vec<toml::Table> {
+    let doc: toml::Table = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
+    doc.get("harness")
+        .and_then(toml::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(toml::Value::as_table)
+                .filter(|t| {
+                    t.get("name")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|n| !n.starts_with("runner-with-"))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One runner's table with the shipped shape under it, field by field:
+/// a key the file sets wins, a key it leaves out comes from the shape.
+/// A shape added to ljos after the first onboard reaches the runner.
+#[must_use]
+pub fn merge_shipped(user: &toml::Table, shipped: &toml::Table) -> toml::Table {
+    let mut out = shipped.clone();
+    for (k, v) in user {
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
+/// The runners file with each runner it names merged over the shipped
+/// shape of that name ([`merge_shipped`]). An absent file is no runners.
+///
+/// # Errors
+///
+/// A file that is present and not this shape.
+pub fn harnesses_with_shipped(path: &Path) -> Result<Harnesses> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Harnesses::default()),
+        Err(e) => return Err(e).with_context(|| format!("{}", path.display())),
+    };
+    let mut doc: toml::Table =
+        toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+    let shipped = shipped_tables();
+    if let Some(toml::Value::Array(rows)) = doc.get_mut("harness") {
+        for row in rows.iter_mut() {
+            let toml::Value::Table(t) = row else { continue };
+            let name = t.get("name").and_then(toml::Value::as_str).unwrap_or("");
+            if let Some(s) = shipped
+                .iter()
+                .find(|s| s.get("name").and_then(toml::Value::as_str) == Some(name))
+            {
+                *t = merge_shipped(t, s);
+            }
+        }
+    }
+    toml::Value::Table(doc)
+        .try_into()
+        .with_context(|| format!("{}", path.display()))
+}
+
+/// Where the runners file parts from the shipped shapes: one line per
+/// key the file sets to something other than the shape, as
+/// `runner.key: yours X, shipped Y`. A copy an older onboard wrote shows
+/// here when the shape has moved on.
+#[must_use]
+pub fn shipped_differences(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = toml::from_str::<toml::Table>(&text) else {
+        return Vec::new();
+    };
+    let shipped = shipped_tables();
+    let mut out = Vec::new();
+    for t in doc
+        .get("harness")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+    {
+        let name = t.get("name").and_then(toml::Value::as_str).unwrap_or("");
+        let Some(s) = shipped
+            .iter()
+            .find(|s| s.get("name").and_then(toml::Value::as_str) == Some(name))
+        else {
+            continue;
+        };
+        for (k, v) in t {
+            if let Some(sv) = s.get(k) {
+                if sv != v {
+                    out.push(format!("{name}.{k}: yours {v}, shipped {sv}"));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Where `ljos-mcp` is, as the runner will start it.
 /// The `ljos-mcp` that goes with this `ljos`: the one installed beside it,
 /// else the one on PATH. A shell a runner or ssh opens may lack the
@@ -1384,7 +1487,7 @@ fn seat_for_client(client: &str) -> String {
 /// The harness a client name belongs to, by its `clients` list in the
 /// runners file.
 fn runner_for_client(file: &Path, slug: &str) -> Option<String> {
-    harnesses_from(file)
+    harnesses_with_shipped(file)
         .ok()?
         .harness
         .into_iter()
@@ -1655,7 +1758,7 @@ pub fn under_a_runner() -> bool {
     {
         return true;
     }
-    let mut runners: Vec<String> = harnesses_from(&harnesses_path())
+    let mut runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.harness.into_iter().map(|h| h.name).collect())
         .unwrap_or_default();
     runners.extend(["agy", "antigravity"].map(String::from));
@@ -2337,7 +2440,9 @@ pub fn detect_runners(
 pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
     let file = harnesses_path();
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
-    let mut shapes = harnesses_from(&file).map(|h| h.harness).unwrap_or_default();
+    let mut shapes = harnesses_with_shipped(&file)
+        .map(|h| h.harness)
+        .unwrap_or_default();
     shapes.extend(shipped.harness);
     let found = detect_runners(&shapes, &home()?, &|c| on_path(c));
     if found.is_empty() {
@@ -2606,7 +2711,7 @@ pub fn onboard_in(
     }
     if harness == "grok" {
         let mut steps = vec![write_grok_hooks(dry)?];
-        let declared = harnesses_from(file)
+        let declared = harnesses_with_shipped(file)
             .ok()
             .and_then(|all| all.harness.into_iter().find(|h| h.name == "grok"));
         if let Some(h) = &declared {
@@ -2636,7 +2741,7 @@ pub fn onboard_in(
         steps.extend([pack_step(dry), host_key_step(dry)]);
         return Ok(steps);
     }
-    let all = harnesses_from(file)?;
+    let all = harnesses_with_shipped(file)?;
     // A runner the seat ships a shape for is onboarded from that shape when
     // the file does not name it, and the shape is written into the file so
     // the doctor and persona sessions know the runner too: a first
@@ -2753,11 +2858,29 @@ fn adopt_shipped_shape(file: &Path, h: &Harness, dry: bool) -> Step {
             ok: true,
         };
     }
-    let table = toml::to_string(&Harnesses {
-        harness: vec![h.clone()],
-        tool: Vec::new(),
-    })
-    .unwrap_or_default();
+    // Only the name, and what differs from the shape: the rest is read
+    // from the shape on each run, so a later ljos's shape reaches it.
+    let full: toml::Table = toml::Value::try_from(h)
+        .ok()
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default();
+    let shape = shipped_tables()
+        .into_iter()
+        .find(|s| s.get("name").and_then(toml::Value::as_str) == Some(h.name.as_str()))
+        .unwrap_or_default();
+    let mut own = toml::Table::new();
+    own.insert("name".into(), toml::Value::String(h.name.clone()));
+    for (k, v) in &full {
+        if k != "name" && shape.get(k).is_some_and(|s| s != v) {
+            own.insert(k.clone(), v.clone());
+        }
+    }
+    let mut doc = toml::Table::new();
+    doc.insert(
+        "harness".into(),
+        toml::Value::Array(vec![toml::Value::Table(own)]),
+    );
+    let table = toml::to_string(&doc).unwrap_or_default();
     let mut text = std::fs::read_to_string(file).unwrap_or_default();
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -5234,7 +5357,7 @@ pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -
             .ok()
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| whoami().seat);
-        let template = harnesses_from(&harnesses_path())
+        let template = harnesses_with_shipped(&harnesses_path())
             .ok()
             .and_then(|all| all.harness.into_iter().find(|h| h.name == runner))
             .or_else(|| {
@@ -6997,7 +7120,7 @@ pub fn format_steps(steps: &[Step]) -> String {
 /// The runner rows for `doctor`, one pair per runner the file names.
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
-    let all = match harnesses_from(&path) {
+    let all = match harnesses_with_shipped(&path) {
         Ok(all) => all,
         Err(e) => {
             return vec![Habitat {
@@ -7019,6 +7142,19 @@ fn harness_rows() -> Vec<Habitat> {
     }
     let server = server_path().unwrap_or_else(|_| PathBuf::from("ljos-mcp"));
     let mut rows = Vec::new();
+    let differs = shipped_differences(&path);
+    if !differs.is_empty() {
+        rows.push(Habitat {
+            name: "runner settings",
+            state: format!(
+                "{} sets {} key(s) away from the shipped shapes; delete a key to take the shape's: {}",
+                path.display(),
+                differs.len(),
+                differs.join("; ")
+            ),
+            ok: true,
+        });
+    }
     for h in &all.harness {
         let skill = h
             .skills
@@ -14108,7 +14244,7 @@ pub fn doctor() -> Vec<Habitat> {
 /// Which tool would open a persona's pane: the first of the declared and
 /// shipped `[[tool]]` shapes that answers here, and the others that do.
 fn panes_row() -> Habitat {
-    let declared = harnesses_from(&harnesses_path())
+    let declared = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.tool)
         .unwrap_or_default();
     let (ok, state) = tools::doctor_state(&declared);
@@ -25489,7 +25625,11 @@ mod tests {
             "{env}"
         );
         let saved = std::fs::read_to_string(&file).unwrap();
-        assert!(saved.contains("shell = true"), "{saved}");
+        assert!(saved.contains("name = \"grokbot\""), "{saved}");
+        assert!(
+            super::harnesses_with_shipped(&file).unwrap().harness[0].shell,
+            "the shape's shell = true is read under the file's table"
+        );
         assert!(saved.contains(&skills.display().to_string()), "{saved}");
         assert!(!saved.contains("json_pointer"), "{saved}");
         let again = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
@@ -27955,10 +28095,42 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             false,
         );
         assert!(step.ok, "{step:?}");
-        let back = harnesses_from(&file).unwrap();
+        let back = harnesses_with_shipped(&file).unwrap();
         assert_eq!(back.harness.len(), 1);
         assert_eq!(back.harness[0].name, "claude");
         assert_eq!(back.harness[0].resume, ["claude", "--continue"]);
+        let raw = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !raw.contains("hook_events"),
+            "the shape stays the shape's: {raw}"
+        );
+    }
+
+    #[test]
+    fn a_runner_onboarded_before_a_shape_moved_gets_the_new_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harnesses.toml");
+        // An older onboard's copy: no hook_events, no fail-closed, and a
+        // skills directory the person moved.
+        std::fs::write(
+            &file,
+            "[[harness]]\nname = \"claude\"\nskills = \"~/elsewhere\"\nhooks = \"~/.claude/settings.json\"\n",
+        )
+        .unwrap();
+        let h = harnesses_with_shipped(&file).unwrap().harness.remove(0);
+        assert_eq!(
+            h.skills.as_deref(),
+            Some("~/elsewhere"),
+            "the person's key wins"
+        );
+        assert!(h.hook_events.iter().any(|e| e == "PreToolUse"), "{h:?}");
+        assert_eq!(h.hook_fail_closed, ["PreToolUse"]);
+        let differs = shipped_differences(&file);
+        assert_eq!(differs.len(), 1, "{differs:?}");
+        assert!(
+            differs[0].starts_with("claude.skills: yours"),
+            "{differs:?}"
+        );
     }
 
     #[test]
