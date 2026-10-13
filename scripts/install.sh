@@ -15,11 +15,23 @@
 #   --from-dir DIR  take the programs from DIR instead of downloading
 #                   (a local build, or an offline copy)
 #   --no-onboard    install only; onboard nothing
+#   --version VER   install ljos VER (such as 0.29.0) instead of the latest
+#   --pin REPO=VER  install REPO at VER (such as packset=0.14.0); repeat
+#                   for each repository to hold
+#   --attest        refuse a tarball whose GitHub build attestation does
+#                   not verify (needs the gh CLI, signed in)
 #   --help          this text
 #
 # The checksum guards against a broken or truncated download. It comes
 # from the same release page as the tarball, so it does not prove who
-# built the tarball.
+# built the tarball. With the gh CLI on PATH the script also checks each
+# tarball's build attestation, which says the release workflow of that
+# repository built it, and says when none verified (a release from before
+# attestations, or gh not signed in). --attest makes that stop the
+# install.
+#
+# A pinned version that has no release for this platform is built from
+# that version's crate, never from a newer one.
 set -eu
 
 BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
@@ -27,6 +39,8 @@ WITH_EMBED=0
 FROM_DIR=
 ONBOARD=1
 OWNER=leidarljos
+PINS=
+ATTEST=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -37,9 +51,32 @@ while [ $# -gt 0 ]; do
     --with-embed) WITH_EMBED=1; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
     --no-onboard) ONBOARD=0; shift ;;
+    --version) [ $# -ge 2 ] || die "--version needs a version"; PINS="$PINS ljos=$2"; shift 2 ;;
+    --version=*) PINS="$PINS ljos=${1#--version=}"; shift ;;
+    --pin) [ $# -ge 2 ] || die "--pin needs REPO=VER"; PINS="$PINS $2"; shift 2 ;;
+    --pin=*) PINS="$PINS ${1#--pin=}"; shift ;;
+    --attest) ATTEST=1; shift ;;
     --help|-h) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
+done
+
+# The version REPO is pinned to, or nothing for the latest release.
+pinned() {
+  for pin in $PINS; do
+    case $pin in "$1="*) printf '%s' "${pin#*=}"; return ;; esac
+  done
+}
+
+for pin in $PINS; do
+  ver=${pin#*=}
+  ver=${ver#v}
+  case $pin in
+    *=*) ;;
+    *) die "--pin takes REPO=VER, not $pin" ;;
+  esac
+  printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+    die "${pin%%=*}: $ver is not a version such as 0.29.0"
 done
 
 START=$(date +%s)
@@ -85,12 +122,34 @@ ljos-policyd ljos-policyd v ljos-policyd
 consensus ljos-consensus v ljos-consensus"
 
 source_build() {
-  crate=$1
+  crate=$1 ver=$2
   command -v cargo >/dev/null 2>&1 ||
     die "no release build of $crate for $TARGET, and no cargo to build it; install Rust from https://rustup.rs"
-  say "  building $crate from source (no release build for $TARGET)"
-  cargo install --locked --quiet --root "$TMP/cargo" "$crate" >&2
+  if [ -n "$ver" ]; then
+    say "  building $crate $ver from source (no release build for $TARGET)"
+    cargo install --locked --quiet --root "$TMP/cargo" --version "=$ver" "$crate" >&2
+  else
+    say "  building $crate from source (no release build for $TARGET)"
+    cargo install --locked --quiet --root "$TMP/cargo" "$crate" >&2
+  fi
   cp "$TMP"/cargo/bin/* "$BIN_DIR"/
+}
+
+# Check FILE's build attestation from REPO's release workflow with the gh
+# CLI. Prints what it found; with --attest, anything but a pass stops.
+attest() {
+  file=$1 repo=$2
+  if ! command -v gh >/dev/null 2>&1; then
+    [ "$ATTEST" = 0 ] || die "--attest needs the gh CLI (https://cli.github.com)"
+    printf 'no attestation check (gh not installed)'
+    return
+  fi
+  if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$TMP/attest.err"; then
+    printf 'attestation verified'
+    return
+  fi
+  [ "$ATTEST" = 0 ] || die "$(basename "$file"): no build attestation from $OWNER/$repo verified: $(head -n 1 "$TMP/attest.err")"
+  printf 'no attestation verified'
 }
 
 install_one() {
@@ -103,22 +162,29 @@ install_one() {
     say "  $repo: copied from $FROM_DIR"
     return
   fi
-  tag=$(latest_url "https://github.com/$OWNER/$repo/releases/latest")
-  tag=${tag##*/}
-  case $tag in v*) ;; *) die "could not read the latest $repo release" ;; esac
+  ver=$(pinned "$repo")
+  ver=${ver#v}
+  if [ -n "$ver" ]; then
+    tag=v$ver
+  else
+    tag=$(latest_url "https://github.com/$OWNER/$repo/releases/latest")
+    tag=${tag##*/}
+    case $tag in v*) ;; *) die "could not read the latest $repo release" ;; esac
+  fi
   case $style in
     v) asset="$repo-$tag-$TARGET.tar.gz" ;;
     dist) asset="$crate-$TARGET.tar.xz" ;;
   esac
   url="https://github.com/$OWNER/$repo/releases/download/$tag/$asset"
   if [ "$TARGET" = unknown ] || ! fetch "$url" "$TMP/$asset" 2>/dev/null; then
-    source_build "$crate"
+    source_build "$crate" "$ver"
     return
   fi
   fetch "$url.sha256" "$TMP/$asset.sha256" || die "$asset has no published checksum"
   want=$(sed 's/[ *].*//' "$TMP/$asset.sha256" | head -n 1)
   got=$(sha256 "$TMP/$asset")
   [ "$want" = "$got" ] || die "$asset: checksum mismatch (published $want, downloaded $got); nothing from it was installed"
+  attested=$(attest "$TMP/$asset" "$repo")
   mkdir -p "$TMP/x-$repo"
   case $asset in
     *.tar.xz) tar -xJf "$TMP/$asset" -C "$TMP/x-$repo" ;;
@@ -130,8 +196,13 @@ install_one() {
     cp "$found" "$BIN_DIR/$p"
     chmod 755 "$BIN_DIR/$p"
   done
-  say "  $repo $tag: checksum ok"
+  say "  $repo $tag: checksum ok, $attested"
 }
+
+for pin in $PINS; do
+  printf '%s\n' "$COMPONENTS" | grep -q "^${pin%%=*} " ||
+    die "--pin ${pin%%=*}: not one of the repositories this installs"
+done
 
 say "Installing the ljos seat into $BIN_DIR ($TARGET)"
 printf '%s\n' "$COMPONENTS" | while read -r repo crate style progs; do
