@@ -300,7 +300,10 @@ pub struct FileArgs {
     pub top: bool,
     /// The project; absent, the parent's.
     pub project: Option<String>,
-    /// The type tag: bug, task, feature, decision.
+    /// The type tag: bug, task, feature, decision. Named `issue_kind` in
+    /// the schema, since OpenHands builds a class per tool and a field
+    /// named `kind` collides with its own; `kind` is still read.
+    #[serde(rename = "issue_kind", alias = "kind")]
     pub kind: Option<String>,
     /// Comma-separated tags.
     pub tags: Option<String>,

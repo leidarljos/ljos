@@ -72,7 +72,7 @@ integration; each runner registers the events its table names.
 skill for one runner. =NAME= takes =claude=, =codex=, =grok=, =cursor=,
 =antigravity=, =opencode=, =omp=, =hermes=, =copilot=, =gemini=,
 =windsurf=, =factory=, =kiro=, =cline=, =qwen=, =crush=, =zed=, =vscode=,
-=claude-desktop=, =amazonq=, =auggie=, =amp=, =goose=, =openhands=,
+=claude-desktop=, =amazonq=, =aider= (conventions file, advisory), =auggie=, =amp=, =goose=, =openhands=,
 =continue=, =roo=, =kilo=, =grokbot= or =shell=. The contract is the
 same everywhere and the envelope differs:
 
@@ -98,7 +98,7 @@ same everywhere and the envelope differs:
 | Amp | skill | =Bash= delegated first in =amp.permissions=, exit 2 | Amp's prompt, from exit 1 | =~/.config/amp/settings.json= runs =~/.config/amp/ljos-guard-amp.sh= |
 | goose | skill in the plugin | =PreToolUse= on =shell=, exit 2, fails closed | none | user plugin =~/.agents/plugins/ljos=; server in =~/.config/goose/config.yaml= |
 | OpenHands | skill | advisory: hooks are read per repository only | none | =~/.openhands/mcp.json= |
-| Continue | rules file | advisory: no tool hook | runner prompt | =~/.continue/mcpServers/ljos.json= |
+| Continue | rules file; =SessionStart= hook | advisory: hooks in =~/.continue/settings.json= are written, cn 1.5.47 does not fire them | runner prompt | =~/.continue/mcpServers/ljos.json= |
 | Roo Code, Kilo Code | skill | advisory: no tool hook | runner prompt | the extension's =mcp_settings.json= |
 | Grok Bot | the skill, then =ljos hook --prompt= | =ljos policy --fail-on-deny= exits 1 | the person runs the command | no MCP server and no hook file; source the env file =onboard= writes |
 

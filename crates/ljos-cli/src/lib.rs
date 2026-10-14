@@ -923,11 +923,16 @@ skills = "~/.openhands/skills"
 [[harness]]
 name = "continue"
 # Continue (the IDE extension and the cn CLI) reads Claude-shaped JSON
-# server files from its mcpServers directory. No tool hook: advisory.
+# server files from its mcpServers directory. cn's source reads Claude
+# Code's hooks from ~/.continue/settings.json, but cn 1.5.47 ships without
+# firing them, so the guard is advisory until a release does.
 config_json = "~/.continue/mcpServers/ljos.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.continue/rules"
+hooks = "~/.continue/settings.json"
+hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse"]
+hook_fail_closed = ["PreToolUse"]
 
 [[harness]]
 name = "roo"
@@ -3088,6 +3093,9 @@ pub fn onboard_in(
             ok: true,
         }]);
     }
+    if harness == "aider" {
+        return Ok(aider_steps(&home()?, dry));
+    }
     if harness == "grok" {
         let mut steps = vec![write_grok_hooks(dry)?];
         let declared = harnesses_with_shipped(file)
@@ -3232,6 +3240,123 @@ pub fn onboard_in(
     }
     steps.extend(dependencies);
     Ok(steps)
+}
+
+/// Aider has no MCP client and no tool hook. Onboard writes the skill as
+/// a conventions file and names it in `~/.aider.conf.yml`'s `read:` list,
+/// so every session loads it. The guard is advisory there: run
+/// `ljos policy --fail-on-deny -- CMD` before a command, as the skill says.
+#[must_use]
+pub fn aider_steps(home: &Path, dry: bool) -> Vec<Step> {
+    let conv = home.join(".aider/ljos-conventions.md");
+    let conf = home.join(".aider.conf.yml");
+    let mut steps = Vec::new();
+    let text = skill_text();
+    let current = std::fs::read_to_string(&conv).is_ok_and(|t| t == text);
+    steps.push(if current {
+        Step {
+            what: "conventions".into(),
+            detail: format!("{} is current", conv.display()),
+            ok: true,
+        }
+    } else if dry {
+        Step {
+            what: "conventions".into(),
+            detail: format!("would write {}", conv.display()),
+            ok: true,
+        }
+    } else {
+        match std::fs::create_dir_all(conv.parent().unwrap_or(home))
+            .and_then(|()| std::fs::write(&conv, &text))
+        {
+            Ok(()) => Step {
+                what: "conventions".into(),
+                detail: format!("wrote {}", conv.display()),
+                ok: true,
+            },
+            Err(e) => Step {
+                what: "conventions".into(),
+                detail: format!("{}: {e}", conv.display()),
+                ok: false,
+            },
+        }
+    });
+    let have = std::fs::read_to_string(&conf).unwrap_or_default();
+    let entry = conv.display().to_string();
+    steps.push(match aider_read_entry(&have, &entry) {
+        None => Step {
+            what: "aider config".into(),
+            detail: format!("{} reads {entry}", conf.display()),
+            ok: true,
+        },
+        Some(Err(why)) => Step {
+            what: "aider config".into(),
+            detail: format!("{}: {why}; add {entry} to its read: list", conf.display()),
+            ok: false,
+        },
+        Some(Ok(_)) if dry => Step {
+            what: "aider config".into(),
+            detail: format!("would add {entry} to read: in {}", conf.display()),
+            ok: true,
+        },
+        Some(Ok(text)) => match std::fs::write(&conf, text) {
+            Ok(()) => Step {
+                what: "aider config".into(),
+                detail: format!("added {entry} to read: in {}", conf.display()),
+                ok: true,
+            },
+            Err(e) => Step {
+                what: "aider config".into(),
+                detail: format!("{}: {e}", conf.display()),
+                ok: false,
+            },
+        },
+    });
+    steps.push(Step {
+        what: "guard".into(),
+        detail: "advisory: aider has no tool hook, so the conventions ask it to run \
+                 `ljos policy --fail-on-deny -- CMD` before a command"
+            .into(),
+        ok: true,
+    });
+    steps.extend([pack_step(dry), host_key_step(dry)]);
+    steps
+}
+
+/// `text` (an `.aider.conf.yml`) with `entry` in its `read:` list: `None`
+/// when it is there already, an error for a `read:` this cannot extend.
+#[must_use]
+pub fn aider_read_entry(text: &str, entry: &str) -> Option<Result<String, String>> {
+    if text.lines().any(|l| {
+        l.trim().trim_start_matches("- ").trim_matches(['"', '\'']) == entry
+            || l.trim() == format!("read: {entry}")
+    }) {
+        return None;
+    }
+    let item = format!("  - {entry}\n");
+    let mut out = String::new();
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        if !done && line.trim_end() == "read:" {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            out.push_str(&item);
+            done = true;
+            continue;
+        }
+        if !done && line.starts_with("read:") {
+            return Some(Err("read: is not a block list".into()));
+        }
+        out.push_str(line);
+    }
+    if !done {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("read:\n");
+        out.push_str(&item);
+    }
+    Some(Ok(out))
 }
 
 /// Append a shipped runner shape to the runners file, as a table of its
@@ -34276,5 +34401,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 assert!(super::runner_hooks::is_runner(f), "{name}");
             }
         }
+    }
+
+    #[test]
+    fn aider_reads_the_conventions_once() {
+        let e = "/h/.aider/ljos-conventions.md";
+        let fresh = super::aider_read_entry("model: x\n", e).unwrap().unwrap();
+        assert_eq!(fresh, format!("model: x\nread:\n  - {e}\n"));
+        assert!(super::aider_read_entry(&fresh, e).is_none());
+        let list = super::aider_read_entry("read:\n  - CONVENTIONS.md\n", e)
+            .unwrap()
+            .unwrap();
+        assert_eq!(list, format!("read:\n  - {e}\n  - CONVENTIONS.md\n"));
+        assert!(super::aider_read_entry("read: CONVENTIONS.md\n", e)
+            .unwrap()
+            .is_err());
     }
 }
