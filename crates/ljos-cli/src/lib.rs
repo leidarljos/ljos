@@ -27853,7 +27853,10 @@ mod tests {
         let seat_in_a_new_shell = |pre: &str| {
             let out = std::process::Command::new("sh")
                 .arg("-c")
-                .arg(format!("{pre} . '{}' && printf %s \"$LJOS_SEAT\"", env.display()))
+                .arg(format!(
+                    "{pre} . '{}' && printf %s \"$LJOS_SEAT\"",
+                    env.display()
+                ))
                 .env_clear()
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
@@ -28061,7 +28064,10 @@ mod tests {
         assert!(skill.starts_with("---\nname: ljos\n"));
         assert!(skill.contains("## Before the work"));
         let env = std::fs::read_to_string(dir.join("grokbot.env")).unwrap();
-        assert!(env.contains("export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n"), "{env}");
+        assert!(
+            env.contains("export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n"),
+            "{env}"
+        );
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
