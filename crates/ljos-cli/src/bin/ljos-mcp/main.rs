@@ -20,6 +20,9 @@ async fn main() -> anyhow::Result<()> {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // Dropped when the process returns, including after the client closes.
+    // A name, not `let _`, so the finish runs at the end of main.
+    let _book_finish = ljos_cli::bookkeep::ShutdownFinish;
     let running = server::LjosServer::from_env().serve(stdio()).await?;
     let ended = running.waiting().await;
     ljos_cli::retire_seat(ljos_cli::runner_pid());

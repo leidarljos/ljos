@@ -1,11 +1,13 @@
 // ljos seat hook for opencode, at ~/.config/opencode/plugins/ljos.ts.
 // Written by `ljos onboard --harness opencode`; {ljos} is filled in there.
 //
-// The seat's memories on each user prompt, argv law on each bash call, and
-// the session id in every shell the agent opens. Each payload names the
-// working directory. A bash call waits on the gate: a missing binary, a
-// timeout, a non-zero exit or bad JSON refuses it rather than letting the
-// command run. The prompt and session hooks have no opinion when it fails.
+// The seat's memories on each user prompt, argv law on each bash call, the
+// book on each edit and each git commit, and the session id in every shell
+// the agent opens. Each payload names the working directory. A bash call
+// waits on the gate: a missing binary, a timeout, a non-zero exit or bad
+// JSON refuses it rather than letting the command run. An edit is recorded
+// and is not refused when the hook cannot answer. The prompt and session
+// hooks have no opinion when it fails.
 import type { Plugin } from "@opencode-ai/plugin"
 
 const LJOS = process.env.LJOS_BIN ?? "{ljos}"
@@ -19,6 +21,29 @@ const held = new Map<string, string>()
 const started = new Set<string>()
 
 type Answer = { ok: true; out: any | undefined } | { ok: false; why: string }
+
+// Edit tools the seat files a claim for, under the name ljos hook expects.
+function seatTool(name: string): { tool: string; bash: boolean } | undefined {
+  const n = name.toLowerCase().replace(/-/g, "_")
+  if (n === "bash" || n === "shell") return { tool: "Bash", bash: true }
+  const edits: Record<string, string> = {
+    edit: "Edit",
+    write: "Write",
+    multiedit: "MultiEdit",
+    multi_edit: "MultiEdit",
+    apply_patch: "apply_patch",
+    applypatch: "apply_patch",
+    strreplace: "Edit",
+    str_replace: "Edit",
+    write_to_file: "Write",
+    replace_file_content: "Edit",
+    edit_file: "Edit",
+    notebookedit: "NotebookEdit",
+    notebook_edit: "NotebookEdit",
+  }
+  const tool = edits[n]
+  return tool ? { tool, bash: false } : undefined
+}
 
 async function hook(payload: Record<string, unknown>): Promise<Answer> {
   let proc
@@ -87,15 +112,20 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
   // A throw here reaches the model as the tool's error and the command
   // does not run. opencode cannot raise its approval prompt from a plugin,
   // so an ask stops the command and tells the agent to ask the person.
+  // An edit is told to the seat and still runs when the hook cannot answer.
   "tool.execute.before": async (input, output) => {
-    if (input.tool !== "bash" || typeof output.args?.command !== "string") return
+    const seat = seatTool(input.tool)
+    if (!seat) return
+    const command = output.args?.command
+    if (seat.bash && typeof command !== "string") return
     const a = await hook({
       session_id: input.sessionID,
       hook_event_name: "PreToolUse",
-      tool_name: "Bash",
-      tool_input: { command: output.args.command },
+      tool_name: seat.tool,
+      tool_input: seat.bash ? { command } : (output.args ?? {}),
       cwd: output.args.workdir ?? directory,
     })
+    if (!seat.bash) return
     if (!a.ok) throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
     const out = a.out
     const verdict = out?.permissionDecision
@@ -107,7 +137,26 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
       )
   },
 
+  "tool.execute.after": async (input, output) => {
+    const seat = seatTool(input.tool)
+    if (!seat) return
+    const command = output.args?.command
+    if (seat.bash && typeof command !== "string") return
+    await hook({
+      session_id: input.sessionID,
+      hook_event_name: "PostToolUse",
+      tool_name: seat.tool,
+      tool_input: seat.bash ? { command } : (output.args ?? {}),
+      cwd: output.args.workdir ?? directory,
+    })
+  },
+
   event: async ({ event }) => {
+    if (event.type === "session.idle") {
+      const id = (event as any).properties?.sessionID ?? (event as any).properties?.info?.id
+      await hook({ session_id: id, hook_event_name: "Stop", cwd: directory })
+      return
+    }
     if (event.type === "session.deleted") {
       const id = (event as any).properties?.info?.id
       held.delete(id)

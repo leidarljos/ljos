@@ -22,6 +22,18 @@ as `ljos VERB` in the shell.
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
 
+## The seat keeps the book
+
+A harness hook files the claim, the deed and the finish. You do not have to call them.
+At session start and on each prompt the hook injects recall. The first edit
+(Edit, Write, MultiEdit, apply_patch) files a vissue titled from the prompt
+and claims it, when this session holds nothing on this repository. A git commit
+the tool hook sees is cited as a deed. Stop and the end of the session finish
+the claim, or extract what the session learned and release it. The same loop runs
+inside ljos-mcp for a client with no hooks: the first tool that writes claims,
+and the server finishes when it shuts down. Call claim, deed or finish
+yourself only to name an issue, an accession or a lesson.
+
 ## Before the work: a sitting
 
 One verb runs the whole opening in order and stops at the first store that
@@ -409,7 +421,7 @@ under equal weights is a count; under calibrated rows it is not.
 - `not a deed accession`: `--why` on `forget` and `trust` takes accessions
   from `deedar`, never free text.
 - `the pack writer did not answer`: the pack is down, not empty.
-  `packset ensure`.
+  Recall and a new session start the writer, as `ljos doctor` does.
 - `no tracker ... relative root` or `root is not a directory` in `doctor`:
   the tracker root is private to your working directory (often a
   `VISSUE_ROOT` that kept a literal `~`). Anything filed there is invisible

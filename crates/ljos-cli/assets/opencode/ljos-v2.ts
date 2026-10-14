@@ -3,8 +3,9 @@
 //
 // opencode V2 does not run a V1 plugin, which returns hooks by string key.
 // This one registers the same hooks on their V2 domains in setup(ctx):
-// the seat's memories on each prompt, argv law on each bash call, and the
-// session id in every shell the agent opens.
+// the seat's memories on each prompt, argv law on each bash call, the book
+// on each edit and each git commit, and the session id in every shell the
+// agent opens. The first prompt of a session also carries the start line.
 //
 // A gate that cannot answer refuses: a missing binary, a timeout, a
 // non-zero exit or bad JSON stops the bash call rather than letting it run.
@@ -14,6 +15,28 @@ const LJOS = process.env.LJOS_BIN ?? "{ljos}"
 const TIMEOUT_MS = 20_000
 
 type Answer = { ok: true; out: any | undefined } | { ok: false; why: string }
+
+function seatTool(name: string): { tool: string; bash: boolean } | undefined {
+  const n = (name ?? "").toLowerCase().replace(/-/g, "_")
+  if (n === "bash" || n === "shell") return { tool: "Bash", bash: true }
+  const edits: Record<string, string> = {
+    edit: "Edit",
+    write: "Write",
+    multiedit: "MultiEdit",
+    multi_edit: "MultiEdit",
+    apply_patch: "apply_patch",
+    applypatch: "apply_patch",
+    strreplace: "Edit",
+    str_replace: "Edit",
+    write_to_file: "Write",
+    replace_file_content: "Edit",
+    edit_file: "Edit",
+    notebookedit: "NotebookEdit",
+    notebook_edit: "NotebookEdit",
+  }
+  const tool = edits[n]
+  return tool ? { tool, bash: false } : undefined
+}
 
 async function hook(payload: Record<string, unknown>): Promise<Answer> {
   let proc
@@ -58,6 +81,8 @@ export default Plugin.define({
     // The context the last prompt raised, per session; the context hook
     // hands it to every model request of that turn.
     const held = new Map<string, string>()
+    // Sessions that have heard the start line. The first prompt carries it.
+    const started = new Set<string>()
 
     await ctx.shell.hook("create.before", (event: any) => {
       const id = event.sessionID ?? event.session?.id
@@ -69,7 +94,13 @@ export default Plugin.define({
       const prompt = text(event.parts ?? event.message?.parts)
       if (!id || !prompt) return
       const a = await hook({ session_id: id, hook_event_name: "UserPromptSubmit", prompt, cwd })
-      const add = a.ok ? a.out?.additionalContext : undefined
+      let add: string | undefined = a.ok ? a.out?.additionalContext : undefined
+      if (!started.has(id)) {
+        started.add(id)
+        const s = await hook({ session_id: id, hook_event_name: "SessionStart", cwd })
+        const line = s.ok ? s.out?.additionalContext : undefined
+        if (line) add = add ? `${line}\n${add}` : line
+      }
       if (add) held.set(id, add)
       else held.delete(id)
     })
@@ -83,15 +114,18 @@ export default Plugin.define({
     // A throw here reaches the model as the tool's error and the command
     // does not run. An ask stops the command and tells the agent to ask.
     await ctx.tool.hook("execute.before", async (event: any) => {
+      const seat = seatTool(event.tool)
+      if (!seat) return
       const command = (event.input as { command?: unknown })?.command
-      if (event.tool !== "bash" || typeof command !== "string") return
+      if (seat.bash && typeof command !== "string") return
       const a = await hook({
         session_id: event.sessionID ?? event.session?.id,
         hook_event_name: "PreToolUse",
-        tool_name: "Bash",
-        tool_input: { command },
+        tool_name: seat.tool,
+        tool_input: seat.bash ? { command } : (event.input ?? {}),
         cwd: (event.input as { workdir?: string })?.workdir ?? cwd,
       })
+      if (!seat.bash) return
       if (!a.ok) throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
       const verdict = a.out?.permissionDecision
       if (verdict === "deny") throw new Error(`ljos: denied: ${a.out.permissionDecisionReason}`)
@@ -105,9 +139,15 @@ export default Plugin.define({
     const stop = new AbortController()
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: stop.signal }) as any) {
+        if (event?.type === "session.idle") {
+          const id = event.properties?.sessionID ?? event.properties?.info?.id
+          await hook({ session_id: id, hook_event_name: "Stop", cwd })
+          continue
+        }
         if (event?.type !== "session.deleted") continue
         const id = event.properties?.info?.id
         held.delete(id)
+        started.delete(id)
         await hook({ session_id: id, hook_event_name: "SessionEnd", cwd })
       }
     })()

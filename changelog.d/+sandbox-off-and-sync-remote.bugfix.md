@@ -1,0 +1,1 @@
+The command guard and the pack daemon stay quiet when HOME or the working directory is a temporary sandbox, and when LJOS_OFF=1. A sync with no remote says none is configured and how to add one, instead of pushing to nothing.

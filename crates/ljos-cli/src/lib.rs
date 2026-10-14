@@ -15,6 +15,7 @@ pub mod admit;
 pub mod approval;
 pub mod ask_pack;
 pub mod ballot_sig;
+pub mod bookkeep;
 pub mod capture;
 pub mod command_prefs;
 pub mod extract;
@@ -247,14 +248,24 @@ pub fn statusline(input: &str) -> String {
 /// The line a new session hears first: that ljos is on, how many
 /// memories this workspace holds and how many are due, whether the
 /// command guard runs, and up to three of the workspace's preferences.
-/// A pack that does not answer within 400 ms is named with its fix.
+/// A pack that does not answer is started, as [`doctor`] starts it.
+/// The line says the store is down only when that start did not bring
+/// it up, and it does not hand the agent a command to run.
 #[must_use]
 pub fn session_start_line() -> String {
-    let atoms = with_pack_timeout(400, || -> Result<Vec<Value>> {
+    let mut atoms = session_atoms(400);
+    if atoms.is_err() {
+        wake_for_recall();
+        atoms = session_atoms(2_000);
+    }
+    session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"))
+}
+
+fn session_atoms(ms: u64) -> Result<Vec<Value>> {
+    with_pack_timeout(ms, || {
         let client = pack()?;
         atoms_lean(&client, &client.workspace())
-    });
-    session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"))
+    })
 }
 
 /// [`session_start_line`] from what it read: the workspace's atoms, or
@@ -268,9 +279,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
         "command guard off (`cargo binstall ljos-policyd` turns it on)"
     };
     let Some(atoms) = atoms else {
-        return format!(
-            "ljos is on, but the memory store does not answer (`packset ensure` starts it); {guard}."
-        );
+        return format!("ljos is on, but the memory store does not answer; {guard}.");
     };
     let kept: Vec<&Value> = atoms.iter().filter(|a| reviewable(a)).collect();
     if kept.is_empty() {
@@ -676,7 +685,7 @@ register = ["claude", "mcp", "add", "-s", "user", "ljos", "--", "{server}"]
 registered = ["claude", "mcp", "get", "ljos"]
 skills = "~/.claude/skills"
 hooks = "~/.claude/settings.json"
-hook_events = ["UserPromptSubmit", "SessionEnd", "PostToolUse", "PreToolUse", "SubagentStop", "PreCompact", "SessionStart"]
+hook_events = ["UserPromptSubmit", "SessionEnd", "Stop", "PostToolUse", "PreToolUse", "SubagentStop", "PreCompact", "SessionStart"]
 # A tool call waits on the gate: a hook that fails or times out blocks it.
 hook_fail_closed = ["PreToolUse"]
 clients = ["claude-code"]
@@ -691,7 +700,7 @@ marker = "[mcp_servers.ljos]"
 snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
 skills = "~/.codex/skills"
 hooks = "~/.codex/hooks.json"
-hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse"]
+hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]
 # Codex runs a hook only once it is trusted in /hooks, and a changed hook
 # needs trusting again.
 hooks_trust = "~/.codex/config.toml"
@@ -3037,6 +3046,26 @@ for d in $PATH; do
 done
 IFS=$old_ifs
 if [ -z "$real" ]; then echo "ljos guard: no $me found on PATH" >&2; exit 127; fi
+# LJOS_OFF and a temp sandbox are not seats. Bookkeeping is a hook, not this shim.
+case ",1,true,TRUE,yes,YES,on,ON," in
+  *,"${LJOS_OFF}",*) exec "$real" "$@" ;;
+esac
+under_temp() {
+  p=$1
+  [ -n "$p" ] || return 1
+  for root in /tmp /var/tmp /private/tmp /dev/shm ${TMPDIR-}; do
+    [ -n "$root" ] || continue
+    root=${root%/}
+    [ -n "$root" ] || continue
+    case $p in
+      "$root"|"$root"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)" || under_temp "$(pwd -P)"; then
+  exec "$real" "$@"
+fi
 if command -v ljos-policyd >/dev/null 2>&1; then
   verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
   case $verdict in
@@ -3568,7 +3597,10 @@ pub const HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "SessionEnd"];
 
 /// The events the hook knows a matcher for; any other event takes `*`.
 pub const HOOK_MATCHERS: &[(&str, &str)] = &[
-    ("PreToolUse", "Bash|Edit|Write|MultiEdit|NotebookEdit"),
+    (
+        "PreToolUse",
+        "Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch",
+    ),
     ("PostToolUse", "*"),
     ("UserPromptSubmit", "*"),
     ("Stop", "*"),
@@ -3716,6 +3748,7 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
     let mut added = Vec::new();
     let mut removed = Vec::new();
     let mut closed = Vec::new();
+    let mut widened = Vec::new();
     for event in events {
         let groups = hooks
             .entry(event.clone())
@@ -3724,22 +3757,42 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
             continue;
         };
         let block = fail_closed.contains(event);
+        let want = hook_matcher(event);
         let mut present = false;
         let mut shut = false;
-        for hook in groups
-            .iter_mut()
-            .filter_map(|g| g["hooks"].as_array_mut())
-            .flatten()
-            .filter(|h| is_seat_hook(h))
-        {
-            present = true;
-            if block && hook["onFailure"] != "block" {
-                hook["onFailure"] = "block".into();
-                shut = true;
+        let mut grew = false;
+        for group in groups.iter_mut() {
+            let seat = group["hooks"]
+                .as_array()
+                .is_some_and(|hs| hs.iter().any(|h| is_seat_hook(h)));
+            if !seat {
+                continue;
+            }
+            // A group that also carries someone else's hook keeps its matcher.
+            // Widening it would fire that other hook on apply_patch.
+            let only_seat = group["hooks"]
+                .as_array()
+                .is_some_and(|hs| !hs.is_empty() && hs.iter().all(|h| is_seat_hook(h)));
+            if only_seat && group["matcher"].as_str() != Some(want) {
+                group["matcher"] = want.into();
+                grew = true;
+            }
+            let Some(hooks) = group["hooks"].as_array_mut() else {
+                continue;
+            };
+            for hook in hooks.iter_mut().filter(|h| is_seat_hook(h)) {
+                present = true;
+                if block && hook["onFailure"] != "block" {
+                    hook["onFailure"] = "block".into();
+                    shut = true;
+                }
             }
         }
         if shut {
             closed.push(event.clone());
+        }
+        if grew {
+            widened.push(event.clone());
         }
         if present {
             continue;
@@ -3773,7 +3826,7 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
             removed.push(event.clone());
         }
     }
-    if added.is_empty() && removed.is_empty() && closed.is_empty() {
+    if added.is_empty() && removed.is_empty() && closed.is_empty() && widened.is_empty() {
         return Step {
             what,
             detail: format!(
@@ -3797,6 +3850,10 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
     if !closed.is_empty() {
         change.push(format!("block on its failure on {}", closed.join(", ")));
         done.push(format!("blocks on failure on {}", closed.join(", ")));
+    }
+    if !widened.is_empty() {
+        change.push(format!("widen its matcher on {}", widened.join(", ")));
+        done.push(format!("widened the matcher on {}", widened.join(", ")));
     }
     let change = change.join(" and ");
     let done = done.join(" and ");
@@ -8801,6 +8858,18 @@ fn scope_pack_port() -> Result<()> {
     Ok(())
 }
 
+/// Start the default writer when a recall found it down. The health probe
+/// stays inside the hook's budget. [`wake_writer`] runs `packset ensure`;
+/// the agent is not told to.
+fn wake_for_recall() {
+    let ms: u64 = if std::env::var_os("LJOS_IN_HOOK").is_some() {
+        800
+    } else {
+        2_000
+    };
+    with_pack_timeout(ms, wake_writer);
+}
+
 /// Start the default writer when it does not answer, as a memory verb does.
 /// A writer that answered, or a seat pointed elsewhere, is left alone.
 fn wake_writer() {
@@ -8862,8 +8931,12 @@ fn pack_timeout() -> std::time::Duration {
 
 /// Start the default writer when a memory verb could not connect.
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
-/// replaced with the default writer.
+/// replaced with the default writer. A temp sandbox and `LJOS_OFF` do not
+/// get a daemon: the process's home is not a seat to write into.
 fn ensure_writer() -> Result<()> {
+    if bookkeep::guard_suspended() {
+        return Ok(());
+    }
     if std::env::var("PACKSET_URL").ok().as_deref() == Some("off") {
         return Ok(());
     }
@@ -14491,6 +14564,9 @@ fn shell_words(segment: &str) -> Vec<String> {
 /// itself write them, run by the person.
 #[must_use]
 pub fn seat_guard(line: &str) -> Option<Rule> {
+    if bookkeep::guard_suspended() {
+        return None;
+    }
     let refuse = |what: &str| {
         Rule {
         pattern: "seat-guard".into(),
@@ -19674,8 +19750,9 @@ pub fn is_decision(v: &Value) -> bool {
 
 /// What the seat remembers that bears on an issue, for `ljos recall`: the
 /// pack searched on the issue's id and on its title, reviewed kinds only,
-/// at most five lines. Empty when the pack holds nothing on it; a pack that
-/// does not answer says so in one line rather than failing the recall.
+/// at most five lines. Empty when the pack holds nothing on it. A pack that
+/// does not answer is started, as the doctor starts it, and the line says
+/// so only when the start did not bring it up.
 pub fn recall_memories(issue: &str) -> String {
     let mut cues = vec![issue.to_string()];
     if let Ok(t) = issue_title(issue) {
@@ -19686,10 +19763,19 @@ pub fn recall_memories(issue: &str) -> String {
     let now = now_utc();
     let mut seen = std::collections::BTreeSet::new();
     let mut lines = Vec::new();
+    let mut woke = false;
     for cue in &cues {
         let hits = match packset_search(cue) {
             Ok(h) => h,
-            Err(e) => return format!("\nMemory\n  (the pack did not answer: {e:#})\n"),
+            Err(_) if !woke => {
+                woke = true;
+                wake_for_recall();
+                match packset_search(cue) {
+                    Ok(h) => h,
+                    Err(e) => return recall_down(&e),
+                }
+            }
+            Err(e) => return recall_down(&e),
         };
         for h in hits {
             if UNREVIEWED_KINDS.contains(&h.kind.as_str()) {
@@ -19711,6 +19797,15 @@ pub fn recall_memories(issue: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The one line a recall shows when the store stayed down after it was
+/// started. No command for the agent: the start already ran.
+fn recall_down(err: &anyhow::Error) -> String {
+    let mut msg = format!("{err:#}");
+    msg = msg.replace("(`packset ensure` starts it)", "");
+    msg = msg.replace("`packset ensure`", "the writer");
+    format!("\nMemory\n  (the pack did not answer: {msg})\n")
 }
 
 /// The issue's title, for a cue, from the tracker.
@@ -21291,6 +21386,9 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 /// required and absent, the line is refused.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
+    if bookkeep::guard_suspended() {
+        return None;
+    }
     let mut answered = false;
     // Each pipeline whole, in shell words: a quoted sentence that names a
     // command is one word, and a download piped into a shell is one call.
@@ -22768,6 +22866,15 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
     out
 }
 
+/// The lock every test that changes the process environment takes.
+/// Bookkeeping tests live in another module and take the same one.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ENV.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     /// A guard shim refuses what ljos-policyd denies, with the rule and a
@@ -22814,6 +22921,197 @@ mod tests {
         assert!(run(&format!("'{}'", file.display())).status.success());
         assert!(!file.exists());
         assert!(super::seat_env_text("grokbot").contains("ljos/guard-bin"));
+    }
+
+    /// A temp home, a temp working directory, or LJOS_OFF runs the real
+    /// binary. The policyd denial that blocked `git branch -D` in a scratch
+    /// repository does not apply there.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_steps_aside_for_a_temp_sandbox_and_ljos_off() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join("guard-bin");
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&guard).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        let exe = |p: &std::path::Path, text: &str| {
+            std::fs::write(p, text).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exe(&guard.join("git"), super::GUARD_SHIM);
+        let marker = dir.path().join("asked");
+        exe(
+            &fake.join("ljos-policyd"),
+            &format!(
+                "#!/bin/sh\ntouch '{}'\nprintf 'deny\\tgit-branch-delete\\n'\nexit 2\n",
+                marker.display()
+            ),
+        );
+        exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
+        let run = |home: &std::path::Path, off: bool, cwd: &std::path::Path| {
+            let _ = std::fs::remove_file(&marker);
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("branch")
+                .arg("-D")
+                .arg("gone")
+                .current_dir(cwd)
+                .env("HOME", home)
+                .env(
+                    "PATH",
+                    format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
+                )
+                .env_remove("TMPDIR");
+            if off {
+                cmd.env("LJOS_OFF", "1");
+            } else {
+                cmd.env_remove("LJOS_OFF");
+            }
+            cmd.output().unwrap()
+        };
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let sandbox = dir.path().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let skipped = run(&home, false, &sandbox);
+        assert!(
+            skipped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&skipped.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&skipped.stdout).trim(), "ran");
+        assert!(!marker.exists(), "policyd was asked in a temp directory");
+        let off = run(
+            std::path::Path::new("/home/ubuntu"),
+            true,
+            std::path::Path::new("/workspace"),
+        );
+        assert!(
+            off.status.success(),
+            "{}",
+            String::from_utf8_lossy(&off.stderr)
+        );
+        assert!(!marker.exists(), "LJOS_OFF still asked policyd");
+        let denied = run(
+            std::path::Path::new("/home/ubuntu"),
+            false,
+            std::path::Path::new("/workspace"),
+        );
+        assert_eq!(denied.status.code(), Some(126));
+        assert!(marker.exists());
+        let err = String::from_utf8_lossy(&denied.stderr);
+        assert!(err.contains("denied"), "{err}");
+    }
+
+    /// The in-process guard matches the shim: a temp home and LJOS_OFF do
+    /// not ask ljos-policyd, and they do not start the pack daemon.
+    #[test]
+    fn a_temp_home_and_ljos_off_skip_the_guard_and_the_daemon() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let marker = dir.path().join("started");
+        let policyd = bin.join("deny-policyd");
+        std::fs::write(
+            &policyd,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf 'deny\\tgit-branch-delete\\n'\nexit 2\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("packset"),
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["deny-policyd", "packset"] {
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let keys = [
+            "HOME",
+            "PATH",
+            "LJOS_OFF",
+            "POLICYD_BIN",
+            "PACKSET_URL",
+            "PACKSET_PORT",
+        ];
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|k| ((*k).to_string(), std::env::var_os(k)))
+            .collect();
+        let path = {
+            let mut next = std::ffi::OsString::from(&bin);
+            next.push(":");
+            next.push(std::env::var_os("PATH").unwrap_or_default());
+            next
+        };
+        unsafe {
+            std::env::set_var("PATH", &path);
+            std::env::set_var("POLICYD_BIN", &policyd);
+            std::env::remove_var("PACKSET_URL");
+            std::env::remove_var("PACKSET_PORT");
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", "/home/ubuntu");
+        }
+        assert!(
+            super::tcb_verdict("git branch -D gone").is_some(),
+            "outside a sandbox the branch delete is denied"
+        );
+        assert!(marker.exists());
+        let _ = std::fs::remove_file(&marker);
+        unsafe { std::env::set_var("LJOS_OFF", "1") };
+        assert!(super::tcb_verdict("git branch -D gone").is_none());
+        assert!(
+            super::seat_guard("sed -i s/a/b/ ~/.codex/hooks.json").is_none(),
+            "LJOS_OFF skips the seat guard"
+        );
+        assert!(super::ensure_writer().is_ok());
+        assert!(!marker.exists(), "LJOS_OFF started the pack daemon");
+        unsafe {
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", dir.path());
+        }
+        assert!(super::tcb_verdict("git branch -D gone").is_none());
+        assert!(super::ensure_writer().is_ok());
+        assert!(!marker.exists(), "a temp HOME started the pack daemon");
+        unsafe {
+            for (k, v) in &saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    /// An onboard that already wrote the seat's PreToolUse hook picks up
+    /// apply_patch on the next run, and a second run still says the hook is there.
+    #[test]
+    fn an_old_pre_tool_matcher_grows_apply_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(
+            &file,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"ljos hook","timeout":20}]}]}}"#,
+        )
+        .unwrap();
+        let events = vec!["PreToolUse".to_string()];
+        let step = hook_step(&file, &events, &[], false);
+        assert!(step.detail.contains("widened the matcher"), "{step:?}");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["matcher"],
+            "Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch"
+        );
+        let again = hook_step(&file, &events, &[], false);
+        assert!(
+            again.detail.contains("carries the memory hook"),
+            "{again:?}"
+        );
     }
 
     /// A prompt naming an issue is handed the issue's recall.
@@ -22913,8 +23211,7 @@ mod tests {
     }
 
     pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = super::test_env_lock();
         for (k, v) in std::env::vars() {
             if super::runner_session_var(&k, &v) {
                 // SAFETY: under the lock every environment-reading test takes.
@@ -32483,7 +32780,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         assert!(empty.contains("cargo binstall ljos-policyd"), "{empty}");
         let down = session_start_line_from(None, now, true);
-        assert!(down.contains("`packset ensure`"), "{down}");
+        assert!(down.contains("memory store does not answer"), "{down}");
+        assert!(!down.contains("packset ensure"), "{down}");
     }
 
     #[test]
