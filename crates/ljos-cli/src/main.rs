@@ -789,6 +789,12 @@ enum Cmd {
         /// numbers can differ from the model crate's once trust rows exist.
         #[arg(long)]
         compare: bool,
+        /// Read only: do not file a `Dissent holds OPTION` child for a
+        /// position a voter still holds after the anchored settle. By default
+        /// each such dissent is filed once, as a child of the issue, so a
+        /// held minority view becomes work instead of a lost ballot.
+        #[arg(long)]
+        no_file: bool,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -2173,7 +2179,12 @@ fn run_command() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Consensus { id, json, compare } => {
+        Cmd::Consensus {
+            id,
+            json,
+            compare,
+            no_file,
+        } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -2219,6 +2230,14 @@ fn run_command() -> Result<()> {
             // exist.
             let predictions = predictions_of(&atoms, &id);
             let panel = panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions);
+            // A position a voter still holds after the anchored settle is
+            // filed once as a `Dissent holds OPTION` child; the tracker skips
+            // one already filed. `--no-file` keeps this a pure read.
+            let dissent = if no_file || !on_path("vissue") {
+                Vec::new()
+            } else {
+                file_dissent_children(&id, &trust, &anchors, &tags)
+            };
             if json {
                 // One document on stdout. The push cite stays at the top
                 // level; each reading is under its own key. A human tally
@@ -2231,11 +2250,17 @@ fn run_command() -> Result<()> {
                     }
                     said.push((ljos_cli::consensus_step_label(step), captured.stdout));
                 }
-                let doc = ljos_cli::consensus_document(&gate_json, &said);
+                let mut doc = ljos_cli::consensus_document(&gate_json, &said);
+                if !dissent.is_empty() {
+                    doc["dissent"] = serde_json::json!(dissent);
+                }
                 println!("{}", serde_json::to_string_pretty(&doc)?);
                 return Ok(());
             }
             print!("{gate}");
+            for line in &dissent {
+                println!("dissent: {line}");
+            }
             println!("advice, which does not decide a push: the weighted settle over every ballot");
             if let Some(line) = discount {
                 println!("{line}");
@@ -2615,5 +2640,30 @@ fn pack_trust_or_none() -> Vec<Trust> {
             eprintln!("ljos: no trust rows ({e:#}); settling with equal weights");
             Vec::new()
         }
+    }
+}
+
+/// File each held dissent on `id` as a child through the tracker's
+/// `vissue consensus --file-dissent`, under the same trust rows and anchors
+/// the settle used. Returns what the tracker said about each dissent: the
+/// new child, or that it was already filed. A tracker that fails is quiet:
+/// filing is a side effect of the reading, never a reason it fails.
+fn file_dissent_children(
+    id: &str,
+    trust: &[Trust],
+    anchors: &std::collections::BTreeMap<String, f64>,
+    tags: &[String],
+) -> Vec<String> {
+    let Ok(steps) = consensus_steps_for(id, false, true, trust, anchors, tags) else {
+        return Vec::new();
+    };
+    let Some(step) = steps.into_iter().find(|s| s.bin == "vissue") else {
+        return Vec::new();
+    };
+    let mut args = step.args;
+    args.push("--file-dissent".into());
+    match run_captured(step.bin, &args) {
+        Ok(out) => ljos_cli::dissent_lines(&out.stderr),
+        Err(_) => Vec::new(),
     }
 }

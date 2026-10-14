@@ -21251,7 +21251,14 @@ pub fn settle_in_words(
         .map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_f64).collect());
     let mut out = format!("settle ({model}, {} voters): {shares_line}\n", agents.len());
     let tie = v["tie"].as_bool().unwrap_or(false);
-    if tie || ranked.len() < 2 {
+    if ranked.len() == 1 {
+        out.push_str(&format!(
+            "every voter is on {}: the settle is unanimous\n",
+            ranked[0].0
+        ));
+    } else if ranked.is_empty() {
+        out.push_str("no option is on the ballot\n");
+    } else if tie {
         out.push_str("no option leads: the settle is a tie\n");
     } else {
         out.push_str(&format!(
@@ -21534,6 +21541,53 @@ pub fn consensus_steps_anchored(
         });
     }
     Ok(steps)
+}
+
+/// The lines of `vissue consensus --file-dissent`'s stderr that report a
+/// dissent: a child it filed (the create line naming `Dissent holds`) or one
+/// already filed. Other stderr is dropped.
+#[must_use]
+pub fn dissent_lines(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains("Dissent holds") || l.contains("already filed"))
+        .filter(|l| !l.starts_with("file:"))
+        .map(|l| {
+            if l.contains("already filed") {
+                l.to_string()
+            } else {
+                format!("filed {l}")
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod unanimous_settle_tests {
+    /// One option on every ballot used to read "the settle is a tie".
+    #[test]
+    fn a_unanimous_settle_is_not_called_a_tie() {
+        let one = r#"{"options":["ship"],"shares":[1.0],"settled":true,"converged":true,"engine":"degroot-fj","agents":["a","b","c"],"influence":[0.34,0.33,0.33],"tie":false}"#;
+        let words = super::settle_in_words(one, &Default::default()).unwrap();
+        assert!(words.contains("every voter is on ship"), "{words}");
+        assert!(!words.contains("tie"), "{words}");
+    }
+}
+
+#[cfg(test)]
+mod dissent_lines_tests {
+    use super::dissent_lines;
+
+    #[test]
+    fn a_filed_and_an_already_filed_dissent_are_reported() {
+        let err = "demo-ab12  TODO  [#B]  Dissent holds keep\nfile: /t/demo/issues.org\ntracker git: committed\ndemo-x: dissent drop already filed\n";
+        let got = dissent_lines(err);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].starts_with("filed demo-ab12"));
+        assert!(got[1].contains("already filed"));
+        assert!(dissent_lines("noise\n").is_empty());
+    }
 }
 
 /// Refuse a settle on an issue that holds no ballots. The model reads an
