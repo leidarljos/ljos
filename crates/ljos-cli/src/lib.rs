@@ -18707,10 +18707,10 @@ pub fn complete(
                     &hold.assignee,
                 ));
             }
-            let hold = run_captured("claimdag", &["get", id.as_str()])
+            let holder = run_captured("claimdag", &["get", id.as_str()])
                 .ok()
-                .and_then(|g| holder_of(&g.stdout))
-                .and_then(|h| read_hold(&h));
+                .and_then(|g| holder_of(&g.stdout));
+            let hold = holder.as_deref().and_then(read_hold);
             let tracker = tracker_show_json(node).ok().and_then(|v| {
                 v["claimed_by"]
                     .as_str()
@@ -18718,6 +18718,23 @@ pub fn complete(
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             });
+            // The name the tracker or the hold record gives is the seat this
+            // shell asked for: the claim was taken under a conversation or
+            // host-suffixed holder of the same seat, so finish under it.
+            if let Some(holder) = holder.as_deref() {
+                let named = hold
+                    .as_ref()
+                    .map(|h| h.assignee.as_str())
+                    .into_iter()
+                    .chain(tracker.as_deref());
+                if adopts_holder(node, assignee, named) {
+                    let said = run(holder)?;
+                    drop_hold(holder);
+                    drop_playbook(node);
+                    let stamped = tracker.as_deref().unwrap_or(assignee);
+                    return Ok(with_unstamp(said.stdout, node, &id, stamped));
+                }
+            }
             bail!(
                 "{}",
                 not_assignee_message(node, assignee, hold.as_ref(), tracker.as_deref())
@@ -18728,6 +18745,45 @@ pub fn complete(
     drop_hold(&actor);
     drop_playbook(node);
     Ok(with_unstamp(said.stdout, node, &id, assignee))
+}
+
+/// The bare seat a holder name stands for: no `:node` scope, no `@host`
+/// suffix, trimmed and lowercased.
+#[must_use]
+pub fn bare_seat(name: &str, node: &str) -> String {
+    let n = name.trim();
+    let n = n.strip_suffix(&format!(":{}", node.trim())).unwrap_or(n);
+    let n = n.split('@').next().unwrap_or(n);
+    n.trim().to_lowercase()
+}
+
+/// Whether `assignee` names the same seat as any of `named`, the holder
+/// names the hold record and the tracker give, so `complete` may finish
+/// under the claim graph's holder.
+pub fn adopts_holder<'a>(
+    node: &str,
+    assignee: &str,
+    named: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let mine = bare_seat(assignee, node);
+    // A shell holder is `SEAT-TAG`, TAG the base-36 pid
+    // `conversation_tag` makes: short, and with a digit, so a hyphenated
+    // seat name such as `disk-saver` never reads as `disk` plus a tag.
+    let tagged = |n: &str| {
+        n.strip_prefix(mine.as_str())
+            .and_then(|r| r.strip_prefix('-'))
+            .is_some_and(|t| {
+                (1..=4).contains(&t.len())
+                    && t.bytes()
+                        .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+                    && t.bytes().any(|b| b.is_ascii_digit())
+            })
+    };
+    !mine.is_empty()
+        && named.into_iter().any(|n| {
+            let n = bare_seat(n, node);
+            n == mine || tagged(&n)
+        })
 }
 
 /// Refusal when this shell's holder is not the name that holds the node:
@@ -32496,6 +32552,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{}",
             wrong.state
         );
+    }
+
+    #[test]
+    fn a_bare_seat_adopts_a_host_suffixed_or_scoped_holder() {
+        assert!(adopts_holder("promo-qvdu", "commbot", ["commbot"]));
+        assert!(adopts_holder("n1", "inky", ["inky@uhpdsahugi:n1"]));
+        assert!(adopts_holder("n1", "inky@box", [" Inky "]));
+        assert!(adopts_holder("n1", "inky", ["inky-p6a"]));
+        assert!(!adopts_holder("n1", "disk", ["disk-saver"]));
+        assert!(!adopts_holder("n1", "inky", ["saddle"]));
+        assert!(!adopts_holder("n1", "", ["inky"]));
     }
 
     #[test]
