@@ -11,7 +11,7 @@ a prompt back to the agent. Three verbs write to it. Pick by what was said.
 | the person said | verb | when it comes back |
 |---|---|---|
 | "I prefer X over Y", "always do X" | `ljos prefer "..."` | from now on |
-| a lesson from this work | `ljos remember "..."` | once a review promotes it; `--standing` makes it standing now |
+| a lesson from this work | `ljos remember "..."` | when a prompt bears on it; a review promotes it to standing. `--standing` makes it standing now |
 | "never run X", "ask me before X" | `ljos rule 'PATTERN' --verdict deny --why "..."` | the hook stops the command before it runs |
 
 Examples:

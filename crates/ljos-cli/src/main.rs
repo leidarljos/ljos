@@ -36,13 +36,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. Typed by the person it takes effect at once; from an agent runner it is an episode until a review promotes it.
+    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is an episode: the hook shows it when a prompt bears on it, and a review promotes it to standing.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Store this as an episode. It is kept, and it is not a refresher. The default under an agent runner.
+        /// Store this as an episode. The hook shows it when a prompt bears on it. The default under an agent runner.
         #[arg(long)]
         transient: bool,
         /// Store this as a standing rule now, without waiting for a review. The default when the person types it.
