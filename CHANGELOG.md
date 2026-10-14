@@ -3,6 +3,8 @@
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
 Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), heads-up display (HUD), software bill of materials (SBOM), European Environment for Scientific Software Installations (EESSI).
 
+<!-- towncrier release notes start -->
+
 ## Unreleased
 
 - `ljos doctor` prints how many of the workspace's preferences a rule enforces, such as `6 of 10 preferences enforced by a rule`. A preference counts when a deny or ask rule carries it as its reason, as `ljos prefer --deny` and `--ask` write. The row also says how many more name a command they forbid, and the command that turns one into an ask.
