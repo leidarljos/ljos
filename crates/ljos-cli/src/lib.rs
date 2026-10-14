@@ -8880,15 +8880,86 @@ pub const SEAT_ENTITY: &str = "seat:";
 /// Explicit claim body. The text is stored as given; never harvested. The
 /// entities open with the seat that wrote it.
 pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
+    let mut entities = vec![format!("{SEAT_ENTITY}{}", seat_name())];
+    entities.extend(take_validity());
     serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
         "level": "explicit",
         "text": text,
         "workspace": workspace,
-        "entities": [format!("{SEAT_ENTITY}{}", seat_name())],
+        "entities": entities,
         "source": atom_source(),
     })
+}
+
+/// The entity prefixes of a claim's validity window: the world time it
+/// holds from and until, as dates. The pack's own clock (`--as-of`) is when
+/// the seat learned it; these are when it was true (Graphiti's valid time).
+pub const VALID_FROM: &str = "valid_from:";
+pub const VALID_TO: &str = "valid_to:";
+
+static VALIDITY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Set the validity window the next written claim carries.
+///
+/// # Errors
+///
+/// A bound that is not YYYY-MM-DD, or a window that ends before it starts.
+pub fn set_validity(from: Option<&str>, to: Option<&str>) -> Result<()> {
+    let mut tags = Vec::new();
+    for (prefix, v) in [(VALID_FROM, from), (VALID_TO, to)] {
+        if let Some(d) = v.map(str::trim) {
+            chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .map_err(|_| anyhow::anyhow!("{prefix} {d:?} is not YYYY-MM-DD"))?;
+            tags.push(format!("{prefix}{d}"));
+        }
+    }
+    if let (Some(f), Some(t)) = (from, to) {
+        if f.trim() > t.trim() {
+            bail!("the window ends ({t}) before it starts ({f})");
+        }
+    }
+    *VALIDITY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = tags;
+    Ok(())
+}
+
+fn take_validity() -> Vec<String> {
+    std::mem::take(
+        &mut *VALIDITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// Whether a claim with these entities held on `day` (YYYY-MM-DD). A claim
+/// with no window holds always; a bound it lacks is open.
+#[must_use]
+pub fn valid_on(entities: &[String], day: &str) -> bool {
+    let bound = |p: &str| entities.iter().find_map(|e| e.strip_prefix(p));
+    bound(VALID_FROM).is_none_or(|f| f <= day) && bound(VALID_TO).is_none_or(|t| day <= t)
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::valid_on;
+
+    #[test]
+    fn a_window_bounds_when_a_claim_held() {
+        let w = vec![
+            "valid_from:2026-01-01".to_string(),
+            "valid_to:2026-03-31".to_string(),
+        ];
+        assert!(valid_on(&w, "2026-02-15"));
+        assert!(valid_on(&w, "2026-03-31"));
+        assert!(!valid_on(&w, "2026-04-01"));
+        assert!(!valid_on(&w, "2025-12-31"));
+        assert!(valid_on(&[], "1999-01-01"));
+        let open = vec!["valid_from:2026-04-01".to_string()];
+        assert!(valid_on(&open, "2030-01-01") && !valid_on(&open, "2026-03-01"));
+    }
 }
 
 /// Where a claim was written: the runner, the conversation, the host and,

@@ -224,6 +224,12 @@ enum Cmd {
         /// Store this as a standing rule now. The default.
         #[arg(long)]
         standing: bool,
+        /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
+        #[arg(long, value_name = "DATE")]
+        valid_from: Option<String>,
+        /// The last day (YYYY-MM-DD) the claim holds. A plain search from the next day on leaves it out; `--valid-at` asks about another day.
+        #[arg(long, value_name = "DATE")]
+        valid_to: Option<String>,
     },
     /// Prefer one way over another, as a standing preference. Stored as written.
     Prefer {
@@ -267,6 +273,9 @@ enum Cmd {
         /// Ask the pack as it stood then (YYYY-MM-DD or RFC 3339): what the seat knew at that time, withdrawn memories included, later ones left out.
         #[arg(long, value_name = "TIME")]
         as_of: Option<String>,
+        /// What held in the world on this day (YYYY-MM-DD): claims whose validity window excludes it are left out. Without it, today; `--valid-at any` keeps every window.
+        #[arg(long, value_name = "DATE")]
+        valid_at: Option<String>,
         /// Open with what the score and the fraction mean, and what an empty answer means.
         #[arg(long)]
         explain: bool,
@@ -1090,10 +1099,13 @@ fn run_command() -> Result<()> {
             as_persona,
             transient,
             standing,
+            valid_from,
+            valid_to,
         } => {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
+            ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             let text = join(&text);
             // Under a runner the lesson is the agent's, unless it is the
             // person's words from their latest prompt: then it stands.
@@ -1227,16 +1239,25 @@ fn run_command() -> Result<()> {
             limit,
             rerank,
             as_of,
+            valid_at,
             explain,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
-            print!(
-                "{}",
-                format_hits(
-                    &packset_search_as_of(&join(&query), limit, as_of.as_deref(), rerank)?,
-                    explain
-                )
-            );
+            let mut hits = packset_search_as_of(&join(&query), limit, as_of.as_deref(), rerank)?;
+            let day = match valid_at.as_deref().map(str::trim) {
+                Some("any") => None,
+                Some(d) => {
+                    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                        anyhow::anyhow!("--valid-at {d:?} is not YYYY-MM-DD or any")
+                    })?;
+                    Some(d.to_string())
+                }
+                None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
+            };
+            if let Some(day) = day {
+                hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
+            }
+            print!("{}", format_hits(&hits, explain));
         }
         Cmd::Evidence { accession } => {
             let said = run_captured("deedar", &["evidence", &accession])?;

@@ -151,6 +151,14 @@ run as alice ljos memories list; N2=$(printf '%s' "$LAST" | grep -c "demo crate 
 chk "a second session end writes no duplicates" test "$N2" -eq 3
 run as bob ljos search "linker flag demo crate"; chk "another seat recalls the extracted fact" has "linker flag"
 
+# 7d. validity windows: what held then, and what holds now
+as alice ljos remember "The demo deploys from the bluebox runner pool." --valid-from 2026-01-01 --valid-to 2026-03-31 >/dev/null 2>&1
+as alice ljos remember "The demo deploys from the greenbox runner pool." --valid-from 2026-04-01 >/dev/null 2>&1
+run as bob ljos search "demo deploys runner pool"; chk "today's search shows the current fact, not the expired one" bash -c 'printf "%s" "$0" | grep -q greenbox && ! printf "%s" "$0" | grep -q bluebox' "$LAST"
+run as bob ljos search "demo deploys runner pool" --valid-at 2026-02-15; chk "--valid-at in the window shows what held then" bash -c 'printf "%s" "$0" | grep -q bluebox && ! printf "%s" "$0" | grep -q greenbox' "$LAST"
+run as bob ljos search "demo deploys runner pool" --valid-at any; chk "--valid-at any keeps both" bash -c 'printf "%s" "$0" | grep -q bluebox && printf "%s" "$0" | grep -q greenbox' "$LAST"
+run as alice ljos remember "Bad window." --valid-from 2026-05-01 --valid-to 2026-04-01; chk "a window that ends before it starts is refused" bash -c '! printf "%s" "$0" | grep -q "^ok\|remembered"' "$LAST"
+
 # 8. finish
 run as bob ljos finish "$T1" --gen "$GEN" --assignee bob --lesson "The CHANGES line shipped in one commit. Review passed first time." --close
 chk "bob finishes $T1" has "completed"
