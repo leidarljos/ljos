@@ -4655,6 +4655,20 @@ const CUE_ALIASES: &[&[&str]] = &[
     &["secret", "key", "token", "credential", "password", "apikey"],
     &["trunk", "master", "main"],
     &["whitespace", "indentation", "indent", "tab"],
+    // Adding a dependency is a package install, whatever the manager.
+    &["dependency", "package", "library", "install"],
+    // A query is written in some SQL dialect, so a rule about the
+    // database engine bears on it.
+    &[
+        "sql",
+        "query",
+        "postgres",
+        "postgresql",
+        "psql",
+        "mysql",
+        "sqlite",
+        "mariadb",
+    ],
 ];
 
 /// Words that name an alias group only on the claim's side. `go` in a
@@ -4667,12 +4681,15 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
     let mut out: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .map(|w| singular(&w.to_lowercase()))
+        .map(str::to_lowercase)
         .filter(|w| claim || !CLAIM_ONLY_ALIASES.contains(&w.as_str()))
         .filter_map(|w| {
+            // `postgres` is a name, not the plural of `postgre`, so the
+            // word is looked up as written and then singular.
+            let one = singular(&w);
             CUE_ALIASES
                 .iter()
-                .position(|group| group.contains(&w.as_str()))
+                .position(|group| group.contains(&w.as_str()) || group.contains(&one.as_str()))
                 .map(|i| format!("alias:{i}"))
         })
         .collect();
@@ -23354,7 +23371,7 @@ mod tests {
 
     #[test]
     fn the_encoder_admits_a_paraphrase_that_shares_no_word() {
-        let cue = "add the lodash dependency to the web app";
+        let cue = "add lodash to the web app";
         let pref = signal_hit(
             "preference",
             "Use pnpm instead of npm for every JavaScript package install in this repo",
@@ -23377,6 +23394,32 @@ mod tests {
         };
         assert!(!admits_local(&pref, low, cue, 1.0, 0.95));
         assert!(!admits_local(&pref, DenseSignal::default(), cue, 1.0, 0.0));
+    }
+
+    #[test]
+    fn a_paraphrase_names_the_subject_through_its_concept() {
+        // m01 and m15 of the 20-memory set share no content word with
+        // their paraphrase, and the encoder put them under the line.
+        let pnpm = "Use pnpm instead of npm for every JavaScript package install in this repo";
+        assert!(names_the_subject(
+            pnpm,
+            "add the lodash dependency to the web app"
+        ));
+        let pg = "Our staging Postgres is version 15; do not use features from Postgres 16";
+        assert!(names_the_subject(
+            pg,
+            "can I use MERGE ... RETURNING in this query"
+        ));
+        // The unrelated prompts of the same set stay out.
+        for cue in [
+            "Run the tests and tell me what fails",
+            "Summarize the last three commits",
+            "Why is the build slow on my laptop",
+            "Add a docstring to every public function",
+        ] {
+            assert!(!names_the_subject(pnpm, cue), "{cue}");
+            assert!(!names_the_subject(pg, cue), "{cue}");
+        }
     }
 
     #[test]
