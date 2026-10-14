@@ -1070,6 +1070,21 @@ fn server_path() -> Result<PathBuf> {
     }
 }
 
+/// Replace this process with the `ljos-mcp` that goes with this `ljos`, so
+/// `ljos mcp` serves on the same standard input and output. Returns only
+/// when the server cannot be found or started.
+#[must_use]
+pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
+    use std::os::unix::process::CommandExt as _;
+    match server_path() {
+        Ok(path) => {
+            let e = std::process::Command::new(&path).args(args).exec();
+            anyhow::Error::new(e).context(format!("start {}", path.display()))
+        }
+        Err(e) => e,
+    }
+}
+
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
     Ok(serde_json::json!({

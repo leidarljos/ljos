@@ -41,16 +41,17 @@ const PROTOCOL_URI: &str = "ljos://protocol";
 /// the caching fields on every cacheable result.
 const RESOURCE_TTL_MS: u64 = 0;
 
-/// The tools a session lists when `LJOS_MCP_TOOLS` is unset: memory, the
-/// consent form for a held command, tickets, claims, mail, decisions and
-/// the doctor. Every tool costs its description and schema in the model's
-/// context on every session, so the rest wait for an opt-in.
+/// The tools a session lists when `LJOS_MCP_TOOLS` is unset: the command
+/// rules and the consent form for a held command, memory, tickets, claims,
+/// mail, decisions and the doctor. Every tool costs its description and
+/// schema in the model's context on every session, so the rest wait for an
+/// opt-in. `tools/list` keeps this order, so the guard and memory lead.
 pub const CORE_TOOLS: &[&str] = &[
+    "ljos_rule",
     "ljos_request_approval",
+    "ljos_prefer",
     "ljos_remember",
     "ljos_search",
-    "ljos_prefer",
-    "ljos_rule",
     "ljos_file",
     "ljos_note",
     "ljos_sitting",
@@ -64,6 +65,29 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_consensus",
     "ljos_doctor",
 ];
+
+/// The persona and playbook tools, listed after every other tool.
+const PERSONA_TOOLS: &[&str] = &[
+    "ljos_brief",
+    "ljos_persona",
+    "ljos_personas",
+    "ljos_playbook",
+    "ljos_playbooks",
+];
+
+/// The order `tools/list` gives: the core set in its own order, then the
+/// other tools by name, then the persona tools by name.
+fn listing_order(tools: &mut [Tool]) {
+    tools.sort_by_cached_key(|t| {
+        let name = t.name.as_ref();
+        let rank = match CORE_TOOLS.iter().position(|c| *c == name) {
+            Some(at) => (0, at),
+            None if PERSONA_TOOLS.contains(&name) => (2, 0),
+            None => (1, 0),
+        };
+        (rank, name.to_string())
+    });
+}
 
 /// The tools `LJOS_MCP_TOOLS` names, or `None` for every tool. Unset or
 /// empty is the core set. `all` is every tool. Otherwise a list split on
@@ -2583,13 +2607,15 @@ impl ServerHandler for LjosServer {
             .protocol_version()
             .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
         let set = env_tool_set();
+        let mut tools: Vec<Tool> = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|t| listed(set.as_deref(), &t.name))
+            .collect();
+        listing_order(&mut tools);
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
-            tools: Self::tool_router()
-                .list_all()
-                .into_iter()
-                .filter(|t| listed(set.as_deref(), &t.name))
-                .collect(),
+            tools,
             meta: None,
             next_cursor: None,
             ttl_ms: supports_cache_hints.then_some(0),
@@ -2741,6 +2767,39 @@ mod tests {
         assert!(more.contains(&"ljos_remember".to_string()));
         assert!(listed(None, "ljos_bump_plan"));
         assert!(!listed(Some(&core), "ljos_bump_plan"));
+    }
+
+    /// The guard and memory tools lead the list, and the persona tools close
+    /// it, whichever set the server lists.
+    #[test]
+    fn the_guard_and_memory_lead_and_the_personas_close_the_list() {
+        let order = |set: Option<&[String]>| -> Vec<String> {
+            let mut tools: Vec<Tool> = LjosServer::tool_router()
+                .list_all()
+                .into_iter()
+                .filter(|t| listed(set, &t.name))
+                .collect();
+            listing_order(&mut tools);
+            tools.into_iter().map(|t| t.name.to_string()).collect()
+        };
+        let lead = [
+            "ljos_rule",
+            "ljos_request_approval",
+            "ljos_prefer",
+            "ljos_remember",
+            "ljos_search",
+        ];
+        let core = order(tool_set(None).as_deref());
+        assert_eq!(core, CORE_TOOLS);
+        let every = order(None);
+        assert_eq!(every.len(), LjosServer::tool_router().list_all().len());
+        assert_eq!(&every[..lead.len()], lead);
+        assert_eq!(&every[..CORE_TOOLS.len()], CORE_TOOLS);
+        let tail = &every[every.len() - PERSONA_TOOLS.len()..];
+        assert_eq!(tail, PERSONA_TOOLS);
+        for name in PERSONA_TOOLS {
+            assert!(!CORE_TOOLS.contains(name), "{name} is in the core set");
+        }
     }
 
     /// A tool that ran and refused answers with a result the model reads; a

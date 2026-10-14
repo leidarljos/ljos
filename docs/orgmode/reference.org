@@ -128,11 +128,13 @@ Writers: =ljos_sitting=, =ljos_finish=, =ljos_calibrate=, =ljos_persona=, =ljos_
 =start_a_sitting=, =run_a_panel=, =check_a_handover=. Every tool description opens with
 when to call it.
 
-By default the server lists the core set: =ljos_remember=, =ljos_search=,
-=ljos_prefer=, =ljos_rule=, =ljos_file=, =ljos_note=, =ljos_sitting=,
-=ljos_finish=, =ljos_claim=, =ljos_release=, =ljos_send=, =ljos_inbox=,
-=ljos_reply=, =ljos_vote=, =ljos_consensus=, =ljos_doctor= and
-=ljos_request_approval=. =LJOS_MCP_TOOLS=all= lists every tool above.
+By default the server lists the core set, in this order: =ljos_rule=,
+=ljos_request_approval=, =ljos_prefer=, =ljos_remember=, =ljos_search=,
+=ljos_file=, =ljos_note=, =ljos_sitting=, =ljos_finish=, =ljos_claim=,
+=ljos_release=, =ljos_send=, =ljos_inbox=, =ljos_reply=, =ljos_vote=,
+=ljos_consensus= and =ljos_doctor=. =LJOS_MCP_TOOLS=all= lists every tool
+above: the core set first, then the rest by name, then the persona and
+playbook tools.
 =LJOS_MCP_TOOLS= also takes names split on commas or spaces, with or
 without the =ljos_= prefix, where =core= stands for the core set. A call
 to a tool the server does not list is refused with the shell command to
