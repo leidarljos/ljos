@@ -581,7 +581,7 @@ pub struct SittingArgs {
     #[serde(default)]
     pub anyway: bool,
     /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
-    /// `company-panel`, `overnight`). Absent, a closed-set token in the
+    /// `company-panel`, `overnight`, `feature`). Absent, a closed-set token in the
     /// title else sit. Held until finish or release.
     #[serde(default)]
     pub playbook: Option<String>,
@@ -592,7 +592,7 @@ pub struct SittingArgs {
 pub struct PlaybookBindArgs {
     /// The tracker id of the issue.
     pub issue: String,
-    /// The recipe name: sit, arena, land, company-panel, overnight.
+    /// The recipe name: sit, arena, land, company-panel, overnight, feature.
     pub name: String,
 }
 
@@ -2037,7 +2037,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to see the playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight. Kind playbook, weighed not recalled. Pack latest per name, shipped seed only when the pack has no live atom. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
+        description = "Call this to see the playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature. Kind playbook, weighed not recalled. Pack latest per name, shipped seed only when the pack has no live atom. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
         annotations(title = "Playbooks", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_playbooks(&self) -> Result<Json<Rows<PlaybookRow>>, McpError> {

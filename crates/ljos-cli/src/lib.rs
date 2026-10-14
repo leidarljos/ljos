@@ -9015,9 +9015,21 @@ pub struct Playbook {
 }
 
 /// The closed set. Write, list, bind, and copy refuse any other name.
-pub const PLAYBOOK_NAMES: &[&str] = &["sit", "arena", "land", "company-panel", "overnight"];
+pub const PLAYBOOK_NAMES: &[&str] = &[
+    "sit",
+    "arena",
+    "land",
+    "company-panel",
+    "overnight",
+    "feature",
+];
 
-/// The five shipped recipes. Kind `playbook`, weighed not recalled.
+/// The names a title token binds by itself. `feature` is left out: "feature"
+/// is an ordinary word in titles, and the feature recipe is for a parent that
+/// `ljos workflow --start` put under the workflow.
+pub const TITLE_PLAYBOOK_NAMES: &[&str] = &["sit", "arena", "land", "company-panel", "overnight"];
+
+/// The six shipped recipes. Kind `playbook`, weighed not recalled.
 pub const SHIPPED_PLAYBOOK_NAMES: &[&str] = PLAYBOOK_NAMES;
 
 /// Five named principles, invocable mid-sitting, mapped onto existing law.
@@ -9094,7 +9106,18 @@ Drive work while unattended, still one sitting.
 5. `ljos finish` when the condition holds; otherwise `ljos release` and a new sitting.
 ";
 
-/// The five shipped playbooks, bodies in full, model roles as spawn hints.
+const FEATURE_BODY: &str = "\
+A feature runs design, implement, review and a panel vote until the panel agrees. The parent issue carries the workflow; each step is a child issue and its own sitting.
+
+1. Start on the parent: `ljos workflow PARENT --start feature` files the design child. `ljos workflow PARENT` prints the stage and the next step at any time.
+2. Design: write the design as a deed and cite it on the design child. Then file one `impl: TASK` and one `review: TASK` child per task under the parent.
+3. A review cites its findings as a deed, and a holder other than the implementer does it.
+4. With every child closed, `ljos workflow PARENT --round` files the next `panel rN` decision. Each panel persona casts `ljos vote ROUND --for pass|revise --expect OPTION --as NAME`, and a revise notes its finding as `finding: NAME: TEXT` on the round.
+5. A round that does not pass turns each finding into a `fix:` and a `review:` child, then the next round. There is no round cap, and the loop waits on no one.
+6. `ljos finish PARENT --close` is refused until the latest round passed and no child is open.
+";
+
+/// The six shipped playbooks, bodies in full, model roles as spawn hints.
 #[must_use]
 pub fn shipped_playbooks() -> Vec<Playbook> {
     vec![
@@ -9121,6 +9144,11 @@ pub fn shipped_playbooks() -> Vec<Playbook> {
         Playbook {
             name: "overnight".into(),
             body: OVERNIGHT_BODY.trim().into(),
+            models: Vec::new(),
+        },
+        Playbook {
+            name: "feature".into(),
+            body: FEATURE_BODY.trim().into(),
             models: Vec::new(),
         },
     ]
@@ -9262,7 +9290,7 @@ fn ensure_shipped_playbooks() {
     }
 }
 
-/// The roster: pack atoms, with the five shipped filled in when missing.
+/// The roster: pack atoms, with the six shipped filled in when missing.
 pub fn playbooks_from_pack() -> Result<Vec<Playbook>> {
     ensure_shipped_playbooks();
     let client = pack()?;
@@ -9331,7 +9359,7 @@ pub fn format_playbook_copy(p: &Playbook) -> String {
 #[must_use]
 pub fn format_playbooks(playbooks: &[Playbook]) -> String {
     if playbooks.is_empty() {
-        return "no playbooks; the shipped recipes are sit, arena, land, company-panel, overnight\n"
+        return "no playbooks; the shipped recipes are sit, arena, land, company-panel, overnight, feature\n"
             .to_string();
     }
     let width = playbooks.iter().map(|p| p.name.len()).max().unwrap_or(0);
@@ -9403,12 +9431,20 @@ fn write_playbook_cache(issue: &str, name: &str) -> Result<()> {
 /// it; do not walk back to an earlier bind.
 #[must_use]
 pub fn playbook_name_from_issue(v: &Value) -> Option<String> {
+    latest_note_value(v, PLAYBOOK_NOTE_PREFIX)
+}
+
+/// The rest of the latest logbook note that opens with `prefix`, by
+/// timestamp, else the first one listed when none is dated. An empty rest is
+/// a drop: the answer is `None`, and no earlier note is walked back to.
+#[must_use]
+pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
     let mut dated: Vec<(String, Option<String>)> = Vec::new();
     for e in v["logbook"].as_array().into_iter().flatten() {
         let Some(note) = e["note"].as_str() else {
             continue;
         };
-        let Some(rest) = note.trim().strip_prefix(PLAYBOOK_NOTE_PREFIX) else {
+        let Some(rest) = note.trim().strip_prefix(prefix) else {
             continue;
         };
         let name = rest.trim();
@@ -9506,7 +9542,8 @@ pub fn copy_playbook(issue: &str, name: &str) -> Result<String> {
     Ok(format_playbook_copy(&p))
 }
 
-/// A closed-set name the issue title names, else `sit`. Longer names win
+/// A title-bound name ([`TITLE_PLAYBOOK_NAMES`]) the issue title names, else
+/// `sit`. Longer names win
 /// (`company-panel` before a stray `sit` token); `sitting` is not `sit`.
 #[must_use]
 pub fn playbook_from_title(title: &str) -> &'static str {
@@ -9516,7 +9553,7 @@ pub fn playbook_from_title(title: &str) -> &'static str {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let mut names: Vec<&'static str> = PLAYBOOK_NAMES.to_vec();
+    let mut names: Vec<&'static str> = TITLE_PLAYBOOK_NAMES.to_vec();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
     for name in names {
         if tokens.iter().any(|t| t == name) {
@@ -9541,6 +9578,624 @@ pub fn resolve_sitting_playbook(issue: &str, title: &str, asked: Option<&str>) -
         return Ok(name);
     }
     Ok(playbook_from_title(title).to_string())
+}
+
+// ---- feature workflow ------------------------------------------------------
+
+/// The workflows a parent issue can carry. Each is the playbook of the same
+/// name; the parent keeps it across every sitting on its children.
+pub const WORKFLOW_NAMES: &[&str] = &["feature"];
+
+/// The logbook note that binds a workflow to a parent: `workflow: NAME`.
+/// Latest wins and an empty rest drops it, like the playbook note, but no
+/// finish or release writes the drop: the workflow outlives every sitting.
+pub const WORKFLOW_NOTE_PREFIX: &str = "workflow:";
+
+/// The tag a workflow parent carries, for boards and search. vissue splits
+/// org tags on `:`, so the tag joins with a hyphen.
+pub const WORKFLOW_TAG_PREFIX: &str = "workflow-";
+
+/// The workflow settings S1 reads: which workflow new feature work takes,
+/// the panel, who can veto, the pass share and the tie-break. There is no
+/// round cap and no setting that waits on the person.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowConfig {
+    /// The workflow new feature work binds to.
+    pub default: String,
+    /// Bind without being asked when new feature work opens.
+    pub auto_bind: bool,
+    /// The panel personas, each of whom must cast on a round.
+    pub personas: Vec<String>,
+    /// Personas whose `revise` blocks a pass on its own.
+    pub veto: Vec<String>,
+    /// The share of `pass` ballots a round needs.
+    pub quorum: f64,
+    /// What a tie does. `revise` opens another round.
+    pub tie: String,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            default: "feature".into(),
+            auto_bind: true,
+            personas: ["tester", "senior-engineer", "junior-dev", "ceo", "cto"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            veto: vec!["tester".into()],
+            quorum: 0.6,
+            tie: "revise".into(),
+        }
+    }
+}
+
+/// The workflow settings. Built-in defaults for now; the suite's
+/// configuration layer plugs in here, so every caller already reads through
+/// it.
+#[must_use]
+pub fn workflow_config() -> WorkflowConfig {
+    WorkflowConfig::default()
+}
+
+/// Refuse a name that is not a workflow.
+///
+/// # Errors
+///
+/// A name outside [`WORKFLOW_NAMES`].
+pub fn parse_workflow_name(name: &str) -> Result<&'static str> {
+    let n = name.trim();
+    WORKFLOW_NAMES
+        .iter()
+        .copied()
+        .find(|k| *k == n)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "workflow: unknown name {n:?}; the workflows are {}",
+                WORKFLOW_NAMES.join(", ")
+            )
+        })
+}
+
+/// The workflow an issue JSON carries: the latest `workflow:` note when the
+/// logbook has one (an empty rest is a drop), else a `workflow-NAME` tag.
+/// A name that is not a workflow is none.
+#[must_use]
+pub fn workflow_name_from_issue(v: &Value) -> Option<String> {
+    let noted = v["logbook"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["note"].as_str())
+        .any(|n| n.trim().starts_with(WORKFLOW_NOTE_PREFIX));
+    let name = if noted {
+        latest_note_value(v, WORKFLOW_NOTE_PREFIX)
+    } else {
+        tags_of(v)
+            .iter()
+            .find_map(|t| t.strip_prefix(WORKFLOW_TAG_PREFIX).map(str::to_string))
+    }?;
+    parse_workflow_name(&name).ok().map(str::to_string)
+}
+
+/// The step of a workflow a child issue stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Design,
+    Implement,
+    Review,
+    Panel,
+    Other,
+}
+
+impl Stage {
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Design => "design",
+            Self::Implement => "implement",
+            Self::Review => "review",
+            Self::Panel => "panel",
+            Self::Other => "other",
+        }
+    }
+
+    /// The tag `ljos workflow` writes on a child it files.
+    #[must_use]
+    pub fn tag(self) -> String {
+        format!("stage-{}", self.word())
+    }
+}
+
+/// A child's stage: its `stage-*` tag, else its title's opening word
+/// (`design:`, `impl:` or `fix:`, `review:`, `panel rN`), so a child filed
+/// by hand with `ljos file "impl: ..."` counts too.
+#[must_use]
+pub fn stage_of(title: &str, tags: &[String]) -> Stage {
+    for (tag, stage) in [
+        ("stage-design", Stage::Design),
+        ("stage-implement", Stage::Implement),
+        ("stage-review", Stage::Review),
+        ("stage-panel", Stage::Panel),
+    ] {
+        if tags.iter().any(|t| t == tag) {
+            return stage;
+        }
+    }
+    let t = title.trim().to_lowercase();
+    if t.starts_with("design:") {
+        Stage::Design
+    } else if t.starts_with("impl:") || t.starts_with("fix:") {
+        Stage::Implement
+    } else if t.starts_with("review:") {
+        Stage::Review
+    } else if panel_round_number(&t).is_some() {
+        Stage::Panel
+    } else {
+        Stage::Other
+    }
+}
+
+/// N in a title that opens `panel rN`.
+#[must_use]
+pub fn panel_round_number(title: &str) -> Option<usize> {
+    let t = title.trim().to_lowercase();
+    let rest = t.strip_prefix("panel r")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// One child of a workflow parent, as the status reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowChild {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+    pub stage: Stage,
+}
+
+impl WorkflowChild {
+    /// From a tracker issue JSON (`vissue show --json`).
+    #[must_use]
+    pub fn from_issue(v: &Value) -> Self {
+        let title = v["title"].as_str().unwrap_or("").to_string();
+        let tags = tags_of(v);
+        Self {
+            id: v["id"].as_str().unwrap_or("").to_string(),
+            stage: stage_of(&title, &tags),
+            state: v["state"].as_str().unwrap_or("").to_string(),
+            title,
+        }
+    }
+
+    #[must_use]
+    pub fn open(&self) -> bool {
+        !matches!(self.state.as_str(), "DONE" | "CANCELLED")
+    }
+}
+
+/// Whether a closed panel round passed, and why not when it did not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelVerdict {
+    pub passed: bool,
+    pub share: f64,
+    pub reasons: Vec<String>,
+}
+
+/// The exit rule on one round's ballots. A pass needs every panel persona's
+/// ballot, no `revise` from a veto persona, and a `pass` share at or above
+/// the quorum that is not a tie. Everything else revises; nothing waits.
+#[must_use]
+pub fn panel_verdict(ballots: &[Forecast], cfg: &WorkflowConfig) -> PanelVerdict {
+    fn norm(s: &str) -> String {
+        s.trim().to_lowercase()
+    }
+    let mut reasons = Vec::new();
+    let missing: Vec<&str> = cfg
+        .personas
+        .iter()
+        .filter(|p| !ballots.iter().any(|b| norm(&b.agent) == norm(p)))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        reasons.push(format!("not cast: {}", missing.join(", ")));
+    }
+    let vetoed: Vec<&str> = cfg
+        .veto
+        .iter()
+        .filter(|p| {
+            ballots
+                .iter()
+                .any(|b| norm(&b.agent) == norm(p) && norm(&b.choice) != "pass")
+        })
+        .map(String::as_str)
+        .collect();
+    if !vetoed.is_empty() {
+        reasons.push(format!("veto: {} voted revise", vetoed.join(", ")));
+    }
+    let pass = ballots.iter().filter(|b| norm(&b.choice) == "pass").count();
+    let rest = ballots.len() - pass;
+    let share = if ballots.is_empty() {
+        0.0
+    } else {
+        pass as f64 / ballots.len() as f64
+    };
+    if ballots.is_empty() {
+        reasons.push("no ballots".to_string());
+    } else if pass == rest {
+        reasons.push(format!("tie at {pass} to {rest}: a tie revises"));
+    } else if share < cfg.quorum {
+        reasons.push(format!(
+            "pass share {share:.2} is under the quorum {:.2}",
+            cfg.quorum
+        ));
+    }
+    PanelVerdict {
+        passed: reasons.is_empty(),
+        share,
+        reasons,
+    }
+}
+
+/// Where a workflow parent stands and what comes next.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowStatus {
+    pub parent: String,
+    pub name: String,
+    pub round: usize,
+    pub stage: &'static str,
+    pub next: String,
+    pub open: Vec<WorkflowChild>,
+    pub passed: bool,
+}
+
+/// The status from the parent's children and the latest round's ballots.
+/// Open children come first, in the order design, implement, review, panel;
+/// a closed latest round is read by [`panel_verdict`].
+#[must_use]
+pub fn workflow_status_of(
+    parent: &str,
+    name: &str,
+    children: &[WorkflowChild],
+    latest_ballots: &[Forecast],
+    cfg: &WorkflowConfig,
+) -> WorkflowStatus {
+    let rounds: Vec<&WorkflowChild> = children
+        .iter()
+        .filter(|c| c.stage == Stage::Panel)
+        .collect();
+    let latest = rounds
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, c)| (panel_round_number(&c.title).unwrap_or(0), *i))
+        .map(|(_, c)| *c);
+    let round = rounds
+        .iter()
+        .filter_map(|c| panel_round_number(&c.title))
+        .max()
+        .unwrap_or(0)
+        .max(rounds.len());
+    let open: Vec<WorkflowChild> = children.iter().filter(|c| c.open()).cloned().collect();
+    let first_open = |stage: Stage| open.iter().find(|c| c.stage == stage);
+    let sit = |c: &WorkflowChild| format!("`ljos sitting {}` ({})", c.id, c.title);
+    let mut passed = false;
+    let (stage, next) = if !children.iter().any(|c| c.stage == Stage::Design) {
+        (
+            "design",
+            format!("file the design child: `ljos workflow {parent} --start {name}`"),
+        )
+    } else if let Some(c) = first_open(Stage::Design) {
+        ("design", sit(c))
+    } else if let Some(c) = first_open(Stage::Implement) {
+        ("implement", sit(c))
+    } else if let Some(c) = first_open(Stage::Review) {
+        ("review", sit(c))
+    } else if let Some(c) = first_open(Stage::Panel) {
+        (
+            "panel",
+            format!(
+                "{}; each of {} casts `ljos vote {} --for pass|revise --expect OPTION --as NAME`, then `ljos finish {} --close`",
+                sit(c),
+                cfg.personas.join(", "),
+                c.id,
+                c.id
+            ),
+        )
+    } else if let Some(c) = open.first() {
+        ("work", sit(c))
+    } else {
+        match latest {
+            None if !children.iter().any(|c| c.stage == Stage::Implement) => (
+                "plan",
+                format!(
+                    "file one `impl: TASK` and one `review: TASK` child per task in the design (`ljos file \"impl: TASK\" --parent {parent}`), then `ljos workflow {parent} --round`"
+                ),
+            ),
+            None => (
+                "panel",
+                format!("open round 1: `ljos workflow {parent} --round`"),
+            ),
+            Some(_) => {
+                let verdict = panel_verdict(latest_ballots, cfg);
+                if verdict.passed {
+                    passed = true;
+                    ("passed", format!("`ljos finish {parent} --close`"))
+                } else {
+                    (
+                        "revise",
+                        format!(
+                            "round {round} did not pass ({}); file a `fix:` and a `review:` child under {parent} for each finding, then `ljos workflow {parent} --round`",
+                            verdict.reasons.join("; ")
+                        ),
+                    )
+                }
+            }
+        }
+    };
+    WorkflowStatus {
+        parent: parent.to_string(),
+        name: name.to_string(),
+        round,
+        stage,
+        next,
+        open,
+        passed,
+    }
+}
+
+/// The status as the sitting and `ljos workflow` print it.
+#[must_use]
+pub fn format_workflow_status(s: &WorkflowStatus) -> String {
+    let mut out = format!(
+        "{} on {}, round {}, stage {}\nnext: {}\n",
+        s.name, s.parent, s.round, s.stage, s.next
+    );
+    for c in &s.open {
+        out.push_str(&format!(
+            "  open {} ({}, {}) {}\n",
+            c.id,
+            c.stage.word(),
+            c.state,
+            c.title
+        ));
+    }
+    out
+}
+
+/// The children of `parent` as the tracker holds them now.
+fn workflow_children(parent: &str) -> Result<Vec<WorkflowChild>> {
+    let said = run_captured("vissue", &["children", parent, "--json"])?;
+    let rows: Vec<Value> = serde_json::from_str(&said.stdout).context("vissue children --json")?;
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        let child = match tracker_show_json(id) {
+            Ok(v) => WorkflowChild::from_issue(&v),
+            Err(_) => WorkflowChild::from_issue(&row),
+        };
+        out.push(child);
+    }
+    Ok(out)
+}
+
+/// The workflow an issue carries, read from the tracker.
+#[must_use]
+pub fn workflow_on(issue: &str) -> Option<String> {
+    tracker_show_json(issue)
+        .ok()
+        .and_then(|v| workflow_name_from_issue(&v))
+}
+
+/// The status of a workflow parent; none when it carries no workflow.
+///
+/// # Errors
+///
+/// The tracker not answering.
+pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
+    let v = tracker_show_json(parent)?;
+    let Some(name) = workflow_name_from_issue(&v) else {
+        return Ok(None);
+    };
+    let cfg = workflow_config();
+    let children = workflow_children(parent)?;
+    let latest = children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.stage == Stage::Panel)
+        .max_by_key(|(i, c)| (panel_round_number(&c.title).unwrap_or(0), *i))
+        .map(|(_, c)| c.id.clone());
+    let ballots = match latest {
+        Some(id) => {
+            let said = run_captured("vissue", &["vote", &id, "--json"])?;
+            forecasts_from_json(&said.stdout)?
+        }
+        None => Vec::new(),
+    };
+    Ok(Some(workflow_status_of(
+        parent, &name, &children, &ballots, &cfg,
+    )))
+}
+
+/// Why `ljos finish PARENT --close` is refused on a workflow parent, or none
+/// when the latest round passed and no child is open.
+#[must_use]
+pub fn workflow_close_refusal(s: &WorkflowStatus) -> Option<String> {
+    if s.passed && s.open.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "finish: {} runs the {} workflow and has not passed its panel (round {}, stage {}); next: {}. Nothing was written",
+        s.parent, s.name, s.round, s.stage, s.next
+    ))
+}
+
+/// File one child of a workflow parent with its stage tag, and commit it.
+fn workflow_child(
+    parent: &str,
+    project: &str,
+    kind: &str,
+    stage: Stage,
+    title: &str,
+) -> Result<String> {
+    let said = run_captured(
+        "vissue",
+        &["q", "-p", project, "--parent", parent, "-t", kind, title],
+    )?;
+    let id = said.stdout.trim().to_string();
+    if id.is_empty() {
+        bail!("workflow: vissue q printed no id for {title:?}");
+    }
+    run_captured("vissue", &["update", &id, "-t", &stage.tag()])?;
+    Ok(id)
+}
+
+/// Put `parent` under workflow `name` and file its design child. Running it
+/// again files nothing new. The parent gets no blocker edge, so it never
+/// turns BLOCKED; the close gate reads the children instead.
+///
+/// # Errors
+///
+/// An unknown workflow, a parent under another workflow, or the tracker
+/// refusing a write.
+pub fn workflow_start(parent: &str, name: &str) -> Result<String> {
+    let name = parse_workflow_name(name)?;
+    let v = tracker_show_json(parent)?;
+    let mut out = String::new();
+    match workflow_name_from_issue(&v) {
+        Some(have) if have != name => {
+            bail!("workflow: {parent} already runs the {have} workflow; nothing was written")
+        }
+        Some(_) => out.push_str(&format!("{parent} already runs the {name} workflow\n")),
+        None => {
+            run_captured(
+                "vissue",
+                &["note", parent, &format!("{WORKFLOW_NOTE_PREFIX} {name}")],
+            )?;
+            run_captured(
+                "vissue",
+                &[
+                    "update",
+                    parent,
+                    "-t",
+                    &format!("{WORKFLOW_TAG_PREFIX}{name}"),
+                ],
+            )?;
+            out.push_str(&format!("{parent} runs the {name} workflow\n"));
+        }
+    }
+    let children = workflow_children(parent)?;
+    if let Some(d) = children.iter().find(|c| c.stage == Stage::Design) {
+        out.push_str(&format!("design child: {} ({})\n", d.id, d.state));
+    } else {
+        let project = v["project"].as_str().unwrap_or("").to_string();
+        let title = v["title"].as_str().unwrap_or(parent);
+        let id = workflow_child(
+            parent,
+            &project,
+            "task",
+            Stage::Design,
+            &format!("design: {title}"),
+        )?;
+        out.push_str(&format!("filed the design child {id}\n"));
+        out.push_str(&persist_tracker(&id, "filed a design child"));
+    }
+    out.push_str(&persist_tracker(parent, "started a workflow"));
+    if let Some(s) = workflow_status(parent)? {
+        out.push_str(&format_workflow_status(&s));
+    }
+    Ok(out)
+}
+
+/// File the next panel round, a decision child with options pass and revise.
+/// Refused while any child is open or once a round has passed.
+///
+/// # Errors
+///
+/// The parent carries no workflow, a child is still open, the design is
+/// missing, the panel already passed, or the tracker refusing a write.
+pub fn workflow_round(parent: &str) -> Result<String> {
+    let Some(s) = workflow_status(parent)? else {
+        bail!("workflow: {parent} carries no workflow; `ljos workflow {parent} --start feature` starts one");
+    };
+    if s.passed {
+        bail!(
+            "workflow: {parent} passed round {}; `ljos finish {parent} --close` closes it",
+            s.round
+        );
+    }
+    if !s.open.is_empty() {
+        let ids: Vec<&str> = s.open.iter().map(|c| c.id.as_str()).collect();
+        bail!(
+            "workflow: {parent} has open children ({}); a round opens when every child is closed. Nothing was written",
+            ids.join(", ")
+        );
+    }
+    if s.stage == "design" {
+        bail!("workflow: {parent} has no design child; next: {}", s.next);
+    }
+    let v = tracker_show_json(parent)?;
+    let project = v["project"].as_str().unwrap_or("").to_string();
+    let title = v["title"].as_str().unwrap_or(parent);
+    let n = s.round + 1;
+    let id = workflow_child(
+        parent,
+        &project,
+        "decision",
+        Stage::Panel,
+        &format!("panel r{n}: {title}"),
+    )?;
+    let cfg = workflow_config();
+    run_captured(
+        "vissue",
+        &[
+            "append",
+            &id,
+            &format!(
+                "Options: pass, revise\nPanel: {}.\nVeto: {}.\nA round passes when every panel persona has cast, no veto persona voted revise, and pass holds a share of at least {:.2} that is not a tie.\nA revise notes its finding on this issue as `finding: NAME: TEXT`.",
+                cfg.personas.join(", "),
+                cfg.veto.join(", "),
+                cfg.quorum
+            ),
+        ],
+    )?;
+    let mut out = format!("filed panel round {n}: {id}\n");
+    out.push_str(&persist_tracker(&id, "filed a panel round"));
+    if let Some(s) = workflow_status(parent)? {
+        out.push_str(&format_workflow_status(&s));
+    }
+    Ok(out)
+}
+
+/// The `== workflow` block of a sitting: the status of the issue's own
+/// workflow, or of its parent's when the issue is a step of one. Empty when
+/// neither carries a workflow.
+#[must_use]
+pub fn workflow_sitting_block(issue: &str) -> String {
+    let Ok(v) = tracker_show_json(issue) else {
+        return String::new();
+    };
+    let (parent, role) = if workflow_name_from_issue(&v).is_some() {
+        (issue.to_string(), String::new())
+    } else {
+        let Some(p) = v["parent"].as_str().filter(|p| !p.trim().is_empty()) else {
+            return String::new();
+        };
+        if workflow_on(p).is_none() {
+            return String::new();
+        }
+        let stage = WorkflowChild::from_issue(&v).stage;
+        (
+            p.to_string(),
+            format!("{issue} is the {} step of {p}\n", stage.word()),
+        )
+    };
+    match workflow_status(&parent) {
+        Ok(Some(s)) => format!("== workflow\n{role}{}", format_workflow_status(&s)),
+        Ok(None) => String::new(),
+        Err(e) => format!("== workflow\n{role}the workflow status could not be read: {e:#}\n"),
+    }
 }
 
 /// The `== playbook` section of a sitting: bind when a name is given,
@@ -9942,7 +10597,7 @@ pub fn panel_personas(issue: &str, all: &[Persona]) -> Vec<Persona> {
     seat_panel(all, &direct, &island, &title)
 }
 
-/// How many specialists a panel seats by their views when no domain and no/// How many specialists a panel seats by their views when no domain and no
+/// How many specialists a panel seats by their views when no domain and no
 /// generalist speaks to the issue.
 pub const PANEL_BY_VIEW: usize = 5;
 
@@ -18433,8 +19088,9 @@ pub fn open_blockers(issue: &str) -> Vec<String> {
 /// seat that sits on blocked work sits on nothing it can finish.
 /// `playbook` names the recipe copied into `== playbook` before recall;
 /// absent, a name already bound, else a closed-set token in the title,
-/// else `sit`. Sitting always binds one of the five before claim. Finish
-/// and release drop the sticky name.
+/// else `sit`. A workflow parent takes its workflow's recipe. Sitting always
+/// binds one of the closed set before claim. Finish and release drop the
+/// sticky name; the workflow on a parent stays.
 pub fn sitting_gated(
     issue: &str,
     assignee: &str,
@@ -18506,12 +19162,19 @@ pub fn sitting_gated(
     // `ljos panel`, so the sitting binds the panel recipe and writes the
     // briefs.
     let decision = tracker_show_json(issue).is_ok_and(|v| is_decision(&v));
+    // A workflow parent takes its workflow's recipe, so a sitting on it
+    // reads the whole loop rather than the plain sitting.
     let name = match (playbook, decision) {
         (None, true) if bound_playbook(issue).is_none() => "company-panel".to_string(),
+        (None, false) if bound_playbook(issue).is_none() => match workflow_on(issue) {
+            Some(w) => w,
+            None => resolve_sitting_playbook(issue, &title, playbook)?,
+        },
         _ => resolve_sitting_playbook(issue, &title, playbook)?,
     };
     out.push_str("== playbook\n");
     out.push_str(&copy_playbook(issue, &name)?);
+    out.push_str(&workflow_sitting_block(issue));
     if decision {
         out.push_str("== panel\n");
         let dir = runtime_dir().join(format!("panel-{issue}"));
@@ -18859,6 +19522,24 @@ pub fn finish(
                  settle with `ljos consensus {issue}`, then --close. Nothing was written",
                 if ballots == 1 { "" } else { "s" }
             );
+        }
+    }
+    // A workflow parent closes when its panel passed and no child is open,
+    // never on the say of the seat that sat on it; refused before anything
+    // is written.
+    if close {
+        match workflow_status(issue) {
+            Ok(Some(s)) => {
+                if let Some(why) = workflow_close_refusal(&s) {
+                    bail!("{why}");
+                }
+            }
+            Ok(None) => {}
+            // A workflow parent whose children cannot be read fails closed.
+            Err(e) if workflow_on(issue).is_some() => bail!(
+                "finish: {issue} runs a workflow and its status could not be read: {e:#}. Nothing was written"
+            ),
+            Err(_) => {}
         }
     }
     let terminal = ["done", "failed", "cancelled"];
@@ -25089,6 +25770,347 @@ mod tests {
             "sit",
             "title-match binds only closed-set tokens"
         );
+    }
+
+    fn wf_child(id: &str, title: &str, state: &str) -> WorkflowChild {
+        WorkflowChild {
+            id: id.into(),
+            title: title.into(),
+            state: state.into(),
+            stage: stage_of(title, &[]),
+        }
+    }
+
+    fn wf_ballot(agent: &str, choice: &str) -> Forecast {
+        Forecast {
+            agent: agent.into(),
+            choice: choice.into(),
+            confidence: None,
+        }
+    }
+
+    fn wf_all(choice: &str) -> Vec<Forecast> {
+        workflow_config()
+            .personas
+            .iter()
+            .map(|p| wf_ballot(p, choice))
+            .collect()
+    }
+
+    #[test]
+    fn feature_is_a_playbook_no_title_binds_by_itself() {
+        assert!(PLAYBOOK_NAMES.contains(&"feature"));
+        assert!(parse_playbook_name("feature").is_ok());
+        assert!(!TITLE_PLAYBOOK_NAMES.contains(&"feature"));
+        assert_eq!(playbook_from_title("Add a feature flag to the HUD"), "sit");
+        let feature = playbook_among("feature", &[]).unwrap();
+        assert!(
+            feature
+                .body
+                .contains("ljos workflow PARENT --start feature"),
+            "{}",
+            feature.body
+        );
+        assert!(feature.body.contains("no round cap"), "{}", feature.body);
+        assert!(playbook_atom(&feature, "ws").is_ok());
+    }
+
+    #[test]
+    fn workflow_defaults_are_the_five_persona_panel() {
+        let cfg = workflow_config();
+        assert_eq!(cfg, WorkflowConfig::default());
+        assert_eq!(cfg.default, "feature");
+        assert!(cfg.auto_bind);
+        assert_eq!(
+            cfg.personas,
+            ["tester", "senior-engineer", "junior-dev", "ceo", "cto"]
+        );
+        assert_eq!(cfg.veto, ["tester"]);
+        assert!((cfg.quorum - 0.6).abs() < 1e-12);
+        assert_eq!(cfg.tie, "revise");
+        assert!(parse_workflow_name(&cfg.default).is_ok());
+        assert!(parse_workflow_name("overnight").is_err());
+    }
+
+    #[test]
+    fn a_workflow_is_the_latest_note_else_the_tag() {
+        let tagged = serde_json::json!({"tags": ["workflow-feature", "Software"], "logbook": []});
+        assert_eq!(
+            workflow_name_from_issue(&tagged).as_deref(),
+            Some("feature")
+        );
+        let noted = serde_json::json!({"tags": [], "logbook": [
+            {"note": "workflow: feature", "timestamp": "[2026-10-11 Sun 15:40]"}
+        ]});
+        assert_eq!(workflow_name_from_issue(&noted).as_deref(), Some("feature"));
+        let dropped = serde_json::json!({"tags": ["workflow-feature"], "logbook": [
+            {"note": "workflow: feature", "timestamp": "[2026-10-11 Sun 15:40]"},
+            {"note": "workflow:", "timestamp": "[2026-10-11 Sun 15:41]"}
+        ]});
+        assert_eq!(
+            workflow_name_from_issue(&dropped),
+            None,
+            "an empty note drops it"
+        );
+        let unknown = serde_json::json!({"tags": ["workflow-poteto"], "logbook": []});
+        assert_eq!(workflow_name_from_issue(&unknown), None);
+        let playbook_only = serde_json::json!({"tags": [], "logbook": [
+            {"note": "playbook: feature", "timestamp": "[2026-10-11 Sun 15:40]"}
+        ]});
+        assert_eq!(workflow_name_from_issue(&playbook_only), None);
+        assert_eq!(
+            playbook_name_from_issue(&playbook_only).as_deref(),
+            Some("feature")
+        );
+    }
+
+    #[test]
+    fn a_stage_is_the_tag_else_the_title() {
+        assert_eq!(
+            stage_of("anything", &["stage-review".into()]),
+            Stage::Review
+        );
+        assert_eq!(stage_of("design: add widget", &[]), Stage::Design);
+        assert_eq!(stage_of("impl: parser", &[]), Stage::Implement);
+        assert_eq!(stage_of("Fix: off by one", &[]), Stage::Implement);
+        assert_eq!(stage_of("review: parser", &[]), Stage::Review);
+        assert_eq!(stage_of("panel r2: add widget", &[]), Stage::Panel);
+        assert_eq!(stage_of("panel review of logos", &[]), Stage::Other);
+        assert_eq!(panel_round_number("panel r12: x"), Some(12));
+        assert_eq!(panel_round_number("panel rx"), None);
+        assert_eq!(Stage::Panel.tag(), "stage-panel");
+    }
+
+    #[test]
+    fn a_round_passes_only_when_every_persona_agrees_enough() {
+        let cfg = workflow_config();
+        assert!(panel_verdict(&wf_all("pass"), &cfg).passed);
+
+        let mut missing = wf_all("pass");
+        missing.pop();
+        let v = panel_verdict(&missing, &cfg);
+        assert!(!v.passed);
+        assert!(
+            v.reasons.iter().any(|r| r.contains("not cast: cto")),
+            "{v:?}"
+        );
+
+        let mut veto = wf_all("pass");
+        veto[0] = wf_ballot("Tester", "revise");
+        let v = panel_verdict(&veto, &cfg);
+        assert!(!v.passed, "the tester's revise blocks a 4 to 1 pass");
+        assert!(
+            v.reasons.iter().any(|r| r.contains("veto: tester")),
+            "{v:?}"
+        );
+
+        let mut low = wf_all("pass");
+        for b in &mut low[2..] {
+            b.choice = "revise".into();
+        }
+        let v = panel_verdict(&low, &cfg);
+        assert!(!v.passed);
+        assert!(
+            v.reasons.iter().any(|r| r.contains("under the quorum")),
+            "{v:?}"
+        );
+
+        let four = WorkflowConfig {
+            personas: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            veto: vec![],
+            ..WorkflowConfig::default()
+        };
+        let tie = [
+            wf_ballot("a", "pass"),
+            wf_ballot("b", "pass"),
+            wf_ballot("c", "revise"),
+            wf_ballot("d", "revise"),
+        ];
+        let v = panel_verdict(&tie, &four);
+        assert!(!v.passed);
+        assert!(
+            v.reasons.iter().any(|r| r.contains("a tie revises")),
+            "{v:?}"
+        );
+
+        let v = panel_verdict(&[], &cfg);
+        assert!(!v.passed);
+        assert!(v.reasons.iter().any(|r| r == "no ballots"), "{v:?}");
+    }
+
+    #[test]
+    fn the_status_walks_design_implement_review_panel() {
+        let cfg = workflow_config();
+        let status = |children: &[WorkflowChild], ballots: &[Forecast]| {
+            workflow_status_of("p-1", "feature", children, ballots, &cfg)
+        };
+        let s = status(&[], &[]);
+        assert_eq!(s.stage, "design");
+        assert!(s.next.contains("--start feature"), "{}", s.next);
+
+        let design_open = [wf_child("p-d", "design: widget", "STARTED")];
+        let s = status(&design_open, &[]);
+        assert_eq!(s.stage, "design");
+        assert!(s.next.contains("ljos sitting p-d"), "{}", s.next);
+
+        let planned = [wf_child("p-d", "design: widget", "DONE")];
+        let s = status(&planned, &[]);
+        assert_eq!(s.stage, "plan");
+        assert!(s.next.contains("impl: TASK"), "{}", s.next);
+
+        let mut work = planned.to_vec();
+        work.push(wf_child("p-i", "impl: parser", "TODO"));
+        work.push(wf_child("p-r", "review: parser", "TODO"));
+        assert_eq!(status(&work, &[]).stage, "implement");
+        work[1].state = "DONE".into();
+        let s = status(&work, &[]);
+        assert_eq!(s.stage, "review");
+        assert!(s.next.contains("p-r"), "{}", s.next);
+        work[2].state = "DONE".into();
+        let s = status(&work, &[]);
+        assert_eq!((s.stage, s.round), ("panel", 0));
+        assert!(s.next.contains("--round"), "{}", s.next);
+
+        work.push(wf_child("p-r1", "panel r1: widget", "TODO"));
+        let s = status(&work, &[]);
+        assert_eq!((s.stage, s.round), ("panel", 1));
+        assert!(s.next.contains("--as NAME"), "{}", s.next);
+        assert!(workflow_close_refusal(&s).is_some());
+
+        work[3].state = "DONE".into();
+        let mut split = wf_all("pass");
+        split[0].choice = "revise".into();
+        let s = status(&work, &split);
+        assert_eq!(s.stage, "revise");
+        assert!(s.next.contains("veto: tester"), "{}", s.next);
+        assert!(s.next.contains("fix:"), "{}", s.next);
+        assert!(!s.passed);
+        let why = workflow_close_refusal(&s).unwrap();
+        assert!(why.contains("has not passed"), "{why}");
+        assert!(why.contains("Nothing was written"), "{why}");
+
+        // Round 2 after the fix: the latest round is the one read.
+        work.push(wf_child("p-f", "fix: tester finding", "DONE"));
+        work.push(wf_child("p-r2", "panel r2: widget", "DONE"));
+        let s = status(&work, &wf_all("pass"));
+        assert_eq!((s.stage, s.round), ("passed", 2));
+        assert!(s.passed);
+        assert_eq!(workflow_close_refusal(&s), None);
+        assert!(s.next.contains("ljos finish p-1 --close"), "{}", s.next);
+
+        // A child opened after a pass closes the gate again.
+        work.push(wf_child("p-x", "impl: late change", "TODO"));
+        let s = status(&work, &wf_all("pass"));
+        assert!(!s.passed);
+        assert!(workflow_close_refusal(&s).is_some());
+
+        let text = format_workflow_status(&s);
+        assert!(
+            text.starts_with("feature on p-1, round 2, stage implement\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("open p-x (implement, TODO) impl: late change"),
+            "{text}"
+        );
+    }
+
+    /// The close gate on a real tracker: a workflow parent with an open
+    /// child is refused before the node is touched, and the same parent
+    /// reads as passed once every child is closed and the round agreed.
+    #[test]
+    fn finish_close_is_refused_on_a_workflow_parent_until_the_panel_passes() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let board = |review_state: &str| {
+            format!(
+                "* TODO [#C] Add widget\n:PROPERTIES:\n:ID:         probe-p001\n:VISSUE_TAGS: workflow-feature\n:END:\n\
+                 * DONE [#C] design: Add widget\n:PROPERTIES:\n:ID:         probe-d001\n:PARENT:     probe-p001\n:VISSUE_TAGS: stage-design\n:END:\n\
+                 * DONE [#C] impl: widget\n:PROPERTIES:\n:ID:         probe-i001\n:PARENT:     probe-p001\n:VISSUE_TAGS: stage-implement\n:END:\n\
+                 * {review_state} [#C] review: widget\n:PROPERTIES:\n:ID:         probe-v001\n:PARENT:     probe-p001\n:VISSUE_TAGS: stage-review\n:END:\n\
+                 * DONE [#C] panel r1: Add widget\n:PROPERTIES:\n:ID:         probe-r001\n:PARENT:     probe-p001\n:TYPE:       decision\n:VISSUE_TAGS: stage-panel\n:END:\n"
+            )
+        };
+        std::fs::write(&issues, board("TODO")).unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ballots: Vec<String> = workflow_config()
+            .personas
+            .iter()
+            .map(|p| format!("{{\"agent\":\"{p}\",\"choice\":\"pass\"}}"))
+            .collect();
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  children) printf '%s' '[{{\"id\":\"probe-d001\"}},{{\"id\":\"probe-i001\"}},{{\"id\":\"probe-v001\"}},{{\"id\":\"probe-r001\"}}]' ;;\n  vote) printf '%s' '[{}]' ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n",
+            ballots.join(",")
+        );
+        let fake = bin.join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path_before = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                path_before
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+        );
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("LJOS_TRACKER_GIT", "off");
+
+        assert_eq!(workflow_on("probe-p001").as_deref(), Some("feature"));
+        assert_eq!(
+            workflow_on("probe-i001"),
+            None,
+            "a child carries no workflow of its own"
+        );
+        let err = super::finish(
+            "probe-p001",
+            "done",
+            None,
+            None,
+            false,
+            0.5,
+            "seat",
+            None,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("runs the feature workflow"), "{err}");
+        assert!(
+            err.contains("probe-v001"),
+            "the next step names the open review: {err}"
+        );
+        assert!(err.contains("Nothing was written"), "{err}");
+        let block = workflow_sitting_block("probe-v001");
+        assert!(
+            block.starts_with("== workflow\nprobe-v001 is the review step of probe-p001\n"),
+            "{block}"
+        );
+
+        std::fs::write(&issues, board("DONE")).unwrap();
+        let s = workflow_status("probe-p001").unwrap().unwrap();
+        assert!(s.passed, "{s:?}");
+        assert_eq!(workflow_close_refusal(&s), None);
+        assert_eq!(workflow_sitting_block("probe-x999"), "");
+
+        match path_before {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+            std::env::remove_var(var);
+        }
     }
 
     #[test]
