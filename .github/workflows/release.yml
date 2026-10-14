@@ -22,9 +22,6 @@ permissions:
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
-env:
-  TAG: ${{ inputs.tag || github.ref_name }}
-
 jobs:
   build:
     strategy:
