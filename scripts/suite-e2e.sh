@@ -88,7 +88,7 @@ run as carol ljos brief skeptic "$D1"; chk "a persona brief says only the tracke
 run as alice vissue create -p demo "Signed: enable the cache?" -q; D6=$(echo "$LAST"|tail -1)
 as alice ljos vote "$D6" --for on --used none >/dev/null 2>&1
 head -c 32 /dev/urandom > "$root/mallory.key"
-run env HOME="$root/home-bob" LJOS_SEAT=bob VISSUE_AGENT=bob DEEDAR_HOST_SIGNING_KEY="$root/mallory.key" ljos vote "$D6" --for on --used none
+run env HOME="$root/home-bob" LJOS_SEAT=bob VISSUE_AGENT=bob LJOS_SEAT_KEY="$root/mallory.key" ljos vote "$D6" --for on --used none
 chk "a ballot under bob's name with another key is refused a signature" has "pinned to key"
 run as carol ljos consensus "$D6"; chk "the gate rejects the mismatched ballot" has "bob's ballot is unsigned\|bob's ballot is signed by a key other"
 as bob ljos vote "$D6" --for on --used none >/dev/null 2>&1

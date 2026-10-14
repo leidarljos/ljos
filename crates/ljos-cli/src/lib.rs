@@ -2289,19 +2289,25 @@ pub fn ballot_seat(verb: &str) -> Result<String> {
 /// an audit can tell when a seat last asked its memory. Best effort: a
 /// log that cannot be written never fails the call.
 pub fn log_recall(verb: &str, what: &str) {
-    use std::io::Write;
     let dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos");
+    log_recall_in(&dir, verb, what);
+}
+
+/// [`log_recall`] into `dir`, so a test names its own directory instead of
+/// racing other tests over `XDG_STATE_HOME`.
+pub fn log_recall_in(dir: &Path, verb: &str, what: &str) {
+    use std::io::Write;
     let what: String = what
         .chars()
         .map(|c| if c.is_whitespace() { ' ' } else { c })
         .take(120)
         .collect();
     let line = format!("{} {} {verb} {what}\n", now_utc(), seat_name());
-    let _ = std::fs::create_dir_all(&dir).and_then(|()| {
+    let _ = std::fs::create_dir_all(dir).and_then(|()| {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -8571,15 +8577,10 @@ mod read_back_tests {
     }
 }
 
-/// The seat's deedar host key path, for signing ballots.
-#[must_use]
-pub fn host_key_path_pub() -> Option<PathBuf> {
-    host_key_path()
-}
-
 /// The seat ballots on `issue` that fail their signature check, said as
-/// one refusal. `Ok` when every seat ballot is signed under its pinned key,
-/// or when `LJOS_UNSIGNED_BALLOTS=allow`.
+/// one refusal. `Ok` when every seat ballot is signed under its pinned key
+/// or is legacy unsigned (committed to the tracker before signing began),
+/// or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok` names the legacy ones.
 ///
 /// # Errors
 ///
@@ -8588,23 +8589,27 @@ pub fn check_seat_signatures(
     issue: &str,
     ballots: &[Value],
     personas: &std::collections::BTreeSet<String>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Vec<String>, String> {
     if ballot_sig::unsigned_allowed() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let seats = seat_ballots(ballots, personas);
     if seats.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let v = tracker_show_json(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
-    let problems = ballot_sig::seat_problems(
+    let legacy = |voter: &str, choice: &str| {
+        ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
+    };
+    let (problems, old) = ballot_sig::seat_check(
         issue,
         &seats,
         &ballot_sig::notes_of(&v),
         &ballot_sig::pins(),
+        &legacy,
     );
     if problems.is_empty() {
-        Ok(())
+        Ok(old)
     } else {
         Err(format!(
             "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
@@ -9056,9 +9061,25 @@ pub fn valid_on(entities: &[String], day: &str) -> bool {
     bound(VALID_FROM).is_none_or(|f| f <= day) && bound(VALID_TO).is_none_or(|t| day <= t)
 }
 
+/// How many hits to ask the pack for when validity filtering will drop
+/// some: four times the limit, at least 40, at most 200.
+#[must_use]
+pub fn valid_fetch(limit: u32) -> u32 {
+    limit.saturating_mul(4).clamp(40, 200).max(limit)
+}
+
 #[cfg(test)]
 mod validity_tests {
-    use super::valid_on;
+    use super::{valid_fetch, valid_on};
+
+    #[test]
+    fn filtering_over_fetches() {
+        assert_eq!(valid_fetch(1), 40);
+        assert_eq!(valid_fetch(10), 40);
+        assert_eq!(valid_fetch(30), 120);
+        assert_eq!(valid_fetch(100), 200);
+        assert_eq!(valid_fetch(500), 500);
+    }
 
     #[test]
     fn a_window_bounds_when_a_claim_held() {
@@ -14135,8 +14156,12 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         let (ballots, personas) = cite_ballots(cite)?;
-        check_seat_signatures(cite, &ballots, &personas)?;
-        let d = seats_decide(cite, &ballots, &personas, &seat_name())?;
+        let old = check_seat_signatures(cite, &ballots, &personas)?;
+        let mut d = seats_decide(cite, &ballots, &personas, &seat_name())?;
+        if !old.is_empty() {
+            d.counted
+                .push_str(&format!("; legacy unsigned: {}", old.join(", ")));
+        }
         let closed = if v["state"].as_str() == Some("DONE") && is_decision(&v) {
             ", closed as a decision"
         } else {
@@ -21684,9 +21709,17 @@ pub fn push_cite_reading_signed(
     rows: &[Value],
     personas: &std::collections::BTreeSet<String>,
     pusher: &str,
-    signed: std::result::Result<(), String>,
+    signed: std::result::Result<Vec<String>, String>,
 ) -> (String, Value) {
-    let decided = signed.and_then(|()| seats_decide(issue, rows, personas, pusher));
+    let decided = signed.and_then(|old| {
+        seats_decide(issue, rows, personas, pusher).map(|mut d| {
+            if !old.is_empty() {
+                d.counted
+                    .push_str(&format!("; legacy unsigned: {}", old.join(", ")));
+            }
+            d
+        })
+    });
     let (mut words, json) = match decided {
         Ok(d) => (
             format!(
@@ -26765,7 +26798,8 @@ mod tests {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let (words, json) = push_cite_reading_signed("x-1", &rows, &personas, "ljos-bot", Ok(()));
+        let (words, json) =
+            push_cite_reading_signed("x-1", &rows, &personas, "ljos-bot", Ok(vec![]));
         assert_eq!(
             words,
             "push cite: x-1 decides guard-fix for a push by ljos-bot; counted ljos-bot for guard-fix, \
@@ -26776,7 +26810,7 @@ mod tests {
         assert_eq!(json["push_cite"]["stands"], true);
         assert_eq!(json["push_cite"]["choice"], "guard-fix");
         let (words, json) =
-            push_cite_reading_signed("x-1", &rows[..4], &personas, "ljos-bot", Ok(()));
+            push_cite_reading_signed("x-1", &rows[..4], &personas, "ljos-bot", Ok(vec![]));
         assert!(
             words.starts_with("push cite: does not stand for ljos-bot: the only seat ballot on x-1 is from ljos-bot"),
             "{words}"

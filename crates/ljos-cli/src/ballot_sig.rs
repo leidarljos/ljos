@@ -1,6 +1,9 @@
-//! Signed seat ballots. A seat signs each ballot it casts with its deedar
-//! host key (`DEEDAR_HOST_SIGNING_KEY` or `~/.config/deedar/host.key`), and
-//! the signature rides on the issue as a `ballot-sig:` note. The tracker
+//! Signed seat ballots. A seat signs each ballot it casts with its own
+//! ed25519 key, made on its first vote at
+//! `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (or `LJOS_SEAT_KEY`), so
+//! seats sharing one HOME still sign apart. The signature rides on the
+//! issue as a `ballot-sig:` note. A ballot the tracker committed before
+//! signing began ([`SIGNING_SINCE`]) is legacy unsigned and still counts. The tracker
 //! pins each seat's public key the first time it signs (`.ljos-seat-keys`
 //! at the tracker root, committed), so a later ballot under that name signed
 //! by another key is a mismatch. The push gate counts a seat ballot only
@@ -62,6 +65,94 @@ fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| anyhow::anyhow!("seat key {} holds fewer than 32 bytes", path.display()))?;
     Ok(SigningKey::from_bytes(&seed))
+}
+
+/// The commit time of the signing change: a ballot the tracker recorded
+/// before it is legacy unsigned and still counts; one after needs a
+/// signature.
+pub const SIGNING_SINCE: i64 = 1_791_984_778;
+
+/// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when set, else
+/// `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (`~/.local/share` when unset).
+/// Seats that share one HOME still get one key each.
+#[must_use]
+pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    let name: String = seat
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(
+        base.join("ljos")
+            .join("seats")
+            .join(name)
+            .join("ballot.key"),
+    )
+}
+
+/// The key at `path`, made on first use: 32 random bytes, mode 0600.
+///
+/// # Errors
+///
+/// The key cannot be read or written.
+pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
+    if !path.exists() {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut seed = [0u8; 32];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("seat key {}", path.display()))?;
+        std::io::Write::write_all(&mut f, &seed)?;
+    }
+    key_from_file(path)
+}
+
+/// When the tracker recorded `voter`'s ballot for `choice` on `issue`: the
+/// newest commit that added or removed its `] VOTER: CHOICE` line in the
+/// file holding the issue. `None` when the tracker is not a git repository
+/// or the ballot is not committed yet.
+#[must_use]
+pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
+    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
+    let files = git(&["grep", "-l", "-E", &pattern])?;
+    let file = files.lines().next()?.to_string();
+    let needle = format!("] {}: {}", voter.trim(), choice.trim());
+    git(&["log", "-1", "--format=%ct", "-S", &needle, "--", &file])?
+        .parse()
+        .ok()
 }
 
 /// The note text for a ballot signed by `key`.
@@ -131,9 +222,9 @@ pub fn pins() -> BTreeMap<String, String> {
 /// No seat key, a key that does not match the pin, or a tracker write that
 /// failed.
 pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
-    let path = crate::host_key_path_pub()
-        .ok_or_else(|| anyhow::anyhow!("no seat key: set DEEDAR_HOST_SIGNING_KEY or create ~/.config/deedar/host.key; the ballot is unsigned and no gate counts it"))?;
-    let key = key_from_file(&path)?;
+    let path = seat_key_path(voter)
+        .ok_or_else(|| anyhow::anyhow!("no place for a seat key: HOME and XDG_DATA_HOME are unset; the ballot is unsigned and no gate counts it"))?;
+    let key = load_or_create(&path)?;
     let mine = hex::encode(key.verifying_key().to_bytes());
     let mut pinned = pins();
     match pinned.get(voter.trim()) {
@@ -176,13 +267,29 @@ pub fn seat_problems(
     notes: &[String],
     pins: &BTreeMap<String, String>,
 ) -> Vec<String> {
+    seat_check(issue, seats, notes, pins, &|_, _| false).0
+}
+
+/// [`seat_problems`] with grandfathering: an unsigned ballot `legacy`
+/// says the tracker recorded before signing began counts, and is named in
+/// the second list as legacy unsigned.
+#[must_use]
+pub fn seat_check(
+    issue: &str,
+    seats: &[(&str, &str)],
+    notes: &[String],
+    pins: &BTreeMap<String, String>,
+    legacy: &dyn Fn(&str, &str) -> bool,
+) -> (Vec<String>, Vec<String>) {
     let mut out = Vec::new();
+    let mut old = Vec::new();
     for (voter, choice) in seats {
         let newest = notes
             .iter()
             .filter_map(|n| parse_note(n))
             .find(|n| n.voter == *voter);
         match newest {
+            None if legacy(voter, choice) => old.push((*voter).to_string()),
             None => out.push(format!("{voter}'s ballot is unsigned")),
             Some(n) if n.choice != *choice => out.push(format!(
                 "{voter}'s signature is for {} and the ballot says {choice}",
@@ -200,7 +307,7 @@ pub fn seat_problems(
             },
         }
     }
-    out
+    (out, old)
 }
 
 /// The logbook notes of an issue JSON, newest first.
@@ -268,6 +375,40 @@ mod tests {
         let lone = sign_with(&mallory, "d-1", "bob", "ship");
         let p = seat_problems("d-1", &[("bob", "ship")], &[lone], &pins);
         assert!(p[0].contains("no pinned key"), "{p:?}");
+    }
+
+    #[test]
+    fn an_old_unsigned_ballot_is_legacy_and_a_new_one_is_not() {
+        let pins = BTreeMap::new();
+        let legacy = |v: &str, _: &str| v == "inky";
+        let (bad, old) = seat_check(
+            "d-1",
+            &[("inky", "ship"), ("bob", "ship")],
+            &[],
+            &pins,
+            &legacy,
+        );
+        assert_eq!(old, vec!["inky".to_string()]);
+        assert_eq!(bad, vec!["bob's ballot is unsigned".to_string()]);
+    }
+
+    #[test]
+    fn seats_sharing_a_home_get_their_own_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("ljos/seats/inky/ballot.key");
+        let b = dir.path().join("ljos/seats/disk-saver/ballot.key");
+        let ka = load_or_create(&a).unwrap();
+        let kb = load_or_create(&b).unwrap();
+        assert_ne!(ka.verifying_key(), kb.verifying_key());
+        assert_eq!(
+            load_or_create(&a).unwrap().verifying_key(),
+            ka.verifying_key()
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

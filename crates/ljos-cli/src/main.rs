@@ -1243,7 +1243,6 @@ fn run_command() -> Result<()> {
             explain,
         } => {
             ljos_cli::log_recall("search", &query.join(" "));
-            let mut hits = packset_search_as_of(&join(&query), limit, as_of.as_deref(), rerank)?;
             let day = match valid_at.as_deref().map(str::trim) {
                 Some("any") => None,
                 Some(d) => {
@@ -1254,9 +1253,18 @@ fn run_command() -> Result<()> {
                 }
                 None => Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
             };
+            // Expired claims are dropped after the pack answers, so ask for
+            // more than the limit and cut to it once they are gone.
+            let fetch = if day.is_some() {
+                ljos_cli::valid_fetch(limit)
+            } else {
+                limit
+            };
+            let mut hits = packset_search_as_of(&join(&query), fetch, as_of.as_deref(), rerank)?;
             if let Some(day) = day {
                 hits.retain(|h| ljos_cli::valid_on(&h.entities, &day));
             }
+            hits.truncate(limit as usize);
             print!("{}", format_hits(&hits, explain));
         }
         Cmd::Evidence { accession } => {

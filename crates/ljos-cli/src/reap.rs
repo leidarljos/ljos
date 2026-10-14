@@ -310,16 +310,13 @@ mod tests {
 mod log_tests {
     #[test]
     fn recall_log_appends_one_line_per_call() {
+        // Its own directory, not XDG_STATE_HOME: other tests set that env
+        // in parallel, and a shared env made this flake.
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", dir.path());
-        crate::log_recall("recall", "a-1");
-        crate::log_recall("search", "two\nlines");
-        match old {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
-        let log = std::fs::read_to_string(dir.path().join("ljos/recall.log")).unwrap();
+        let logs = dir.path().join("ljos");
+        crate::log_recall_in(&logs, "recall", "a-1");
+        crate::log_recall_in(&logs, "search", "two\nlines");
+        let log = std::fs::read_to_string(logs.join("recall.log")).unwrap();
         let lines: Vec<_> = log.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].ends_with(" recall a-1"));
