@@ -2969,11 +2969,122 @@ fn seat_env_text(name: &str) -> String {
          # Before a prompt: ljos hook --prompt\n\
          # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
          {}\n\
+         {}\n\
          {}\n",
         shared_holder_id(name),
         keep_seat_assignment(name),
-        session_assignment(name)
+        session_assignment(name),
+        GUARD_PATH_LINES
     )
+}
+
+/// The env file's guard lines: put the guard shims first on PATH, once.
+/// A runner with no pre-command hook then runs `rm`, `git` and `find`
+/// through ljos-policyd, from its own shell and from any child that looks
+/// them up on PATH.
+const GUARD_PATH_LINES: &str = "# Command guard: rm, git and find go through ljos-policyd first (shims, see `ljos onboard`).\n\
+_ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n\
+case \":$PATH:\" in *\":$_ljos_guard:\"*) ;; *) [ -d \"$_ljos_guard\" ] && export PATH=\"$_ljos_guard:$PATH\";; esac\n\
+unset _ljos_guard";
+
+/// The commands the guard shims stand in front of.
+pub const GUARD_SHIMMED: [&str; 3] = ["rm", "git", "find"];
+
+/// Where the guard shims live: `$XDG_DATA_HOME/ljos/guard-bin`, or
+/// `~/.local/share/ljos/guard-bin`.
+#[must_use]
+pub fn guard_bin_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| expand("~/.local/share"), PathBuf::from)
+        .join("ljos")
+        .join("guard-bin")
+}
+
+/// The shim each guarded command is: ask ljos-policyd about the argv, refuse
+/// a deny with the rule and what to do instead, else exec the next binary of
+/// that name on PATH. Without ljos-policyd it runs the command (fail open),
+/// so a box without the guard still works.
+pub const GUARD_SHIM: &str = r#"#!/bin/sh
+# ljos command guard shim (written by `ljos onboard`). It stands in front of
+# rm, git and find for runners that have no pre-command hook.
+me=${0##*/}
+here=$(cd -- "${0%/*}" 2>/dev/null && pwd -P)
+real=
+old_ifs=$IFS; IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || continue
+  [ "$d" = "${0%/*}" ] && continue
+  [ "$(cd -- "$d" 2>/dev/null && pwd -P)" = "$here" ] && continue
+  if [ -x "$d/$me" ] && [ ! -d "$d/$me" ]; then real=$d/$me; break; fi
+done
+IFS=$old_ifs
+if [ -z "$real" ]; then echo "ljos guard: no $me found on PATH" >&2; exit 127; fi
+if command -v ljos-policyd >/dev/null 2>&1; then
+  verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
+  case $verdict in
+    deny*)
+      rule=$(printf '%s' "$verdict" | head -n 1 | cut -f 2)
+      case $rule in
+        rm-rf-*|find-delete-*) hint="Leave it, or move it to the trash (trash-put or gio trash). Moving it under /tmp to delete it there is the same delete." ;;
+        *) hint="This rewrites or discards history or work. Ask the person first; they can run it themselves." ;;
+      esac
+      echo "ljos guard: denied ($rule): $me $*" >&2
+      echo "ljos guard: $hint" >&2
+      exit 126 ;;
+  esac
+fi
+exec "$real" "$@"
+"#;
+
+/// Write the guard shims into [`guard_bin_dir`].
+fn guard_step(dry: bool) -> Step {
+    let dir = guard_bin_dir();
+    let current = GUARD_SHIMMED
+        .iter()
+        .all(|c| std::fs::read_to_string(dir.join(c)).is_ok_and(|t| t == GUARD_SHIM));
+    if current {
+        return Step {
+            what: "guard".into(),
+            detail: format!("shims for rm, git, find are current in {}", dir.display()),
+            ok: true,
+        };
+    }
+    if dry {
+        return Step {
+            what: "guard".into(),
+            detail: format!("would write shims for rm, git, find in {}", dir.display()),
+            ok: true,
+        };
+    }
+    let wrote = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        for c in GUARD_SHIMMED {
+            let p = dir.join(c);
+            std::fs::write(&p, GUARD_SHIM)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        Ok(())
+    })();
+    match wrote {
+        Ok(()) => Step {
+            what: "guard".into(),
+            detail: format!(
+                "wrote shims for rm, git, find in {}; the seat env puts them first on PATH",
+                dir.display()
+            ),
+            ok: true,
+        },
+        Err(e) => Step {
+            what: "guard".into(),
+            detail: format!("{}: {e}", dir.display()),
+            ok: false,
+        },
+    }
 }
 
 /// `NAME-shell`, the holder a runner that stamps no conversation id
@@ -3078,6 +3189,7 @@ fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Re
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
     steps.push(env_step(&env_path_for(file, h), &h.name, dry));
+    steps.push(guard_step(dry));
     steps.extend([
         deed_store_step(dry),
         tracker_step(dry),
@@ -22583,6 +22695,52 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A guard shim refuses what ljos-policyd denies, with the rule and a
+    /// way forward, and runs the real command for everything else.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_refuses_a_deny_and_runs_the_rest() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join("guard-bin");
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&guard).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        let exe = |p: &std::path::Path, text: &str| {
+            std::fs::write(p, text).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exe(&guard.join("rm"), super::GUARD_SHIM);
+        exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; esac\necho allow\n",
+        );
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        let run = |args: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("rm {args}"))
+                .env(
+                    "PATH",
+                    format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
+                )
+                .output()
+                .unwrap()
+        };
+        let denied = run(&format!("-rf '{}'", victim.display()));
+        assert_eq!(denied.status.code(), Some(126));
+        let err = String::from_utf8_lossy(&denied.stderr);
+        assert!(err.contains("denied (rm-rf-outside-tmp)"), "{err}");
+        assert!(err.contains("trash"), "{err}");
+        assert!(victim.exists());
+        let file = victim.join("f");
+        std::fs::write(&file, "x").unwrap();
+        assert!(run(&format!("'{}'", file.display())).status.success());
+        assert!(!file.exists());
+        assert!(super::seat_env_text("grokbot").contains("ljos/guard-bin"));
+    }
+
     /// A prompt naming an issue is handed the issue's recall.
     #[test]
     fn a_prompt_naming_an_issue_gets_its_recall() {
