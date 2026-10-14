@@ -78,6 +78,12 @@ run ljos consensus "$D1"; chk "ljos consensus names a leader on D1" bash -c '! p
 run as alice ljos consensus "$D1"; chk "signed seat ballots stand at the push gate" has "decides ship for a push by alice"
 chk "each seat's key is pinned on the tracker" test "$(wc -l < "$VISSUE_ROOT/.ljos-seat-keys")" -eq 3
 
+# 4a. only the tracker is proof
+run as alice ljos vote "$D1" --for ship --used none; chk "ljos vote reads its ballot back from the tracker" has "recorded on the tracker: alice for ship"
+run as alice ljos vote demo-zzzz --for ship --used none; chk "a vote the tracker does not hold is not reported as cast" bash -c '! printf "%s" "$0" | grep -q "recorded on the tracker"' "$LAST"
+as carol ljos persona skeptic --anchor 0.3 --view "Asks for evidence." >/dev/null 2>&1
+run as carol ljos brief skeptic "$D1"; chk "a persona brief says only the tracker is proof" has "Only the tracker is proof"
+
 # 4b. forged and unsigned ballots do not count
 run as alice vissue create -p demo "Signed: enable the cache?" -q; D6=$(echo "$LAST"|tail -1)
 as alice ljos vote "$D6" --for on --used none >/dev/null 2>&1

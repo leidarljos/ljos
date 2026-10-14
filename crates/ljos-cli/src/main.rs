@@ -1563,6 +1563,20 @@ fn run_command() -> Result<()> {
                 }
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 run_as("vissue", &refs, as_persona.as_deref())?;
+                // Read the ballot back: only the tracker is proof it exists.
+                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
+                let rows: Vec<serde_json::Value> =
+                    ljos_cli::run_captured("vissue", &["vote", &issue, "--json"])
+                        .ok()
+                        .and_then(|o| serde_json::from_str(&o.stdout).ok())
+                        .unwrap_or_default();
+                if !ljos_cli::tracker_holds_ballot(&rows, &who, &args[3]) {
+                    bail!(
+                        "the tracker does not hold a ballot from {who} for {} on {issue}: nothing was cast",
+                        args[3]
+                    );
+                }
+                println!("recorded on the tracker: {who} for {} on {issue}", args[3]);
                 if as_persona.is_none() {
                     // A seat ballot is signed with the seat's key; the push
                     // gate counts no unsigned one.

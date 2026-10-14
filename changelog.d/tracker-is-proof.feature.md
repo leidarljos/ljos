@@ -1,0 +1,1 @@
+Only the tracker is proof: `ljos vote` reads its ballot back from `vissue vote --json` and fails when the tracker does not hold it, printing `recorded on the tracker` only when it does, and persona briefs and agent definitions tell the model to confirm its row there and never report a ballot, claim or finish the tracker does not show.

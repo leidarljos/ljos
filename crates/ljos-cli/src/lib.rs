@@ -369,7 +369,8 @@ pub fn persona_agent(p: &Persona) -> (String, String) {
          1. Run `ljos brief {who} ISSUE` and read all of it: what you remembered yourself, what the seat knows on your domains, the playbook and the work.\n\
          2. Decide as yourself before you see another voice: do not read `vissue vote ISSUE`, `vissue show ISSUE` or `ljos consensus ISSUE` until your ballot is cast.\n\
          3. Cast one ballot: `ljos vote ISSUE --for OPTION --expect '{{\"OPTION\": SHARE}}' --confidence P --used none --as {who}`, with your forecast of the others' shares and the probability you give your own choice.\n\
-         4. Note why, in short sentences, with the evidence your ballot stands on: `vissue note ISSUE \"{who}: ...\"`.\n\n\
+         4. Check the tracker holds it: `vissue vote ISSUE --json` has your row. Only the tracker is proof; a ballot you did not see there was not cast, so say that instead of reporting a vote.\n\
+         5. Note why, in short sentences, with the evidence your ballot stands on: `vissue note ISSUE \"{who}: ...\"`.\n\n\
          Do not edit files, push, or ssh. Stop after the note.\n",
         view = p.view.trim(),
         anchor = p.anchor,
@@ -8431,6 +8432,30 @@ fn host_key_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Whether the tracker holds `voter`'s ballot for `choice` on `issue`,
+/// from `vissue vote --json` rows. The read-back after a cast: only the
+/// tracker is proof a ballot exists.
+#[must_use]
+pub fn tracker_holds_ballot(rows: &[Value], voter: &str, choice: &str) -> bool {
+    rows.iter().any(|r| {
+        r["agent"].as_str().map(str::trim) == Some(voter.trim())
+            && r["choice"].as_str().map(str::trim) == Some(choice.trim())
+    })
+}
+
+#[cfg(test)]
+mod read_back_tests {
+    #[test]
+    fn only_the_matching_row_is_proof() {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(r#"[{"agent":"bob","choice":"ship"}]"#).unwrap();
+        assert!(super::tracker_holds_ballot(&rows, "bob", "ship"));
+        assert!(!super::tracker_holds_ballot(&rows, "bob", "hold"));
+        assert!(!super::tracker_holds_ballot(&rows, "alice", "ship"));
+        assert!(!super::tracker_holds_ballot(&[], "bob", "ship"));
+    }
+}
+
 /// The seat's deedar host key path, for signing ballots.
 #[must_use]
 pub fn host_key_path_pub() -> Option<PathBuf> {
@@ -11018,6 +11043,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
          P is the probability you give that your own choice is the outcome. \
          --used none records that the ballot drew on no deed. \
          The line it prints is a count. `ljos consensus {issue}` is the settle. \
+         Only the tracker is proof: your ballot is cast when `vissue vote {issue} --json` holds your row and `ljos vote` printed `recorded on the tracker`. Never report a ballot, claim or finish the tracker does not show. \
          A lesson of your own goes in with `ljos remember --as {name} \"...\"`.\n",
         name = p.name,
     ));
