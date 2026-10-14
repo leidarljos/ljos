@@ -2515,6 +2515,10 @@ fn forward_call(
 #[prompt_handler(router = Self::prompt_router())]
 impl ServerHandler for LjosServer {
     fn get_info(&self) -> ServerInfo {
+        // A runner with no session hook (goose, OpenHands, Continue, Roo,
+        // Kilo, Zed) still hears the session-start line: it opens the
+        // instructions the runner hands the model.
+        let start = ljos_cli::session_start_line();
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
@@ -2523,7 +2527,7 @@ impl ServerHandler for LjosServer {
                 .build(),
         )
         .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
-        .with_instructions(instructions_for(
+        .with_instructions(format!("{start}\n\n{}", instructions_for(
             "One seat over five habitats: tracker, pack, deed store, claim graph, \
              consensus. Read ljos://protocol first; it says which store answers \
              which question and the order of tools in a sitting. ljos_sitting \
@@ -2548,7 +2552,7 @@ impl ServerHandler for LjosServer {
              The holder is that name and a short tag for the `*_SESSION_ID` the \
              runner stamped, else that name tagged with the runner's process; a shell the runner \
              opens finds the same names, so no field here needs an assignee.",
-        ))
+        )))
     }
 
     /// One tool call, held as the thread the call names in its `_meta`
