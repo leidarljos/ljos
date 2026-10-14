@@ -151,6 +151,7 @@ pub fn reap(idle: Duration, apply: bool) -> Result<String> {
             Err(e) => out.push_str(&format!("reap: {}: mail to {seat} failed: {e}\n", h.id)),
         }
     }
+    out.push_str(&enforce_quorum_deadlines(apply));
     out.push_str(&format!(
         "reap: {} of {} claims idle over {hours:.1}h{}\n",
         idle_ones.len(),
@@ -164,9 +165,114 @@ pub fn reap(idle: Duration, apply: bool) -> Result<String> {
     Ok(out)
 }
 
+/// The note `ljos file --quorum N --deadline T` leaves on a decision.
+pub const QUORUM_NOTE: &str = "quorum: ";
+
+/// Open issues whose vote is due: the latest `quorum: N by RFC3339` note,
+/// a deadline before `now`, and no `quorum timed out` note yet. From
+/// `vissue export` (one JSON issue a line).
+#[must_use]
+pub fn due_quorums(export: &str, now: DateTime<chrono::Utc>) -> Vec<(String, usize, String)> {
+    let mut due = Vec::new();
+    for line in export.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if matches!(v["state"].as_str(), Some("DONE" | "CANCELLED")) {
+            continue;
+        }
+        let notes: Vec<&str> = v["logbook"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["note"].as_str())
+            .collect();
+        if notes.iter().any(|n| n.contains("quorum timed out")) {
+            continue;
+        }
+        // The logbook is newest first.
+        let Some(rest) = notes
+            .iter()
+            .find_map(|n| n.trim().strip_prefix(QUORUM_NOTE))
+        else {
+            continue;
+        };
+        let Some((n, at)) = rest.split_once(" by ") else {
+            continue;
+        };
+        let (Ok(n), Ok(at_t)) = (
+            n.trim().parse::<usize>(),
+            DateTime::parse_from_rfc3339(at.trim()),
+        ) else {
+            continue;
+        };
+        if at_t < now {
+            due.push((
+                v["id"].as_str().unwrap_or("").to_string(),
+                n,
+                at.trim().to_string(),
+            ));
+        }
+    }
+    due
+}
+
+/// Run the tracker's quorum gate with its deadline on every vote that is
+/// due. A vote short of its quorum lapses (one note, exit 3); one that met
+/// its quorum is left to its settle. A dry run says which would be checked.
+fn enforce_quorum_deadlines(apply: bool) -> String {
+    let Ok(said) = crate::run_captured("vissue", &["export"]) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (id, n, at) in due_quorums(&said.stdout, chrono::Utc::now()) {
+        if !apply {
+            out.push_str(&format!("would check {id}: quorum {n} was due {at}\n"));
+            continue;
+        }
+        let gate = std::process::Command::new("vissue")
+            .args([
+                "consensus",
+                &id,
+                "--gate",
+                "--quorum",
+                &n.to_string(),
+                "--deadline",
+                &at,
+            ])
+            .output();
+        match gate.map(|o| o.status.code()) {
+            Ok(Some(3)) => {
+                out.push_str(&format!(
+                    "lapsed {id}: fewer than {n} ballots by {at}; noted, nothing decided\n"
+                ));
+                out.push_str(&crate::persist_tracker(&id, "quorum timed out"));
+            }
+            Ok(_) => out.push_str(&format!("{id}: quorum {n} met by {at}\n")),
+            Err(e) => out.push_str(&format!("reap: {id}: quorum gate did not run: {e}\n")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vote_past_its_deadline_is_due_once() {
+        let past = r#"{"id":"d-1","state":"TODO","logbook":[{"note":"quorum: 3 by 2000-01-01T00:00:00Z"}]}"#;
+        let future = r#"{"id":"d-2","state":"TODO","logbook":[{"note":"quorum: 3 by 2999-01-01T00:00:00Z"}]}"#;
+        let lapsed = r#"{"id":"d-3","state":"TODO","logbook":[{"note":"quorum timed out: 1 of 3"},{"note":"quorum: 3 by 2000-01-01T00:00:00Z"}]}"#;
+        let closed = r#"{"id":"d-4","state":"DONE","logbook":[{"note":"quorum: 3 by 2000-01-01T00:00:00Z"}]}"#;
+        let plain = r#"{"id":"d-5","state":"TODO","logbook":[]}"#;
+        let all = [past, future, lapsed, closed, plain].join("\n");
+        let due = due_quorums(&all, chrono::Utc::now());
+        assert_eq!(
+            due,
+            vec![("d-1".to_string(), 3, "2000-01-01T00:00:00Z".to_string())]
+        );
+    }
 
     #[test]
     fn idle_parses_units() {

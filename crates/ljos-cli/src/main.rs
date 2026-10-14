@@ -360,6 +360,13 @@ enum Cmd {
         /// Body prose under the heading. A decision's body names `Options: A, B`.
         #[arg(long)]
         body: Option<String>,
+        /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
+        /// lapses the vote once the deadline passes short of it.
+        #[arg(long, value_name = "N", requires = "deadline")]
+        quorum: Option<usize>,
+        /// RFC 3339 time the ballots are due, with `--quorum`.
+        #[arg(long, value_name = "RFC3339", requires = "quorum")]
+        deadline: Option<String>,
     },
     /// Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief.
     OpenPanel {
@@ -1294,7 +1301,13 @@ fn run_command() -> Result<()> {
             tags,
             priority,
             body,
+            quorum,
+            deadline,
         } => {
+            if let Some(d) = &deadline {
+                chrono::DateTime::parse_from_rfc3339(d.trim())
+                    .map_err(|e| anyhow::anyhow!("--deadline {d:?} is not RFC 3339: {e}"))?;
+            }
             let held = if top || parent.is_some() {
                 None
             } else {
@@ -1336,6 +1349,11 @@ fn run_command() -> Result<()> {
             }
             let id = text.split_whitespace().next().unwrap_or("").to_string();
             print!("{text}");
+            if let (Some(n), Some(d)) = (quorum, &deadline) {
+                let note = format!("{}{n} by {}", ljos_cli::reap::QUORUM_NOTE, d.trim());
+                ljos_cli::run_captured("vissue", &["note", &id, &note])?;
+                println!("{id}: {note}; `ljos reap --apply` lapses it past the deadline");
+            }
             // An issue for a projected board waits in its inbox until the fold.
             let inbox = text
                 .lines()

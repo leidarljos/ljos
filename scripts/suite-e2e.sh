@@ -104,6 +104,15 @@ run as alice ljos consensus "$D4" --quorum 3 --deadline 2000-01-01T00:00:00Z; rc
 chk "the lapse is noted once" bash -c 'test "$(vissue show "$0" | grep -c "quorum timed out")" = 1' "$D4"
 run as alice ljos consensus "$D1" --quorum 3; chk "ljos consensus: quorum met reads on" test $? -eq 0
 
+# 7b. reap enforces a quorum deadline with no one asking
+run as alice ljos file --top -p demo -t decision "Deadline: switch CI runner?" --body "Options: switch, stay" --quorum 3 --deadline 2000-01-01T00:00:00Z; D5=$(echo "$LAST" | grep -oE '^[a-z]+-[a-z0-9]{4}' | head -1)
+chk "ljos file records the quorum and deadline" bash -c 'vissue show "$0" | grep -q "quorum: 3 by"' "$D5"
+as bob ljos vote "$D5" --for switch --used none >/dev/null 2>&1
+run as carol ljos reap; chk "a reap dry run names the due vote" has "would check $D5"
+run as carol ljos reap --apply; chk "reap --apply lapses the short vote" has "lapsed $D5"
+chk "the lapse is on the tracker once" bash -c 'test "$(vissue show "$0" | grep -c "quorum timed out")" = 1' "$D5"
+run as carol ljos reap --apply; chk "a second reap does not lapse it again" bash -c '! printf "%s" "$0" | grep -q "lapsed $1"' "$LAST" "$D5"
+
 # 8. finish
 run as bob ljos finish "$T1" --gen "$GEN" --assignee bob --lesson "The CHANGES line shipped in one commit. Review passed first time." --close
 chk "bob finishes $T1" has "completed"
