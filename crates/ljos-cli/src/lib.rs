@@ -18,6 +18,7 @@ pub mod ballot_sig;
 pub mod bookkeep;
 pub mod capture;
 pub mod command_prefs;
+pub mod converge;
 pub mod extract;
 pub mod hud;
 pub mod jev;
@@ -10094,8 +10095,8 @@ A feature runs design, implement, review and a panel vote until the panel agrees
 1. Start on the parent: `ljos workflow PARENT --start feature` files the design child. `ljos workflow PARENT` prints the stage and the next step at any time.
 2. Design: write the design as a deed and cite it on the design child. Then file one `impl: TASK` and one `review: TASK` child per task under the parent.
 3. A review cites its findings as a deed, and a holder other than the implementer does it.
-4. With every child closed, `ljos workflow PARENT --round` files the next `panel rN` decision. Each panel persona casts `ljos vote ROUND --for pass|revise --expect OPTION --as NAME`, and a revise notes its finding as `finding: NAME: TEXT` on the round.
-5. A round that does not pass turns each finding into a `fix:` and a `review:` child, then the next round. There is no round cap, and the loop waits on no one.
+4. With every child closed, `ljos workflow PARENT --round` files the next `panel rN` decision. Each panel persona casts `ljos vote ROUND --for pass|revise --expect OPTION --as NAME`, and a revise notes its finding on the round. `finding: NAME: TEXT` is a nit. `finding: NAME: wording: TEXT` and `finding: NAME: style: TEXT` are notes. `finding: NAME: blocking: REASON :: TEXT` is blocking, and a blocking mark with no reason stays a nit.
+5. Once the substance has settled, a nit, a wording note or a style note is recorded on the issue and is not a child. A blocking objection with a reason is one `fix:` child, and the next round reviews it. The same objection is not filed again. At the round limit (three by default) the parent closes as settled-with-notes and lists what remains. That close is automatic, and the loop does not wait.
 6. `ljos finish PARENT --close` is refused until the latest round passed and no child is open.
 ";
 
@@ -10578,8 +10579,9 @@ pub const WORKFLOW_NOTE_PREFIX: &str = "workflow:";
 pub const WORKFLOW_TAG_PREFIX: &str = "workflow-";
 
 /// The workflow settings S1 reads: which workflow new feature work takes,
-/// the panel, who can veto, the pass share and the tie-break. There is no
-/// round cap and no setting that waits on the person.
+/// the panel, who can veto, the pass share and the tie-break. The round
+/// limit lives on the panel budget. The loop closes itself, and nothing
+/// here waits on the person.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowConfig {
     /// The workflow new feature work binds to.
@@ -10906,7 +10908,7 @@ pub fn workflow_status_of(
                     (
                         "revise",
                         format!(
-                            "round {round} did not pass ({}); file a `fix:` and a `review:` child under {parent} for each finding, then `ljos workflow {parent} --round`",
+                            "round {round} did not pass ({}); `ljos workflow {parent} --round` files a `fix:` child only for a blocking finding with a reason, records a nit, wording or style finding as a note, and closes as settled-with-notes at the round limit. It does not wait",
                             verdict.reasons.join("; ")
                         ),
                     )
@@ -11020,7 +11022,7 @@ pub fn workflow_close_refusal(s: &WorkflowStatus) -> Option<String> {
 }
 
 /// File one child of a workflow parent with its stage tag, and commit it.
-fn workflow_child(
+pub(crate) fn workflow_child(
     parent: &str,
     project: &str,
     kind: &str,
@@ -11096,64 +11098,187 @@ pub fn workflow_start(parent: &str, name: &str) -> Result<String> {
     Ok(out)
 }
 
-/// File the next panel round, a decision child with options pass and revise.
-/// Refused while any child is open or once a round has passed.
+/// Where the workflow panel stands for [`workflow_round`]: the latest
+/// round's findings, the children already filed, and whether ballots are
+/// still missing.
+fn panel_state_for(parent: &str, status: &WorkflowStatus) -> Result<converge::PanelState> {
+    let children = workflow_children(parent)?;
+    let latest = children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.stage == Stage::Panel)
+        .max_by_key(|(i, c)| (panel_round_number(&c.title).unwrap_or(0), *i))
+        .map(|(_, c)| c);
+    let mut objections = Vec::new();
+    let mut awaiting_ballots = false;
+    if let Some(panel) = latest {
+        if let Ok(v) = issue_record(&panel.id) {
+            objections.extend(converge::objections_in(&v, parent));
+        }
+        if !panel.open() {
+            let said = run_captured("vissue", &["vote", &panel.id, "--json"])?;
+            let ballots = forecasts_from_json(&said.stdout).unwrap_or_default();
+            let verdict = panel_verdict(&ballots, &workflow_config());
+            awaiting_ballots = verdict
+                .reasons
+                .iter()
+                .any(|r| r.starts_with("not cast") || r == "no ballots");
+        }
+    }
+    let parent_issue = issue_record(parent).unwrap_or(Value::Null);
+    objections.extend(converge::objections_in(&parent_issue, parent));
+    let mut seen = Vec::new();
+    let mut children_filed = 0usize;
+    for child in &children {
+        if let Some(key) = converge::filed_key(&child.title, parent) {
+            seen.push(key);
+            children_filed += 1;
+        }
+    }
+    Ok(converge::PanelState {
+        round: status.round,
+        passed: status.passed,
+        dissent_depth: converge::dissent_depth(&parent_issue),
+        children_filed,
+        open_children: status.open.len(),
+        awaiting_ballots,
+        seen,
+        wall_secs: None,
+        tokens: None,
+        objections,
+    })
+}
+
+/// Write a below-threshold objection onto `issue` when it is not already
+/// a note there. A blocking objection is left for the filer.
+fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()> {
+    let have = issue_record(issue)
+        .map(|v| converge::objections_in(&v, issue))
+        .unwrap_or_default();
+    let mut keys: std::collections::BTreeSet<_> =
+        have.iter().map(converge::Objection::key).collect();
+    for objection in &state.objections {
+        if objection.may_file(state.passed, state.dissent_depth) || !keys.insert(objection.key()) {
+            continue;
+        }
+        let text = format!(
+            "finding: {}: {}: {} @ {}",
+            objection.persona,
+            objection.severity.word(),
+            objection.text,
+            objection.target
+        );
+        run_captured("vissue", &["note", issue, &text])?;
+    }
+    Ok(())
+}
+
+/// File the next panel round, or one `fix:` child for a blocking finding.
+/// A round of nits, or a round past the limit, closes the parent as
+/// settled-with-notes. That close is the step. Refused while a child is
+/// open, while the panel has not voted, or once a round has passed with
+/// nothing blocking left.
 ///
 /// # Errors
 ///
-/// The parent carries no workflow, a child is still open, the design is
-/// missing, the panel already passed, or the tracker refusing a write.
+/// The parent carries no workflow, a child is still open, the panel has
+/// not all voted, the design is missing, the panel already passed, or the
+/// tracker refusing a write.
 pub fn workflow_round(parent: &str) -> Result<String> {
-    let Some(s) = workflow_status(parent)? else {
+    let Some(status) = workflow_status(parent)? else {
         bail!("workflow: {parent} carries no workflow; `ljos workflow {parent} --start feature` starts one");
     };
-    if s.passed {
+    if status.stage == "design" && status.open.is_empty() {
         bail!(
-            "workflow: {parent} passed round {}; `ljos finish {parent} --close` closes it",
-            s.round
+            "workflow: {parent} has no design child; next: {}",
+            status.next
         );
     }
-    if !s.open.is_empty() {
-        let ids: Vec<&str> = s.open.iter().map(|c| c.id.as_str()).collect();
-        bail!(
-            "workflow: {parent} has open children ({}); a round opens when every child is closed. Nothing was written",
-            ids.join(", ")
-        );
-    }
-    if s.stage == "design" {
-        bail!("workflow: {parent} has no design child; next: {}", s.next);
-    }
-    let v = tracker_show_json(parent)?;
-    let project = v["project"].as_str().unwrap_or("").to_string();
-    let title = v["title"].as_str().unwrap_or(parent);
-    let n = s.round + 1;
-    let id = workflow_child(
-        parent,
-        &project,
-        "decision",
-        Stage::Panel,
-        &format!("panel r{n}: {title}"),
-    )?;
-    let cfg = workflow_config();
-    run_captured(
-        "vissue",
-        &[
-            "append",
-            &id,
-            &format!(
-                "Options: pass, revise\nPanel: {}.\nVeto: {}.\nA round passes when every panel persona has cast, no veto persona voted revise, and pass holds a share of at least {:.2} that is not a tie.\nA revise notes its finding on this issue as `finding: NAME: TEXT`.",
+    let state = panel_state_for(parent, &status)?;
+    let limits = converge::load_budget().workflow;
+    match converge::plan_round(&state, &limits) {
+        converge::RoundPlan::Passed => {
+            let _ = note_objections_below(parent, &state);
+            bail!(
+                "workflow: {parent} passed round {}; `ljos finish {parent} --close` closes it",
+                status.round
+            );
+        }
+        converge::RoundPlan::Hold { why } => {
+            let ids: Vec<&str> = status.open.iter().map(|c| c.id.as_str()).collect();
+            let which = if ids.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", ids.join(", "))
+            };
+            bail!("workflow: {parent} {why}{which}. Nothing was written");
+        }
+        converge::RoundPlan::Settle { summary } => {
+            let mut out = converge::close_settled(parent, &summary)?;
+            if let Some(s) = workflow_status(parent)? {
+                out.push_str(&format_workflow_status(&s));
+            }
+            Ok(out)
+        }
+        converge::RoundPlan::FileBlocking { objections } => {
+            let v = tracker_show_json(parent)?;
+            let project = v["project"].as_str().unwrap_or("").to_string();
+            let mut out = String::new();
+            for objection in &objections {
+                let id = converge::file_fix(parent, &project, objection)?;
+                out.push_str(&format!(
+                    "filed fix {id} for a blocking objection from {}: {}\n",
+                    objection.persona, objection.text
+                ));
+                out.push_str(&persist_tracker(&id, "filed a blocking fix"));
+            }
+            let n = objections.len();
+            out.push_str(&format!(
+                "the next round opens when the {n} blocking {} closed\n",
+                if n == 1 { "fix is" } else { "fixes are" }
+            ));
+            if let Some(s) = workflow_status(parent)? {
+                out.push_str(&format_workflow_status(&s));
+            }
+            Ok(out)
+        }
+        converge::RoundPlan::OpenRound { n } => {
+            let v = tracker_show_json(parent)?;
+            let project = v["project"].as_str().unwrap_or("").to_string();
+            let title = v["title"].as_str().unwrap_or(parent);
+            let id = workflow_child(
+                parent,
+                &project,
+                "decision",
+                Stage::Panel,
+                &format!("panel r{n}: {title}"),
+            )?;
+            let cfg = workflow_config();
+            let body = format!(
+                "Options: pass, revise\n\
+                 Panel: {}.\n\
+                 Veto: {}.\n\
+                 A round passes when every panel persona has cast, no veto persona voted revise, \
+                 and pass holds a share of at least {:.2} that is not a tie.\n\
+                 A revise notes its finding on this issue as `finding: NAME: TEXT` (a nit), \
+                 `finding: NAME: wording: TEXT`, `finding: NAME: style: TEXT`, or \
+                 `finding: NAME: blocking: REASON :: TEXT`.\n\
+                 A nit, a wording note or a style note stays on the issue. \
+                 A blocking finding with a reason is one `fix:` child. \
+                 At the round limit the parent closes as settled-with-notes and does not wait.",
                 cfg.personas.join(", "),
                 cfg.veto.join(", "),
                 cfg.quorum
-            ),
-        ],
-    )?;
-    let mut out = format!("filed panel round {n}: {id}\n");
-    out.push_str(&persist_tracker(&id, "filed a panel round"));
-    if let Some(s) = workflow_status(parent)? {
-        out.push_str(&format_workflow_status(&s));
+            );
+            run_captured("vissue", &["append", &id, &body])?;
+            let mut out = format!("filed panel round {n}: {id}\n");
+            out.push_str(&persist_tracker(&id, "filed a panel round"));
+            if let Some(s) = workflow_status(parent)? {
+                out.push_str(&format_workflow_status(&s));
+            }
+            Ok(out)
+        }
     }
-    Ok(out)
 }
 
 /// The `== workflow` block of a sitting: the status of the issue's own
@@ -27395,7 +27520,12 @@ mod tests {
             "{}",
             feature.body
         );
-        assert!(feature.body.contains("no round cap"), "{}", feature.body);
+        assert!(
+            feature.body.contains("settled-with-notes"),
+            "{}",
+            feature.body
+        );
+        assert!(feature.body.contains("does not wait"), "{}", feature.body);
         assert!(playbook_atom(&feature, "ws").is_ok());
     }
 
@@ -27597,6 +27727,179 @@ mod tests {
             text.contains("open p-x (implement, TODO) impl: late change"),
             "{text}"
         );
+    }
+
+    /// The anneal loop on a tracker: nit findings after a revise close the
+    /// parent, a blocking finding files one fix, and round 3 lists a new
+    /// blocking finding instead of filing it.
+    #[test]
+    fn a_round_of_nits_closes_and_a_blocking_finding_files_one_fix() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join("Software/anneal")).unwrap();
+        let issues = root.join("Software/anneal/issues.org");
+        let note = |line: &str| format!("- Note: \"{line}\" [2026-10-14 Wed 12:00]\n");
+        let board = |extra: &str, later: &str| {
+            format!(
+                "#+VISSUE: 1\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+                 * STARTED [#C] anneal the notes\n:PROPERTIES:\n:ID:         anneal-z64x\n:VISSUE_TAGS: workflow-feature\n:END:\n\
+                 * DONE [#C] design: anneal the notes\n:PROPERTIES:\n:ID:         anneal-d\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-design\n:END:\n\
+                 * DONE [#C] impl: anneal the notes\n:PROPERTIES:\n:ID:         anneal-i\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-implement\n:END:\n\
+                 * DONE [#C] review: anneal the notes\n:PROPERTIES:\n:ID:         anneal-v\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-review\n:END:\n\
+                 * DONE [#C] panel r1: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r1\n:PARENT:     anneal-z64x\n:TYPE:       decision\n:VISSUE_TAGS: stage-panel\n:END:\n\
+                 :LOGBOOK:\n\
+                 {nit}{wording}{extra}:END:\n\
+                 {later}",
+                nit = note("finding: ceo: comma in note 0"),
+                wording = note("finding: cto: wording: heading tone"),
+            )
+        };
+        std::fs::write(&issues, board("", "")).unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.path().join("vissue.log");
+        let children = dir.path().join("children.json");
+        let ballots = dir.path().join("ballots.json");
+        let ids = |extra: &[&str]| {
+            let mut rows = vec![
+                "anneal-d".to_string(),
+                "anneal-i".to_string(),
+                "anneal-v".to_string(),
+                "anneal-r1".to_string(),
+            ];
+            rows.extend(extra.iter().map(|id| (*id).to_string()));
+            format!(
+                "[{}]",
+                rows.iter()
+                    .map(|id| format!("{{\"id\":\"{id}\"}}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        std::fs::write(&children, ids(&[])).unwrap();
+        let mut rows = Vec::new();
+        for persona in &workflow_config().personas {
+            let choice = if persona == "tester" {
+                "revise"
+            } else {
+                "pass"
+            };
+            rows.push(format!(
+                "{{\"agent\":\"{persona}\",\"choice\":\"{choice}\"}}"
+            ));
+        }
+        std::fs::write(&ballots, format!("[{}]", rows.join(","))).unwrap();
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LOG\"\ncase \"$1\" in\n  children) cat \"$CHILDREN\" ;;\n  vote) cat \"$BALLOTS\" ;;\n  q) echo anneal-f001 ;;\n  note|update|append) exit 0 ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n"
+        );
+        let fake = bin.join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let save = |key: &str| std::env::var_os(key);
+        let saved = [
+            save("PATH"),
+            save("VISSUE_ROOT"),
+            save("VISSUE_NO_ROUTE"),
+            save("ISSUE_ROOT"),
+            save("LJOS_TRACKER_GIT"),
+            save("XDG_CONFIG_HOME"),
+            save("VISSUE_CONFIG"),
+            save("LJOS_CONFIG"),
+            save("LOG"),
+            save("CHILDREN"),
+            save("BALLOTS"),
+        ];
+        let keys = [
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "ISSUE_ROOT",
+            "LJOS_TRACKER_GIT",
+            "XDG_CONFIG_HOME",
+            "VISSUE_CONFIG",
+            "LJOS_CONFIG",
+            "LOG",
+            "CHILDREN",
+            "BALLOTS",
+        ];
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                saved[0]
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+        );
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::remove_var("ISSUE_ROOT");
+        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("xdg"));
+        std::env::remove_var("VISSUE_CONFIG");
+        std::env::remove_var("LJOS_CONFIG");
+        std::env::set_var("LOG", &log);
+        std::env::set_var("CHILDREN", &children);
+        std::env::set_var("BALLOTS", &ballots);
+
+        let out = workflow_round("anneal-z64x").unwrap();
+        assert!(out.contains("settled-with-notes"), "{out}");
+        assert!(out.contains("comma in note 0"), "{out}");
+        assert_eq!(out.matches("heading tone").count(), 1, "{out}");
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            said.lines().all(|line| !line.starts_with("q ")),
+            "nits filed a child: {said}"
+        );
+
+        std::fs::write(&log, "").unwrap();
+        std::fs::write(
+            &issues,
+            board(
+                &note(
+                    "finding: tester: blocking: the exit status is dropped :: the gate ignores a failure",
+                ),
+                "",
+            ),
+        )
+        .unwrap();
+        let out = workflow_round("anneal-z64x").unwrap();
+        assert!(out.contains("filed fix anneal-f001"), "{out}");
+        assert!(out.contains("the gate ignores a failure"), "{out}");
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            said.lines().filter(|line| line.starts_with("q ")).count(),
+            1,
+            "{said}"
+        );
+
+        std::fs::write(&log, "").unwrap();
+        let later = "\
+* DONE [#C] panel r2: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r2\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-panel\n:END:\n\
+* DONE [#C] panel r3: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r3\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-panel\n:END:\n\
+:LOGBOOK:\n- Note: \"finding: tester: blocking: the wait is still unchecked :: the wait is unchecked\" [2026-10-14 Wed 12:05]\n:END:\n";
+        std::fs::write(&issues, board("", later)).unwrap();
+        std::fs::write(&children, ids(&["anneal-r2", "anneal-r3"])).unwrap();
+        let out = workflow_round("anneal-z64x").unwrap();
+        assert!(out.contains("settled-with-notes"), "{out}");
+        assert!(out.contains("round 3"), "{out}");
+        assert!(out.contains("the wait is unchecked"), "{out}");
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            said.lines().all(|line| !line.starts_with("q ")),
+            "round 3 filed another child: {said}"
+        );
+
+        for (key, value) in keys.iter().zip(saved) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     /// The close gate on a real tracker: a workflow parent with an open
