@@ -973,7 +973,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Call this when the work taught something. One lesson, two short sentences at most, stored as an episode: the hook shows it when a prompt bears on it, and a recalled review or a consolidation promotes it to standing. Pass transient false to store a standing rule now. Pass transient true to force an episode. Never a transcript. Progress notes go on the issue.",
+        description = "Call this when the work taught something. One lesson, two short sentences at most, written at once as a standing lesson with origin agent-derived and its provenance; nobody approves it first, and a later review prunes it. Pass transient true to store an episode the hook shows only when a prompt bears on it. Never a transcript. Progress notes go on the issue.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -986,7 +986,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ClaimArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
-        packset_write_as(
+        ljos_cli::packset_write_agent(
             "Remember",
             &args.text,
             args.as_persona.as_deref(),

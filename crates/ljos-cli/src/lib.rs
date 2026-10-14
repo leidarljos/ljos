@@ -19,6 +19,7 @@ pub mod command_prefs;
 pub mod hud;
 pub mod jev;
 pub mod mail;
+pub mod memories;
 pub mod persona_session;
 pub mod plugin;
 pub mod reap;
@@ -7207,7 +7208,7 @@ pub fn correction_cue(text: &str) -> Option<&'static str> {
     CORRECTION_CUES.iter().find(|c| lower.contains(*c)).copied()
 }
 
-/// File a correction as a proposal. The hook does not write a preference.
+/// Write a correction as an agent-derived preference, reviewed later.
 /// Once per session per cue. A pack that does not answer is left for the note.
 pub fn store_correction(call: &HookCall) {
     let Some(hit) = correction_cue(&call.cue) else {
@@ -7243,7 +7244,7 @@ fn file_correction(call: &HookCall, key: &str) {
         let workspace = client.workspace();
         let mut atom = atom_body("preference", &text, &workspace);
         stamp_horizon(&mut atom, "preference", &text, Some(false));
-        admit::propose_atom(&client, atom).is_ok()
+        admit::write_agent(&client, atom).is_ok()
     });
     if wrote {
         mark_seen(call.session.as_deref(), &[key]);
@@ -8755,12 +8756,21 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
 #[must_use]
 pub fn atom_source() -> Value {
     let seat = whoami();
+    // The runner that connected, when the seat was renamed over it.
+    let harness = seat_from_runner_env()
+        .or_else(seat_from_tree)
+        .map_or_else(|| seat.seat.clone(), |s| s.seat);
     let mut source = serde_json::json!({
-        "harness": seat.seat,
+        "harness": harness,
+        "seat": seat.seat,
         "session": seat.holder,
         "host": sync::host(),
+        "at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         "via": "ljos",
     });
+    if let Some(reason) = memories::write_reason() {
+        source["reason"] = Value::String(reason);
+    }
     let turn = std::env::vars()
         .filter(|(k, v)| k.ends_with("_TURN_ID") && !v.trim().is_empty())
         .map(|(_, v)| v.trim().to_string())
@@ -8819,6 +8829,39 @@ fn post_claim_horizon(
     Ok(posted)
 }
 
+/// Write a claim an agent made, at once. No person approves it first: it
+/// carries origin `agent-derived` and its provenance in `source`, and
+/// `ljos memories review` keeps, edits, merges or drops it afterwards.
+/// The pack's own checks (secrets, size, the two-sentence cap) still apply.
+///
+/// # Errors
+///
+/// An empty text, an unknown label, or the pack refusing the claim.
+pub fn packset_write_agent(
+    label: &str,
+    text: &str,
+    persona: Option<&str>,
+    transient: Option<bool>,
+) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("{label}: empty text is not a claim");
+    }
+    let kind = atom_kind(label)?;
+    let mut atom = atom_body(kind, trimmed, &workspace);
+    stamp_horizon(&mut atom, kind, trimmed, transient);
+    if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
+        add_entities(&mut atom, [persona_entity(name)]);
+        atom["set"] = Value::String(persona_set(name));
+    }
+    with_writer(|| {
+        admit::write_agent(&client, atom.clone())
+            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })
+}
+
 /// `horizon:standing` or `horizon:transient` on a claim as it is written.
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
@@ -8839,19 +8882,15 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
 }
 
 /// The horizon `ljos remember` writes when neither `--transient` nor
-/// `--standing` is given. The person typing it is the review, so the lesson
-/// takes effect at once, like `prefer` and `rule`. Run under an agent runner it is
-/// the agent's lesson: an episode. The hook shows it when a prompt bears
-/// on it, and a review promotes it to standing.
+/// `--standing` is given: standing, whoever wrote it, like `prefer` and
+/// `rule`. Under an agent runner the lesson keeps origin `agent-derived`
+/// and its provenance, and `ljos memories review` prunes it later.
 #[must_use]
 pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
-    if transient {
-        Some(true)
-    } else if standing || !under_runner {
-        Some(false)
-    } else {
-        None
-    }
+    // An agent's lesson stands when written, like the person's: no review
+    // gates it. `ljos memories review` keeps, edits or drops it afterwards.
+    let _ = (standing, under_runner);
+    Some(transient)
 }
 
 /// The line `ljos remember` prints after the write, saying when the hook
@@ -8864,7 +8903,7 @@ pub fn remember_note(body: &Value) -> &'static str {
     if standing {
         "standing: the hook shows it from the next prompt it bears on"
     } else {
-        "episode: written from an agent runner; the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
+        "episode: the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
     }
 }
 
@@ -20031,8 +20070,7 @@ pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
 /// File the lesson of a finished sitting. A lesson learned on an issue
 /// belongs to the scope of the repository that holds the issue, wherever
 /// it was written. One the person typed in a terminal of their own is
-/// written at once; any other is a proposal until `ljos accept`, or until
-/// the person types the same words. Called after the node completed, so
+/// `user-declared`; any other is written at once as `agent-derived`. Called after the node completed, so
 /// a refusal is a line that names the pack's reason and the command that
 /// keeps the lesson, never an error.
 /// A lesson cut into claims the pack takes: at most two sentences each.
@@ -20098,9 +20136,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             tags.push(format!("scope:{scope}"));
         }
         add_entities(&mut atom, tags);
-        // Standing once accepted: the person's `ljos accept` is the
-        // review, so the hook shows the lesson from the next prompt.
-        // Until then the writer holds it and no search returns it.
+        // Standing at once; the review comes afterwards.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
         if lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal()) {
             // Typed by the person in a terminal of their own: no
@@ -20121,10 +20157,18 @@ fn finish_lesson(issue: &str, text: &str) -> String {
                 "remembered your lesson (id {id}); the hook shows it from the next prompt\n"
             ));
         }
-        let filed = admit::propose_atom(&client, atom)?;
+        let posted = with_writer(|| {
+            admit::write_agent(&client, atom.clone())
+                .context("finish: POST /v1/atoms failed for the lesson")
+        })?;
+        let id: String = posted["id"]
+            .as_str()
+            .unwrap_or("?")
+            .chars()
+            .take(8)
+            .collect();
         Ok(format!(
-            "proposed {} as agent-derived; `ljos accept {}` writes it\n",
-            filed.id, filed.id
+            "remembered the lesson (id {id}) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it\n"
         ))
     })();
     match filed {
@@ -21907,10 +21951,18 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         let lesson = finding_lesson(&campaign, f);
         let mut atom = atom_body("lesson", &lesson, &workspace);
         add_entities(&mut atom, finding_entities(&campaign, f));
-        // Standing once the person accepts it, like a finish lesson.
+        // Standing at once, like a finish lesson; reviewed afterwards.
         stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
-        let result = match admit::propose_atom(&client, atom) {
-            Ok(filed) => format!("proposed {}", filed.id),
+        let result = match admit::write_agent(&client, atom) {
+            Ok(posted) => format!(
+                "remembered {}",
+                posted["id"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .chars()
+                    .take(8)
+                    .collect::<String>()
+            ),
             Err(e) => format!("refused: {e}"),
         };
         out.push(Remembered {
@@ -27106,13 +27158,14 @@ mod tests {
             session: Some("plain".into()),
             shape: HookShape::Asks,
         });
-        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
-        assert!(proposals.contains("\"kind\":\"preference\""), "{proposals}");
-        assert!(proposals.contains("\"status\":\"open\""), "{proposals}");
+        assert!(
+            !state.path().join("ljos/proposals.jsonl").exists(),
+            "a plain correction is written, not proposed"
+        );
         assert_eq!(
             posts.load(Ordering::SeqCst),
             1,
-            "the proposal was the only post"
+            "the correction was written once"
         );
     }
 
@@ -28850,9 +28903,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn the_person_s_remember_stands_and_an_agent_s_waits() {
+    fn a_remember_stands_whoever_writes_it_and_an_episode_waits() {
         assert_eq!(remember_horizon(false, false, false), Some(false));
-        assert_eq!(remember_horizon(false, false, true), None);
         assert_eq!(remember_horizon(true, false, false), Some(true));
         assert_eq!(remember_horizon(false, true, true), Some(false));
         let mut person = atom_body("lesson", "Run the linter before the push.", "w");
@@ -28862,12 +28914,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "",
             remember_horizon(false, false, false),
         );
+        assert_eq!(
+            remember_horizon(false, false, true),
+            Some(false),
+            "an agent's lesson stands at once"
+        );
         let mut agent = atom_body("lesson", "Run the linter before the push.", "w");
         stamp_horizon(
             &mut agent,
             "lesson",
             "",
-            remember_horizon(false, false, true),
+            remember_horizon(true, false, true),
         );
         assert!(remember_note(&person).starts_with("standing"));
         assert!(remember_note(&agent).starts_with("episode"));
@@ -28890,10 +28947,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             is_refresher(&hit(&person)),
             "a standing lesson is a refresher"
         );
-        assert!(
-            !is_refresher(&hit(&agent)),
-            "the tag stays transient until a review"
-        );
+        assert!(!is_refresher(&hit(&agent)), "an episode is not a refresher");
         let sure = DenseSignal {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT),
@@ -32859,19 +32913,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let filed = admit::propose_atom(&client, atom).unwrap();
         assert!(filed.remote);
 
-        store_correction(&HookCall {
-            event: "UserPromptSubmit".into(),
-            cue: "you should have used the cluster for this fuse run".into(),
-            session: Some("launder".into()),
-            shape: HookShape::Asks,
-        });
-
         let live = stored.lock().unwrap().clone();
-        assert_eq!(
-            live.len(),
-            1,
-            "the proposal and the hook wrote no atom: {live:?}"
-        );
+        assert_eq!(live.len(), 1, "the proposal wrote no atom: {live:?}");
         assert!(live.iter().all(|a| a["text"] != lesson));
         assert!(live.iter().all(|a| a["kind"] != "preference"));
         let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();

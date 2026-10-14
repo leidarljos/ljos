@@ -34,7 +34,7 @@ agent, in Cursor or any other tool, can see who has it and what it taught.
 ljos finish ISSUE --lesson "One or two sentences the next agent can act on."
 ```
 
-The lesson is filed as a proposal; `ljos accept ID` from the person writes it.
+The lesson is written at once as `agent-derived`; `ljos memories review` prunes it later.
 A lesson the person types at `ljos finish` in their own terminal is written at once.
 Finishing does not close the ticket. Add `--close` only when the person has
 accepted the work. To stop without finishing, `ljos release ISSUE`.

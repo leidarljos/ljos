@@ -35,17 +35,193 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum MemCmd {
+    /// List memories newest first with their provenance. Unreviewed agents' memories by default.
+    List {
+        #[command(flatten)]
+        f: MemFilter,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Review unreviewed memories: interactive on a terminal; with --keep/--drop/--edit/--merge, for scripts.
+    Review {
+        #[command(flatten)]
+        f: MemFilter,
+        #[arg(long)]
+        json: bool,
+        /// Keep this memory as it stands. Repeatable.
+        #[arg(long, value_name = "ID")]
+        keep: Vec<String>,
+        /// Drop this memory (the pack tombstones it). Repeatable.
+        #[arg(long = "drop", value_name = "ID")]
+        drop_ids: Vec<String>,
+        /// Rewrite this memory with --text.
+        #[arg(long, value_name = "ID")]
+        edit: Option<String>,
+        /// Merge these memories into one, with --text or their texts joined. Repeatable, two or more.
+        #[arg(long, value_name = "ID")]
+        merge: Vec<String>,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Browse, filter by seat or date, and prune memories in a terminal viewer.
+    Tui {
+        #[command(flatten)]
+        f: MemFilter,
+    },
+    /// Name duplicates and never-recalled memories. A dry run unless --apply.
+    Prune {
+        /// Duplicates and memories never recalled in --days.
+        #[arg(long)]
+        stale: bool,
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args, Clone)]
+struct MemFilter {
+    /// Only this seat's.
+    #[arg(long)]
+    seat: Option<String>,
+    /// Only those written on or after YYYY-MM-DD.
+    #[arg(long)]
+    since: Option<String>,
+    /// Reviewed ones too.
+    #[arg(long)]
+    all: bool,
+    /// The person's own claims too.
+    #[arg(long)]
+    user: bool,
+}
+
+impl MemFilter {
+    fn filter(&self) -> ljos_cli::memories::Filter {
+        ljos_cli::memories::Filter {
+            seat: self.seat.clone(),
+            since: self.since.clone(),
+            reviewed: self.all,
+            user: self.user,
+        }
+    }
+}
+
+fn memories_cmd(cmd: MemCmd) -> Result<()> {
+    use ljos_cli::memories as mem;
+    let everything = mem::Filter {
+        reviewed: true,
+        user: true,
+        ..mem::Filter::default()
+    };
+    match cmd {
+        MemCmd::List { f, json } => {
+            let shown = mem::list(&mem::live_atoms()?, &mem::reviews(), &f.filter());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&shown)?);
+            } else if shown.is_empty() {
+                println!("no memories to review");
+            } else {
+                for m in &shown {
+                    print!("{}", mem::describe(m));
+                }
+            }
+        }
+        MemCmd::Review {
+            f,
+            json,
+            keep,
+            drop_ids,
+            edit,
+            merge,
+            text,
+        } => {
+            let all = mem::list(&mem::live_atoms()?, &mem::reviews(), &everything);
+            let scripted =
+                !keep.is_empty() || !drop_ids.is_empty() || edit.is_some() || !merge.is_empty();
+            if scripted {
+                for id in &keep {
+                    print!("{}", mem::keep(id, &all)?);
+                }
+                for id in &drop_ids {
+                    print!("{}", mem::drop_memory(id, &all)?);
+                }
+                if let Some(id) = edit {
+                    let text = text
+                        .as_deref()
+                        .context("memories review --edit needs --text")?;
+                    print!("{}", mem::edit(&id, text, &all)?);
+                } else if !merge.is_empty() {
+                    print!("{}", mem::merge(&merge, text.as_deref(), &all)?);
+                }
+                return Ok(());
+            }
+            let shown: Vec<_> = all.into_iter().filter(|m| f.filter().admits(m)).collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&shown)?);
+            } else if std::io::stdin().is_terminal() {
+                mem::review_interactive(&shown)?;
+            } else {
+                for m in &shown {
+                    print!("{}", mem::describe(m));
+                }
+            }
+        }
+        MemCmd::Tui { f } => mem::tui(&f.filter())?,
+        MemCmd::Prune {
+            stale,
+            days,
+            apply,
+            json,
+        } => {
+            if !stale {
+                bail!("memories prune: pass --stale");
+            }
+            let all = mem::list(
+                &mem::live_atoms()?,
+                &mem::reviews(),
+                &mem::Filter {
+                    reviewed: true,
+                    ..mem::Filter::default()
+                },
+            );
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let found = mem::stale(&all, days, &today);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else {
+                for s in &found {
+                    println!("{}  {}  {}", s.id.get(..8).unwrap_or(&s.id), s.why, s.text);
+                }
+                if !apply {
+                    println!("{} stale; dry run, pass --apply to drop them", found.len());
+                }
+            }
+            if apply {
+                for s in &found {
+                    print!("{}", mem::drop_memory(&s.id, &all)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is an episode: the hook shows it when a prompt bears on it, and a review promotes it to standing.
+    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Store this as an episode. The hook shows it when a prompt bears on it. The default under an agent runner.
+        /// Store this as an episode. The hook shows it when a prompt bears on it.
         #[arg(long)]
         transient: bool,
-        /// Store this as a standing rule now, without waiting for a review. The default when the person types it.
+        /// Store this as a standing rule now. The default.
         #[arg(long)]
         standing: bool,
     },
@@ -61,6 +237,11 @@ enum Cmd {
         /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
         #[arg(long, value_name = "PATTERN")]
         ask: Vec<String>,
+    },
+    /// Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer.
+    Memories {
+        #[command(subcommand)]
+        cmd: MemCmd,
     },
     /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
@@ -897,7 +1078,11 @@ fn run_command() -> Result<()> {
             let agents =
                 ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
             let horizon = ljos_cli::remember_horizon(transient, standing, agents);
-            let body = packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?;
+            let body = if agents {
+                ljos_cli::packset_write_agent("Remember", &text, as_persona.as_deref(), horizon)?
+            } else {
+                packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
+            };
             println!("{}", write_ack(&body));
             eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
@@ -976,6 +1161,7 @@ fn run_command() -> Result<()> {
             }
             print!("{}", ljos_cli::admit::accept(&id)?);
         }
+        Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::Forget { id, why, json } => {
             let body = packset_forget(&id, why.as_deref())?;
             println!("{}", ljos_cli::atom_out(&body, json)?);

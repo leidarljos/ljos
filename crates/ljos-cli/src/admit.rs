@@ -233,6 +233,38 @@ fn post_direct(client: &PacksetClient, atom: &Value) -> Result<Option<String>> {
     }
 }
 
+/// Write `atom` as an agent's own memory, live at once.
+///
+/// It carries origin `agent-derived`. A writer from before agent writes
+/// were live answers `held as proposal ID`; that proposal is accepted on
+/// the spot, so the memory is live there too. Nothing waits for a person.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the claim for a reason other than
+/// holding it (a secret, the size cap).
+pub fn write_agent(client: &PacksetClient, mut atom: Value) -> Result<Value> {
+    if atom["text"].as_str().unwrap_or("").trim().is_empty() {
+        bail!("remember: empty text is not a claim");
+    }
+    stamp_origin(&mut atom, ORIGIN_AGENT);
+    match post_kept(client, &atom) {
+        Ok(posted) => Ok(posted),
+        Err(e) => {
+            let text = format!("{e:#}");
+            let Some(id) = held_proposal_id(&text) else {
+                return Err(e);
+            };
+            let workspace = atom
+                .get("workspace")
+                .and_then(Value::as_str)
+                .filter(|w| !w.is_empty())
+                .map_or_else(|| client.workspace(), str::to_string);
+            accept_on_writer(client, &workspace, &id)
+        }
+    }
+}
+
 /// File `atom` as an agent proposal by posting it.
 ///
 /// A held answer is the proposal. The id is stable for one kind and one

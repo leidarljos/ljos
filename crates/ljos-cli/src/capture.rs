@@ -499,6 +499,92 @@ pub fn capture_stated(call: &HookCall) -> Option<(String, Vec<String>)> {
     ))
 }
 
+/// How much of the person's latest prompt a memory's provenance keeps.
+const PROMPT_EXCERPT_CHARS: usize = 160;
+
+/// The opening of the person's latest prompt, as the reason an agent wrote
+/// a memory now: whitespace folded, at most [`PROMPT_EXCERPT_CHARS`], and
+/// any word shaped like a key, token or password replaced by `[redacted]`.
+/// `None` when no prompt was kept in the last few minutes.
+#[must_use]
+pub fn latest_prompt_excerpt() -> Option<String> {
+    let path = latest_prompt_path();
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() <= LATEST_PROMPT_SECS);
+    if !fresh {
+        return None;
+    }
+    let prompt = std::fs::read_to_string(&path).ok()?;
+    let out = excerpt_of(&prompt);
+    (!out.is_empty()).then_some(out)
+}
+
+/// [`latest_prompt_excerpt`] of one prompt's text.
+#[must_use]
+pub fn excerpt_of(prompt: &str) -> String {
+    let words: Vec<String> = prompt
+        .split_whitespace()
+        .map(|w| {
+            if secret_shaped(w) {
+                "[redacted]".to_string()
+            } else {
+                w.to_string()
+            }
+        })
+        .collect();
+    let joined = words.join(" ");
+    if joined.chars().count() <= PROMPT_EXCERPT_CHARS {
+        return joined;
+    }
+    let mut cut: String = joined.chars().take(PROMPT_EXCERPT_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// A word that may be a credential: a `key=`/`token:` style assignment, a
+/// known key prefix, or a long run of mixed letters and digits.
+fn secret_shaped(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    if [
+        "key=",
+        "token=",
+        "secret=",
+        "password=",
+        "passwd=",
+        "key:",
+        "token:",
+        "secret:",
+        "password:",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+    {
+        return true;
+    }
+    if [
+        "sk-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xox",
+        "akia",
+        "glpat-",
+    ]
+    .iter()
+    .any(|p| lower.starts_with(p))
+    {
+        return true;
+    }
+    let core: String = word.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    core.len() >= 24
+        && core.chars().any(|c| c.is_ascii_digit())
+        && core.chars().any(|c| c.is_ascii_alphabetic())
+        && !word.contains('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
