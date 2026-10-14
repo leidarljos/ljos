@@ -188,10 +188,10 @@ claude plugin install vissue@leidarljos
 
 `ljos@leidarljos` is this repository. `vissue@leidarljos` is the tracker
 server, fetched from `leidarljos/vissue`. `ljos`, `ljos-mcp`, and `vissue-mcp`
-stay on `PATH` (`cargo binstall` or `cargo install` for this repository and
-for vissue). The plugins run those binaries and also look in `~/.cargo/bin`
-and `~/.local/bin`. Install packset, deedar, claimdag, consensus, and
-ljos-policyd the same way, since those binaries call them. Start a new
+stay on `PATH`; the `install.sh` line in Five minutes puts them and
+packset, deedar, claimdag, consensus and ljos-policyd in `~/.local/bin`.
+The plugins run those binaries and also look in `~/.cargo/bin` and
+`~/.local/bin`. Start a new
 session. `/ljos:sitting ISSUE` opens a sitting and
 `/ljos:finish ISSUE --lesson "..."` closes it. In a checkout,
 `claude plugin validate .` checks the marketplace and
@@ -205,7 +205,7 @@ memory, the command guard, the `ljos_*` tools, the skills above, a rule that tel
 the agent to use them, and four commands: `/sitting`, `/finish`, `/remember`
 and `/doctor`.
 
-Install the programs first (the `cargo binstall` line in Five minutes), then
+Install the programs first (the `install.sh` line in Five minutes), then
 type this in Cursor's agent chat:
 
 ```
