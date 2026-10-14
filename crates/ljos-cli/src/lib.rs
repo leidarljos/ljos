@@ -117,6 +117,12 @@ pub struct Harness {
     /// run.
     #[serde(default)]
     pub hook_fail_closed: Vec<String>,
+    /// Where a runner that runs a hook only once a person trusted it keeps
+    /// that trust (Codex: `trusted_hash` rows in `~/.codex/config.toml`,
+    /// set from `/hooks`). Onboard and doctor say when the seat's hook is
+    /// not trusted yet; the runner skips it until then.
+    #[serde(default)]
+    pub hooks_trust: Option<String>,
     /// Where a runner whose hooks are code loads a plugin from, for a
     /// runner with no hooks file: the plugin carries the memory hook and
     /// argv law and shells to `ljos hook`.
@@ -667,6 +673,9 @@ snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [
 skills = "~/.codex/skills"
 hooks = "~/.codex/hooks.json"
 hook_events = ["UserPromptSubmit", "PreToolUse"]
+# Codex runs a hook only once it is trusted in /hooks, and a changed hook
+# needs trusting again.
+hooks_trust = "~/.codex/config.toml"
 clients = ["codex-mcp-client"]
 resume = ["codex", "resume", "--last"]
 
@@ -2943,6 +2952,18 @@ pub fn onboard_in(
             (None, _) => hook_step(&expand(file), &hook_events_of(h), &h.hook_fail_closed, dry),
         });
     }
+    if let (Some(file), Some(trust)) = (&h.hooks, &h.hooks_trust) {
+        let trusted = !dry && hook_trusted(&expand(trust), &expand(file));
+        steps.push(Step {
+            what: "hook trust".into(),
+            detail: if trusted {
+                format!("{} records trust in {}", h.name, expand(trust).display())
+            } else {
+                untrusted_hook_note(&h.name)
+            },
+            ok: true,
+        });
+    }
     if let Some(dest) = &h.plugin {
         steps.push(plugin_step(h, &expand(dest), dry));
     }
@@ -3119,6 +3140,29 @@ fn hook_command() -> String {
     which::which("ljos").map_or_else(
         |_| "ljos hook".to_string(),
         |p| format!("{} hook", p.display()),
+    )
+}
+
+/// Whether a runner that gates hooks on trust has trusted the hooks in
+/// `hooks`: its trust file records a `trusted_hash`, and was written after
+/// the hooks file last changed (a changed hook loses its trust).
+#[must_use]
+pub fn hook_trusted(trust: &Path, hooks: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(trust) else {
+        return false;
+    };
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    text.contains("trusted_hash")
+        && match (mtime(trust), mtime(hooks)) {
+            (Some(t), Some(h)) => t >= h,
+            _ => true,
+        }
+}
+
+/// What onboard and doctor say about a hook the runner has not trusted.
+fn untrusted_hook_note(runner: &str) -> String {
+    format!(
+        "{runner} skips the ljos hooks until you trust them: open `/hooks` in {runner} and trust each ljos hook. A rewritten hook needs trusting again"
     )
 }
 
@@ -7362,6 +7406,18 @@ fn harness_rows() -> Vec<Habitat> {
                     },
                     ok: installed,
                 });
+                if let (true, Some(trust)) = (installed, &h.hooks_trust) {
+                    let trusted = hook_trusted(&expand(trust), &path);
+                    rows.push(Habitat {
+                        name: "runner hook trust",
+                        state: if trusted {
+                            format!("{}: trust recorded in {}", h.name, expand(trust).display())
+                        } else {
+                            format!("{}: {}", h.name, untrusted_hook_note(&h.name))
+                        },
+                        ok: trusted,
+                    });
+                }
             } else if h.plugin.is_none() {
                 if let Some(cfg) = &h.config {
                     let path = expand(cfg);
@@ -27001,6 +27057,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             hooks_format: None,
             hook_events: Vec::new(),
             hook_fail_closed: Vec::new(),
+            hooks_trust: None,
             plugin: None,
             plugin_template: None,
             probe: Vec::new(),
@@ -28569,6 +28626,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 None => unsafe { std::env::remove_var(k) },
             }
         }
+    }
+
+    #[test]
+    fn a_codex_hook_reads_untrusted_until_trust_is_recorded_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trust, hooks) = (
+            dir.path().join("config.toml"),
+            dir.path().join("hooks.json"),
+        );
+        std::fs::write(&hooks, "{}").unwrap();
+        assert!(!hook_trusted(&trust, &hooks), "no trust file");
+        std::fs::write(&trust, "[mcp_servers.ljos]\n").unwrap();
+        assert!(!hook_trusted(&trust, &hooks), "no trusted_hash");
+        std::fs::write(&trust, "[hooks.state.x]\ntrusted_hash = \"abc\"\n").unwrap();
+        assert!(hook_trusted(&trust, &hooks));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&hooks)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            !hook_trusted(&trust, &hooks),
+            "a rewritten hook loses trust"
+        );
+        let codex = toml::from_str::<Harnesses>(HARNESSES_EXAMPLE)
+            .unwrap()
+            .harness
+            .into_iter()
+            .find(|h| h.name == "codex")
+            .unwrap();
+        assert_eq!(codex.hooks_trust.as_deref(), Some("~/.codex/config.toml"));
+        assert!(untrusted_hook_note("codex").contains("/hooks"));
     }
 
     #[test]
