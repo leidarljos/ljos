@@ -20953,8 +20953,9 @@ pub fn policyd_reason(token: &str) -> String {
              mean by name, or `git stash` first so the work can come back"
         }
         "rm-rf-outside-tmp" | "find-delete-outside-tmp" => {
-            "a recursive delete outside /tmp cannot be undone. Move the directory to the trash \
-             or under /tmp instead, or ask the person to delete it"
+            "a recursive delete outside /tmp cannot be undone. Leave it, or move it to the \
+             trash (`trash-put` or `gio trash`) so the person can restore it, or ask the person \
+             to delete it. Moving it under /tmp to delete it there is the same delete"
         }
         "curl-pipe-shell" => {
             "this runs a script from the network without anyone reading it. Download it to a \
@@ -22271,6 +22272,16 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Real models given the old denial moved the directory to /tmp and
+    /// deleted it there. The denial no longer offers /tmp as a way around.
+    #[test]
+    fn the_rm_rf_denial_offers_no_way_around_through_tmp() {
+        let said = super::policyd_reason("rm-rf-outside-tmp");
+        assert!(!said.contains("under /tmp instead"), "{said}");
+        assert!(said.contains("trash"), "{said}");
+        assert!(said.contains("same delete"), "{said}");
+    }
+
     /// The tests that set or read the process environment take this lock:
     /// cargo runs tests on threads, and one process has one environment.
     /// The runner session the test process inherited is dropped first, so a
