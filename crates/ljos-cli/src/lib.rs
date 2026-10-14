@@ -19827,7 +19827,7 @@ pub fn finish(
     match lesson.map(str::trim).filter(|l| !l.is_empty()) {
         Some(text) => out.push_str(&finish_lesson(issue, text)),
         None => out.push_str(
-            "no lesson remembered this sitting; `ljos remember` takes one in two sentences\n",
+            "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n",
         ),
     }
     match packset_island(&title, true) {
