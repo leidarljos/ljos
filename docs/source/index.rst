@@ -53,7 +53,7 @@ Install
    $ ljos onboard --harness json
 
 ``ljos`` provides ``ljos`` and ``ljos-mcp``. ``packset`` provides ``packset`` and the
-writer ``packsetd``. ``packset-embed``, the encoder for meaning-based search, is optional: ``packsetd`` matches words without it, and nothing needs ONNX Runtime. ``scripts/install.sh`` installs the same set with checksums and onboards each runner it finds. ``deedar-cli`` provides ``deedar``. ``claimdag-cli`` provides
+writer ``packsetd``. ``packset-embed`` is the encoder for meaning-based search; without it ``packsetd`` matches words only. ``scripts/install.sh`` installs the same set and the encoder (``--no-embed`` leaves it out) with checksums and onboards each runner it finds. ``deedar-cli`` provides ``deedar``. ``claimdag-cli`` provides
 ``claimdag``. ``vissue-cli`` provides ``vissue``, and ``vissue-mcp`` the tracker server. ``ljos-consensus`` provides
 ``ljos-consensus``, which ``ljos consensus`` runs. ``ljos-policyd`` is the command
 check. Those are the binaries the tutorial calls. Each comes prebuilt from

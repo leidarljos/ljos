@@ -10,8 +10,11 @@
 #
 # Options:
 #   --bin-dir DIR   where the programs go (default: $LJOS_BIN_DIR or ~/.local/bin)
-#   --with-embed    also install packset-embed, the optional encoder for
-#                   dense search (it fetches a model on first use)
+#   --no-embed      skip packset-embed, the encoder for dense search; by
+#                   default it is installed (it fetches a model on first
+#                   use), and without it search is lexical only
+#   --with-embed    accepted for older instructions; the encoder is the
+#                   default now
 #   --from-dir DIR  take the programs from DIR instead of downloading
 #                   (a local build, or an offline copy)
 #   --no-onboard    install only; onboard nothing
@@ -35,7 +38,7 @@
 set -eu
 
 BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
-WITH_EMBED=0
+WITH_EMBED=1
 FROM_DIR=
 ONBOARD=1
 OWNER=leidarljos
@@ -43,12 +46,17 @@ PINS=
 ATTEST=0
 
 say() { printf '%s\n' "$*"; }
+warn_embed() {
+  say "  warning: no packset-embed for $TARGET in $1; search stays lexical."
+  say "  Paraphrases that share no word with a memory are missed until an encoder is installed."
+}
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case $1 in
     --bin-dir) BIN_DIR=$2; shift 2 ;;
     --with-embed) WITH_EMBED=1; shift ;;
+    --no-embed) WITH_EMBED=0; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
     --no-onboard) ONBOARD=0; shift ;;
     --version) [ $# -ge 2 ] || die "--version needs a version"; PINS="$PINS ljos=$2"; shift 2 ;;
@@ -156,6 +164,10 @@ install_one() {
   repo=$1 crate=$2 style=$3 progs=$4
   if [ -n "$FROM_DIR" ]; then
     for p in $(printf '%s' "$progs" | tr ',' ' '); do
+      if [ "$p" = packset-embed ] && [ ! -x "$FROM_DIR/$p" ]; then
+        warn_embed "$FROM_DIR"
+        continue
+      fi
       [ -x "$FROM_DIR/$p" ] || die "$FROM_DIR/$p is missing"
       cp "$FROM_DIR/$p" "$BIN_DIR/$p"
     done
@@ -178,6 +190,9 @@ install_one() {
   url="https://github.com/$OWNER/$repo/releases/download/$tag/$asset"
   if [ "$TARGET" = unknown ] || ! fetch "$url" "$TMP/$asset" 2>/dev/null; then
     source_build "$crate" "$ver"
+    case ",$progs," in
+      *,packset-embed,*) [ -x "$BIN_DIR/packset-embed" ] || warn_embed "a source build" ;;
+    esac
     return
   fi
   fetch "$url.sha256" "$TMP/$asset.sha256" || die "$asset has no published checksum"
@@ -192,6 +207,10 @@ install_one() {
   esac
   for p in $(printf '%s' "$progs" | tr ',' ' '); do
     found=$(find "$TMP/x-$repo" -type f -name "$p" | head -n 1)
+    if [ -z "$found" ] && [ "$p" = packset-embed ]; then
+      warn_embed "$asset"
+      continue
+    fi
     [ -n "$found" ] || die "$asset holds no $p"
     cp "$found" "$BIN_DIR/$p"
     chmod 755 "$BIN_DIR/$p"

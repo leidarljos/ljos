@@ -29,9 +29,11 @@ platform has no release. It then runs `ljos onboard` for every coding agent it
 finds and shows the guard refusing a force push. Its programs are ljos,
 packset (memory), vissue (the tracker), deedar (records of work), claimdag
 (who works on what), ljos-policyd (the command check) and ljos-consensus
-(voting). `--with-embed` adds `packset-embed`, the optional encoder for
-meaning-based search; without it search matches words, and nothing needs ONNX
-Runtime. `ljos doctor` names any part that is missing.
+(voting), plus `packset-embed`, the encoder for meaning-based search.
+`--no-embed` leaves the encoder out; search then matches words only and misses
+a paraphrase that shares no word with the memory. Where a platform has no
+encoder build, the installer warns and goes on without it. `--with-embed` is
+still accepted and changes nothing. `ljos doctor` names any part that is missing.
 `--version 0.29.0` installs that ljos release instead of the latest, and `--pin packset=0.14.0` holds another repository at a version; a pinned version with no release for the platform builds that version's crate, never a newer one.
 With the `gh` CLI signed in, the installer also checks each tarball's GitHub build attestation and prints whether it verified; `--attest` stops the install when one does not.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
@@ -39,9 +41,8 @@ An `ljos-policyd` built without phronesis checks commands with its table alone, 
 Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
 An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.3.0 installed without a word, so the doctor marks that row `no` and names the fix.
 
-Each ljos release attaches the script as `install.sh`, starting with the
-first release after 0.28.0. Until that release is out the link is a 404, and
-the hand install below works. Read the script before you run it; it is
+Each ljos release from 0.29.0 on attaches the script as `install.sh`.
+Read the script before you run it; it is
 `scripts/install.sh` in this repository. To install by hand:
 
 ```
