@@ -52,6 +52,8 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_prefer",
     "ljos_remember",
     "ljos_search",
+    "ljos_start",
+    "ljos_guard_check",
     "ljos_file",
     "ljos_note",
     "ljos_sitting",
@@ -134,33 +136,96 @@ fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
     }
 }
 
-/// What a session hears first with the core set.
-const INSTRUCTIONS_CORE: &str =
-    "The seat files a claim on the first edit (on this server, the first write), \
-     records a deed when a git commit is seen, and finishes at Stop, session end, \
-     or when this server shuts down, without the model choosing those tools. \
-     One seat over five habitats: tracker, pack, deed store, claim graph, \
-     consensus. Read ljos://protocol first. This server lists the core tools: \
-     ljos_search and ljos_remember for what the seat knows, ljos_prefer and ljos_rule for \
-     what holds from now on, ljos_sitting, ljos_note, ljos_file and ljos_finish for the work \
-     on an issue, ljos_claim and ljos_release for who holds it, ljos_send, ljos_inbox and \
-     ljos_reply for mail between seats, ljos_vote and ljos_consensus for a decision, \
-     ljos_doctor when another tool fails, and ljos_request_approval for a command the hook \
-     held. LJOS_MCP_TOOLS=all in the server's environment lists the other tools. A tool \
-     that fails means a habitat refused or is not running; it is not an empty answer. \
-     The seat is named after the client that connected. The holder is that name and a \
-     short tag for the `*_SESSION_ID` the runner stamped, else that name tagged with the \
-     runner's process; a shell the runner opens finds the same names, so no field here needs an \
-     assignee.";
+/// What every bot hears at initialize. Short on purpose: the runner injects
+/// this into the model's context, and the tools do the bookkeeping.
+pub const SERVER_INSTRUCTIONS: &str = "\
+Pass seat on every call: your own bot name. It is required when this server has no LJOS_SEAT.
+Before any repo work, call ljos_start with the repo or the issue and the task. It recalls and claims.
+Call ljos_note and ljos_remember freely while you work.
+Call ljos_guard_check before a destructive shell command.
+Call ljos_finish with the lesson when the task is done. It releases the claim, syncs, and pushes the tracker.
+The server also claims on the first write and finishes on shutdown or when the session goes idle.";
 
-/// The instructions for this server's tool set: `all` with every tool
-/// listed, the core text otherwise.
-fn instructions_for(all: &'static str) -> &'static str {
-    if env_tool_set().is_none() {
-        all
-    } else {
-        INSTRUCTIONS_CORE
+/// One line on a tool result, so the next call is named.
+fn next_step(tool: &str) -> &'static str {
+    match tool {
+        "ljos_start" => {
+            "next: do the work; ljos_note and ljos_remember as you go; ljos_guard_check before a destructive command; ljos_finish when done"
+        }
+        "ljos_note" | "ljos_remember" => {
+            "next: keep going, or ljos_finish with the lesson when the task is done"
+        }
+        "ljos_guard_check" => "next: run the command only when this allowed it",
+        "ljos_finish" => {
+            "next: the claim is released and the tracker is pushed; this sitting is closed"
+        }
+        name if ljos_cli::bookkeep::mcp_tool_writes(name) => {
+            "next: ljos_finish with the lesson when the task is done"
+        }
+        _ => "next: ljos_start before repo work if you have not, then ljos_finish when done",
     }
+}
+
+fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
+    match response {
+        CallToolResponse::Complete(mut result) => {
+            result.content.push(ContentBlock::text(next_step(name)));
+            CallToolResponse::Complete(result)
+        }
+        other => other,
+    }
+}
+
+/// The call's `seat`, when the bot passed one.
+fn seat_argument(
+    args: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<Option<String>, String> {
+    let Some(args) = args else {
+        return Ok(None);
+    };
+    match args.get("seat") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text.to_string()))
+            }
+        }
+        Some(_) => Err("pass seat as your own bot name".into()),
+    }
+}
+
+/// Habitat children and the blocking book read the process environment.
+/// One stdio server sits one bot, so this call's seat is that process's seat.
+fn bind_seat_env(seat: &str) {
+    unsafe {
+        std::env::set_var("LJOS_SEAT", seat);
+        std::env::set_var("VISSUE_AGENT", seat);
+    }
+}
+
+const SEAT_PROPERTY: &str =
+    "This bot's name. Pass it on every call. Required when the server has no LJOS_SEAT.";
+
+/// Every listed tool accepts `seat`. The handlers ignore the field; the
+/// server reads it before the handler runs. It is not required in the
+/// schema: `LJOS_SEAT` in the server's environment supplies it.
+fn offer_seat(tool: &mut Tool) {
+    let mut schema = tool.input_schema.as_ref().clone();
+    let properties = schema
+        .entry("properties")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let serde_json::Value::Object(map) = properties {
+        map.entry("seat").or_insert_with(|| {
+            serde_json::json!({
+                "description": SEAT_PROPERTY,
+                "type": "string"
+            })
+        });
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 #[derive(Clone)]
@@ -496,6 +561,26 @@ pub struct TakeArgs {
     pub assignee: Option<String>,
 }
 
+/// Recall and claim before repo work.
+#[derive(Deserialize, JsonSchema)]
+pub struct StartArgs {
+    /// The tracker issue to claim. Absent, file one from the task.
+    #[serde(default)]
+    pub issue: Option<String>,
+    /// The repository this work is in. Absent, the working directory.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// What this sitting does, in one sentence.
+    pub task: String,
+}
+
+/// A shell command to judge before it runs.
+#[derive(Deserialize, JsonSchema)]
+pub struct GuardArgs {
+    /// The command line, as the shell would read it.
+    pub command: String,
+}
+
 /// A session node to finish.
 #[derive(Deserialize, JsonSchema)]
 pub struct FinishArgs {
@@ -639,8 +724,9 @@ pub struct PlaybookRow {
 /// A sitting to close.
 #[derive(Deserialize, JsonSchema)]
 pub struct FinishSittingArgs {
-    /// The tracker id of the issue.
-    pub issue: String,
+    /// The tracker id of the issue. Absent, the issue `ljos_start` claimed.
+    #[serde(default)]
+    pub issue: Option<String>,
     /// `done` (the default), `failed`, or `cancelled`.
     pub status: Option<String>,
     /// The lesson this sitting taught, two sentences at most. Omit only
@@ -881,9 +967,10 @@ fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<S
 /// A message to one seat, or to a group.
 #[derive(Deserialize, JsonSchema)]
 pub struct SendMailArgs {
-    /// The seat to write to. Omit when `group` is set.
-    #[serde(default)]
-    pub seat: Option<String>,
+    /// The seat to write to. Omit when `group` is set. Named `to` so `seat`
+    /// stays this bot's own name on every call.
+    #[serde(default, rename = "to")]
+    pub to: Option<String>,
     /// The message, as it will be stored.
     pub text: String,
     /// Write to every other member of this group.
@@ -1418,6 +1505,42 @@ impl LjosServer {
     // ---- the session graph --------------------------------------------------
 
     #[tool(
+        description = "Call this before any repo work. Pass the task in one sentence, and the issue to claim or the repo to file it in. It recalls what the seat knows and claims the issue. Shutdown finishes that claim if you do not.",
+        annotations(
+            title = "Start work",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_start(
+        &self,
+        Parameters(args): Parameters<StartArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text =
+            ljos_cli::bookkeep::start_work(args.issue.as_deref(), args.repo.as_deref(), &args.task)
+                .map_err(|e| refused(anyhow::anyhow!(e)))?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this before a destructive shell command. Pass the command line. It returns the seat's verdict. Run the command only when this allowed it.",
+        annotations(
+            title = "Check a command",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_guard_check(
+        &self,
+        Parameters(args): Parameters<GuardArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let text = ljos_cli::guard_command(&args.command).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
         description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
@@ -1462,7 +1585,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this when the work on an issue ends; it is the whole closing of a sitting: file the lesson as a proposal, fire the island so its links gain weight, complete the session node, and learn from the outcome when one is named. The lesson is not a memory until `ljos accept` on the command line, or until the person types the same words with remember or prefer. Pass the lesson: a sitting that taught nothing worth two sentences is rare, and the report says so when none is given.",
+        description = "Call this when the task is done. Pass the lesson. It completes the session node, files the lesson, releases the claim, syncs, and pushes the tracker. Pass the issue ljos_start claimed; absent, that issue is the one this sitting holds. Pass close only when the work is accepted and a blocker on the ticket may drop.",
         annotations(
             title = "Close a sitting",
             read_only_hint = false,
@@ -1475,8 +1598,21 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<FinishSittingArgs>,
     ) -> Result<Json<Said>, McpError> {
+        let issue = match args
+            .issue
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(id) => id.to_string(),
+            None => ljos_cli::bookkeep::open_issue().ok_or_else(|| {
+                refused(anyhow::anyhow!(
+                    "ljos_finish: pass the issue, or call ljos_start first"
+                ))
+            })?,
+        };
         let text = finish(
-            &args.issue,
+            &issue,
             args.status.as_deref().unwrap_or("done"),
             args.lesson.as_deref(),
             args.outcome.as_deref(),
@@ -1487,6 +1623,7 @@ impl LjosServer {
             args.close,
         )
         .map_err(refused)?;
+        ljos_cli::bookkeep::note_finished(&issue);
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -2155,7 +2292,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to write to another seat, or to every other member of a group. Pass seat or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. A seat this pack has never heard from is refused with the seats it knows; pass new_seat to write to one that has not started yet. The id in the answer is what ljos_read and ljos_reply take.",
+        description = "Call this to write to another seat, or to every other member of a group. Pass to or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. A seat this pack has never heard from is refused with the seats it knows; pass new_seat to write to one that has not started yet. The id in the answer is what ljos_read and ljos_reply take.",
         annotations(
             title = "Send",
             read_only_hint = false,
@@ -2169,7 +2306,7 @@ impl LjosServer {
         Parameters(args): Parameters<SendMailArgs>,
     ) -> Result<Json<Said>, McpError> {
         mail_said(ljos_cli::mail::send(&ljos_cli::mail::Send {
-            seat: args.seat.as_deref(),
+            seat: args.to.as_deref(),
             group: args.group.as_deref(),
             text: &args.text,
             interrupt: args.interrupt.unwrap_or(false),
@@ -2550,10 +2687,6 @@ fn forward_call(
 #[prompt_handler(router = Self::prompt_router())]
 impl ServerHandler for LjosServer {
     fn get_info(&self) -> ServerInfo {
-        // A runner with no session hook (goose, OpenHands, Continue, Roo,
-        // Kilo, Zed) still hears the session-start line: it opens the
-        // instructions the runner hands the model.
-        let start = ljos_cli::session_start_line();
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
@@ -2562,35 +2695,7 @@ impl ServerHandler for LjosServer {
                 .build(),
         )
         .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
-        .with_instructions(format!("{start}\n\n{}", instructions_for(
-            "The seat files a claim on the first edit (on this server, the first write), \
-             records a deed when a git commit is seen, and finishes at Stop, session end, \
-             or when this server shuts down, without the model choosing those tools. \
-             One seat over five habitats: tracker, pack, deed store, claim graph, \
-             consensus. Read ljos://protocol first; it says which store answers \
-             which question and the order of tools in a sitting. ljos_sitting \
-             runs the whole opening (doctor, cards, due, island, playbook, recall, timeline, reclaim, claim) \
-             and ljos_finish the whole closing (remember, fire, complete, learn); \
-             prefer them. By hand: ljos_doctor, ljos_cards, ljos_due then \
-             ljos_graded, ljos_search then ljos_island, ljos_playbook, ljos_recall, \
-             ljos_timeline, ljos_claim; \
-             during the work ljos_file, ljos_note, ljos_deed, ljos_remember, ljos_vote; after it \
-             ljos_island with fire, ljos_complete, ljos_learn. ljos_calibrate \
-             moves the trust rows from a project's history when nobody names an \
-             outcome. \
-             The pack is written by remember, prefer, trust, learn, graded and an \
-             imported handover; the text is the claim. Cards are read at \
-             ljos://cards/ and never written. Citing a deed on a node names an \
-             accession and does not paste the product. Neither completing a session \
-             node nor ljos_finish closes a ticket; ljos_finish with close does, \
-             when the work is accepted, so a blocker on it holds until then; \
-             ljos_release hands one back unfinished. A \
-             tool that fails means a habitat refused or is not running; it is not \
-             an empty answer. The seat is named after the client that connected. \
-             The holder is that name and a short tag for the `*_SESSION_ID` the \
-             runner stamped, else that name tagged with the runner's process; a shell the runner \
-             opens finds the same names, so no field here needs an assignee.",
-        )))
+        .with_instructions(SERVER_INSTRUCTIONS)
     }
 
     /// One tool call, held as the thread the call names in its `_meta`
@@ -2624,31 +2729,60 @@ impl ServerHandler for LjosServer {
             && !listed(set.as_deref(), &request.name)
             && Self::tool_router().get(&request.name).is_some()
         {
-            let verb = request.name.trim_start_matches("ljos_");
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{} is not in this server's tool set. Run `ljos {verb}` in the shell, or set \
-                 LJOS_MCP_TOOLS=all in the server's environment to list every tool",
-                request.name
-            ))])
-            .into());
+            let missing = request.name.to_string();
+            let verb = missing.trim_start_matches("ljos_");
+            return Ok(attach_next(
+                &missing,
+                CallToolResult::error(vec![ContentBlock::text(format!(
+                    "{missing} is not in this server's tool set. Run `ljos {verb}` in the shell, or set \
+                     LJOS_MCP_TOOLS=all in the server's environment to list every tool"
+                ))])
+                .into(),
+            ));
         }
-        if ljos_cli::bookkeep::mcp_tool_writes(request.name.as_ref()) {
-            let name = request.name.to_string();
+        let name = request.name.to_string();
+        ljos_cli::bookkeep::touch_activity();
+        let seat_text = match seat_argument(request.arguments.as_ref()) {
+            Ok(text) => text,
+            Err(e) => {
+                return Ok(attach_next(
+                    &name,
+                    as_tool_error(refused(anyhow::anyhow!(e)))?,
+                ));
+            }
+        };
+        let resolved =
+            tokio::task::spawn_blocking(move || ljos_cli::resolve_call_seat(seat_text.as_deref()))
+                .await
+                .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
+        let seat = match resolved {
+            Ok(seat) => seat,
+            Err(e) => {
+                return Ok(attach_next(&name, as_tool_error(refused(e))?));
+            }
+        };
+        bind_seat_env(&seat.seat);
+        if ljos_cli::bookkeep::mcp_tool_writes(&name) {
+            let tool = name.clone();
             let args = request.arguments.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                ljos_cli::bookkeep::before_mcp_write(&name, args.as_ref());
+                ljos_cli::bookkeep::before_mcp_write(&tool, args.as_ref());
             })
             .await;
         }
         let thread = thread_in_meta(&context.meta.0);
         let session = session_in_meta(&context.meta.0);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        ljos_cli::ballot_sig::scope_session(
+        let response = ljos_cli::ballot_sig::scope_session(
             session,
-            ljos_cli::as_thread(thread, Self::tool_router().call(tcc)),
+            ljos_cli::as_thread(
+                thread,
+                ljos_cli::with_call_seat(seat, Self::tool_router().call(tcc)),
+            ),
         )
         .await
-        .or_else(as_tool_error)
+        .or_else(as_tool_error)?;
+        Ok(attach_next(&name, response))
     }
 
     /// The core set unless `LJOS_MCP_TOOLS` asks for more.
@@ -2666,6 +2800,9 @@ impl ServerHandler for LjosServer {
             .into_iter()
             .filter(|t| listed(set.as_deref(), &t.name))
             .collect();
+        for tool in &mut tools {
+            offer_seat(tool);
+        }
         listing_order(&mut tools);
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
@@ -2679,10 +2816,12 @@ impl ServerHandler for LjosServer {
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
         let set = env_tool_set();
-        Self::tool_router()
+        let mut tool = Self::tool_router()
             .get(name)
             .filter(|_| listed(set.as_deref(), name))
-            .cloned()
+            .cloned()?;
+        offer_seat(&mut tool);
+        Some(tool)
     }
 
     /// The client has said who it is: name the seat after it and leave the
@@ -2774,6 +2913,7 @@ fn card_named(uri: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::handler::server::ServerHandler;
 
     #[test]
     fn a_call_names_its_thread_in_the_meta() {
@@ -2884,7 +3024,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            47,
+            49,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -2945,10 +3085,67 @@ mod tests {
                 "ljos_rule",
                 "ljos_send",
                 "ljos_sitting",
+                "ljos_start",
                 "ljos_trust",
                 "ljos_vote"
             ]
         );
+    }
+
+    /// The instructions a bot hears are the loop, and every tool accepts seat.
+    #[test]
+    fn the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
+        let info = LjosServer::at(std::env::temp_dir()).get_info();
+        assert_eq!(info.instructions.as_deref(), Some(SERVER_INSTRUCTIONS));
+        let mut tools = LjosServer::tool_router().list_all();
+        assert!(tools.iter().any(|tool| tool.name == "ljos_start"));
+        assert!(tools.iter().any(|tool| tool.name == "ljos_guard_check"));
+        for tool in &mut tools {
+            offer_seat(tool);
+            let props = tool
+                .input_schema
+                .get("properties")
+                .and_then(|value| value.as_object())
+                .unwrap_or_else(|| panic!("{} has no properties", tool.name));
+            let seat = props
+                .get("seat")
+                .unwrap_or_else(|| panic!("{} has no seat", tool.name));
+            assert_eq!(
+                seat.get("type").and_then(|value| value.as_str()),
+                Some("string"),
+                "{}",
+                tool.name
+            );
+            assert_eq!(
+                seat.get("description").and_then(|value| value.as_str()),
+                Some(SEAT_PROPERTY),
+                "{}",
+                tool.name
+            );
+            if let Some(required) = tool.input_schema.get("required").and_then(|r| r.as_array()) {
+                assert!(
+                    required.iter().all(|value| value.as_str() != Some("seat")),
+                    "{} requires seat",
+                    tool.name
+                );
+            }
+        }
+        let CallToolResponse::Complete(done) = attach_next(
+            "ljos_start",
+            CallToolResult::success(vec![ContentBlock::text("claimed")]).into(),
+        ) else {
+            panic!("a start completes");
+        };
+        let last = done.content.last().unwrap().as_text().expect("text");
+        assert_eq!(last.text, next_step("ljos_start"));
+        assert!(next_step("ljos_guard_check").contains("allowed"));
+        assert!(next_step("ljos_finish").contains("released"));
+        assert!(next_step("ljos_note").contains("ljos_finish"));
+        assert!(next_step("ljos_remember").contains("ljos_finish"));
+        assert!(next_step("ljos_search").contains("ljos_start"));
+        assert!(next_step("ljos_prefer").contains("ljos_finish"));
+        assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_start"));
+        assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_guard_check"));
     }
 
     /// A refusal is an error, not a success carrying an error message.

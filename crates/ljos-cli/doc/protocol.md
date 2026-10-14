@@ -34,6 +34,14 @@ inside ljos-mcp for a client with no hooks: the first tool that writes claims,
 and the server finishes when it shuts down. Call claim, deed or finish
 yourself only to name an issue, an accession or a lesson.
 
+A bot with no harness hooks passes its own name as `seat` on every call.
+Before any repo work it calls `start` with the repo or the issue and the
+task: that recalls and claims. During the work it calls `note` and
+`remember` freely, and `guard_check` before a destructive shell command.
+`finish` takes the lesson, releases the claim, syncs, and pushes the
+tracker. The server also claims on the first write and finishes on
+shutdown or when the session goes idle.
+
 ## Before the work: a sitting
 
 One verb runs the whole opening in order and stops at the first store that

@@ -1,0 +1,1 @@
+ljos-mcp takes each bot's name as `seat`, recalls and claims with `ljos_start`, checks a shell line with `ljos_guard_check`, and finishes on shutdown or when the session goes idle. Each tool result names the next step, and the server instructions are that loop.

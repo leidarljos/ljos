@@ -20,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    ljos_cli::bookkeep::spawn_idle_finish();
     // Dropped when the process returns, including after the client closes.
     // A name, not `let _`, so the finish runs at the end of main.
     let _book_finish = ljos_cli::bookkeep::ShutdownFinish;
