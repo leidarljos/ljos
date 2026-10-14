@@ -1136,6 +1136,12 @@ fn session_actor() -> Option<(String, String)> {
         return None;
     }
     parts.sort_by(|a, b| a.0.cmp(&b.0));
+    // Codex names the conversation on each MCP call by its thread; the
+    // shell keys on the same id alone, whatever else Codex stamps.
+    if let Some(i) = parts.iter().position(|(k, _)| k == "CODEX_THREAD_ID") {
+        let (k, v) = parts.swap_remove(i);
+        return Some(session_from_value(&k, &v));
+    }
     if parts.len() == 1 {
         return Some(session_from_value(&parts[0].0, &parts[0].1));
     }
@@ -1543,9 +1549,11 @@ pub fn seat_for_thread(thread: &str) -> Seat {
             source: "the thread the runner named on this call, as its shells hold it".into(),
         };
     }
+    // SEAT@TAG of the thread, the holder a shell of the thread builds from
+    // the same id ([`session_actor`]), so the call and the shell hold as one.
     let found = Seat {
+        holder: holder_for_session(&seat, thread),
         seat,
-        holder: thread.to_string(),
         source: "the thread the runner named on this call".into(),
     };
     write_record_ids(&path, &found, &[thread.to_string()]);
@@ -22246,13 +22254,15 @@ mod tests {
             "BLE_SESSION_ID",
             "1790911378.908637/3800612"
         ));
-        // No shell has sat yet: the thread id is the holder, and recorded.
+        // No shell has sat yet: SEAT@TAG of the thread is the holder, and
+        // recorded.
         let first = seat_for_thread("0199a1b2-aaaa-thread");
-        assert_eq!(first.holder, "0199a1b2-aaaa-thread");
+        let want = holder_for_session(&first.seat, "0199a1b2-aaaa-thread");
+        assert_eq!(first.holder, want);
         let text = std::fs::read_to_string(session_record_path("0199a1b2-aaaa-thread")).unwrap();
         assert_eq!(
             holder_naming(&text, "0199a1b2-aaaa-thread").as_deref(),
-            Some("0199a1b2-aaaa-thread")
+            Some(want.as_str())
         );
         // A shell of the thread sat first: the call takes the shell's holder.
         let shell = Seat {
@@ -28464,6 +28474,48 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_codex_call_and_its_shell_hold_one_name() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "XDG_RUNTIME_DIR",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let rt = tempfile::tempdir().unwrap();
+        let thread = "019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d";
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+            std::env::set_var("LJOS_SEAT", "codex");
+        }
+        let call = seat_for_thread(thread);
+        let other = tempfile::tempdir().unwrap();
+        unsafe {
+            // The shell carries the thread and a second Codex id, and finds
+            // no record.
+            std::env::set_var("XDG_RUNTIME_DIR", other.path());
+            std::env::set_var("CODEX_THREAD_ID", thread);
+            std::env::set_var("CODEX_SESSION_ID", "019a7c3e-ffff-7b10-0000-000000000001");
+        }
+        let shell = whoami();
+        assert_eq!(call.holder, shell.holder, "{call:?} {shell:?}");
+        assert!(shell.holder.starts_with("codex@"), "{shell:?}");
+        unsafe {
             for (k, v) in saved {
                 match v {
                     Some(v) => std::env::set_var(k, v),
