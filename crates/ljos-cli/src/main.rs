@@ -1243,7 +1243,8 @@ fn run_command() -> Result<()> {
         }
         Cmd::Recall { issue } => {
             ljos_cli::log_recall("recall", &issue);
-            run("vissue", &["recall", &issue])?
+            run("vissue", &["recall", &issue])?;
+            print!("{}", ljos_cli::recall_memories(&issue));
         }
         Cmd::Reap { idle, apply } => {
             print!(

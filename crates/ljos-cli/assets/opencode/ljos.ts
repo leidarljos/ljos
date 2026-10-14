@@ -14,6 +14,9 @@ const TIMEOUT_MS = 20_000
 // The context the last prompt raised, per session; the system transform
 // hands it to every model call of that turn.
 const held = new Map<string, string>()
+// Sessions that have heard the start line. opencode has no session-start
+// hook a plugin can answer into, so the first prompt of a session carries it.
+const started = new Set<string>()
 
 type Answer = { ok: true; out: any | undefined } | { ok: false; why: string }
 
@@ -65,7 +68,13 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
       prompt,
       cwd: directory,
     })
-    const ctx = a.ok ? a.out?.additionalContext : undefined
+    let ctx: string | undefined = a.ok ? a.out?.additionalContext : undefined
+    if (!started.has(input.sessionID)) {
+      started.add(input.sessionID)
+      const s = await hook({ session_id: input.sessionID, hook_event_name: "SessionStart", cwd: directory })
+      const line = s.ok ? s.out?.additionalContext : undefined
+      if (line) ctx = ctx ? `${line}\n${ctx}` : line
+    }
     if (ctx) held.set(input.sessionID, ctx)
     else held.delete(input.sessionID)
   },
@@ -102,6 +111,7 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
     if (event.type === "session.deleted") {
       const id = (event as any).properties?.info?.id
       held.delete(id)
+      started.delete(id)
       await hook({ session_id: id, hook_event_name: "SessionEnd", cwd: directory })
     }
   },

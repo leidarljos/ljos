@@ -686,7 +686,7 @@ marker = "[mcp_servers.ljos]"
 snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
 skills = "~/.codex/skills"
 hooks = "~/.codex/hooks.json"
-hook_events = ["UserPromptSubmit", "PreToolUse"]
+hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse"]
 # Codex runs a hook only once it is trusted in /hooks, and a changed hook
 # needs trusting again.
 hooks_trust = "~/.codex/config.toml"
@@ -18941,6 +18941,47 @@ pub fn is_decision(v: &Value) -> bool {
         .as_str()
         .is_some_and(|b| b.lines().any(|l| l.trim_start().starts_with("Options:")));
     tagged || typed || listed
+}
+
+/// What the seat remembers that bears on an issue, for `ljos recall`: the
+/// pack searched on the issue's id and on its title, reviewed kinds only,
+/// at most five lines. Empty when the pack holds nothing on it; a pack that
+/// does not answer says so in one line rather than failing the recall.
+pub fn recall_memories(issue: &str) -> String {
+    let mut cues = vec![issue.to_string()];
+    if let Ok(t) = issue_title(issue) {
+        if t != issue {
+            cues.push(t);
+        }
+    }
+    let now = now_utc();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lines = Vec::new();
+    for cue in &cues {
+        let hits = match packset_search(cue) {
+            Ok(h) => h,
+            Err(e) => return format!("\nMemory\n  (the pack did not answer: {e:#})\n"),
+        };
+        for h in hits {
+            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) {
+                continue;
+            }
+            let key = h.id.clone().unwrap_or_else(|| h.text.clone());
+            if seen.insert(key) {
+                lines.push(hit_line(&h, &now));
+            }
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nMemory\n");
+    for l in lines.iter().take(5) {
+        out.push_str("  ");
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
 }
 
 /// The issue's title, for a cue, from the tracker.
