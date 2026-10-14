@@ -1654,6 +1654,13 @@ pub async fn as_thread<F: std::future::Future>(thread: Option<String>, f: F) -> 
     }
 }
 
+/// Run `f` as the seat this call named. Nest it inside [`as_thread`]: the
+/// inner scope is the one [`whoami`] reads, so the bot's own name wins over
+/// the thread the runner named on the same call.
+pub async fn with_call_seat<F: std::future::Future>(seat: Seat, f: F) -> F::Output {
+    CALL_SEAT.scope(seat, f).await
+}
+
 /// The seat for a thread a runner named on a call. The holder is the one a
 /// shell of that thread already took, found by the thread's record; else
 /// the thread id whole, recorded so the thread's shells find it.
@@ -2237,6 +2244,137 @@ pub fn whoami() -> Seat {
             }
         }
     }
+}
+
+/// Seats this tracker already knows. `seats` in `vissue.toml` is the
+/// roster a person wrote. A `CLAIMED_BY` holder counts too: the name
+/// before `@`, slugged, so `inky@box` and `Disk Saver` are `inky` and
+/// `disk-saver`. An empty set means the tracker has not named a roster.
+#[must_use]
+pub fn tracker_known_seats() -> std::collections::BTreeSet<String> {
+    let mut seats = std::collections::BTreeSet::new();
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return seats;
+    };
+    collect_configured_seats(layout.root(), &mut seats);
+    collect_claimed_seats(layout.root(), &mut seats, 0);
+    seats
+}
+
+fn collect_configured_seats(root: &Path, seats: &mut std::collections::BTreeSet<String>) {
+    let Ok(text) = std::fs::read_to_string(root.join("vissue.toml")) else {
+        return;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return;
+    };
+    let Some(list) = value.get("seats").and_then(toml::Value::as_array) else {
+        return;
+    };
+    for item in list {
+        if let Some(name) = item.as_str() {
+            insert_known_seat(seats, name);
+        }
+    }
+}
+
+fn collect_claimed_seats(dir: &Path, seats: &mut std::collections::BTreeSet<String>, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_claimed_seats(&path, seats, depth + 1);
+            continue;
+        }
+        let is_board = name == "issues.org";
+        let in_issues = path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|parent| parent == "issues")
+            && path.extension().is_some_and(|ext| ext == "org");
+        if !is_board && !in_issues {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix(":CLAIMED_BY:") else {
+                continue;
+            };
+            insert_known_seat(seats, rest.trim());
+        }
+    }
+}
+
+fn insert_known_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) {
+    let name = raw.split('@').next().unwrap_or(raw).trim();
+    if name.is_empty() || omitted_actor_name(name) {
+        return;
+    }
+    let slug = seat_slug(name);
+    if slug == "runner" || omitted_actor_name(&slug) {
+        return;
+    }
+    seats.insert(slug);
+}
+
+/// The seat for one tool call. `arg` is the call's `seat` and wins over
+/// `LJOS_SEAT`. One of the two is required. The name has to be a seat the
+/// tracker already lists.
+///
+/// # Errors
+///
+/// No seat was passed and `LJOS_SEAT` is unset, the tracker names no seats,
+/// or the name is not one of them.
+pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
+    let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
+    let raw = match (from_call, named_var("LJOS_SEAT")) {
+        (Some(name), _) => name.to_string(),
+        (None, Some(name)) => name,
+        (None, None) => {
+            bail!("pass seat, your own bot name, on every call: this server has no LJOS_SEAT")
+        }
+    };
+    let slug_source = raw.split('@').next().unwrap_or(raw.as_str()).trim();
+    if slug_source.is_empty() || omitted_actor_name(slug_source) {
+        bail!("pass seat, your own bot name, not {raw:?}");
+    }
+    let slug = seat_slug(slug_source);
+    if slug == "runner" || omitted_actor_name(&slug) {
+        bail!("pass seat, your own bot name, not {raw:?}");
+    }
+    let known = tracker_known_seats();
+    if known.is_empty() {
+        bail!(
+            "this tracker names no seats, so {slug} cannot sit yet. Add seats = [\"{slug}\"] to vissue.toml at the tracker root"
+        );
+    }
+    if !known.contains(&slug) {
+        let guess = mail::closest_seat(&slug, &known)
+            .map(|seat| format!(" Did you mean {seat}?"))
+            .unwrap_or_default();
+        let list = known.into_iter().collect::<Vec<_>>().join(", ");
+        bail!("no seat named {slug} on this tracker.{guess} Known seats: {list}");
+    }
+    let (holder, source) = match session_holder(&slug) {
+        Some((holder, keys)) => (holder, format!("the seat this call named; session {keys}")),
+        None => (slug.clone(), "the seat this call named".to_string()),
+    };
+    Ok(Seat {
+        seat: slug,
+        holder,
+        source,
+    })
 }
 
 /// Runners whose shells cannot see the runner's process, named by a
@@ -21487,6 +21625,40 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         None if policyd_required() => Ok(format!("{line}\ndeny\tTCB required\n{ruled}")),
         _ => Ok(format!("{line}\n{ruled}")),
     }
+}
+
+/// The seat's verdict on one shell command. An empty line is an error. A
+/// `deny` or an `ask` is an error too: the command stays unrun.
+///
+/// # Errors
+///
+/// The command is empty, or the rules refuse it.
+pub fn guard_command(line: &str) -> Result<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        bail!("guard: pass the command to check");
+    }
+    let argv = shell_words(line);
+    if argv.is_empty() {
+        bail!("guard: pass the command to check");
+    }
+    let text = policy_with_memory(&argv)?;
+    if command_refused(&text) {
+        bail!("{text}");
+    }
+    Ok(text)
+}
+
+/// Whether a policy reading refuses the command. A verdict line opens with
+/// `deny` or `ask`, or carries that word after a tab. Prose that merely
+/// uses the words does not.
+#[must_use]
+pub fn command_refused(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        let head = line.split([':', '\t']).next().unwrap_or(line);
+        matches!(head, "deny" | "ask") || line.contains("\tdeny") || line.contains("\task")
+    })
 }
 
 /// Operator switch: missing TCB is a deny. Unset, absence stays open.

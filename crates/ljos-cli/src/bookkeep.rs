@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -17,6 +18,11 @@ use serde_json::Value;
 /// on PreToolUse treats a slow hook as a refusal, so the book stays inside
 /// this and a warm call does not spawn anything.
 const COMMAND_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Unix seconds of the last MCP tool call. Zero means the server has not
+/// been touched, and the idle watcher does not finish a session it has
+/// not seen.
+static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
 /// Events that keep the book. A subagent stop and a bare argv line do not:
 /// the parent session is the one that claimed.
@@ -233,6 +239,10 @@ pub fn before_mcp_write(name: &str, args: Option<&serde_json::Map<String, Value>
         }
         store_book(&path, &book);
     }
+    // A hook's warm edit after Stop stays warm. An MCP write after the
+    // idle close files a new claim: the finished row is this sitting, and
+    // the next write is the next one.
+    reopen_finished(&session);
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
@@ -273,6 +283,208 @@ pub fn mcp_shutdown() {
         shape: super::HookShape::Asks,
     };
     let _ = observe(&raw, &call);
+    match super::sync::sync_repo_in_passing(false, true) {
+        Ok(line) if !line.trim().is_empty() => log_line(line.trim()),
+        Err(e) => log_line(&format!("sync: {e:#}")),
+        Ok(_) => {}
+    }
+}
+
+/// Note that a tool ran, so the idle watcher waits another window.
+pub fn touch_activity() {
+    LAST_ACTIVITY.store(unix_secs(), Ordering::Relaxed);
+}
+
+/// How long a silent MCP server sits before it finishes. Unset is thirty
+/// minutes. `0` and `off` leave the session open until the process exits.
+#[must_use]
+pub fn idle_limit() -> Option<Duration> {
+    idle_limit_from(std::env::var("LJOS_MCP_IDLE").ok().as_deref())
+}
+
+/// [`idle_limit`] from an already-read value. `None` is the default window.
+#[must_use]
+pub fn idle_limit_from(raw: Option<&str>) -> Option<Duration> {
+    let Some(raw) = raw.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Some(Duration::from_secs(30 * 60));
+    };
+    let lowered = raw.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "0" | "off" | "false" | "no") {
+        return None;
+    }
+    match super::reap::parse_idle(raw) {
+        Ok(window) if window.is_zero() => None,
+        Ok(window) => Some(window),
+        Err(_) => Some(Duration::from_secs(30 * 60)),
+    }
+}
+
+/// Whether `now` is at least `limit` past `last`. A `last` of zero has
+/// never been touched, so it is not idle.
+#[must_use]
+pub fn idle_due(now: u64, last: u64, limit: Duration) -> bool {
+    last > 0 && now.saturating_sub(last) >= limit.as_secs()
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Finish the open claims when no tool has run for [`idle_limit`]. One
+/// thread for the process. A disabled window starts nothing.
+pub fn spawn_idle_finish() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(limit) = idle_limit() else {
+            return;
+        };
+        touch_activity();
+        let _ = std::thread::Builder::new()
+            .name("ljos-mcp-idle".into())
+            .spawn(move || {
+                let tick = Duration::from_secs(30.min(limit.as_secs().max(1)));
+                loop {
+                    std::thread::sleep(tick);
+                    let last = LAST_ACTIVITY.load(Ordering::Relaxed);
+                    if idle_due(unix_secs(), last, limit) {
+                        mcp_shutdown();
+                        touch_activity();
+                    }
+                }
+            });
+    });
+}
+
+/// The issue this MCP sitting still holds, for a finish that did not name one.
+#[must_use]
+pub fn open_issue() -> Option<String> {
+    let book = load_book(&book_path(&mcp_session()));
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    if let Some(key) = book.cwd_repo.get(&cwd) {
+        if let Some(issue) = unfinished(&book, key) {
+            return Some(issue);
+        }
+    }
+    book.repos
+        .iter()
+        .find_map(|(key, _)| unfinished(&book, key))
+}
+
+fn unfinished(book: &Book, key: &str) -> Option<String> {
+    let row = book.repos.get(key)?;
+    if row.finished {
+        return None;
+    }
+    row.issue.clone()
+}
+
+/// The explicit finish closed `issue`. Shutdown then has nothing left to close.
+pub fn note_finished(issue: &str) {
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let path = book_path(&mcp_session());
+    let mut book = load_book(&path);
+    let mut changed = false;
+    for row in book.repos.values_mut() {
+        if row.issue.as_deref() == Some(issue) && !row.finished {
+            row.finished = true;
+            changed = true;
+        }
+    }
+    if changed {
+        store_book(&path, &book);
+    }
+}
+
+/// Recall and claim before repo work. `issue` claims that ticket. Without
+/// it, `task` is filed under `repo` (or the working directory) and claimed.
+/// The issue is the one shutdown and an issue-less finish close.
+///
+/// # Errors
+///
+/// `task` is empty, or the tracker did not file or claim.
+pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result<String, String> {
+    let task = collapse(task);
+    if task.is_empty() {
+        return Err("ljos_start: pass the task in one sentence".into());
+    }
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let place = repo
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or(cwd.as_str())
+        .to_string();
+    let issue_id = match issue.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => {
+            claim_existing(id)?;
+            id.to_string()
+        }
+        None => file_and_claim(&project_for(&place), &task)?,
+    };
+    let persisted = super::persist_tracker(&issue_id, "claimed");
+    if persisted.contains("could not") || persisted.contains("refused") {
+        log_line(persisted.trim());
+    }
+    let recall = format!(
+        "{}{}",
+        recall_line(&issue_id),
+        super::recall_memories(&issue_id)
+    );
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let path = book_path(&mcp_session());
+    let mut book = load_book(&path);
+    if book.prompt.trim().is_empty() {
+        book.prompt = task.chars().take(4000).collect();
+    }
+    let row = book.repos.entry(place.clone()).or_default();
+    row.issue = Some(issue_id.clone());
+    row.finished = false;
+    row.claim_failed = false;
+    row.recall.clone_from(&recall);
+    if !cwd.is_empty() {
+        book.cwd_repo.insert(cwd, place);
+    }
+    store_book(&path, &book);
+    drop(_held);
+    Ok(format!("claimed {issue_id}\n{recall}"))
+}
+
+fn claim_existing(issue: &str) -> Result<(), String> {
+    let assignee = super::resolve_assignee(None);
+    if which::which("claimdag").is_ok() && super::claim(issue, &assignee).is_ok() {
+        return Ok(());
+    }
+    run_timed(
+        "vissue",
+        &["claim", issue],
+        &[("VISSUE_AGENT", assignee.as_str())],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+fn reopen_finished(session: &str) {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let raw = serde_json::json!({ "cwd": cwd });
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let path = book_path(session);
+    let mut book = load_book(&path);
+    let repo = repo_key(&mut book, &raw);
+    if book.repos.get(&repo).is_some_and(|row| row.finished) {
+        book.repos.insert(repo, RepoBook::default());
+    }
+    store_book(&path, &book);
 }
 
 /// Finishes the MCP session's claims when the server process returns.
@@ -1244,6 +1456,130 @@ print(f"id=deed-{n:04x}")
         assert!(log.contains("finished"), "{log}");
         mcp_shutdown();
         assert_eq!(git_log(&tracker), log);
+        let before = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        args.insert("text".into(), Value::String("the notes stay dated".into()));
+        before_mcp_write("ljos_remember", Some(&args));
+        let after = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        let creates =
+            |log: &str| log.matches("\ncreate").count() + usize::from(log.starts_with("create"));
+        assert_eq!(
+            creates(&after),
+            creates(&before) + 1,
+            "a write after shutdown files a new claim\n{after}"
+        );
+    }
+
+    #[test]
+    fn idle_defaults_to_half_an_hour_and_zero_turns_it_off() {
+        assert_eq!(idle_limit_from(None), Some(Duration::from_secs(1800)));
+        assert_eq!(idle_limit_from(Some("")), Some(Duration::from_secs(1800)));
+        assert_eq!(idle_limit_from(Some("0")), None);
+        assert_eq!(idle_limit_from(Some("OFF")), None);
+        assert_eq!(idle_limit_from(Some("15m")), Some(Duration::from_secs(900)));
+        assert_eq!(
+            idle_limit_from(Some("nope")),
+            Some(Duration::from_secs(1800))
+        );
+        assert!(idle_due(2_000, 100, Duration::from_secs(1800)));
+        assert!(!idle_due(1_000, 100, Duration::from_secs(1800)));
+        assert!(!idle_due(5_000, 0, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn an_empty_guard_is_refused() {
+        let err = crate::guard_command(" ").unwrap_err().to_string();
+        assert!(err.contains("pass the command"), "{err}");
+        assert!(crate::command_refused("deny\tTCB required\n"));
+        assert!(crate::command_refused("ask: wipe\n"));
+        assert!(!crate::command_refused("echo hi\n"));
+        assert!(!crate::command_refused("the person may ask later\n"));
+    }
+
+    #[test]
+    fn a_call_seat_must_be_one_the_tracker_knows() {
+        let _g = lock();
+        let _saved = Restore::new(&["VISSUE_ROOT", "ISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_SEAT"]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("vissue.toml"),
+            "seats = [\"inky\", \"Disk Saver\", \"saddle\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("Software/probe")).unwrap();
+        std::fs::write(
+            dir.path().join("Software/probe/issues.org"),
+            "* STARTED [#C] held\n:PROPERTIES:\n:ID:         probe-abcd\n:CLAIMED_BY: eessi@box\n:END:\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("LJOS_SEAT");
+        }
+        let err = crate::resolve_call_seat(None).unwrap_err().to_string();
+        assert!(err.contains("LJOS_SEAT"), "{err}");
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "inky");
+        }
+        assert_eq!(crate::resolve_call_seat(None).unwrap().seat, "inky");
+        assert_eq!(
+            crate::resolve_call_seat(Some("Disk Saver")).unwrap().seat,
+            "disk-saver"
+        );
+        let err = crate::resolve_call_seat(Some("sadle"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Did you mean saddle"), "{err}");
+        assert!(err.contains("inky"), "{err}");
+        assert!(err.contains("disk-saver"), "{err}");
+        assert!(err.contains("eessi"), "{err}");
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", empty.path());
+            std::env::remove_var("LJOS_SEAT");
+        }
+        let err = crate::resolve_call_seat(Some("ljosbot"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("vissue.toml"), "{err}");
+        assert!(err.contains("ljosbot"), "{err}");
+    }
+
+    #[test]
+    fn ljos_start_claims_the_task() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", "mcp-start-1");
+        }
+        let err = start_work(None, None, "  ").unwrap_err();
+        assert!(err.contains("one sentence"), "{err}");
+        let said = start_work(None, Some(repo.to_str().unwrap()), "Add a readme line").unwrap();
+        assert!(said.contains("claimed probe-"), "{said}");
+        assert!(said.contains("Add a readme line"), "{said}");
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(org.contains("Add a readme line"), "{org}");
+        let held = open_issue().expect("the start filed an issue");
+        assert!(said.contains(&held), "{said}");
+        mcp_shutdown();
+        assert!(git_log(&tracker).contains("finished"));
+        assert!(open_issue().is_none());
     }
 
     fn git_log(tracker: &Path) -> String {
