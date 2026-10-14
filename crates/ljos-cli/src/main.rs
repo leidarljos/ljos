@@ -790,6 +790,9 @@ enum Cmd {
         /// The lesson this sitting taught, two sentences at most.
         #[arg(long)]
         lesson: Option<String>,
+        /// The lesson given after the issue without `--lesson`, as agents often write it.
+        #[arg(value_name = "LESSON", conflicts_with = "lesson")]
+        lesson_text: Option<String>,
         /// The option that turned out right, when the ballots are in and the world has said.
         #[arg(long)]
         outcome: Option<String>,
@@ -2292,6 +2295,7 @@ fn run_command() -> Result<()> {
             issue,
             status,
             lesson,
+            lesson_text,
             outcome,
             new_option,
             beta,
@@ -2303,7 +2307,7 @@ fn run_command() -> Result<()> {
             finish(
                 &issue,
                 &status,
-                lesson.as_deref(),
+                lesson.or(lesson_text).as_deref(),
                 outcome.as_deref(),
                 new_option,
                 beta,

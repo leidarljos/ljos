@@ -3820,11 +3820,13 @@ fn hook_installed(file: &Path, events: &[String]) -> bool {
 }
 
 /// The events the seat's hook takes in Cursor's hooks file, each with its
-/// timeout in seconds. They are the gate before a shell command, the
+/// timeout in seconds. They are the session start, whose context the
+/// model hears (the CLI runs it too), the gate before a shell command, the
 /// prompt, the tool results that deliver its note, a failure, a
 /// compaction, the stop, and the end of the session. A prompt's note is
 /// held, since Cursor does not hand a prompt hook's context to the model.
 pub const CURSOR_HOOK_EVENTS: &[(&str, u64)] = &[
+    ("sessionStart", 5),
     ("beforeShellExecution", 10),
     ("preToolUse", 10),
     ("beforeMCPExecution", 10),
@@ -34127,7 +34129,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let hooks: Value = serde_json::from_str(&read("hooks/cursor.json")).unwrap();
         assert_eq!(hooks["version"], 1);
         let left_to_pre_tool_use = ["beforeMCPExecution", "beforeReadFile"];
-        let mut want: Vec<(&str, u64)> = vec![("sessionStart", 5)];
+        let mut want: Vec<(&str, u64)> = Vec::new();
         want.extend(
             super::CURSOR_HOOK_EVENTS
                 .iter()
