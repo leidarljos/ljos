@@ -795,6 +795,15 @@ enum Cmd {
         /// held minority view becomes work instead of a lost ballot.
         #[arg(long)]
         no_file: bool,
+        /// Ballots the decision needs. Short of it the reading says so and
+        /// exits 1: nothing is decided yet.
+        #[arg(long, value_name = "N")]
+        quorum: Option<usize>,
+        /// With `--quorum`, the RFC 3339 time the ballots were due. Past it
+        /// and still short, the vote has lapsed: the tracker notes `quorum
+        /// timed out` once and this exits 3.
+        #[arg(long, value_name = "RFC3339", requires = "quorum")]
+        deadline: Option<String>,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -2184,6 +2193,8 @@ fn run_command() -> Result<()> {
             json,
             compare,
             no_file,
+            quorum,
+            deadline,
         } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
@@ -2202,6 +2213,9 @@ fn run_command() -> Result<()> {
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
             ljos_cli::require_ballots(&id, &ballots)?;
+            if let Some(n) = quorum {
+                quorum_or_exit(&id, n, deadline.as_deref(), json)?;
+            }
             let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
             // The model crate's settle is the one printed; the tracker's
             // runs under --compare, or when the model crate is not there.
@@ -2665,5 +2679,59 @@ fn file_dissent_children(
     match run_captured(step.bin, &args) {
         Ok(out) => ljos_cli::dissent_lines(&out.stderr),
         Err(_) => Vec::new(),
+    }
+}
+
+/// The tracker's quorum gate on `id`: `vissue consensus --gate --quorum N`
+/// with the deadline when one is set. Met, the reading goes on. Short, it
+/// says so and exits 1; short past the deadline, the tracker notes the
+/// lapse once and this exits 3.
+fn quorum_or_exit(id: &str, n: usize, deadline: Option<&str>, json: bool) -> Result<()> {
+    let mut args = vec![
+        "consensus".to_string(),
+        id.to_string(),
+        "--gate".into(),
+        "--quorum".into(),
+        n.to_string(),
+    ];
+    if let Some(d) = deadline {
+        args.push("--deadline".into());
+        args.push(d.to_string());
+    }
+    let out = std::process::Command::new("vissue")
+        .args(&args)
+        .output()
+        .context("consensus: vissue did not run for the quorum")?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    let line = said
+        .lines()
+        .find(|l| l.contains("quorum"))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    match out.status.code() {
+        Some(3) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"quorum": {"issue": id, "needed": n, "lapsed": true, "said": line}})
+                );
+            } else {
+                println!("quorum: lapsed, nothing was decided: {line}");
+            }
+            std::process::exit(3);
+        }
+        Some(1) if line.contains("needed for a quorum") => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"quorum": {"issue": id, "needed": n, "lapsed": false, "said": line}})
+                );
+            } else {
+                println!("quorum: short, nothing is decided yet: {line}");
+            }
+            std::process::exit(1);
+        }
+        _ => Ok(()),
     }
 }
