@@ -5269,6 +5269,36 @@ fn shown_on_prompt(hit: &Hit) -> bool {
 /// marking here would burn the note before the model read it.
 #[must_use]
 pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
+    let (text, ids) = hook_note_from_pack(call, limit);
+    (with_issue_recall(call, text), ids)
+}
+
+/// `text`, then the recall of each tracker issue (at most two) a prompt
+/// names, so the working set reaches the model whether or not it runs
+/// `ljos recall`. Any other event is left as it is.
+fn with_issue_recall(call: &HookCall, text: String) -> String {
+    if call.event != "UserPromptSubmit" {
+        return text;
+    }
+    let notes: Vec<String> = issue_ids_in(&call.cue)
+        .into_iter()
+        .filter(|id| tracker_show_json(id).is_ok())
+        .take(2)
+        .map(|id| recall_note(&id, &recall_memories(&id)))
+        .collect();
+    if notes.is_empty() {
+        return text;
+    }
+    let joined = notes.join("\n");
+    if text.is_empty() {
+        joined
+    } else {
+        format!("{text}\n{joined}")
+    }
+}
+
+/// What the pack holds that bears on the call, before any issue recall.
+fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let cue = call.cue.trim();
     if cue.len() < 3 {
         return (String::new(), Vec::new());
@@ -5536,26 +5566,7 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
     if !call.shape.holds_prompt_note() {
         mark_seen(call.session.as_deref(), &ids);
     }
-    if call.event != "UserPromptSubmit" {
-        return text;
-    }
-    // A prompt that names a tracker issue gets that issue's recall, so the
-    // working set reaches the model whether or not it runs `ljos recall`.
-    let notes: Vec<String> = issue_ids_in(&call.cue)
-        .into_iter()
-        .filter(|id| tracker_show_json(id).is_ok())
-        .take(2)
-        .map(|id| recall_note(&id, &recall_memories(&id)))
-        .collect();
-    if notes.is_empty() {
-        return text;
-    }
-    let joined = notes.join("\n");
-    if text.is_empty() {
-        joined
-    } else {
-        format!("{text}\n{joined}")
-    }
+    text
 }
 
 /// Tokens in `text` shaped like tracker ids: a prefix that opens with a
