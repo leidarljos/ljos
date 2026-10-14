@@ -2036,6 +2036,9 @@ fn run_command() -> Result<()> {
             if call.event == "SessionEnd" {
                 session_end(call.session.as_deref());
                 ljos_cli::extract::at_session_end(&input, call.session.as_deref());
+                // Finish or release after extract. A bookkeeping error stays
+                // off the answer: this event has nothing to say.
+                let _ = ljos_cli::bookkeep::observe(&input, &call);
                 return Ok(());
             }
             // On a tool call the pack's rules give a verdict; on a prompt
@@ -2097,7 +2100,7 @@ fn run_command() -> Result<()> {
             // stdout, so each held note goes out on the next tool result.
             // Stop additionalContext starts another round, so that runner
             // does not print a held note on Stop. PreToolUse / argv only decide.
-            let context = match call.event.as_str() {
+            let mut context = match call.event.as_str() {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
                     let _ = ljos_cli::work_nudge(&call, subagent.is_some());
@@ -2295,6 +2298,20 @@ fn run_command() -> Result<()> {
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
             };
+            // The book is kept here, after a deny has already been decided,
+            // so a tracker that does not answer cannot turn into a refusal.
+            // A Stop the audit held never reaches this line.
+            if verdict.is_none() {
+                let (extra, ids) = ljos_cli::bookkeep::observe(&input, &call);
+                if !extra.is_empty() {
+                    context = if context.is_empty() {
+                        extra
+                    } else {
+                        format!("{context}\n{extra}")
+                    };
+                }
+                seen_later.extend(ids);
+            }
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
             ljos_cli::answer_gate(&output);
             ljos_cli::keep_hook_answer(&call, &output);

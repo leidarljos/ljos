@@ -1,11 +1,37 @@
 //! `ljos doctor` on a fresh machine starts the default writer.
 
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// A seat home outside the temp roots. A temp HOME is a sandbox and the
+/// daemon stays out of those, so this proof cannot live in one.
+struct SeatHome(PathBuf);
+
+impl SeatHome {
+    fn new(name: &str) -> Self {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target")
+            .join(format!("ljos-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("seat home");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SeatHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 #[test]
 fn doctor_runs_packset_ensure_when_no_writer_answers() {
-    let home = tempfile::tempdir().expect("home");
+    let home = SeatHome::new("doctor-wake");
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).expect("bin");
     let marker = home.path().join("ensure-called");

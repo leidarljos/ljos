@@ -282,12 +282,28 @@ fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
     }
 }
 
+/// One line when `age` is not installed. The seal is skipped; the rest of
+/// the sync still succeeds. The next finish tries again.
+fn age_missing_line() -> String {
+    "sync: age is not installed, so the log was not sealed; install age to sync it\n".into()
+}
+
+fn age_missing(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// Write this machine's log for the repository's scope when its atoms
 /// changed since the last write. Returns the line that says what happened.
+/// A missing `age` skips the seal and is not an error.
 ///
 /// # Errors
 ///
-/// The pack not answering, or age refusing to seal.
+/// The pack not answering, or age refusing to seal for a reason other than
+/// being absent.
 pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
     let host = host();
     let plain = log_plaintext(atoms, &scope.name, &default_scope(&scope.name));
@@ -306,11 +322,19 @@ pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
             scope.name
         ));
     }
-    seal(
+    if !crate::on_path("age") {
+        return Ok(age_missing_line());
+    }
+    if let Err(err) = seal(
         &plain,
         &scope.recipients,
         &dir.join(format!("{host}.jsonl.age")),
-    )?;
+    ) {
+        if age_missing(&err) {
+            return Ok(age_missing_line());
+        }
+        return Err(err);
+    }
     std::fs::write(&stamp, digest)?;
     Ok(format!(
         "sync: exported {count} {} atoms to .ljos/atoms/{host}.jsonl.age, sealed to {} recipient{}\n",
@@ -527,6 +551,16 @@ fn git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
         .output()
 }
 
+/// Commit the log after an export. A skipped seal with no file yet has
+/// nothing to stage, and that is not a failure.
+fn commit_if_sealed(root: &Path, scope: &str, exported: &str) -> String {
+    let age = log_dir(root).join(format!("{}.jsonl.age", host()));
+    if exported.contains("age is not installed") && !age.is_file() {
+        return String::new();
+    }
+    commit_log(root, scope)
+}
+
 /// Commit this host's log alone and push it to the upstream and every other
 /// remote that carries the branch.
 fn commit_log(root: &Path, scope: &str) -> String {
@@ -571,6 +605,18 @@ fn commit_log(root: &Path, scope: &str) -> String {
         Err(e) => return format!("sync: git: {e}\n"),
     }
     drop(held);
+    let remotes = git(root, &["remote"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if remotes.is_empty() {
+        return format!(
+            "sync: committed {message}; no remote is configured, so nothing was pushed. \
+             Set one with `git -C {} remote add origin URL` and `git push -u origin HEAD`.\n",
+            root.display()
+        );
+    }
     let mut pushed = vec![];
     // A push another host beat is merged and tried once more; left ahead,
     // the next catch-up could only fast-forward and never would.
@@ -590,11 +636,11 @@ fn commit_log(root: &Path, scope: &str) -> String {
         }
     }
     format!(
-        "sync: committed {message}; pushed to {}\n",
+        "sync: committed {message}; {}\n",
         if pushed.is_empty() {
-            "nothing".to_string()
+            "the push did not land".to_string()
         } else {
-            pushed.join(", ")
+            format!("pushed to {}", pushed.join(", "))
         }
     )
 }
@@ -698,8 +744,9 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     if export_log {
         let client = crate::pack()?;
         let atoms = crate::atoms_lean(&client, &client.workspace())?;
-        out.push_str(&export(&root, &scope, &atoms)?);
-        out.push_str(&commit_log(&root, &scope.name));
+        let said = export(&root, &scope, &atoms)?;
+        out.push_str(&said);
+        out.push_str(&commit_if_sealed(&root, &scope.name, &said));
     }
     Ok(out)
 }
@@ -722,6 +769,71 @@ mod tests {
         assert_eq!(sync_one(&root, true, false, false).unwrap(), "");
         assert_eq!(sync_one(&root, false, true, false).unwrap(), "");
         let _ = std::fs::remove_dir(&root);
+    }
+
+    /// A tracker with no remote used to say the log was pushed to nothing.
+    #[test]
+    fn a_log_with_no_remote_says_how_to_set_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "seat@example.invalid"]);
+        git(&["config", "user.name", "seat"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        let atoms = root.join(".ljos/atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        let name = host();
+        std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
+        std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
+        let said = commit_log(root, "surf");
+        assert!(said.contains("no remote is configured"), "{said}");
+        assert!(said.contains("remote add origin"), "{said}");
+        assert!(said.contains("git push -u origin HEAD"), "{said}");
+        assert!(!said.contains("pushed to nothing"), "{said}");
+        assert_eq!(commit_log(root, "surf"), "");
+    }
+
+    /// Finish's sync used to print an os error when `age` was not installed.
+    #[test]
+    fn a_missing_age_skips_the_seal_without_an_os_error() {
+        let _g = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(path) => unsafe { std::env::set_var("PATH", path) },
+                    None => unsafe { std::env::remove_var("PATH") },
+                }
+            }
+        }
+        let _path = Restore(std::env::var_os("PATH"));
+        let empty = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PATH", empty.path()) };
+        let root = tempfile::tempdir().unwrap();
+        let scope: Scope =
+            toml::from_str("name = \"surf\"\nrecipients = [\"age1test\"]\n").unwrap();
+        let said = export(root.path(), &scope, &[atom("a", "kept", &[])]).unwrap();
+        assert!(said.contains("age is not installed"), "{said}");
+        assert!(said.contains("install age"), "{said}");
+        assert!(!said.contains("os error"), "{said}");
+        assert!(!said.to_lowercase().contains("not found"), "{said}");
+        assert!(!log_dir(root.path())
+            .join(format!("{}.jsonl.age", host()))
+            .is_file());
+        assert_eq!(commit_if_sealed(root.path(), "surf", &said), "");
     }
 
     #[test]

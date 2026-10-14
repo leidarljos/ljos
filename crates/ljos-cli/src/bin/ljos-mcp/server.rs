@@ -136,7 +136,10 @@ fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
 
 /// What a session hears first with the core set.
 const INSTRUCTIONS_CORE: &str =
-    "One seat over five habitats: tracker, pack, deed store, claim graph, \
+    "The seat files a claim on the first edit (on this server, the first write), \
+     records a deed when a git commit is seen, and finishes at Stop, session end, \
+     or when this server shuts down, without the model choosing those tools. \
+     One seat over five habitats: tracker, pack, deed store, claim graph, \
      consensus. Read ljos://protocol first. This server lists the core tools: \
      ljos_search and ljos_remember for what the seat knows, ljos_prefer and ljos_rule for \
      what holds from now on, ljos_sitting, ljos_note, ljos_file and ljos_finish for the work \
@@ -1090,7 +1093,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: `packset ensure` starts one. Pass as_of to ask what the seat knew at an earlier time. Follow with ljos_island for the cluster the task touches.",
+        description = "Call this at the start of any task, before reading code or files, with the topic in a few words. The reading says what the score is: a rank from the scorers, not whether the claim is true. The fraction is how many scorers named the hit. An empty list means the pack holds nothing on it; a failure means the writer is down, which is a different thing: the seat starts the writer, as ljos doctor does, and the search is asked again. Pass as_of to ask what the seat knew at an earlier time. Follow with ljos_island for the cluster the task touches.",
         annotations(
             title = "Search the pack",
             read_only_hint = true,
@@ -1206,7 +1209,7 @@ impl LjosServer {
     // ---- the tracker ---------------------------------------------------------
 
     #[tool(
-        description = "Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. Omit the accession to list what the issue cites. A citation names the accession; the bytes stay in deedar.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this after the work produced something and the deed store minted it (deedar create): cite the accession on the issue. Omit the accession to list what the issue cites. A citation names the accession; the bytes stay in deedar.",
         annotations(
             title = "Cite a deed",
             read_only_hint = false,
@@ -1232,7 +1235,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. A `project` other than the held issue's files at its top level, which is how a bug in a tool goes to the tool's project mid-sitting. Returns the new id, which a later child may name as its parent at once.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. A `project` other than the held issue's files at its top level, which is how a bug in a tool goes to the tool's project mid-sitting. Returns the new id, which a later child may name as its parent at once.",
         annotations(
             title = "File work",
             read_only_hint = false,
@@ -1415,7 +1418,7 @@ impl LjosServer {
     // ---- the session graph --------------------------------------------------
 
     #[tool(
-        description = "Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Completing a node later does not close the ticket.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this before starting work on an issue, after ljos_recall: it takes the session node for that tracker id under your name. A named worker occupies one slot (busy names the held node and ljos_complete / ljos_release). A harness seat occupies per issue. Completing a node later does not close the ticket.",
         annotations(
             title = "Claim a node",
             read_only_hint = false,
@@ -1434,7 +1437,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the five before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the five before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -1459,7 +1462,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work on an issue ends; it is the whole closing of a sitting: file the lesson as a proposal, fire the island so its links gain weight, complete the session node, and learn from the outcome when one is named. The lesson is not a memory until `ljos accept` on the command line, or until the person types the same words with remember or prefer. Pass the lesson: a sitting that taught nothing worth two sentences is rare, and the report says so when none is given.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this when the work on an issue ends; it is the whole closing of a sitting: file the lesson as a proposal, fire the island so its links gain weight, complete the session node, and learn from the outcome when one is named. The lesson is not a memory until `ljos accept` on the command line, or until the person types the same words with remember or prefer. Pass the lesson: a sitting that taught nothing worth two sentences is rare, and the report says so when none is given.",
         annotations(
             title = "Close a sitting",
             read_only_hint = false,
@@ -2560,7 +2563,10 @@ impl ServerHandler for LjosServer {
         )
         .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
         .with_instructions(format!("{start}\n\n{}", instructions_for(
-            "One seat over five habitats: tracker, pack, deed store, claim graph, \
+            "The seat files a claim on the first edit (on this server, the first write), \
+             records a deed when a git commit is seen, and finishes at Stop, session end, \
+             or when this server shuts down, without the model choosing those tools. \
+             One seat over five habitats: tracker, pack, deed store, claim graph, \
              consensus. Read ljos://protocol first; it says which store answers \
              which question and the order of tools in a sitting. ljos_sitting \
              runs the whole opening (doctor, cards, due, island, playbook, recall, timeline, reclaim, claim) \
@@ -2625,6 +2631,14 @@ impl ServerHandler for LjosServer {
                 request.name
             ))])
             .into());
+        }
+        if ljos_cli::bookkeep::mcp_tool_writes(request.name.as_ref()) {
+            let name = request.name.to_string();
+            let args = request.arguments.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                ljos_cli::bookkeep::before_mcp_write(&name, args.as_ref());
+            })
+            .await;
         }
         let thread = thread_in_meta(&context.meta.0);
         let session = session_in_meta(&context.meta.0);
