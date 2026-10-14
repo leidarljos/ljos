@@ -1563,6 +1563,15 @@ fn run_command() -> Result<()> {
                 }
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 run_as("vissue", &refs, as_persona.as_deref())?;
+                if as_persona.is_none() {
+                    // A seat ballot is signed with the seat's key; the push
+                    // gate counts no unsigned one.
+                    let voter = identity_or_seat(None).unwrap_or_else(whoami_tracker);
+                    match ljos_cli::ballot_sig::sign_ballot(&issue, &voter, &args[3]) {
+                        Ok(said) => print!("{said}"),
+                        Err(e) => eprintln!("ljos vote: {e:#}"),
+                    }
+                }
                 if let Some(expect) = expect.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
                     let who =
                         identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);

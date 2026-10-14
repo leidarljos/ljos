@@ -14,6 +14,7 @@ use serde_json::Value;
 pub mod admit;
 pub mod approval;
 pub mod ask_pack;
+pub mod ballot_sig;
 pub mod capture;
 pub mod command_prefs;
 pub mod hud;
@@ -8430,6 +8431,48 @@ fn host_key_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// The seat's deedar host key path, for signing ballots.
+#[must_use]
+pub fn host_key_path_pub() -> Option<PathBuf> {
+    host_key_path()
+}
+
+/// The seat ballots on `issue` that fail their signature check, said as
+/// one refusal. `Ok` when every seat ballot is signed under its pinned key,
+/// or when `LJOS_UNSIGNED_BALLOTS=allow`.
+///
+/// # Errors
+///
+/// The refusal naming each ballot that does not count.
+pub fn check_seat_signatures(
+    issue: &str,
+    ballots: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+) -> std::result::Result<(), String> {
+    if ballot_sig::unsigned_allowed() {
+        return Ok(());
+    }
+    let seats = seat_ballots(ballots, personas);
+    if seats.is_empty() {
+        return Ok(());
+    }
+    let v = tracker_show_json(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
+    let problems = ballot_sig::seat_problems(
+        issue,
+        &seats,
+        &ballot_sig::notes_of(&v),
+        &ballot_sig::pins(),
+    );
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
+            problems.join("; ")
+        ))
+    }
+}
+
 /// `raw` with a leading `~` or `~/` put against `home`; `None` when there is
 /// nothing to expand.
 pub fn expand_leading_tilde(raw: &str, home: &str) -> Option<String> {
@@ -13857,6 +13900,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         let (ballots, personas) = cite_ballots(cite)?;
+        check_seat_signatures(cite, &ballots, &personas)?;
         let d = seats_decide(cite, &ballots, &personas, &seat_name())?;
         let closed = if v["state"].as_str() == Some("DONE") && is_decision(&v) {
             ", closed as a decision"
@@ -21388,7 +21432,27 @@ pub fn push_cite_reading(
     personas: &std::collections::BTreeSet<String>,
     pusher: &str,
 ) -> (String, Value) {
-    let (mut words, json) = match seats_decide(issue, rows, personas, pusher) {
+    push_cite_reading_signed(
+        issue,
+        rows,
+        personas,
+        pusher,
+        check_seat_signatures(issue, rows, personas),
+    )
+}
+
+/// [`push_cite_reading`] with the signature check already made: a refusal
+/// there is the gate's answer.
+#[must_use]
+pub fn push_cite_reading_signed(
+    issue: &str,
+    rows: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+    signed: std::result::Result<(), String>,
+) -> (String, Value) {
+    let decided = signed.and_then(|()| seats_decide(issue, rows, personas, pusher));
+    let (mut words, json) = match decided {
         Ok(d) => (
             format!(
                 "push cite: {issue} decides {} for a push by {pusher}; counted {}\n",
@@ -26420,7 +26484,7 @@ mod tests {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        let (words, json) = push_cite_reading("x-1", &rows, &personas, "ljos-bot");
+        let (words, json) = push_cite_reading_signed("x-1", &rows, &personas, "ljos-bot", Ok(()));
         assert_eq!(
             words,
             "push cite: x-1 decides guard-fix for a push by ljos-bot; counted ljos-bot for guard-fix, \
@@ -26430,7 +26494,8 @@ mod tests {
         );
         assert_eq!(json["push_cite"]["stands"], true);
         assert_eq!(json["push_cite"]["choice"], "guard-fix");
-        let (words, json) = push_cite_reading("x-1", &rows[..4], &personas, "ljos-bot");
+        let (words, json) =
+            push_cite_reading_signed("x-1", &rows[..4], &personas, "ljos-bot", Ok(()));
         assert!(
             words.starts_with("push cite: does not stand for ljos-bot: the only seat ballot on x-1 is from ljos-bot"),
             "{words}"

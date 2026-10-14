@@ -18,7 +18,8 @@ printf '# demo\n' > "$root/repo/README.md"; git -C "$root/repo" add README.md; g
 SEATS="alice bob carol"
 CA=${CA:-$(command -v cursor-agent || true)}
 for s in $SEATS; do mkdir -p "$root/home-$s"; for rc in .bashrc .profile .zshenv; do printf 'export PATH="%s:/home/box/.cargo/bin:$PATH"\n' "${BIN:-/home/box/.cargo/bin}" > "$root/home-$s/$rc"; done; printf '[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n' > "$root/home-$s/.gitconfig"; done
-as() { local s=$1; shift; HOME="$root/home-$s" LJOS_SEAT=$s VISSUE_AGENT=$s SEAT_SESSION_ID="sess-$s-0001" "$@"; }
+for s in $SEATS; do head -c 32 /dev/urandom > "$root/home-$s/seat.key"; done
+as() { local s=$1; shift; HOME="$root/home-$s" DEEDAR_HOST_SIGNING_KEY="$root/home-$s/seat.key" LJOS_SEAT=$s VISSUE_AGENT=$s SEAT_SESSION_ID="sess-$s-0001" "$@"; }
 cd "$root/repo"
 packset ensure >/dev/null 2>&1 || true
 P=0; F=0; TABLE=()
@@ -73,6 +74,22 @@ chk "three seats cast on $D1" test "$N" -ge 3
 chk "each ballot on $D1 is its own seat's" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "alice,bob,carol"' "$LAST"
 run vissue consensus "$D1" --gate --quorum 3; chk "D1 settles with quorum 3" test $? -eq 0
 run ljos consensus "$D1"; chk "ljos consensus names a leader on D1" bash -c '! printf "%s" "$0" | grep -q "tie"' "$LAST"
+
+run as alice ljos consensus "$D1"; chk "signed seat ballots stand at the push gate" has "decides ship for a push by alice"
+chk "each seat's key is pinned on the tracker" test "$(wc -l < "$VISSUE_ROOT/.ljos-seat-keys")" -eq 3
+
+# 4b. forged and unsigned ballots do not count
+run as alice vissue create -p demo "Signed: enable the cache?" -q; D6=$(echo "$LAST"|tail -1)
+as alice ljos vote "$D6" --for on --used none >/dev/null 2>&1
+head -c 32 /dev/urandom > "$root/mallory.key"
+run env HOME="$root/home-bob" LJOS_SEAT=bob VISSUE_AGENT=bob DEEDAR_HOST_SIGNING_KEY="$root/mallory.key" ljos vote "$D6" --for on --used none
+chk "a ballot under bob's name with another key is refused a signature" has "pinned to key"
+run as carol ljos consensus "$D6"; chk "the gate rejects the mismatched ballot" has "bob's ballot is unsigned\|bob's ballot is signed by a key other"
+as bob ljos vote "$D6" --for on --used none >/dev/null 2>&1
+run as carol ljos consensus "$D6"; chk "bob's own key makes it stand" has "decides on for a push by carol"
+VISSUE_AGENT=carol vissue vote "$D6" --for on --used none >/dev/null 2>&1
+run as alice ljos consensus "$D6"; chk "a ballot cast around ljos, unsigned, is rejected" has "carol's ballot is unsigned"
+run as alice ljos consensus "$D6" --json; chk "push_cite stands false with the refusal in JSON" bash -c 'printf "%s" "$0" | jq -e ".push_cite.stands == false" >/dev/null' "$LAST"
 
 # 5. tie must not settle
 run as alice vissue create -p demo "Tie: rename the crate?" -q; D2=$(echo "$LAST"|tail -1)
