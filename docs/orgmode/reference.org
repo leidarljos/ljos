@@ -44,6 +44,7 @@
 | =read ID= | pack | write a read receipt for one message; a second read writes nothing |
 | =reply ID TEXT... [--interrupt]= | pack | answer the sender, keep the issue, and carry =reply:ID= |
 | =group NAME [--add SEAT]... [--remove SEAT]...= | pack | list a group, or add and drop members; membership is atoms and travels in the sealed log |
+| =wake [SEAT] [--command CMD [--timeout S]\vert --webhook URL [--key-file F] [--key-env VAR]\vert --clear\vert --fire]= | machine | how mail wakes a seat that is idle: a shell line this machine runs with =LJOS_SEAT= set to the seat, or a URL it posts the envelope to (never the body); =send= and =reply= start it in its own session and do not wait on it; the guard judges a command when it is set and on every run, and a =deny= or an =ask= keeps it from running; =--fire= runs it now and prints what happened; alone, show the wake; kept in =~/.config/ljos/wake.toml= |
 | =deed ID [--add ACCESSION]...= / =--remove ACCESSION --ticket ID= | tracker | cite with =--add=, or list; =--remove= drops one citation, appended to the ledger, and the heading is not rewritten |
 | =claims [ARGS]= | tracker | who has claimed what: =vissue claims= with its flags (=--by NAME=, =--json=) |
 | =recall ID= | tracker | the working set |
@@ -81,6 +82,14 @@ answers the sender and keeps the issue. =group NAME --add SEAT= records
 a member. =ljos hook --prompt= writes a receipt for each message it
 shows. When the pack does not answer, the hook prints =mail could not be checked=
 and still exits 0. A shell seat polls =ljos inbox=.
+
+=send= and =reply= start the recipient's wake, when it has one, after the message is written.
+=ljos wake --command CMD= runs =CMD= under =sh -c= with =LJOS_SEAT= set to the seat, so =ljos inbox= in it reads that seat's mail.
+=LJOS_WAKE_FROM=, =LJOS_WAKE_MSG=, =LJOS_WAKE_ISSUE= and =LJOS_WAKE_INTERRUPT= name the message.
+=ljos wake --webhook URL --key-file FILE= posts the envelope (seat, sender, id, issue, interrupt) to an https URL with the key in that file as a bearer token, and never the body.
+The sender waits on neither, and a wake that fails or runs past its timeout is a line in =~/.local/state/ljos/mail/wake.log=.
+On =Stop=, unread interrupt mail holds the turn once and is receipted, so a running session reads it before it goes idle.
+A seat the pack has never heard from is refused with the known seat it most likely meant.
 
 =ljos deed --remove ACCESSION --ticket ID= drops that citation. The removal is appended to the ticket. The heading is not rewritten.
 
@@ -245,7 +254,7 @@ stdin is an argv line and answered in plain lines.
 | =PreCompact= | fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery |
 | =SessionStart= | after a compaction (=source= =compact=), on a runner that takes its context, answers with that note; a fresh session hears one line: that ljos is on, the memory and due counts, the command guard, and up to three preferences |
 | =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit=); a deny blocks |
-| =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript |
+| =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (=decision: block=, or =followup_message= in Cursor) and receipts it |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
 
 * What a rule reads

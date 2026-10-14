@@ -255,6 +255,48 @@ enum Cmd {
         #[arg(long)]
         remove: Vec<String>,
     },
+    /// How mail wakes a seat that is idle: a command this machine runs or a
+    /// webhook it posts to, which `ljos send` and `ljos reply` start without
+    /// waiting. Alone, show the seat's wake.
+    Wake {
+        /// The seat. Absent: this seat.
+        seat: Option<String>,
+        /// Run this shell line, with `LJOS_SEAT` set to the seat, when mail
+        /// reaches it. The guard judges it now and on every run.
+        #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
+        command: Option<String>,
+        /// POST the message's envelope (never its body) here, such as a Grok
+        /// Bot routine's webhook. https, or http on this machine.
+        #[arg(long, conflicts_with_all = ["clear", "fire"])]
+        webhook: Option<String>,
+        /// A file holding the webhook's bearer key.
+        #[arg(long, requires = "webhook")]
+        key_file: Option<String>,
+        /// An environment variable holding the webhook's bearer key.
+        #[arg(long, requires = "webhook")]
+        key_env: Option<String>,
+        /// Seconds before a wake command is stopped (default 30).
+        #[arg(long, requires = "command")]
+        timeout: Option<u64>,
+        /// Remove the seat's wake.
+        #[arg(long, conflicts_with = "fire")]
+        clear: bool,
+        /// Run the seat's wake now, as a send does, and print what happened.
+        #[arg(long)]
+        fire: bool,
+        /// With --fire: the seat the message is from.
+        #[arg(long, requires = "fire")]
+        from: Option<String>,
+        /// With --fire: the message id.
+        #[arg(long, requires = "fire")]
+        msg: Option<String>,
+        /// With --fire: the issue the message is about.
+        #[arg(long, requires = "fire")]
+        issue: Option<String>,
+        /// With --fire: the message is an interrupt.
+        #[arg(long, requires = "fire")]
+        interrupt: bool,
+    },
     /// Who holds what on the tracker: `vissue claims`, with its flags.
     Claims {
         /// Passed to `vissue claims` as given (`--by NAME`, `--json`, `-p PROJECT`).
@@ -1134,6 +1176,40 @@ fn run_command() -> Result<()> {
         Cmd::Group { name, add, remove } => {
             print!("{}", ljos_cli::mail::group(&name, &add, &remove)?)
         }
+        Cmd::Wake {
+            seat,
+            command,
+            webhook,
+            key_file,
+            key_env,
+            timeout,
+            clear,
+            fire,
+            from,
+            msg,
+            issue,
+            interrupt,
+        } => {
+            let seat = seat.unwrap_or_else(ljos_cli::seat_name);
+            let said = if let Some(command) = command {
+                ljos_cli::wake::set_command(&seat, &command, timeout)?
+            } else if let Some(url) = webhook {
+                ljos_cli::wake::set_webhook(&seat, &url, key_file.as_deref(), key_env.as_deref())?
+            } else if clear {
+                ljos_cli::wake::clear(&seat)?
+            } else if fire {
+                ljos_cli::wake::fire(&ljos_cli::wake::Event {
+                    seat,
+                    from: from.unwrap_or_else(ljos_cli::seat_name),
+                    msg: msg.unwrap_or_default(),
+                    issue,
+                    interrupt,
+                })?
+            } else {
+                ljos_cli::wake::show(&seat)
+            };
+            print!("{said}");
+        }
         Cmd::Claims { args } => {
             let mut argv = vec!["claims"];
             argv.extend(args.iter().map(String::as_str));
@@ -1579,6 +1655,19 @@ fn run_command() -> Result<()> {
                 if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
                     println!("{}", ljos_cli::block_output(call.shape, &reason));
                     return Ok(());
+                }
+                // Interrupt mail that came in during the turn holds the
+                // stop once, so a running session reads it before it goes
+                // idle. Each letter is receipted once delivered, so the
+                // next stop is not held for it again.
+                if subagent.is_none() {
+                    let (mail, ids) = ljos_cli::mail::stop_note();
+                    if !mail.is_empty() {
+                        println!("{}", ljos_cli::block_output(call.shape, &mail));
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        ljos_cli::mail::ack_delivered(&ids);
+                        return Ok(());
+                    }
                 }
             }
             // At the end of a session the memories it used fire together,

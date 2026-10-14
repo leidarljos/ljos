@@ -467,6 +467,13 @@ When the pack does not answer, the hook prints `mail could not be checked`
 and does not block the prompt. A shell seat has no hook. It polls
 `ljos inbox` and writes a receipt with `ljos read`.
 
+An idle agent has no next prompt, so a seat can name how to wake it.
+`ljos wake --command CMD` runs `CMD` with `LJOS_SEAT` set to the seat, and `ljos wake --webhook URL --key-file FILE` posts the envelope (never the body) to a URL such as a Grok Bot routine's webhook.
+`ljos send` and `ljos reply` start the recipient's wake after the message is written and do not wait on it.
+The guard judges a wake command when it is set and on every run, and a `deny` or an `ask` keeps it from running.
+A session still at work needs no wake: its `Stop` hook holds the turn once for unread interrupt mail, so send `--interrupt` when the work cannot wait for the next prompt.
+A seat the pack has never heard from is refused with the seat it most likely meant; `--new-seat` writes to one that has not started yet.
+
 The text of a message carries its id. Two messages with the same words stay
 two messages when a sealed log is imported. The same is true of a receipt
 and for a group membership.

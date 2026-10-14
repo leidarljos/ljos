@@ -25,6 +25,7 @@ pub mod runner_hooks;
 pub mod sync;
 pub mod tools;
 pub mod upgrade;
+pub mod wake;
 
 /// Working-core files this seat will print. Nothing else, and never write.
 pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
@@ -5693,12 +5694,12 @@ pub fn start_decision_panel(
 
 /// Start `bin` with `args` in its own session, writing stdout and stderr to
 /// `log`. `setsid --fork` when it is on `PATH`, otherwise a spawned child.
-fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
+pub(crate) fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)
-        .with_context(|| format!("panel log {}", log.display()))?;
+        .with_context(|| format!("log {}", log.display()))?;
     let err = file.try_clone()?;
     if which::which("setsid").is_ok() {
         let mut cmd = std::process::Command::new("setsid");
@@ -5706,7 +5707,8 @@ fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
         cmd.stdin(std::process::Stdio::null())
             .stdout(file)
             .stderr(err);
-        cmd.spawn().context("setsid --fork the panel opener")?;
+        cmd.spawn()
+            .with_context(|| format!("setsid --fork {bin}"))?;
         return Ok(());
     }
     let mut cmd = std::process::Command::new(bin);
@@ -5714,7 +5716,7 @@ fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(file)
         .stderr(err);
-    cmd.spawn().context("spawn the panel opener")?;
+    cmd.spawn().with_context(|| format!("spawn {bin}"))?;
     Ok(())
 }
 
