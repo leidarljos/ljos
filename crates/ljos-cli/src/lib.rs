@@ -5400,6 +5400,7 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
         .filter(|id| tracker_show_json(id).is_ok())
         .take(2)
         .map(|id| recall_note(&id, &recall_memories(&id)))
+        .filter(|n| !n.is_empty())
         .collect();
     if notes.is_empty() {
         return text;
@@ -5711,7 +5712,8 @@ pub fn issue_ids_in(text: &str) -> Vec<String> {
 }
 
 /// The recall a prompt naming `issue` is handed: where the full working set
-/// is, then what the seat remembers on it.
+/// is, then what the seat remembers on it. Empty when nothing is
+/// remembered on it, so an issue with no memories adds no line to the prompt.
 #[must_use]
 pub fn recall_note(issue: &str, memories: &str) -> String {
     let head = format!("Recall for {issue} (`ljos recall {issue}` shows its full working set):");
@@ -5720,7 +5722,7 @@ pub fn recall_note(issue: &str, memories: &str) -> String {
         .trim_start_matches("Memory\n")
         .trim_end();
     if body.is_empty() {
-        format!("{head}\n  (nothing remembered on it yet)")
+        String::new()
     } else {
         format!("{head}\n{body}")
     }
@@ -22763,7 +22765,7 @@ mod tests {
             note.ends_with("- [lesson, today] PURPLE-HERON-42"),
             "{note}"
         );
-        assert!(super::recall_note("Rig-ab12", "").contains("nothing remembered"));
+        assert!(super::recall_note("Rig-ab12", "").is_empty());
     }
 
     /// Real models given the old denial moved the directory to /tmp and
