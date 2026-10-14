@@ -211,7 +211,20 @@ fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
     let text = "Build the lesson on the cluster fuse.";
     let filed = ljos_cli::admit::propose_atom(&client, lesson(text))
         .unwrap_or_else(|err| panic!("{err:#}\n{}", daemon.log.lock().expect("log")));
-    assert!(filed.remote, "the writer held the lesson");
+    if !filed.remote {
+        // A writer from packset 3aec57f on stores an agent's write live, with
+        // no proposal to accept: the lesson is in the pack as agent-derived.
+        let live: Vec<_> = live_atoms(&daemon.url)
+            .into_iter()
+            .filter(|atom| atom["text"] == text)
+            .collect();
+        assert_eq!(live.len(), 1, "the writer stored the lesson once: {live:?}");
+        assert_eq!(live[0]["origin"], "agent-derived", "{live:?}");
+        let entities = live[0]["entities"].to_string();
+        assert!(entities.contains("issue:Software-kzdk"), "{entities}");
+        assert!(open_proposals(&daemon.url).is_empty(), "nothing is held");
+        return;
+    }
 
     let open = open_proposals(&daemon.url);
     assert_eq!(open.len(), 1, "one filing is one proposal: {open:?}");

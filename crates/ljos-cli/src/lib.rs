@@ -5536,7 +5536,68 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
     if !call.shape.holds_prompt_note() {
         mark_seen(call.session.as_deref(), &ids);
     }
-    text
+    if call.event != "UserPromptSubmit" {
+        return text;
+    }
+    // A prompt that names a tracker issue gets that issue's recall, so the
+    // working set reaches the model whether or not it runs `ljos recall`.
+    let notes: Vec<String> = issue_ids_in(&call.cue)
+        .into_iter()
+        .filter(|id| tracker_show_json(id).is_ok())
+        .take(2)
+        .map(|id| recall_note(&id, &recall_memories(&id)))
+        .collect();
+    if notes.is_empty() {
+        return text;
+    }
+    let joined = notes.join("\n");
+    if text.is_empty() {
+        joined
+    } else {
+        format!("{text}\n{joined}")
+    }
+}
+
+/// Tokens in `text` shaped like tracker ids: a prefix that opens with a
+/// capital, a dash, then four or more lowercase letters or digits, as
+/// `Rig-ab12` or `Software-kzdk`. Each once, in order.
+#[must_use]
+pub fn issue_ids_in(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        let Some((prefix, tail)) = raw.split_once('-') else {
+            continue;
+        };
+        let shaped = prefix
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+            && prefix.chars().all(|c| c.is_ascii_alphanumeric())
+            && tail.len() >= 4
+            && tail
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+        if shaped && !out.iter().any(|x| x == raw) {
+            out.push(raw.to_string());
+        }
+    }
+    out
+}
+
+/// The recall a prompt naming `issue` is handed: where the full working set
+/// is, then what the seat remembers on it.
+#[must_use]
+pub fn recall_note(issue: &str, memories: &str) -> String {
+    let head = format!("Recall for {issue} (`ljos recall {issue}` shows its full working set):");
+    let body = memories
+        .trim_start_matches('\n')
+        .trim_start_matches("Memory\n")
+        .trim_end();
+    if body.is_empty() {
+        format!("{head}\n  (nothing remembered on it yet)")
+    } else {
+        format!("{head}\n{body}")
+    }
 }
 
 /// How sure Jev must be that a claim bears on a prompt it shares no
@@ -22272,6 +22333,31 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A prompt naming an issue is handed the issue's recall.
+    #[test]
+    fn a_prompt_naming_an_issue_gets_its_recall() {
+        assert_eq!(
+            super::issue_ids_in(
+                "You're picking up tracker issue Rig-ab12 in this workspace; see Rig-ab12."
+            ),
+            vec!["Rig-ab12".to_string()]
+        );
+        assert!(super::issue_ids_in("a well-known re-run of e-mail").is_empty());
+        let note = super::recall_note(
+            "Rig-ab12",
+            "\nMemory\n  - [lesson, today] PURPLE-HERON-42\n",
+        );
+        assert!(
+            note.starts_with("Recall for Rig-ab12 (`ljos recall Rig-ab12`"),
+            "{note}"
+        );
+        assert!(
+            note.ends_with("- [lesson, today] PURPLE-HERON-42"),
+            "{note}"
+        );
+        assert!(super::recall_note("Rig-ab12", "").contains("nothing remembered"));
+    }
+
     /// Real models given the old denial moved the directory to /tmp and
     /// deleted it there. The denial no longer offers /tmp as a way around.
     #[test]
