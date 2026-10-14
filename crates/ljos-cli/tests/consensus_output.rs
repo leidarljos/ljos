@@ -49,6 +49,9 @@ fn consensus(dir: &Path, home: &Path, args: &[&str]) -> Output {
         .env("XDG_RUNTIME_DIR", home)
         .env("VISSUE_ROOT", home.join("tracker"))
         .env("PACKSET_URL", "off")
+        // The stub tracker holds no signature notes; this test reads the
+        // shape of the JSON, and signed ballots have their own suite.
+        .env("LJOS_UNSIGNED_BALLOTS", "allow")
         .output()
         .unwrap()
 }

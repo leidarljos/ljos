@@ -21,7 +21,7 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1\" in\n  show) echo '{{}}' ;;\nesac\nexit 0\n"
+            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1 $3\" in\n  show*) echo '{{}}' ;;\n  'vote --json') echo '[{{\"agent\":\"reviewer\",\"choice\":\"a\"}}]' ;;\nesac\nexit 0\n"
         ),
     );
     let home = dir.path().join("home");
@@ -71,8 +71,14 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(!calls.contains("vissue vote"), "nothing was cast: {calls}");
 
+    // The stub tracker answers the read-back with the ballot, so the cast
+    // is proved by the tracker, not by the exit of `vissue vote`.
     let cast = ljos(Some("saddle"), &vote);
     assert!(cast.status.success(), "{cast:?}");
+    assert!(
+        String::from_utf8_lossy(&cast.stdout).contains("recorded on the tracker: reviewer for a"),
+        "{cast:?}"
+    );
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(
         calls.contains("vissue vote proj-aaaa --for a --used none VISSUE_AGENT=reviewer"),
