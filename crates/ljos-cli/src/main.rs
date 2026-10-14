@@ -681,14 +681,14 @@ enum Cmd {
     },
     /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature.
     Playbooks,
-    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round.
+    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round, a blocking fix, or closes as settled-with-notes.
     Workflow {
         /// The tracker id of the parent issue.
         issue: String,
         /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
         #[arg(long, value_name = "NAME", conflicts_with = "round")]
         start: Option<String>,
-        /// File the next panel round once every child is closed.
+        /// File the next panel round, one `fix:` for a blocking finding, or close as settled-with-notes. A nit stays a note. The close does not wait.
         #[arg(long)]
         round: bool,
     },
@@ -817,10 +817,12 @@ enum Cmd {
         /// numbers can differ from the model crate's once trust rows exist.
         #[arg(long)]
         compare: bool,
-        /// Read only: do not file a `Dissent holds OPTION` child for a
-        /// position a voter still holds after the anchored settle. By default
-        /// each such dissent is filed once, as a child of the issue, so a
-        /// held minority view becomes work instead of a lost ballot.
+        /// Read only: do not note an objection or file a child. By default
+        /// a blocking objection with a reason is filed once, and so is a
+        /// held minority on an issue whose substance has not settled. A nit,
+        /// a wording note or a style note is written on the issue. The same
+        /// objection is not filed again. At the panel's round limit the
+        /// issue closes as settled-with-notes.
         #[arg(long)]
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and
@@ -2402,13 +2404,14 @@ fn run_command() -> Result<()> {
             // exist.
             let predictions = predictions_of(&atoms, &id);
             let panel = panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions);
-            // A position a voter still holds after the anchored settle is
-            // filed once as a `Dissent holds OPTION` child; the tracker skips
-            // one already filed. `--no-file` keeps this a pure read.
+            // A blocking objection with a reason is filed once. A nit, a
+            // wording note or a style note is written on the issue. A held
+            // minority is filed only while the substance has not settled.
+            // `--no-file` keeps this a pure read. Filing never fails the reading.
             let dissent = if no_file || !on_path("vissue") {
                 Vec::new()
             } else {
-                file_dissent_children(&id, &trust, &anchors, &tags)
+                ljos_cli::converge::record_dissents(&id)
             };
             if json {
                 // One document on stdout. The push cite stays at the top
@@ -2812,31 +2815,6 @@ fn pack_trust_or_none() -> Vec<Trust> {
             eprintln!("ljos: no trust rows ({e:#}); settling with equal weights");
             Vec::new()
         }
-    }
-}
-
-/// File each held dissent on `id` as a child through the tracker's
-/// `vissue consensus --file-dissent`, under the same trust rows and anchors
-/// the settle used. Returns what the tracker said about each dissent: the
-/// new child, or that it was already filed. A tracker that fails is quiet:
-/// filing is a side effect of the reading, never a reason it fails.
-fn file_dissent_children(
-    id: &str,
-    trust: &[Trust],
-    anchors: &std::collections::BTreeMap<String, f64>,
-    tags: &[String],
-) -> Vec<String> {
-    let Ok(steps) = consensus_steps_for(id, false, true, trust, anchors, tags) else {
-        return Vec::new();
-    };
-    let Some(step) = steps.into_iter().find(|s| s.bin == "vissue") else {
-        return Vec::new();
-    };
-    let mut args = step.args;
-    args.push("--file-dissent".into());
-    match run_captured(step.bin, &args) {
-        Ok(out) => ljos_cli::dissent_lines(&out.stderr),
-        Err(_) => Vec::new(),
     }
 }
 

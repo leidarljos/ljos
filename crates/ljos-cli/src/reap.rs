@@ -152,6 +152,7 @@ pub fn reap(idle: Duration, apply: bool) -> Result<String> {
         }
     }
     out.push_str(&enforce_quorum_deadlines(apply));
+    out.push_str(&crate::converge::reap_runaways(apply));
     out.push_str(&format!(
         "reap: {} of {} claims idle over {hours:.1}h{}\n",
         idle_ones.len(),

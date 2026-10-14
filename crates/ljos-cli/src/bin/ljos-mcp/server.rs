@@ -1598,7 +1598,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after the ballots are in. The first line is what the push gate decides: whether a push citing this issue stands, on seat ballots alone, with the ballots it counted; persona and judge ballots neither pass nor block a push. Then comes the weighted settle over every ballot, which is advice. Pass `compare` to add the tracker's own settle. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached, and the settle files a child for each option a voter still leads with that is not the unique plurality. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
+        description = "Call this after the ballots are in. The first line is what the push gate decides: whether a push citing this issue stands, on seat ballots alone, with the ballots it counted; persona and judge ballots neither pass nor block a push. Then comes the weighted settle over every ballot, which is advice. Pass `compare` to add the tracker's own settle. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached. Once the substance has settled, a nit, a wording note or a style note is recorded on the issue; a blocking objection with a reason is still filed as one child, a duplicate is not filed again, and the panel closes as settled-with-notes at its round limit. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
@@ -2466,7 +2466,7 @@ impl LjosServer {
                 how far neighbors still sit from each other. Both zero with one option \
                 means there was one option. Act on the shares when polarization is about \
                 zero and two or more options were named. When polarization is away from \
-                zero, the mean is not a position the group reached, and the settle files a child for each option a voter still leads with that is not the unique plurality. A count printed later \
+                zero, the mean is not a position the group reached. Once the substance has settled, a nit, a wording note or a style note stays on the issue. A blocking objection with a reason is one child, a duplicate is not filed again, and at the round limit the issue closes as settled-with-notes. A count printed later \
                 is who voted. Act on the settle, not on the count.\n\
              4. When the world later says which option \
                 was right, `ljos_learn` on {issue} with that outcome, and the personas that \

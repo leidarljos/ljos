@@ -81,11 +81,16 @@ tracker as a `playbook:` note until `finish` or `release`.
    matches the title (any name but `feature`) or binds `sit`. Mid-sitting
    turns re-read the same note; a new task is a new sitting. Finish and
    release write `playbook:` so the next sitting does not reprint the
-   previous recipe. Feature work runs on a parent issue:
+   previous recipe.    Feature work runs on a parent issue:
    `ljos workflow PARENT --start feature` files its design child, and
    `ljos workflow PARENT` prints the stage and the next step. A sitting
    on the parent or a child prints the same in `== workflow`, and
    `ljos finish PARENT --close` is refused until the panel passed.
+   `ljos workflow PARENT --round` files the next panel. Once the substance
+   has settled, a nit, a wording note or a style note stays on the issue.
+   A blocking finding with a reason is one `fix:` child. The same objection
+   is not filed again. At the round limit the parent closes as
+   settled-with-notes and does not wait.
 6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 7. `ljos timeline ISSUE`. The last twelve dated events across the three
@@ -185,10 +190,13 @@ Every piece of work has an issue before it has a claim.
   how far voters still sit from the mean after listening, disagreement how
   far neighbors still sit from each other. Both zero with one option means
   there was one option. Act on the shares when polarization is about zero
-  and two or more options were named. When polarization is away from zero,
-  the mean is not a position the group reached, and the settle files a
-  child for each option a voter still leads with that is not the unique
-  plurality. A tally printed later is
+  and two or more options were named.   When polarization is away from zero,
+  the mean is not a position the group reached. Once the substance has
+  settled, a nit, a wording note or a style note is recorded on the issue
+  and is not a child. A blocking objection with a reason is filed once,
+  as a child; the same objection is not filed again. At the round limit
+  the issue closes as settled-with-notes and lists what remains. The close
+  does not wait. A tally printed later is
   who voted. On a hard question the ballot carries the private forecast
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
   still records one on its own. With two or more forecasts
