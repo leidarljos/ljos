@@ -283,6 +283,17 @@ if [ "$ONBOARD" = 1 ]; then
   fi
 fi
 
+# The encoder fetches its model on first use. Fetch it now, while the
+# network is known to work, so the first search is not lexical.
+if [ -x "$BIN_DIR/packset-embed" ]; then
+  if printf '%s\n' '{"id":"warm","text":"warm the encoder"}' | "$BIN_DIR/packset-embed" > /dev/null 2> "$TMP/embed.err"; then
+    say "Encoder model ready."
+  else
+    say "  warning: packset-embed could not fetch its model ($(tail -n 1 "$TMP/embed.err"));"
+    say "  search is lexical until it can. Run packset-embed by hand to see why."
+  fi
+fi
+
 say "Checking a command the guard refuses:"
 ljos policy -- git push --force origin main || true
 say "Done in $(( $(date +%s) - START )) s. \`ljos doctor\` lists what each part says."
