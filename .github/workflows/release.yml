@@ -14,6 +14,13 @@ on:
 
 permissions:
   contents: write
+  # The build attestations: a signed statement that this workflow built
+  # each archive, which `gh attestation verify` and install.sh check.
+  id-token: write
+  attestations: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
@@ -94,6 +101,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The installer goes up beside the archives, so
+      # releases/latest/download/install.sh always names the latest one.
+      - name: Attach the installer
+        run: |
+          cp scripts/install.sh dist/install.sh
+          (cd dist && sha256sum install.sh > install.sh.sha256)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/install.sh
       - name: Release notes from the changelog
         run: |
           awk -v v="${TAG#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md

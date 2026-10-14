@@ -78,6 +78,8 @@ pub struct Send<'a> {
     pub text: &'a str,
     pub interrupt: bool,
     pub issue: Option<&'a str>,
+    /// Write to a seat this pack has not heard from yet.
+    pub new_seat: bool,
 }
 
 /// One message as a reader sees it.
@@ -168,8 +170,30 @@ pub fn body_of(text: &str) -> String {
         .unwrap_or_else(|| text.trim().to_string())
 }
 
+/// The pack refuses an atom whose text is longer than this, in characters.
+pub const ATOM_TEXT_CAP: usize = 500;
+
+/// The longest body a message carries. Past it, a file and a deed
+/// (`deedar create file`, then the accession in the message) say it better.
+pub const MAIL_BODY_CAP: usize = 16_000;
+
+/// A body past [`MAIL_BODY_CAP`] is refused before anything is written,
+/// with the way to send it as a deed.
+fn check_length(verb: &str, body: &str) -> Result<()> {
+    let n = body.chars().count();
+    if n > MAIL_BODY_CAP {
+        bail!(
+            "{verb}: the message is {n} characters, past {MAIL_BODY_CAP}; write it to a file, \
+             `deedar create file --path FILE --agent SEAT`, and send the accession it prints. Nothing was sent"
+        );
+    }
+    Ok(())
+}
+
 /// The text that travels. The id is in it, so an import that keys on the
-/// text keeps two copies of the same words.
+/// text keeps two copies of the same words. A body that would push the
+/// text past [`ATOM_TEXT_CAP`] is cut there with an ellipsis; the whole
+/// body rides in the atom's `body` field, which [`message_atom`] sets.
 #[must_use]
 pub fn message_text(m: &Outgoing) -> String {
     let mut head = format!("msg {}\nfrom {}\nto {}", m.id, m.from, m.to.join(", "));
@@ -185,7 +209,13 @@ pub fn message_text(m: &Outgoing) -> String {
     if let Some(reply) = &m.reply {
         head.push_str(&format!("\nreply {reply}"));
     }
-    format!("{head}\n\n{}", m.body.trim())
+    let body = m.body.trim();
+    let room = ATOM_TEXT_CAP.saturating_sub(head.chars().count() + 2);
+    if body.chars().count() <= room {
+        return format!("{head}\n\n{body}");
+    }
+    let cut: String = body.chars().take(room.saturating_sub(1)).collect();
+    format!("{head}\n\n{cut}\u{2026}")
 }
 
 /// The atom a message posts. The entities are what an inbox filters on.
@@ -214,14 +244,19 @@ pub fn message_atom(m: &Outgoing, workspace: &str) -> Value {
     if let Some(scope) = &m.scope {
         entities.push(format!("scope:{scope}"));
     }
-    json!({
+    let text = message_text(m);
+    let mut atom = json!({
         "schema": "inside.atom/v1",
         "kind": "message",
         "level": "explicit",
-        "text": message_text(m),
+        "text": text,
         "workspace": workspace,
         "entities": entities,
-    })
+    });
+    if body_of(&text) != m.body.trim() {
+        atom["body"] = Value::String(m.body.trim().to_string());
+    }
+    atom
 }
 
 fn letter_of(atom: &Value, seq: usize) -> Option<Letter> {
@@ -238,7 +273,11 @@ fn letter_of(atom: &Value, seq: usize) -> Option<Letter> {
         id,
         from,
         to,
-        body: body_of(atom["text"].as_str().unwrap_or("")),
+        // A long body rides whole in `body`; the text holds its start.
+        body: atom["body"]
+            .as_str()
+            .map(|b| b.trim().to_string())
+            .unwrap_or_else(|| body_of(atom["text"].as_str().unwrap_or(""))),
         interrupt: has(atom, "priority:interrupt"),
         issue: tag(atom, "issue:"),
         group: tag(atom, "group:"),
@@ -355,6 +394,19 @@ pub fn members(atoms: &[Value], group: &str) -> Vec<String> {
     out
 }
 
+/// A body as the prompt shows it: one line of 160 characters, and when it
+/// is cut, where the whole of it is. The prompt marks the letter read, so
+/// a long body would otherwise be seen only by its start.
+fn prompt_body(body: &str) -> String {
+    let n = body.chars().count();
+    let line = one_line(body, Some(160));
+    if n > 160 {
+        format!("{line} (all {n} characters: `ljos inbox --all`)")
+    } else {
+        line
+    }
+}
+
 fn one_line(body: &str, limit: Option<usize>) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     match limit {
@@ -450,7 +502,7 @@ pub fn prompt_lines(letters: &[Letter], receipts: &[Receipt]) -> (String, Vec<St
             "{mark}{} from {}{on}: {}",
             letter.id,
             letter.from,
-            one_line(&letter.body, Some(160))
+            prompt_body(&letter.body)
         ));
         ids.push(format!("mail:{}", letter.id));
     }
@@ -472,6 +524,92 @@ fn find_letter(atoms: &[Value], id: &str) -> Result<Letter> {
         .filter_map(|(seq, atom)| letter_of(atom, seq))
         .find(|letter| letter.id == id)
         .ok_or_else(|| anyhow::anyhow!("no message {id}"))
+}
+
+/// Every seat this pack has heard from: a sender, a reader, a group
+/// member, and the seat any atom was written under.
+#[must_use]
+pub fn known_seats(atoms: &[Value]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for atom in atoms {
+        for prefix in ["seat:", "from:", "member:"] {
+            out.extend(tags(atom, prefix));
+        }
+        if let Some(seat) = atom["source"]["harness"].as_str() {
+            out.insert(seat.to_string());
+        }
+    }
+    out.retain(|s| !s.trim().is_empty());
+    out
+}
+
+/// Refuse a seat the pack has never heard from. Mail waits under the name
+/// it was sent to, so a message to `ljos` sat unread while the seat that
+/// meant to read it was `ljos-bot` (Software-mwy5).
+///
+/// # Errors
+///
+/// `seat` is not in `known` and `new_seat` was not passed.
+pub fn check_known(seat: &str, known: &BTreeSet<String>, new_seat: bool) -> Result<()> {
+    if new_seat || known.contains(seat) {
+        return Ok(());
+    }
+    let list = if known.is_empty() {
+        "none yet".to_string()
+    } else {
+        known.iter().cloned().collect::<Vec<_>>().join(", ")
+    };
+    let guess = closest_seat(seat, known)
+        .map(|s| format!("Did you mean {s}? "))
+        .unwrap_or_default();
+    bail!(
+        "send: no seat named {seat} has written to this pack, so the message would wait unread. \
+         {guess}Seats this pack knows: {list}. Pass --new-seat to write to a seat that has not started yet"
+    )
+}
+
+/// The known seat a mistyped name most likely meant: one that starts with
+/// it or holds it (`ljos` for `ljos-bot`), else the nearest by edits, at
+/// most two away. `None` when nothing is that close.
+#[must_use]
+pub fn closest_seat<'a>(seat: &str, known: &'a BTreeSet<String>) -> Option<&'a str> {
+    let lower = seat.to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let holds = known
+        .iter()
+        .filter(|k| k.to_lowercase().contains(&lower) || lower.contains(&k.to_lowercase()))
+        .min_by_key(|k| (k.len().abs_diff(seat.len()), k.as_str()));
+    if let Some(k) = holds {
+        return Some(k.as_str());
+    }
+    known
+        .iter()
+        .map(|k| (edits(&lower, &k.to_lowercase()), k))
+        .filter(|(d, _)| *d <= 2)
+        .min()
+        .map(|(_, k)| k.as_str())
+}
+
+/// Levenshtein distance, in characters.
+fn edits(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == *cb {
+                prev
+            } else {
+                1 + prev.min(cur).min(row[j])
+            };
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 /// Who a send addresses. A group send leaves the sender off the list.
@@ -602,6 +740,7 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     if text.is_empty() {
         bail!("send: empty text");
     }
+    check_length("send", text)?;
     let from = super::seat_name();
     let group = args
         .group
@@ -623,6 +762,12 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let to = recipients(from.as_str(), args.seat, group.as_deref(), &roster)?;
     if group.is_none() {
         ensure_mail(&client, "send")?;
+        if !args.new_seat {
+            let known = known_seats(&listed()?);
+            for seat in &to {
+                check_known(seat, &known, false)?;
+            }
+        }
     }
     let issue = args
         .issue
@@ -645,7 +790,30 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let mut atom = message_atom(&outgoing, &workspace_of(Some(&client.workspace())));
     stamp_source(&mut atom);
     post(&atom, "send")?;
-    Ok(format!("sent {} to {}\n", outgoing.id, to.join(", ")))
+    let mut said = format!("sent {} to {}\n", outgoing.id, to.join(", "));
+    said.push_str(&wake_after(&outgoing));
+    Ok(said)
+}
+
+/// Start the wake of each recipient that set one, and say which. The
+/// message is already written, so a wake that fails changes nothing here.
+fn wake_after(m: &Outgoing) -> String {
+    let events: Vec<super::wake::Event> =
+        m.to.iter()
+            .map(|seat| super::wake::Event {
+                seat: seat.clone(),
+                from: m.from.clone(),
+                msg: m.id.clone(),
+                issue: m.issue.clone(),
+                interrupt: m.interrupt,
+            })
+            .collect();
+    let woken = super::wake::spawn(&events);
+    if woken.is_empty() {
+        String::new()
+    } else {
+        format!("waking {}\n", woken.join(", "))
+    }
 }
 
 /// Unread mail for this seat, then receipts on what it sent that it has not
@@ -751,6 +919,7 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     if text.is_empty() {
         bail!("reply: empty text");
     }
+    check_length("reply", text)?;
     let atoms = load("reply")?;
     let parent = find_letter(&atoms, id).context("reply")?;
     let from = super::seat_name();
@@ -784,6 +953,7 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     if let Some(issue) = &outgoing.issue {
         line.push_str(&format!("issue {issue}\n"));
     }
+    line.push_str(&wake_after(&outgoing));
     Ok(line)
 }
 
@@ -926,6 +1096,39 @@ pub fn prompt_note() -> (String, Vec<String>) {
     prompt_lines(&letters, &receipts)
 }
 
+/// The line a held stop opens with, before the mail it carries.
+pub const STOP_MAIL_HEAD: &str =
+    "Mail marked interrupt reached this seat while you worked. Read it before you stop:";
+
+/// Unread interrupt mail for a stop hook, and the ids to receipt once the
+/// runner has it. A running session takes it as one more round before it
+/// goes idle, so a sender's interrupt does not wait for a prompt that may
+/// never come. Plain mail waits for the next prompt or the seat's wake. A
+/// pack that does not answer says nothing here: holding a stop on an
+/// error would keep every turn open.
+#[must_use]
+pub fn stop_note() -> (String, Vec<String>) {
+    let Some(atoms) = load_quiet() else {
+        return (String::new(), Vec::new());
+    };
+    stop_lines(&atoms, &super::seat_name())
+}
+
+/// [`stop_note`] over atoms already read.
+#[must_use]
+pub fn stop_lines(atoms: &[Value], seat: &str) -> (String, Vec<String>) {
+    let hot: Vec<Letter> = inbox_letters(atoms, seat, false)
+        .into_iter()
+        .filter(|l| l.interrupt)
+        .collect();
+    let (lines, ids) = prompt_lines(&hot, &[]);
+    if lines.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let reply = "Answer with `ljos reply ID TEXT`.";
+    (format!("{STOP_MAIL_HEAD}\n{lines}\n{reply}"), ids)
+}
+
 /// Receipts for messages a runner was just shown, and a local mark for
 /// receipts this seat was told about. A pack that does not answer leaves
 /// the message unread, so the next prompt shows it again.
@@ -961,6 +1164,40 @@ mod tests {
             reply: None,
             scope: None,
         }
+    }
+
+    #[test]
+    fn a_long_body_fits_the_pack_and_reads_back_whole() {
+        let long = "the aarch64 log says the Highway test times out. ".repeat(40);
+        let m = outgoing("msg-1", "saddle", &["inky"], &long);
+        let atom = message_atom(&m, "seat");
+        let text = atom["text"].as_str().unwrap();
+        assert!(
+            text.chars().count() <= ATOM_TEXT_CAP,
+            "{}",
+            text.chars().count()
+        );
+        assert!(text.ends_with('\u{2026}'), "{text}");
+        assert!(
+            text.starts_with("msg msg-1\nfrom saddle\nto inky\n\n"),
+            "{text}"
+        );
+        assert_eq!(atom["body"].as_str(), Some(long.trim()));
+        let letter = letter_of(&atom, 0).expect("a letter");
+        assert_eq!(letter.body, long.trim());
+        // A short body has no `body` field and reads back from the text.
+        let short = message_atom(&outgoing("msg-2", "saddle", &["inky"], "ok"), "seat");
+        assert!(short.get("body").is_none());
+        assert_eq!(letter_of(&short, 0).unwrap().body, "ok");
+        // Past the mail cap, a refusal that names the deed route.
+        let err = check_length("send", &"x".repeat(MAIL_BODY_CAP + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("deedar create file"), "{err}");
+        assert!(check_length("send", &"x".repeat(MAIL_BODY_CAP)).is_ok());
+        let shown = prompt_body(&long);
+        assert!(shown.contains("`ljos inbox --all`"), "{shown}");
+        assert_eq!(prompt_body("ok"), "ok");
     }
 
     fn atom(m: &Outgoing, ts: &str) -> Value {
@@ -1127,6 +1364,50 @@ mod tests {
         assert!(text.contains("2 more in ljos inbox"), "{text}");
         assert_eq!(ids.iter().filter(|id| id.starts_with("mail:")).count(), 8);
         assert!(!ids.iter().any(|id| id == "mail:m7" || id == "mail:m8"));
+    }
+
+    #[test]
+    fn a_misspelt_seat_is_answered_with_the_seat_it_meant() {
+        let known: BTreeSet<String> = ["ljos-bot", "saddle", "inky"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(closest_seat("ljos", &known), Some("ljos-bot"));
+        assert_eq!(closest_seat("sadle", &known), Some("saddle"));
+        assert_eq!(closest_seat("eessi", &known), None);
+        let err = check_known("ljos", &known, false).unwrap_err().to_string();
+        assert!(err.contains("Did you mean ljos-bot?"), "{err}");
+        let err = check_known("eessi", &known, false).unwrap_err().to_string();
+        assert!(!err.contains("Did you mean"), "{err}");
+        assert!(check_known("eessi", &known, true).is_ok());
+    }
+
+    #[test]
+    fn a_stop_carries_unread_interrupt_mail_only() {
+        let plain = outgoing("plain", "grok", &["claude"], "when you can");
+        let mut hot = outgoing("hot", "grok", &["claude"], "take Software-d9n6 now");
+        hot.interrupt = true;
+        hot.issue = Some("Software-d9n6".into());
+        let atoms = [
+            atom(&plain, "2026-10-11T00:00:00Z"),
+            atom(&hot, "2026-10-11T00:00:01Z"),
+        ];
+        let (text, ids) = stop_lines(&atoms, "claude");
+        assert!(text.starts_with(STOP_MAIL_HEAD), "{text}");
+        assert!(
+            text.contains("! hot from grok on Software-d9n6: take Software-d9n6 now"),
+            "{text}"
+        );
+        assert!(!text.contains("when you can"), "{text}");
+        assert_eq!(ids, ["mail:hot"]);
+        let read = json!({
+            "kind": "receipt",
+            "text": "read hot\nby claude\nat 2026-10-11T00:00:02Z\nmsg r1",
+            "entities": ["seat:claude", "from:claude", "to:grok", "receipt:hot", "msg:r1"],
+        });
+        let after = [atoms[0].clone(), atoms[1].clone(), read];
+        assert_eq!(stop_lines(&after, "claude"), (String::new(), Vec::new()));
+        assert_eq!(stop_lines(&atoms, "grok"), (String::new(), Vec::new()));
     }
 
     #[test]

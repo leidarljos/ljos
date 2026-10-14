@@ -33,7 +33,7 @@ store answers for it.
 * How a shell command is judged
 
 Before an agent's shell command runs, the runner's hook hands it to
-=ljos hook=, which asks four layers, in the order below. No later layer can allow
+=ljos hook=, which asks five layers, in the order below. No later layer can allow
 what an earlier one refused, so the first refusal wins.
 
 - *The seat guard.* It refuses a command that writes the seat's own
@@ -46,12 +46,37 @@ what an earlier one refused, so the first refusal wins.
    row says whether it runs the table built into it or phronesis after
    that table. Without the binary nothing is refused here, unless
    =POLICYD_REQUIRED= is set to 1, which refuses everything instead.
+   A binary that is there but crashes, prints no verdict or takes more
+   than five seconds refuses the line.
 - *Seat rules.* =ljos rule= writes a rule (a pattern, and a verdict of
    deny or ask) into the pack, and the seat tries it against each command
    of the line. A quoted sentence or a heredoc body counts as data.
+   The rules last read are kept under =$XDG_DATA_HOME/ljos=, and they
+   stand when the pack is down or switched off.
+   A preference that forbids a command it can name carries an ask over
+   it: "Use pnpm instead of npm" asks before =npm install=, and "never
+   push directly to main" before a push to main. Typed by the person,
+   =prefer= writes that rule and prints the =ljos forget= line that takes
+   it back; under an agent it prints the =ljos rule= command instead.
+   The tool-call hook also hands over, once a session, the preferences
+   that name the command about to run, read from the listing the rules
+   came from.
+- *The ask pack.* It is built into ljos and on by default, and asks the person
+   before a command that drops or resets a database, tears down
+   infrastructure, deletes cluster or cloud resources, prunes containers
+   or volumes, publishes or yanks a package, prints a secret, empties a
+   file, deletes a home config or system file, mirrors with =--delete= into
+   the home directory, drops a git stash, or puts /tmp ahead of PATH. Each ask gives the reason and a safer form. A seat rule on the
+   same command comes first. ~LJOS_ASK_PACK=off~ in the runner's environment
+   turns the pack off, and a list such as ~LJOS_ASK_PACK=db,cloud~ keeps
+   only those classes: =db=, =cloud=, =containers=, =publish=, =secrets=,
+   =files=, =git= and =path=.
 - *The push check.* A =git push= is free to a repository the account
    owns alone and has never released; to any other it needs
    =LJOS_CITE= set to the issue that records the decision behind it.
+   Persona ballots do not count toward that settle. Personas still vote,
+   and count in every other settle, but the issue has to settle on the
+   seats' own ballots for the push to pass.
 
 An =ask= verdict is a question for the person. On Claude Code and Grok
 Build it is the runner's own permission prompt. On a runner without one,
@@ -102,9 +127,15 @@ recency half-life at 0.270 (the packset site carries the table).
 * When the seat speaks
 
 The hook speaks at a prompt, a failed tool and a stop, and fires its
-memories before a compaction. A prompt gets what it activates: the
+memories before a compaction. A prompt gets what it activates, three
+claims at most. With a pack that sends the encoder's cosine on each hit,
+that is the claim the encoder ranks first at a cosine of 0.66 or more,
+word or no word, and a claim that shares a word with the prompt and sits
+within 0.05 of its best cosine. With an older pack, it is the
 preferences and standing lessons that two scorers named and that share a
-word with it. A claim reaches a session once between compactions. It
+word with it. A word counts through its other names, so "golang" names
+what a rule about Go files names, and "virtualenv" what a rule about
+=uv= names. A claim reaches a session once between compactions. It
 arrives when it first matters, not on every command after.
 
 A runner that reports a failed tool, as Grok Build does with
@@ -262,8 +293,22 @@ the pack when someone says to keep it with =remember= or =prefer=, and
 that write is origin =user-declared=. =finish --lesson= and
 =findings --remember= file origin =agent-derived= as proposals. The
 prompt hook files a correction as a proposal and does not write it.
-=ljos accept= writes a proposal, and so does the same text typed with
-=remember= or =prefer=. An import from =receive= or =sync= is origin
+A standing choice the person states in a prompt, such as "from now on
+use bun, never yarn", is the person's own sentence, so the hook saves it
+as a standing preference and says so with the =ljos forget= line that
+takes it back. =LJOS_CAPTURE=nudge= asks the agent to write it instead,
+and =off= leaves it. An agent's =remember= of the person's words from
+their latest prompt stands at once too.
+A prompt event is not always the person: Codex sends one inside a
+subagent with the parent agent's brief as the prompt. A prompt whose
+payload names a subagent (=agent_id=), or a Codex thread other than the
+session's, saves nothing, grants no approval and files no correction,
+and neither does any prompt while =LJOS_UNATTENDED=1= is set. Codex
+sends each hook event twice; the copy prints the first delivery's
+answer and saves nothing.
+=ljos accept= writes a proposal as a standing lesson, and so does the same
+text typed with =remember= or =prefer=. The person runs =accept=; under an
+agent runner it refuses. An import from =receive= or =sync= is origin
 =peer=. None of these paths reads a runner's own memory, so the seat
 and that memory sit side by side without either writing the other.
 
@@ -368,7 +413,7 @@ answer, and each answer fed a structure that was already there.
 
 | point | the judgment | the local answer | what consumes it |
 |---|---|---|---|
-| prompt hook | which claims bear on the prompt | two scorers agree, a score floor, a shared word, a cross-encoder | the injected context |
+| prompt hook | which claims bear on the prompt | the encoder's cosine or two scorers, a floor, a shared word | the injected context |
 | prompt hook | is this a correction, or a choice put to the agent | two phrase lists | a proposal, then the nudges |
 | panel | which option a persona votes for | one subagent per persona | the settle, forecasts, =learn=, =calibrate= |
 | stop | may the agent stop | rules on the held issue | one more round, once |

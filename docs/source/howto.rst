@@ -134,6 +134,42 @@ and writes a receipt for each message it shows. Shown there is read.
 A shell seat has no hook, so it polls ``ljos inbox`` and reads with
 ``ljos read``.
 
+Wake a seat when mail reaches it
+================================
+
+Mail waits until the recipient's next prompt, and an idle agent has no next prompt.
+A seat names how to wake it, and ``ljos send`` starts that wake after the message is written.
+The sender does not wait on it and needs to know nothing about the recipient's runner.
+
+.. code:: console
+
+   $ LJOS_SEAT=claude-review ljos wake --timeout 1800 --command 'cd ~/src/app && flock -n /tmp/claude-review.lock claude -p --resume SESSION "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=codex-ci ljos wake --timeout 1800 --command 'cd ~/src/app && codex exec resume --last "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=cursor-cli ljos wake --timeout 1800 --command 'cd ~/src/app && agent -p --resume=CHAT_ID "Read your ljos mail and act on it."'
+   $ LJOS_SEAT=grok-bot ljos wake --webhook https://api2.cursor.sh/automations/webhook/ID --key-file ~/.config/ljos/grok-bot.key
+   $ ljos wake claude-review --fire
+
+A command runs under ``sh -c`` with ``LJOS_SEAT`` set to the recipient, so ``ljos inbox`` in it reads the right mail.
+``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message, so a wake can ignore plain mail and act only on an interrupt.
+The guard judges the command when it is set and again on every run.
+A ``deny`` or an ``ask`` keeps it from running, since nobody is there to answer an ask.
+A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as ``claude -p`` needs a longer one.
+Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
+
+A webhook gets the envelope as JSON: the seat, the sender, the message id, the issue and the interrupt flag.
+The body stays in the pack, and the woken agent reads it with ``ljos inbox``.
+The key is read from ``--key-file`` or the variable ``--key-env`` names, and never written to ``wake.toml``.
+A Grok Bot wakes this way: make a routine with a webhook trigger, copy its URL and sender key from the routine's panel, and save the key in a file only you can read.
+
+A wake that fails or runs past its timeout is a line in ``~/.local/state/ljos/mail/wake.log``, and the message is still in the pack.
+``ljos wake SEAT --fire`` runs the wake now and prints what happened.
+
+A session that is still working needs no wake.
+When it is about to stop, its ``Stop`` hook holds the turn once for unread interrupt mail.
+Claude Code, Codex and Grok Build get ``decision: block`` with the mail as the reason, and Cursor gets a ``followup_message``.
+Each letter is receipted once it is delivered, so the next stop is not held for it again.
+Plain mail waits for the next prompt or the wake.
+
 Inject memory before the agent acts
 ===================================
 
@@ -166,7 +202,7 @@ Computing Base (TCB)
 .. code:: console
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push (seat rule `ljos-policyd`)"}}
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
 
 An ``ask`` rule uses the caller's approval UI when that UI is supported.
 Otherwise the hook stops the command and prints a request id. Calling
@@ -233,7 +269,8 @@ It stays off unless the machine turns it on, because the call sends the
 prompt and up to ten candidate claims off the machine. When the judge
 does not answer, the hook reranks with the local cross-encoder. A
 correction the hook files is a proposal, and a pasted or quoted prompt
-files none.
+files none. A standing choice the person states ("from now on",
+"always", "never") is saved in their words, outside code and quotes.
 
 The same call asks two more questions, since a call costs its input
 tokens and each question adds about 70 of them to a median of 933. An
@@ -582,7 +619,7 @@ When the campaign ends, its typed findings are the lessons:
 The first prints one line per finding. The second files one lesson per
 finding a person or a seat resolved, under the recipe's name, the
 package and the failure class, with origin ``agent-derived``. It does not
-write the atom. ``ljos accept ID`` writes it, and the command cites the
+write the atom. ``ljos accept ID`` writes it as a standing lesson, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
 past is skipped; ``--all`` takes it too. Once someone accepts the
 proposal, the recipe's next bump recalls this lesson from its island.
@@ -665,12 +702,14 @@ Start a sitting, and end one
    timeline of proj-1a2b: Ship the fuse change?
    2026-08-30  13 days ago     tracker created
    ...
+   == reclaim
+   no claim quiet longer than 900s
    == claim
    gen=2
 
 One verb, in the protocol's order; it stops at the first store that does
 not answer and claims nothing. ``--playbook NAME`` copies a recipe
-(``sit``, ``arena``, ``land``, ``company-panel``, ``overnight``) into the
+(``sit``, ``arena``, ``land``, ``company-panel``, ``overnight``, ``feature``) into the
 playbook section before recall; absent a name, a closed-set token in the
 title else ``sit``. The name is a tracker ``playbook:`` note until finish or
 release. ``ljos panel`` refuses until one is bound. The ``start_a_sitting`` prompt
@@ -699,8 +738,10 @@ Vote with personas
    $ ljos consensus $id
 
 Each persona is one atom in the pack; its ballots carry its name. The
-settle takes its anchor: the reviewer at 0.2 barely moves off ``hold``, the
-reader at 0.8 is nearly a plain voter. A trust row scoped with ``--about
+settle takes its anchor, never below the 0.5 every other voter on the
+ballot, the seat too, settles at: the reviewer at 0.2 settles at 0.5 and
+counts as much as a seat, and the reader at 0.8 moves most of the way
+toward the others. A trust row scoped with ``--about
 docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
 also what seats a persona: ``ljos panel ISSUE`` and the ``run_a_panel``
 prompt brief only the personas whose domains the issue's title or its
@@ -835,10 +876,19 @@ Receive from the same sender again
 
 .. code:: console
 
-   $ ljos receive /tmp/bag2 --since /tmp/bag/head.txt
+   $ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head      # the first time
+   ...
+   3 deeds proven against a log of 34 entries, root 9c1e...
+   kept this head in /home/you/.local/share/ljos/peer.head; pass it to --since next time
+   $ ljos handover --out /tmp/bag2 --issue proj-1a2b --since-size 34  # the sender, next time
+   $ ljos receive /tmp/bag2 --since ~/.local/share/ljos/peer.head --keep ~/.local/share/ljos/peer.head
 
-The bridge shows the sender's log grew from the head you kept and was not
-rewritten.
+``--keep`` writes the head of the log the bag carried. Tell the sender its
+``size``; ``handover --since-size`` puts the bridge from that size into the
+bag. ``--since`` then needs the bridge to start at the head you kept and end
+at the one in the bag, so a sender who rewrote the log in between fails the
+check. A bridge alone proves nothing, because the sender picks both of its
+ends. This needs deedar with ``check --keep``.
 
 Close what a later lesson replaced
 ==================================
@@ -884,8 +934,8 @@ same pair supersedes it.
 Settle under the pack's trust
 =============================
 
-``ljos consensus ID`` reads the live trust rows and passes them to both
-settles. To anchor voters to their own ballots (Friedkin-Johnsen) on the
+``ljos consensus ID`` reads the live trust rows and passes them to the
+settle (and to the tracker's, with ``--compare``). To anchor voters to their own ballots (Friedkin-Johnsen) on the
 model crate alone, pass the rows as JSON tuples:
 
 .. code:: console

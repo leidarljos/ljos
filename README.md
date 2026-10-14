@@ -1,36 +1,60 @@
 # ljos
 
-Memory, a work tracker and a guard on shell commands for coding agents:
-Claude Code, Codex, Grok Build, Cursor, Antigravity's `agy`, opencode, omp and
-hermes.
+Tell your coding agent a rule once. It comes back on every prompt it bears
+on, and the hook refuses the command that breaks it.
 
-An agent forgets what it learned when the session ends, and it runs whatever
-command it decides on. ljos keeps the lessons in a local store and hands the
-ones that bear on a prompt back to the agent before it answers. It records the
-work on a tracker the agent and the person both read. It checks each shell
-command against rules the person wrote before it runs. It plugs into each
-runner through its Model Context Protocol (MCP) server list and its hooks.
-The seat is free software and runs on your machine. Nothing leaves the
-machine unless you turn on a remote judge.
+Coding agents forget what they learned when the session ends, and they run
+whatever shell command they pick. ljos fixes both on your own machine. It
+keeps what you tell the agent in a local store and hands the matching notes
+back before the model reads each prompt. It checks each shell command against
+your rules and a built-in list of destructive commands before the command
+runs. It plugs into the agent through the agent's own hook and MCP settings.
+Nothing leaves the machine unless you turn on a remote judge.
+
+It works with Claude Code, Codex, Cursor, GitHub Copilot CLI, Gemini CLI,
+Windsurf, Factory's Droid, Kiro, Cline, Qwen Code, Crush, Grok Build,
+opencode, omp, hermes and Antigravity's `agy`.
 
 ## Five minutes
 
-The first line installs the seat and the programs a sitting calls: packset
-(memory), vissue (the tracker), deedar (records of work), claimdag (who works
-on what), ljos-policyd (the command check) and ljos-consensus (voting).
-`ljos doctor` names any that are missing.
+```
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
+```
+
+The installer downloads each program from its GitHub release, checks it
+against the published SHA-256 sum, and builds from source with `cargo` where a
+platform has no release. It then runs `ljos onboard` for every coding agent it
+finds and shows the guard refusing a force push. Its programs are ljos,
+packset (memory), vissue (the tracker), deedar (records of work), claimdag
+(who works on what), ljos-policyd (the command check) and ljos-consensus
+(voting). `--with-embed` adds `packset-embed`, the optional encoder for
+meaning-based search; without it search matches words, and nothing needs ONNX
+Runtime. `ljos doctor` names any part that is missing.
+`--version 0.29.0` installs that ljos release instead of the latest, and `--pin packset=0.14.0` holds another repository at a version; a pinned version with no release for the platform builds that version's crate, never a newer one.
+With the `gh` CLI signed in, the installer also checks each tarball's GitHub build attestation and prints whether it verified; `--attest` stops the install when one does not.
+`ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
+An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
+Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
+An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.3.0 installed without a word, so the doctor marks that row `no` and names the fix.
+
+Each ljos release attaches the script as `install.sh`, starting with the
+first release after 0.28.0. Until that release is out the link is a 404, and
+the hand install below works. Read the script before you run it; it is
+`scripts/install.sh` in this repository. To install by hand:
 
 ```
-cargo binstall ljos packset vissue-cli deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install, same list
-ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
+cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
+ljos onboard                                # every coding tool found on this machine: MCP server, hooks and skill
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
-ljos rule '*--force*' --verdict deny --why "Never force push."
+ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
 ```
 
 `--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
 `opencode`, `omp`, `hermes`, `windsurf`, `zed`, `vscode`, `claude-desktop`,
-`gemini`, `amazonq` or `kiro`. Cursor's IDE and its `agent` CLI share
-`~/.cursor/mcp.json`.
+`gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush` or `cline`.
+Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 
 Start a new session and ask for something the preference bears on, such as
 tagging a release. Before the model reads the prompt, the hook adds:
@@ -41,20 +65,38 @@ What this seat already knows that bears on this (from the pack, each with its ag
 ```
 
 When the agent then reaches for `git push --force origin main`, the runner
-refuses the command before it runs:
+refuses the command before it runs. `ljos-policyd` answers first, with the
+rules it ships, and lets `--force-with-lease` through:
 
 ```
-{"permissionDecision":"deny","permissionDecisionReason":"Never force push. (seat rule `*--force*`)"}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
 ```
 
-The hook shows a preference from the moment it is written. A lesson
-(`ljos remember`) comes back once a review or a consolidation promotes it, and
-`ljos due` lists the lessons waiting.
+`sh -c "cd repo && git push -f origin main"` gets the same answer. A command
+only your own rule covers, such as `terraform destroy -auto-approve`, meets
+that rule:
 
-The hooks also keep the work on the tracker. A conversation with no issue
-gets told, on the first tool result, to file one and sit. `Stop` blocks that
-turn once if it used tools and never touched the seat. A conversation that
-has an issue waits forty tool calls before the reminder to record the work.
+```
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (seat rule `terraform destroy*`)"}}
+```
+
+The hook shows what you write from the moment it is written: a preference
+(`ljos prefer`), a rule (`ljos rule`), and a lesson you type with
+`ljos remember`. A lesson the agent proposes at `ljos finish` stays out until
+you run `ljos accept ID` in your own terminal; then it shows at once too. An
+`ljos remember` that an agent runs from inside its runner is an episode: the
+hook shows it when a prompt bears on it, and `ljos due` lists it until a
+review promotes it to standing.
+
+The hooks also keep the work on the tracker once a conversation sits on an
+issue: after forty tool calls without a word to the seat, they remind it to
+record the work. With `LJOS_TRACK_WORK=on` in the environment or in
+`~/.config/ljos/env`, a conversation with no issue is told on the first tool
+result to open one with `vissue q` and sit, and `Stop` blocks that turn once
+if it used tools and never touched the seat. Without it, a conversation that
+never sits hears nothing about the tracker. Of the shapes ljos carries, `grok` and
+`antigravity` register `Stop`. For `claude` or `codex`, add `Stop` to that
+runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
 
 ## What you get
 
@@ -66,10 +108,15 @@ has an issue waits forty tool calls before the reminder to record the work.
   in a git repository. `ljos sitting ISSUE` opens the work and claims it;
   `ljos finish ISSUE --lesson "..."` closes the loop and files what it
   taught. `ljos accept ID` writes that lesson and records the acceptance.
-- A check on shell commands: rules in the pack (`ljos rule`), tried on each
-  command a line runs, plus a guard that keeps agents from rewriting the
-  checker's own binaries and hook files. Pushes to your own unreleased
-  repositories go through; a push anywhere else has to cite a decision.
+- A check on shell commands: ljos-policyd's built-in refusals (force push,
+  `rm -rf` outside temp, `git reset --hard` and the like, read through `env`,
+  `timeout`, `xargs` and other wrappers) and your rules in the pack
+  (`ljos rule`), tried on each command a line runs, plus a guard that keeps agents from rewriting the
+  checker's own binaries and hook files. With an ask rule on pushes
+  (`ljos rule 'git push*' --verdict ask --why "..."`), a push to your own
+  unreleased repository goes through, a push to a released or shared one
+  has to cite a decision another seat voted on, and anything else goes to
+  you. Without that rule a plain push is not checked.
 - Decisions with more than one defensible answer go to personas, voters with
   a view of their own. They settle by trust-weighted
   [consensus](https://github.com/leidarljos/consensus) that learns from the
@@ -99,10 +146,17 @@ copied before recall. Without `--playbook`, the sitting takes a name already
 bound, then a closed-set token in the title, then `sit`. The playbook name
 lives as a tracker note until finish or release, and `ljos panel` refuses to
 run until one is bound.
+The sitting prints a short report: whether ljos is ready, what needs action, what the seat remembers for the task, and the claim.
+`--verbose` prints every section in full.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
-goes in as a proposal with origin `agent-derived`. `ljos accept` writes it and
-records that the person accepted it. The island fires, the session node
+goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
+standing lesson and records that the person accepted it. Under an agent runner
+it accepts only a proposal another conversation filed, such as a worker's, so
+an agent can't accept its own proposal. A lesson you type at `ljos finish` in a
+terminal of your own, with no agent runner above it, is written at once as
+yours. `ljos accept`, `ljos forget` and `ljos graded` take the first eight
+characters of an id. The island fires, the session node
 completes, and a named outcome shrinks the weight of the voters it refuted. A
 lesson typed with `ljos remember` stays `user-declared`, and the same words
 satisfy the open proposal. The ticket stays open unless `--close` is given,
@@ -117,9 +171,11 @@ row when that count stays above zero through the push wait.
 
 ## Claude Code plugin
 
-The plugin bundles the MCP server, the seat protocol skill, the sitting and
-finish commands, and the hooks `ljos onboard --harness claude` registers. The
-marketplace file is in this repository.
+The plugin bundles the tool server (`ljos-mcp`), the skills (the seat protocol, setup,
+remember, sitting, filing, decisions and mail), the sitting, finish, remember
+and doctor commands, a panelist agent, and the hooks
+`ljos onboard --harness claude` registers. The marketplace file is in this
+repository, and the same tree is the Cursor plugin below.
 
 ```
 claude plugin marketplace add leidarljos/ljos
@@ -139,6 +195,39 @@ session. `/ljos:sitting ISSUE` opens a sitting and
 `claude plugin validate .claude-plugin/plugin.json` checks the plugin. Pass
 `--strict` to fail on warnings.
 
+## Cursor plugin
+
+This repository is also a Cursor plugin. It gives Cursor's agent the ljos
+memory, the command guard, the `ljos_*` tools, the skills above, a rule that tells
+the agent to use them, and four commands: `/sitting`, `/finish`, `/remember`
+and `/doctor`.
+
+Install the programs first (the `cargo binstall` line in Five minutes), then
+type this in Cursor's agent chat:
+
+```
+/add-plugin leidarljos/ljos
+```
+
+Cursor pins a plugin added this way to the commit it first fetched. To follow
+updates, put a clone in Cursor's local plugin folder instead and pull it:
+
+```
+git clone https://github.com/leidarljos/ljos ~/.cursor/plugins/local/ljos
+```
+
+Then reload the window. Cursor loads a symlink in that folder only when it
+points inside the folder, so clone rather than link.
+
+The hooks run the same `ljos hook` as `ljos onboard --harness cursor`. Two of
+them, `beforeShellExecution` and `preToolUse`, check each command before it
+runs. A third, `beforeSubmitPrompt`, looks up what the seat knows. Cursor does not pass a
+prompt hook's text to the model, so that note reaches the agent with the next
+tool result. With the plugin installed, `ljos onboard` sees it and leaves
+Cursor to the plugin, so the hooks are not registered a second time. When the programs are missing, the
+hooks say how to install them and let commands run, and the ljos-setup skill
+walks the agent through the install.
+
 ## Command consent in chat
 
 Grok Build and Claude show an ask rule as the runner's own permission
@@ -157,8 +246,9 @@ rules still apply.
 
 For clients without form elicitation, reply `approve REQUEST_ID` in this
 conversation, or run `ljos approve REQUEST_ID` in your own terminal. The
-terminal command refuses to run under a coding runner. A chat message that
-does not name that id grants nothing.
+terminal command refuses to run under a coding runner, and the seat's guard
+refuses it in any command an agent runs. A chat message that does not name
+that id grants nothing.
 
 A client must load the tool before using it, so reconnect after upgrading
 from a version without `ljos_request_approval`. When other calls forward to an
@@ -189,9 +279,13 @@ seat. `ljos seat` prints both names and where they came from. `ljos onboard`
 prints the one MCP entry any runner takes, and `ljos protocol` prints the
 text an agent reads first.
 
-Nothing needs a variable set. `ljos remember` starts the writer when none is
-answering. The seat's memory is the one workspace `seat` from any directory,
-and every claim carries the seat that wrote it.
+Nothing needs a variable set. `ljos onboard --harness NAME` makes the deed
+store deedar falls back to (`~/.local/share/deedar/store`) and a tracker under
+`~/.local/share/vissue/tracker` that `~/.config/vissue/config.toml` names,
+unless `DEEDAR_URL` or `VISSUE_ROOT` already names one. `ljos remember`
+starts the writer when none is answering. The seat's memory is the one
+workspace `seat` from any directory, and every claim carries the seat that
+wrote it.
 
 ## Mail
 
@@ -244,11 +338,11 @@ ljos approve <request-id>                       # record explicit consent for on
 ljos consensus vissue-xxxx
 ljos trust alice bob 0.8 --why deed-… [--about docs]
 ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
-ljos playbooks                                 # sit, arena, land, company-panel, overnight
+ljos playbooks                                 # sit, arena, land, company-panel, overnight, feature
 ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer
-ljos rule '*--force*' --verdict deny --why "Never force push."   # argv law in the pack; the hook and policy enforce it
+ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the runbook."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
@@ -262,9 +356,13 @@ ljos habit                                     # every habit as it stands, the c
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
 ljos receive bag [--since bridge.txt] [--import]
-ljos doctor
+ljos doctor                                    # whether ljos is ready, and only the rows that need action
+ljos doctor --all                              # every row
 ljos protocol
-ljos onboard                                   # the one MCP server entry any runner takes
+ljos mcp                                       # serve MCP over stdio through the ljos-mcp beside this ljos
+ljos onboard                                   # at a terminal, every runner found on this machine; into a pipe, the one MCP server entry any runner takes
+ljos onboard --harness all --dry-run           # what onboarding every runner found would write
+ljos onboard --harness json                    # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes
 ljos onboard --harness grokbot --skills ~/.grokbot/skills   # shell-only: skill and an env file, no MCP server and no hook
 source ~/.config/ljos/grokbot.env              # LJOS_SEAT=grokbot; the process tree is not this seat
@@ -281,15 +379,34 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. It has forty-seven tools, each
-opening with when to call it, plus the protocol at `ljos://protocol`, the
-cards read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the
+`ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which
+runs the `ljos-mcp` installed beside it. By default it lists seventeen core
+tools, guard and memory first: `rule`, `request_approval`, `prefer`,
+`remember`, `search`, `file`, `note`, `sitting`, `finish`, `claim`,
+`release`, `send`, `inbox`, `reply`, `vote`, `consensus` and `doctor`, each
+with the prefix `ljos_`.
+Every listed tool costs its description and schema on every session: about
+6,100 tokens for the core set against 15,000 for all forty-seven (o200k_base
+count). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
+`LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
+with a result marked `isError` that carries the reason, so the model reads
+it. The server also has the protocol at `ljos://protocol`, the cards
+read-only at `ljos://cards/`, and three prompts. `ljos_due` returns the
 soonest eight claims and the total still due. Paste this where the runner
 keeps its servers:
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
 ```
+
+The official MCP Registry lists the server from the crates.io page of
+`ljos`, and checks this line there:
+
+- mcp-name: io.github.leidarljos/ljos
+
+`server.json` holds the registry entry, and a release tag publishes it.
+`Dockerfile` builds `ljos-mcp` and starts it, for a registry that runs the
+server to list its tools.
 
 [`examples/unanimous-green/`](examples/unanimous-green/) shows two
 implementers and two reviewers reaching a unanimous `GREEN` from

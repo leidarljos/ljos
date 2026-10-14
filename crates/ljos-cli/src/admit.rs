@@ -333,7 +333,10 @@ fn accepted_line(id: &str, kind: &str, posted: &Value) -> String {
 fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result<Value> {
     let url = format!("{}/v1/proposals/accept", client.base());
     let body = serde_json::json!({"workspace": workspace, "id": id});
-    match ureq::post(&url).timeout(http_timeout()).send_json(body) {
+    match packset_client::authorize(ureq::post(&url))
+        .timeout(http_timeout())
+        .send_json(body)
+    {
         Ok(resp) => resp
             .into_json()
             .context("accept: the pack's answer was not json"),
@@ -343,6 +346,33 @@ fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result
         }
         Err(e) => bail!("accept: POST /v1/proposals/accept failed: {e}"),
     }
+}
+
+/// The full id of an open proposal a short id names; see
+/// [`crate::resolve_short_id`].
+///
+/// # Errors
+///
+/// The short id starts more than one open proposal.
+pub fn resolve_id(id: &str) -> Result<String> {
+    let open: Vec<String> = read_latest()
+        .into_values()
+        .filter(|r| r.status == "open")
+        .map(|r| r.id)
+        .collect();
+    crate::resolve_short_id("accept", id, &open)
+}
+
+/// The conversation that filed an open proposal: the holder its atom's
+/// source names. `None` when the id is not on file or the atom names none.
+#[must_use]
+pub fn proposed_by(id: &str) -> Option<String> {
+    let rec = read_latest().get(id.trim()).cloned()?;
+    rec.atom["source"]["session"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Write one open proposal into the pack. A satisfied proposal was already

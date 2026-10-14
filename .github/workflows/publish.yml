@@ -26,3 +26,59 @@ jobs:
           set -euo pipefail
           cargo publish --locked --no-verify -p ljos
           cargo publish --locked --no-verify -p ljos-hud
+
+  # Lists the release in the official MCP Registry once crates.io has it.
+  # The registry reads the crate's README on crates.io for the mcp-name line.
+  mcp-registry:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG: ${{ github.ref_name }}
+      MCP_PUBLISHER_VERSION: "1.8.1"
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Set server.json to the tag's version
+        run: |
+          set -euo pipefail
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          version=${TAG#v}
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$crate" != "$version" ]; then
+            echo "Cargo.toml says $crate and the tag says $version" >&2
+            exit 1
+          fi
+          jq --arg v "$version" '.version = $v | .packages[0].version = $v' server.json > server.json.new
+          mv server.json.new server.json
+      - name: Wait for the README on crates.io
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          for _ in $(seq 1 30); do
+            url=$(curl -fsS -H 'Accept: application/json' \
+              -A 'leidarljos-ljos-ci (https://github.com/leidarljos/ljos)' \
+              "https://crates.io/api/v1/crates/ljos/$version/readme" | jq -r '.url // empty') || url=
+            if [ -n "$url" ] && curl -fsS "$url" | grep -qF 'mcp-name: io.github.leidarljos/ljos'; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "crates.io shows no README with the mcp-name line for ljos $version" >&2
+          exit 1
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+      - name: Sign in with the workflow's OIDC token
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json
+        run: ./mcp-publisher publish

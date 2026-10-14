@@ -3,23 +3,24 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, complete, conflicts,
-    consensus_steps_for, copy_playbook, doctor, due_report, finish, forecasts_from_json,
-    format_bump_rows, format_consolidation, format_doctor, format_findings, format_hits,
-    format_hubs, format_island, format_personas, format_playbooks, format_readings,
-    format_remembered, format_seat, format_steps, format_write_ack, graded, habit, habits,
-    handover, healthy, hook_note, identity_or_seat, island_entities, join, learn_anchors,
-    learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, pack,
-    packset_consolidate, packset_forget, packset_hubs, packset_island_as, packset_search_as_of,
-    packset_write_as, panel, panel_steps, parse_every, personas_from_pack, playbooks_from_pack,
-    policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign,
-    receive, release, remember_findings, resolve_assignee, rows_about, rules_from_pack, run,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, compact_sitting,
+    complete, conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish,
+    forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
+    format_doctor_short, format_findings, format_hits, format_hubs, format_island,
+    format_playbooks, format_readings, format_remembered, format_seat, format_steps,
+    format_write_ack, graded, habit, habits, handover, healthy, hook_note, identity_or_seat,
+    island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen,
+    now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
+    packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
+    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
+    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about, run,
     run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, verdict_for, whoami,
-    with_discount, withdraw_prediction, write_outcome, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB,
-    PROTOCOL,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, whoami, with_discount,
+    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
+    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    POLICY_TCB, PROTOCOL,
 };
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -35,16 +36,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. It is stored as an episode until a recalled review promotes it.
+    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is an episode: the hook shows it when a prompt bears on it, and a review promotes it to standing.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
         as_persona: Option<String>,
-        /// Store this as an episode. It is kept, and it is not a refresher. This is the default.
+        /// Store this as an episode. The hook shows it when a prompt bears on it. The default under an agent runner.
         #[arg(long)]
         transient: bool,
-        /// Store this as a standing rule now, without waiting for a review.
+        /// Store this as a standing rule now, without waiting for a review. The default when the person types it.
         #[arg(long)]
         standing: bool,
     },
@@ -54,8 +55,14 @@ enum Cmd {
         /// Prefer as this persona.
         #[arg(long = "as")]
         as_persona: Option<String>,
+        /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook refuses what the preference forbids. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        deny: Vec<String>,
+        /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        ask: Vec<String>,
     },
-    /// Write one agent proposal into the pack. Until then it is not a memory.
+    /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
     /// Retire one atom by id. Tombstones it; the pack keeps the record.
     Forget {
@@ -79,6 +86,9 @@ enum Cmd {
         /// Ask the pack as it stood then (YYYY-MM-DD or RFC 3339): what the seat knew at that time, withdrawn memories included, later ones left out.
         #[arg(long, value_name = "TIME")]
         as_of: Option<String>,
+        /// Open with what the score and the fraction mean, and what an empty answer means.
+        #[arg(long)]
+        explain: bool,
     },
     /// Candidate contradictions from the geometry of the seat's memory: the lowest passes between single memories, read by the optional `landscape` habitat.
     Conflicts {
@@ -120,28 +130,30 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
-    /// Whether a deed's bytes are intact and its sources are too.
+    /// Whether a deed's bytes are intact and its sources are too. `at=` is
+    /// the produced time in ISO 8601 with this machine's offset.
     Evidence { accession: String },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
     /// Cite a deed on an issue, drop one, or list what it cites. Citing a deed names it; the bytes stay in deedar.
     Deed {
-        /// The issue, when citing or listing.
+        /// The issue: cited on, listed, or dropped from.
         #[arg(required_unless_present = "ticket")]
         issue: Option<String>,
         /// An accession to cite, from `deedar create`; repeat for several.
         #[arg(long, conflicts_with = "remove")]
         add: Vec<String>,
         /// An accession to drop. Repeat for several. The removal is appended.
-        #[arg(long, requires = "ticket")]
+        #[arg(long)]
         remove: Vec<String>,
-        /// The ticket `--remove` drops the accession from.
+        /// The ticket `--remove` drops the accession from, in place of the positional issue.
         #[arg(long, conflicts_with = "issue")]
         ticket: Option<String>,
     },
     /// File work found while sitting: a child of the issue this
     /// conversation holds unless `--parent` names another or `--top` none,
-    /// in the parent's project. Prints the new id.
+    /// in the parent's project. `-p` naming another project files at its
+    /// top level, for a bug in a tool found mid-sitting. Prints the new id.
     File {
         /// The issue's title.
         title: String,
@@ -151,7 +163,8 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted.
+        /// The project; the parent's when omitted. Another project than
+        /// the held issue's files at its top level.
         #[arg(short, long)]
         project: Option<String>,
         /// The type tag: bug, task, feature, decision.
@@ -203,6 +216,10 @@ enum Cmd {
         /// The vissue issue this message is about. A reply keeps it.
         #[arg(long)]
         issue: Option<String>,
+        /// Write to a seat this pack has not heard from yet. Without it, a
+        /// seat the pack does not know is refused, with the seats it knows.
+        #[arg(long)]
+        new_seat: bool,
     },
     /// Mail this seat has not read. Listing does not write a receipt.
     /// `ljos hook --prompt` writes a receipt for each message it shows.
@@ -238,6 +255,48 @@ enum Cmd {
         #[arg(long)]
         remove: Vec<String>,
     },
+    /// How mail wakes a seat that is idle: a command this machine runs or a
+    /// webhook it posts to, which `ljos send` and `ljos reply` start without
+    /// waiting. Alone, show the seat's wake.
+    Wake {
+        /// The seat. Absent: this seat.
+        seat: Option<String>,
+        /// Run this shell line, with `LJOS_SEAT` set to the seat, when mail
+        /// reaches it. The guard judges it now and on every run.
+        #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
+        command: Option<String>,
+        /// POST the message's envelope (never its body) here, such as a Grok
+        /// Bot routine's webhook. https, or http on this machine.
+        #[arg(long, conflicts_with_all = ["clear", "fire"])]
+        webhook: Option<String>,
+        /// A file holding the webhook's bearer key.
+        #[arg(long, requires = "webhook")]
+        key_file: Option<String>,
+        /// An environment variable holding the webhook's bearer key.
+        #[arg(long, requires = "webhook")]
+        key_env: Option<String>,
+        /// Seconds before a wake command is stopped (default 30).
+        #[arg(long, requires = "command")]
+        timeout: Option<u64>,
+        /// Remove the seat's wake.
+        #[arg(long, conflicts_with = "fire")]
+        clear: bool,
+        /// Run the seat's wake now, as a send does, and print what happened.
+        #[arg(long)]
+        fire: bool,
+        /// With --fire: the seat the message is from.
+        #[arg(long, requires = "fire")]
+        from: Option<String>,
+        /// With --fire: the message id.
+        #[arg(long, requires = "fire")]
+        msg: Option<String>,
+        /// With --fire: the issue the message is about.
+        #[arg(long, requires = "fire")]
+        issue: Option<String>,
+        /// With --fire: the message is an interrupt.
+        #[arg(long, requires = "fire")]
+        interrupt: bool,
+    },
     /// Who holds what on the tracker: `vissue claims`, with its flags.
     Claims {
         /// Passed to `vissue claims` as given (`--by NAME`, `--json`, `-p PROJECT`).
@@ -246,13 +305,24 @@ enum Cmd {
     },
     /// The working set for an issue: plan, its inputs' deeds, its own citations.
     Recall { issue: String },
+    /// Release claims idle past a window and mail each seat. A dry run without --apply.
+    Reap {
+        /// How long a claim may sit with no claim or tracker commit: 6h, 90m, 2d.
+        #[arg(long, default_value = "6h")]
+        idle: String,
+        /// Release and mail. Absent: print what would happen.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Cast this identity's ballot (VISSUE_AGENT), or read the tally with no --for.
     Vote {
         issue: String,
         /// The option to vote for.
         #[arg(long = "for")]
         choice: Option<String>,
-        /// Probability in (0, 1] that the choice is the outcome.
+        /// Probability in (0, 1] that the choice is the outcome. Recorded;
+        /// `ljos learn` scores it once the outcome is named, and no settle
+        /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
         /// Deed accessions this ballot used, comma-separated, or `none`.
@@ -312,8 +382,8 @@ enum Cmd {
         #[arg(long, default_value_t = 0.5)]
         anchor: f64,
         /// How this persona reads the work, in a sentence or two.
-        #[arg(long)]
-        view: String,
+        #[arg(long, required_unless_present = "retire")]
+        view: Option<String>,
         /// Domains it speaks to, comma-separated, repeated, or several after one flag; a trust row scoped to one of them applies when the issue is about it.
         #[arg(long, value_delimiter = ',', num_args = 1..)]
         about: Vec<String>,
@@ -321,6 +391,15 @@ enum Cmd {
         /// a runner named in harnesses.toml.
         #[arg(long)]
         runner: Option<String>,
+        /// Take over a name another seat, or another holder of this seat, defined.
+        #[arg(long)]
+        replace: bool,
+        /// Say what the define would do (free, yours, refused, taken over, and which personas share its view or domains) and write nothing.
+        #[arg(long, conflicts_with = "retire")]
+        check: bool,
+        /// Withdraw the persona, so it casts no more ballots. Only the conversation that defined it may; --replace retires one someone else defined.
+        #[arg(long, conflicts_with_all = ["view", "about", "runner"])]
+        retire: bool,
     },
     /// Install a published release's binaries beside this ljos: fetched from the release, checked against its sha256 and its version, the old ones kept.
     Upgrade {
@@ -369,7 +448,7 @@ enum Cmd {
         /// What to ask, in words.
         text: Vec<String>,
     },
-    /// The personas the pack holds: name, anchor, domains and view, one per line.
+    /// The personas the pack holds: name, anchor, domains, view, and the seat that defined each, one per line.
     Personas,
     /// Write every persona as an agent definition in each runner's agents
     /// directory. A runner starts it as a subagent that casts that
@@ -388,11 +467,22 @@ enum Cmd {
     Playbook {
         /// The tracker id of the issue.
         issue: String,
-        /// The recipe name: sit, arena, land, company-panel, overnight.
+        /// The recipe name: sit, arena, land, company-panel, overnight, feature.
         name: String,
     },
-    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight.
+    /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature.
     Playbooks,
+    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round.
+    Workflow {
+        /// The tracker id of the parent issue.
+        issue: String,
+        /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
+        #[arg(long, value_name = "NAME", conflicts_with = "round")]
+        start: Option<String>,
+        /// File the next panel round once every child is closed.
+        #[arg(long)]
+        round: bool,
+    },
     /// Take a session node for an issue. One live claim per assignee.
     Claim {
         /// A tracker id, or a 32-hex claim-graph id. Omit when claiming next.
@@ -462,6 +552,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The seat rules the hook and `policy` judge by: verdict, pattern and reason, one a line.
+    Rules {
+        /// Print them as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Record the person's explicit consent for one pending hook request.
     Approve {
         /// The request id printed by the hook. Approve only after the person agrees.
@@ -492,9 +588,27 @@ enum Cmd {
         /// so a runner that reads the JSON is unchanged.
         #[arg(long)]
         fail_on_deny: bool,
+        /// Read the payload and answer in this runner's hook contract: copilot,
+        /// gemini, windsurf, factory, kiro, cline, qwen or crush.
+        #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
+        runner: Option<String>,
     },
-    /// DeGroot/Seldon over the pack's trust rows, then the tracker verb.
-    Consensus { id: String },
+    /// What the push gate decides on the issue, from seat ballots alone,
+    /// then the weighted settle over every ballot as advice: shares, who
+    /// leads, influence, and what each anchor did.
+    Consensus {
+        id: String,
+        /// Print one JSON document and nothing else. The push cite stays at
+        /// the top level under `push_cite`. The model crate's settle is under
+        /// `settle`. The tracker's settle is under `tracker` when `--compare`
+        /// ran. `surprising` and `reputation` are present when those readings ran.
+        #[arg(long)]
+        json: bool,
+        /// Also run the tracker's own settle (`vissue consensus`), whose
+        /// numbers can differ from the model crate's once trust rows exist.
+        #[arg(long)]
+        compare: bool,
+    },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
         from: String,
@@ -507,8 +621,12 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
-    /// Which habitats answer. Exit 1 when a required one does not.
-    Doctor,
+    /// Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer.
+    Doctor {
+        /// Print every row, the ones that answer included.
+        #[arg(long, visible_alias = "verbose")]
+        all: bool,
+    },
     /// Read-only icedtea pane over due, claims, and trust. Execs sibling `ljos-hud`.
     Hud {
         /// Stay on the terminal. Default detaches.
@@ -531,11 +649,17 @@ enum Cmd {
     Protocol,
     /// Who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from.
     Seat,
+    /// Serve MCP over stdio: run the `ljos-mcp` installed beside this `ljos`, with these arguments. For a client that starts a server by its crate's name.
+    Mcp {
+        /// Arguments passed to `ljos-mcp` as they stand.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Print the one MCP server entry any runner takes; with --harness, register it with a runner named in ~/.config/ljos/harnesses.toml and install the protocol as its skill.
     Onboard {
-        /// A runner named in ~/.config/ljos/harnesses.toml; absent, print the entry to paste anywhere.
-        #[arg(long, default_value = "json")]
-        harness: String,
+        /// A runner named in ~/.config/ljos/harnesses.toml or shipped with ljos; `all` onboards every runner found on this machine, and `json` prints the entry to paste anywhere. Absent: `all` at a terminal, `json` into a pipe.
+        #[arg(long)]
+        harness: Option<String>,
         /// Report what would be written and write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -561,13 +685,19 @@ enum Cmd {
         /// Copy the sealed satchel to another seat over ssh, as `user@host:path`; the receiver runs `ljos receive`.
         #[arg(long)]
         to: Option<String>,
+        /// The log size the receiver kept last time (`size=` in its kept head): the bag then carries the bridge from it.
+        #[arg(long)]
+        since_size: Option<u64>,
     },
     /// Check a satchel that arrived; --import puts its atoms in this seat's pack.
     Receive {
         dir: PathBuf,
-        /// A bridge file from the last handover by the same sender.
+        /// The head file `--keep` wrote at the last receive from the same sender.
         #[arg(long)]
         since: Option<PathBuf>,
+        /// Write this bag's log head here, for `--since` next time.
+        #[arg(long)]
+        keep: Option<PathBuf>,
         #[arg(long)]
         import: bool,
     },
@@ -630,11 +760,11 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, claim.
+    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
-        /// Occupancy name. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
+        /// Occupancy name, taken as given, the seat's own name too. Absent: this conversation's holder (`ljos seat`). Always scoped to the issue.
         #[arg(long)]
         assignee: Option<String>,
         /// Where the cards are read from.
@@ -646,6 +776,9 @@ enum Cmd {
         /// The recipe this sitting copies before recall. Absent, a closed-set token in the title else sit. Held until finish or release.
         #[arg(long)]
         playbook: Option<String>,
+        /// Print every section in full: the doctor's rows, recall, timeline, reclaim. Without it the sitting prints what needs action and what the seat remembers.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
     Finish {
@@ -660,6 +793,9 @@ enum Cmd {
         /// The option that turned out right, when the ballots are in and the world has said.
         #[arg(long)]
         outcome: Option<String>,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long, requires = "outcome")]
+        new_option: bool,
         /// The factor a refuted voter shrinks by when an outcome is named.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -694,6 +830,9 @@ enum Cmd {
         /// The option that turned out right.
         #[arg(long)]
         outcome: String,
+        /// The outcome is none of the ballot's options: the person answered with a new one.
+        #[arg(long)]
+        new_option: bool,
         /// The factor a refuted voter shrinks by.
         #[arg(long, default_value_t = LEARN_BETA)]
         beta: f64,
@@ -706,7 +845,33 @@ enum Cmd {
     },
 }
 
+/// The write acknowledgement: the plain sentence for a person at a
+/// terminal, the tab-separated row for a pipe.
+fn write_ack(body: &serde_json::Value) -> String {
+    // The pack keeps a person's hard sentence and says why it would have
+    // refused it; that goes to stderr, so the one line a script reads
+    // stays one line.
+    if let Some(note) = ljos_cli::prose_warning_line(body) {
+        eprintln!("{note}");
+    }
+    if std::io::stdout().is_terminal() {
+        ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
+    } else {
+        format_write_ack(body)
+    }
+}
+
 fn main() -> Result<()> {
+    let ran = run_command();
+    if let Err(e) = &ran {
+        // A gate whose hook fails answers deny in the runner's JSON and
+        // exits 2, so a runner that reads silence as allow still refuses.
+        ljos_cli::refuse_failed_gate(&format!("{e:#}"));
+    }
+    ran
+}
+
+fn run_command() -> Result<()> {
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
@@ -723,15 +888,15 @@ fn main() -> Result<()> {
             if transient && standing {
                 bail!("remember: pass --transient or --standing, not both");
             }
-            let horizon = if transient {
-                Some(true)
-            } else if standing {
-                Some(false)
-            } else {
-                None
-            };
-            let body = packset_write_as("Remember", &join(&text), as_persona.as_deref(), horizon)?;
-            println!("{}", format_write_ack(&body));
+            let text = join(&text);
+            // Under a runner the lesson is the agent's, unless it is the
+            // person's words from their latest prompt: then it stands.
+            let agents =
+                ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
+            let horizon = ljos_cli::remember_horizon(transient, standing, agents);
+            let body = packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?;
+            println!("{}", write_ack(&body));
+            eprintln!("{}", ljos_cli::remember_note(&body));
             if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
                 eprintln!(
                     "revises {} earlier memor{}, now closed: {}",
@@ -744,12 +909,68 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Prefer { text, as_persona } => {
-            let body =
-                packset_write_as("Prefer", &join(&text), as_persona.as_deref(), Some(false))?;
-            println!("{}", format_write_ack(&body));
+        Cmd::Prefer {
+            text,
+            as_persona,
+            deny,
+            ask,
+        } => {
+            let text = join(&text);
+            let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
+            // A preference that forbids a command it can name carries an
+            // ask over it. The person typing it gets the rule with the
+            // line that takes it back; an agent is shown the command.
+            let proposed = if deny.is_empty() && ask.is_empty() {
+                ljos_cli::command_prefs::rule_candidates(&text)
+            } else {
+                Vec::new()
+            };
+            let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
+            println!("{}", write_ack(&body));
+            for rule in &rules {
+                println!("{}", ljos_cli::atom_out(&write_rule(rule)?, false)?);
+            }
+            if !proposed.is_empty() && ljos_cli::under_a_runner() {
+                for rule in &proposed {
+                    println!(
+                        "this preference can carry an ask over {}: `ljos rule {} --verdict ask --why {}`",
+                        rule.pattern,
+                        ljos_cli::tools::sh_quote(&rule.pattern),
+                        ljos_cli::tools::sh_quote(&rule.reason)
+                    );
+                }
+            } else {
+                for rule in &proposed {
+                    let written = write_rule(rule)?;
+                    let id = written
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    println!(
+                        "the hook now asks before {}, with this preference as the reason; `ljos forget {id}` takes the rule back",
+                        rule.pattern
+                    );
+                }
+            }
         }
         Cmd::Accept { id } => {
+            let id = ljos_cli::admit::resolve_id(&id)?;
+            // The agent proposed the lesson; accepting it is a review by
+            // someone else. Under a runner that is the conversation that
+            // started a worker, reviewing the worker's proposal; an agent
+            // that accepted its own proposal would skip the review.
+            if ljos_cli::under_a_runner()
+                && !ljos_cli::accepts_another_conversation(
+                    ljos_cli::admit::proposed_by(&id).as_deref(),
+                    &ljos_cli::holder_name(),
+                )
+            {
+                bail!(
+                    "accept: this conversation filed {id}, or the proposal names no conversation, \
+                     and an agent can't accept its own proposal. The person runs `ljos accept {id}` \
+                     in a terminal of their own, or the conversation that started this worker runs it"
+                );
+            }
             print!("{}", ljos_cli::admit::accept(&id)?);
         }
         Cmd::Forget { id, why, json } => {
@@ -795,18 +1016,21 @@ fn main() -> Result<()> {
             limit,
             rerank,
             as_of,
+            explain,
         } => {
+            ljos_cli::log_recall("search", &query.join(" "));
             print!(
                 "{}",
-                format_hits(&packset_search_as_of(
-                    &join(&query),
-                    limit,
-                    as_of.as_deref(),
-                    rerank
-                )?)
+                format_hits(
+                    &packset_search_as_of(&join(&query), limit, as_of.as_deref(), rerank)?,
+                    explain
+                )
             );
         }
-        Cmd::Evidence { accession } => run("deedar", &["evidence", &accession])?,
+        Cmd::Evidence { accession } => {
+            let said = run_captured("deedar", &["evidence", &accession])?;
+            print!("{}", ljos_cli::evidence_here(&said.stdout));
+        }
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
             issue,
@@ -815,7 +1039,10 @@ fn main() -> Result<()> {
             ticket,
         } => {
             if !remove.is_empty() {
-                let ticket = ticket.as_deref().context("deed: --ticket is required")?;
+                let ticket = ticket
+                    .as_deref()
+                    .or(issue.as_deref())
+                    .context("deed: name the issue to drop it from")?;
                 for a in &remove {
                     print!("{}", uncite_deed(ticket, a)?);
                 }
@@ -864,17 +1091,16 @@ fn main() -> Result<()> {
             priority,
             body,
         } => {
-            let parent = if top {
+            let held = if top || parent.is_some() {
                 None
             } else {
-                parent.or_else(ljos_cli::held_issue)
+                ljos_cli::held_issue()
             };
-            let project = project.or_else(|| {
-                parent
-                    .as_deref()
-                    .and_then(|p| p.rsplit_once('-'))
-                    .map(|(proj, _)| proj.to_string())
-            });
+            let (parent, project, passed_over) =
+                ljos_cli::file_placement(top, parent, project, held);
+            if let Some(line) = passed_over {
+                eprint!("{line}");
+            }
             let Some(project) = project else {
                 anyhow::bail!("no project: name one with -p, or a parent with --parent");
             };
@@ -919,6 +1145,9 @@ fn main() -> Result<()> {
         }
         Cmd::Note { issue, text } => {
             run("vissue", &["note", &issue, &text.join(" ")])?;
+            if let Some(line) = ljos_cli::assist_note_line(&issue) {
+                print!("{line}");
+            }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
         Cmd::Send {
@@ -926,6 +1155,7 @@ fn main() -> Result<()> {
             group,
             interrupt,
             issue,
+            new_seat,
         } => {
             let (seat, text) = if group.is_some() {
                 (None, words.join(" "))
@@ -945,6 +1175,7 @@ fn main() -> Result<()> {
                     text: &text,
                     interrupt,
                     issue: issue.as_deref(),
+                    new_seat,
                 })?
             );
         }
@@ -961,12 +1192,65 @@ fn main() -> Result<()> {
         Cmd::Group { name, add, remove } => {
             print!("{}", ljos_cli::mail::group(&name, &add, &remove)?)
         }
+        Cmd::Wake {
+            seat,
+            command,
+            webhook,
+            key_file,
+            key_env,
+            timeout,
+            clear,
+            fire,
+            from,
+            msg,
+            issue,
+            interrupt,
+        } => {
+            let seat = seat.unwrap_or_else(ljos_cli::seat_name);
+            let said = if let Some(command) = command {
+                ljos_cli::wake::set_command(&seat, &command, timeout)?
+            } else if let Some(url) = webhook {
+                ljos_cli::wake::set_webhook(&seat, &url, key_file.as_deref(), key_env.as_deref())?
+            } else if clear {
+                ljos_cli::wake::clear(&seat)?
+            } else if fire {
+                ljos_cli::wake::fire(&ljos_cli::wake::Event {
+                    seat,
+                    from: from.unwrap_or_else(ljos_cli::seat_name),
+                    msg: msg.unwrap_or_default(),
+                    issue,
+                    interrupt,
+                })?
+            } else {
+                ljos_cli::wake::show(&seat)
+            };
+            print!("{said}");
+        }
         Cmd::Claims { args } => {
+            // vissue names the holder filter `--by`; `--agent` is ljos's word.
+            let mapped: Vec<String> = args
+                .iter()
+                .map(|a| match a.as_str() {
+                    "--agent" => "--by".to_string(),
+                    a => a
+                        .strip_prefix("--agent=")
+                        .map_or_else(|| a.to_string(), |v| format!("--by={v}")),
+                })
+                .collect();
             let mut argv = vec!["claims"];
-            argv.extend(args.iter().map(String::as_str));
+            argv.extend(mapped.iter().map(String::as_str));
             run("vissue", &argv)?;
         }
-        Cmd::Recall { issue } => run("vissue", &["recall", &issue])?,
+        Cmd::Recall { issue } => {
+            ljos_cli::log_recall("recall", &issue);
+            run("vissue", &["recall", &issue])?
+        }
+        Cmd::Reap { idle, apply } => {
+            print!(
+                "{}",
+                ljos_cli::reap::reap(ljos_cli::reap::parse_idle(&idle)?, apply)?
+            )
+        }
         Cmd::Vote {
             issue,
             choice,
@@ -1035,6 +1319,7 @@ fn main() -> Result<()> {
                 }
             }
             Some(c) => {
+                ljos_cli::ballot_seat("vote")?;
                 let used = used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     bail!(
@@ -1083,15 +1368,33 @@ fn main() -> Result<()> {
             view,
             about,
             runner,
+            replace,
+            check,
+            retire,
         } => {
-            let body = write_persona(&Persona {
+            if retire {
+                print!("{}", ljos_cli::retire_persona(&name, replace)?);
+                ljos_cli::refresh_agents();
+                return Ok(());
+            }
+            let persona = Persona {
                 name,
                 anchor,
-                view,
+                view: view.unwrap_or_default(),
                 entities: about,
                 runner,
-            })?;
-            println!("{}", format_write_ack(&body));
+            };
+            let how = if replace {
+                PersonaWrite::Replace
+            } else {
+                PersonaWrite::Define
+            };
+            if check {
+                print!("{}", ljos_cli::check_persona(&persona, how)?);
+                return Ok(());
+            }
+            let body = write_persona_as(&persona, how)?;
+            println!("{}", write_ack(&body));
             ljos_cli::refresh_agents();
         }
         Cmd::Upgrade { version, dir } => {
@@ -1154,7 +1457,7 @@ fn main() -> Result<()> {
             println!("{}", ljos_cli::ask_persona(&name, &text.join(" "))?);
         }
         Cmd::Personas => {
-            print!("{}", format_personas(&personas_from_pack()?));
+            print!("{}", ljos_cli::personas_listing()?);
         }
         Cmd::Agents { harness, dry_run } => {
             print!(
@@ -1174,6 +1477,24 @@ fn main() -> Result<()> {
         Cmd::Playbooks => {
             print!("{}", format_playbooks(&playbooks_from_pack()?));
         }
+        Cmd::Workflow {
+            issue,
+            start,
+            round,
+        } => {
+            if let Some(name) = start {
+                print!("{}", ljos_cli::workflow_start(&issue, &name)?);
+            } else if round {
+                print!("{}", ljos_cli::workflow_round(&issue)?);
+            } else {
+                match ljos_cli::workflow_status(&issue)? {
+                    Some(s) => print!("{}", ljos_cli::format_workflow_status(&s)),
+                    None => bail!(
+                        "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
+                    ),
+                }
+            }
+        }
         Cmd::Claim {
             node,
             assignee,
@@ -1181,7 +1502,7 @@ fn main() -> Result<()> {
             role,
             slack,
         } => {
-            let assignee = resolve_assignee(assignee.as_deref());
+            let assignee = cli_assignee(assignee.as_deref());
             if next || node.is_empty() {
                 print!("{}", claim_next(&assignee, role.as_deref(), slack)?);
             } else {
@@ -1189,10 +1510,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Release { node, assignee } => {
-            print!(
-                "{}",
-                release(&node, &resolve_assignee(assignee.as_deref()))?
-            );
+            print!("{}", release(&node, &cli_assignee(assignee.as_deref()))?);
             print!("{}", ljos_cli::persist_tracker(&node, "released"));
         }
         Cmd::Complete {
@@ -1205,7 +1523,7 @@ fn main() -> Result<()> {
             complete(
                 &node,
                 status.as_deref(),
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 gen
             )?
         ),
@@ -1215,6 +1533,7 @@ fn main() -> Result<()> {
             expect,
             as_persona,
         } => {
+            ljos_cli::ballot_seat("predict")?;
             let who = as_persona
                 .or_else(|| std::env::var("VISSUE_AGENT").ok())
                 .unwrap_or_else(whoami_tracker);
@@ -1234,6 +1553,12 @@ fn main() -> Result<()> {
             })?;
             println!("{}", ljos_cli::atom_out(&body, json)?);
         }
+        Cmd::Rules { json } => {
+            print!(
+                "{}",
+                ljos_cli::format_rules(&ljos_cli::rules_from_pack()?, json)
+            );
+        }
         Cmd::Approve { id } => {
             print!("{}", ljos_cli::approval::approve(&id)?);
         }
@@ -1250,10 +1575,22 @@ fn main() -> Result<()> {
             event,
             prompt,
             fail_on_deny,
+            runner,
         } => {
             use std::io::Read;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
+            ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
+            if let Some(runner) = runner.as_deref() {
+                if !ljos_cli::runner_hooks::is_runner(runner) {
+                    anyhow::bail!(
+                        "hook: no runner {runner:?}; --runner takes {}",
+                        ljos_cli::runner_hooks::RUNNERS.join(", ")
+                    );
+                }
+                let code = ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())?;
+                std::process::exit(code);
+            }
             let call = if prompt {
                 ljos_cli::prompt_call(&input)
             } else {
@@ -1274,9 +1611,20 @@ fn main() -> Result<()> {
             // at the same moment is answered once. A tool gate is exempt
             // from both: its verdict must not be lost to a clock. Exiting
             // at the deadline writes no deny, and the runner then allows
-            // the command.
+            // the command; a gate's own deadline, armed below, writes one.
+            // The same holds for an event said once, such as a stop or the
+            // end of a session: its twin is answered with nothing.
+            if ljos_cli::hook_twin(&call, &input) {
+                return Ok(());
+            }
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
                 if ljos_cli::hook_already_running(&call) {
+                    if ljos_cli::replays_its_copy(&call) {
+                        let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
+                        if let Some(answer) = ljos_cli::replay_hook_answer(&call, wait) {
+                            print!("{answer}");
+                        }
+                    }
                     return Ok(());
                 }
                 std::thread::spawn(|| {
@@ -1292,6 +1640,7 @@ fn main() -> Result<()> {
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
             unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+            ljos_cli::arm_gate(&input, event.as_deref());
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());
             // A subagent about to stop is held once while its parent holds
@@ -1343,6 +1692,19 @@ fn main() -> Result<()> {
                     println!("{}", ljos_cli::block_output(call.shape, &reason));
                     return Ok(());
                 }
+                // Interrupt mail that came in during the turn holds the
+                // stop once, so a running session reads it before it goes
+                // idle. Each letter is receipted once delivered, so the
+                // next stop is not held for it again.
+                if subagent.is_none() {
+                    let (mail, ids) = ljos_cli::mail::stop_note();
+                    if !mail.is_empty() {
+                        println!("{}", ljos_cli::block_output(call.shape, &mail));
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        ljos_cli::mail::ack_delivered(&ids);
+                        return Ok(());
+                    }
+                }
             }
             // At the end of a session the memories it used fire together,
             // and there is nothing to say.
@@ -1352,10 +1714,10 @@ fn main() -> Result<()> {
             }
             // On a tool call the pack's rules give a verdict; on a prompt
             // there is nothing to stop, only something to know.
-            let rules = if call.event == "PreToolUse" || call.event == "argv" {
-                rules_from_pack().unwrap_or_default()
+            let (rules, preferences) = if call.event == "PreToolUse" || call.event == "argv" {
+                ljos_cli::gate_read()
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             // A tool call with no command line (a file read, a search) has
@@ -1385,7 +1747,7 @@ fn main() -> Result<()> {
             } else {
                 ljos_cli::redirect_seat_verb(
                     ljos_cli::gate_push(
-                        verdict_for(&rules, &call.cue),
+                        ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
                         &call.cue,
                         cwd.as_ref().ok().and_then(|p| p.to_str()),
                     ),
@@ -1393,6 +1755,13 @@ fn main() -> Result<()> {
                 )
             };
             let verdict = tcb_rule.as_ref().or(gated.as_ref());
+            // A command the ask pack would have asked about runs because a
+            // setting turned that class off: the bypass log keeps a row.
+            if verdict.is_none() && call.event == "PreToolUse" {
+                if let Some((rule, how)) = ljos_cli::ask_pack::ask_pack_switched_off(&call.cue) {
+                    ljos_cli::log_bypass("switch", &how, &call.cue, &rule);
+                }
+            }
             // Ids are marked after stdout is flushed. A runner that kills
             // the hook before it reads the answer must see the same note
             // on the next call.
@@ -1406,7 +1775,20 @@ fn main() -> Result<()> {
                 "PreToolUse" | "argv" => {
                     // A seat verb about to run resets the work count.
                     let _ = ljos_cli::work_nudge(&call, subagent.is_some());
-                    String::new()
+                    // The preferences that name the command about to run
+                    // go with it, once a session each, read from the
+                    // listing the rules came from.
+                    if call.event == "PreToolUse" {
+                        let (note, keys) = ljos_cli::command_preference_note(
+                            &preferences,
+                            &call.cue,
+                            call.session.as_deref(),
+                        );
+                        seen_later.extend(keys);
+                        note
+                    } else {
+                        String::new()
+                    }
                 }
                 "PostToolUse" => {
                     let (mut ctx, ids) = post_hook_stdout(call.shape, call.session.as_deref());
@@ -1467,8 +1849,12 @@ fn main() -> Result<()> {
                     String::new()
                 }
                 // A session started from a compaction hears what it holds,
-                // where the runner takes SessionStart context.
+                // and a fresh one hears that ljos is on, where the runner
+                // takes SessionStart context.
                 "SessionStart" => {
+                    // A new session starts the encoder loading, so the first
+                    // prompt does not wait on it.
+                    let _ = ljos_cli::encoder_warming();
                     let compacted = serde_json::from_str::<serde_json::Value>(input.trim())
                         .ok()
                         .and_then(|v| {
@@ -1484,6 +1870,11 @@ fn main() -> Result<()> {
                         let (ctx, ids) = ljos_cli::take_hook_note(call.session.as_deref());
                         seen_later.extend(ids);
                         ctx
+                    } else if !compacted && call.shape != ljos_cli::HookShape::CamelCase {
+                        // A fresh session hears that ljos is on, in one
+                        // line, so the person and the agent know the seat
+                        // is there before the first prompt.
+                        ljos_cli::session_start_line()
                     } else {
                         String::new()
                     }
@@ -1494,7 +1885,12 @@ fn main() -> Result<()> {
                 _ => {
                     // The person's prompt is the chat's consent channel; the
                     // grant goes first, ahead of the hook's deadline.
-                    let granted = (call.event == "UserPromptSubmit")
+                    // Only the person's own prompt grants, saves or
+                    // corrects: a subagent's brief or an unattended run's
+                    // prompt is an agent's words in that channel.
+                    let person = call.event == "UserPromptSubmit"
+                        && ljos_cli::capture::not_the_person(&input).is_none();
+                    let granted = person
                         .then(|| {
                             ljos_cli::approval::approve_from_prompt(
                                 &call.cue,
@@ -1502,10 +1898,28 @@ fn main() -> Result<()> {
                             )
                         })
                         .flatten();
-                    if call.event == "UserPromptSubmit" {
+                    // A standing choice the person states is saved in their
+                    // words before the note is read, so the note does not
+                    // repeat it and the correction hook does not file it
+                    // again as a proposal.
+                    let captured = if person {
+                        ljos_cli::capture::note_latest_prompt(&call.cue);
+                        ljos_cli::capture::capture_stated(&call)
+                    } else {
+                        None
+                    };
+                    if person {
                         ljos_cli::store_correction(&call);
                     }
                     let (mut ctx, mut ids) = hook_note(&call, limit);
+                    if let Some((line, keys)) = captured {
+                        ctx = if ctx.is_empty() {
+                            line
+                        } else {
+                            format!("{line}\n{ctx}")
+                        };
+                        ids.extend(keys);
+                    }
                     if call.shape == ljos_cli::HookShape::CamelCase
                         && call.event == "UserPromptSubmit"
                     {
@@ -1556,8 +1970,8 @@ fn main() -> Result<()> {
                 }
             };
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
-            print!("{output}");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            ljos_cli::answer_gate(&output);
+            ljos_cli::keep_hook_answer(&call, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
                 ljos_cli::mail::ack_delivered(&seen_later);
@@ -1569,7 +1983,7 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Consensus { id } => {
+        Cmd::Consensus { id, json, compare } => {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -1582,29 +1996,86 @@ fn main() -> Result<()> {
                         .context("consensus: GET /v1/atoms failed")
                 })
                 .unwrap_or_default();
+            // A persona on the ballot settles under its anchor, and every
+            // other voter, the seat too, under the default one; a ballot
+            // of seats alone stays plain DeGroot.
+            let ballots = ljos_cli::ballot_rows(&id);
+            ljos_cli::require_ballots(&id, &ballots)?;
+            let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
+            // The model crate's settle is the one printed; the tracker's
+            // runs under --compare, or when the model crate is not there.
+            let have_model = on_path("ljos-consensus");
             let mut steps = consensus_steps_for(
                 &id,
-                on_path("ljos-consensus"),
-                on_path("vissue"),
+                have_model,
+                on_path("vissue") && (compare || !have_model),
                 &trust,
-                &personas,
+                &anchors,
                 &tags,
             )?;
+            // First what the push gate decides: seat ballots only.
+            let names: std::collections::BTreeSet<String> =
+                personas.iter().map(|p| p.name.trim().to_string()).collect();
+            let (gate, gate_json) =
+                ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
             // The named outcomes show which voters err together, and
             // those voters are discounted.
-            if let Some((discount, line)) = settle_discount(&atoms) {
+            let discount = settle_discount(&atoms).map(|(discount, line)| {
                 with_discount(&mut steps, &discount);
-                println!("{line}");
-            }
-            for step in steps {
-                run(step.bin, &step.args)?;
-            }
+                line
+            });
             // Beside the settle: the surprisingly popular answer when two
             // or more voters forecast, and the voters' standing when rows
             // exist.
             let predictions = predictions_of(&atoms, &id);
-            for step in panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions) {
-                run(step.bin, &step.args)?;
+            let panel = panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions);
+            if json {
+                // One document on stdout. The push cite stays at the top
+                // level; each reading is under its own key. A human tally
+                // stays off stdout.
+                let mut said = Vec::new();
+                for step in steps.iter().chain(&panel) {
+                    let captured = run_captured(step.bin, &step.args)?;
+                    if !captured.stderr.is_empty() {
+                        eprint!("{}", captured.stderr);
+                    }
+                    said.push((ljos_cli::consensus_step_label(step), captured.stdout));
+                }
+                let doc = ljos_cli::consensus_document(&gate_json, &said);
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+                return Ok(());
+            }
+            print!("{gate}");
+            println!("advice, which does not decide a push: the weighted settle over every ballot");
+            if let Some(line) = discount {
+                println!("{line}");
+            }
+            for step in steps {
+                let settle = step.bin == "ljos-consensus"
+                    && step.args.first().map(String::as_str) == Some("settle");
+                if !settle {
+                    run(step.bin, &step.args)?;
+                    continue;
+                }
+                let said = run_captured(step.bin, &step.args)?;
+                match ljos_cli::settle_in_words(&said.stdout, &anchors) {
+                    Some(words) => print!("{words}"),
+                    None => print!("{}", said.stdout),
+                }
+            }
+            for step in panel {
+                if step.args.first().map(String::as_str) != Some("reputation") {
+                    run(step.bin, &step.args)?;
+                    continue;
+                }
+                // The rows name every voter on the topic; beside this
+                // settle only the issue's voters are read.
+                let said = run_captured(step.bin, &step.args)?;
+                let voters = ljos_cli::voters_of(&ballots);
+                match ljos_cli::standing_in_words(&said.stdout, &voters) {
+                    Some(words) => print!("{words}"),
+                    None => print!("{}", said.stdout),
+                }
             }
         }
         Cmd::Trust {
@@ -1623,9 +2094,13 @@ fn main() -> Result<()> {
             let v = write_trust(&row, &why)?;
             println!("{v}");
         }
-        Cmd::Doctor => {
+        Cmd::Doctor { all } => {
             let rows = doctor();
-            print!("{}", format_doctor(&rows));
+            if all {
+                print!("{}", format_doctor(&rows));
+            } else {
+                print!("{}", format_doctor_short(&rows));
+            }
             if !healthy(&rows) {
                 std::process::exit(1);
             }
@@ -1647,6 +2122,7 @@ fn main() -> Result<()> {
         }
         Cmd::Protocol => print!("{PROTOCOL}"),
         Cmd::Seat => print!("{}", format_seat(&whoami())),
+        Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
         Cmd::Onboard {
             harness,
             dry_run,
@@ -1657,7 +2133,26 @@ fn main() -> Result<()> {
                 print!("{HARNESSES_EXAMPLE}");
                 return Ok(());
             }
-            let steps = onboard_to(&harness, dry_run, skills.as_deref())?;
+            let harness = harness.unwrap_or_else(|| {
+                if std::io::stdout().is_terminal() {
+                    "all".to_string()
+                } else {
+                    "json".to_string()
+                }
+            });
+            let steps = if harness == "all" {
+                ljos_cli::onboard_detected(dry_run, skills.as_deref())?
+            } else {
+                onboard_to(&harness, dry_run, skills.as_deref())?
+            };
+            // With no runner named, the entry is for pasting: print the
+            // JSON alone, so it parses as it stands.
+            if harness == "json" {
+                for s in &steps {
+                    println!("{}", s.detail);
+                }
+                return Ok(());
+            }
             print!("{}", format_steps(&steps));
             if steps.iter().any(|s| !s.ok) {
                 std::process::exit(1);
@@ -1668,8 +2163,9 @@ fn main() -> Result<()> {
             project,
             issue,
             to,
+            since_size,
         } => {
-            for line in handover(&out, &project, &issue)? {
+            for line in handover(&out, &project, &issue, since_size)? {
                 println!("{line}");
             }
             if let Some(dest) = to {
@@ -1684,8 +2180,13 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Receive { dir, since, import } => {
-            for line in receive(&dir, since.as_deref(), import)? {
+        Cmd::Receive {
+            dir,
+            since,
+            keep,
+            import,
+        } => {
+            for line in receive(&dir, since.as_deref(), keep.as_deref(), import)? {
                 println!("{line}");
             }
         }
@@ -1735,7 +2236,7 @@ fn main() -> Result<()> {
             (Some(name), Some(value)) => {
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
-                println!("{}", format_write_ack(&body));
+                println!("{}", write_ack(&body));
                 if let Some(p) = prev {
                     eprintln!(
                         "was {}{}{} ({}), now closed",
@@ -1771,21 +2272,27 @@ fn main() -> Result<()> {
             cards: cards_dir,
             anyway,
             playbook,
-        } => print!(
-            "{}",
-            sitting_gated(
+            verbose,
+        } => {
+            let full = sitting_gated(
                 &issue,
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 &cards_dir,
                 anyway,
-                playbook.as_deref()
-            )?
-        ),
+                playbook.as_deref(),
+            )?;
+            if verbose {
+                print!("{full}");
+            } else {
+                print!("{}", compact_sitting(&full, &issue));
+            }
+        }
         Cmd::Finish {
             issue,
             status,
             lesson,
             outcome,
+            new_option,
             beta,
             gen,
             assignee,
@@ -1797,8 +2304,9 @@ fn main() -> Result<()> {
                 &status,
                 lesson.as_deref(),
                 outcome.as_deref(),
+                new_option,
                 beta,
-                &resolve_assignee(assignee.as_deref()),
+                &cli_assignee(assignee.as_deref()),
                 gen,
                 close
             )?
@@ -1812,17 +2320,33 @@ fn main() -> Result<()> {
 
         Cmd::Graded { id, lapsed } => {
             let v = graded(&id, !lapsed)?;
-            println!("{}", v["due_at"].as_str().unwrap_or("graded"));
+            let due = v["due_at"].as_str().unwrap_or("graded");
+            if std::io::stdout().is_terminal() {
+                println!("graded; next review {}", ljos_cli::local_when(due));
+            } else {
+                println!("{due}");
+            }
         }
         Cmd::Learn {
             id,
             outcome,
+            new_option,
             beta,
             share,
             rule,
         } => {
             let said = run_captured("vissue", &["vote", &id, "--json"])?;
             let forecasts = forecasts_from_json(&said.stdout)?;
+            let (outcome, off) = ljos_cli::named_outcome(
+                &id,
+                &outcome,
+                &forecasts,
+                &ljos_cli::options_of_issue(&id),
+                new_option,
+            )?;
+            if let Some(line) = off {
+                print!("{line}");
+            }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
                 .map(|f| (f.agent.clone(), f.choice.clone()))
@@ -1838,7 +2362,7 @@ fn main() -> Result<()> {
                     write_trust(row, &[])?;
                 }
                 for p in &moved {
-                    write_persona(p)?;
+                    write_persona_as(p, PersonaWrite::Learned)?;
                 }
                 write_outcome(&id, &outcome)?;
                 (rows, moved, std::collections::BTreeMap::new())

@@ -20,9 +20,9 @@ targets = [
 pkg-url = "{ repo }/releases/download/v{ version }/ljos-v{ version }-{ target }.tar.gz"
 bin-dir = "ljos-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
-# The release tarball or nothing. A target without one fails here, and
-# `cargo install` builds it from source.
-disabled-strategies = ["quick-install", "compile"]
+# cargo-quickinstall is a third party's build. Without a release tarball
+# for the target, binstall builds from source.
+disabled-strategies = ["quick-install"]
 
 [lib]
 name = "ljos_hud"
@@ -35,8 +35,8 @@ path = "src/bin.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-ljos = { path = "../ljos-cli", version = "0.28.0" }
-claimdag = "0.6.2"
+ljos = { path = "../ljos-cli", version = "0.29.0" }
+claimdag = "0.7.1"
 iced = { version = "0.14", default-features = true, features = [
     "tokio",
     "advanced",

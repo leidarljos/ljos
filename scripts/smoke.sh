@@ -40,7 +40,7 @@ cd "$root"
 packset ensure >/dev/null
 fail() { echo "smoke: $1" >&2; exit 1; }
 
-doc=$(ljos doctor 2>&1 || true)
+doc=$(ljos doctor --all 2>&1 || true)
 echo "$doc" | grep -q '^ok	pack' || { echo "$doc"; fail "the pack does not answer"; }
 ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns." | grep -q lesson || fail remember
 ljos prefer "CombMNZ over RRF for fusing two ballots." | grep -q preference || fail prefer
@@ -67,7 +67,8 @@ id=$(vissue create -p demo "Ship the fuse change?" -q | tail -1)
 VISSUE_AGENT=alice ljos vote "$id" --for ship --used none >/dev/null
 VISSUE_AGENT=bob ljos vote "$id" --for ship --used none >/dev/null
 VISSUE_AGENT=carol ljos vote "$id" --for hold --used none >/dev/null
-ljos consensus "$id" | grep -q '"engine": "degroot-fj"' || fail consensus
+ljos consensus "$id" --json | grep -q '"engine": "degroot-fj"' || fail consensus
+ljos consensus "$id" | grep -q '^settle (DeGroot, 3 voters): ship 0.667, hold 0.333' || fail "consensus in words"
 learned=$(ljos learn "$id" --outcome hold 2>&1 || true)
 echo "$learned" | grep -q 'weighs' || { echo "$learned"; ljos seat; vissue vote "$id" 2>&1 | head -8; fail learn; }
 
@@ -150,6 +151,8 @@ other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolI
 echo '{"hook_event_name":"PreCompact","session_id":"smoke-compact","trigger":"auto"}' | ljos hook >/dev/null
 resumed=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-compact","source":"compact"}' | ljos hook)
 echo "$resumed" | grep -q '"additionalContext":"The conversation was compacted' || { echo "$resumed"; fail "compaction note at SessionStart"; }
+fresh=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-fresh","source":"startup"}' | ljos hook)
+echo "$fresh" | grep -q '"additionalContext":"ljos is on: ' || { echo "$fresh"; fail "the ljos is on line at SessionStart"; }
 
 ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
 echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"
@@ -169,7 +172,7 @@ if ljos receive "$root/unsigned" --import >/dev/null 2>&1; then fail "an unsigne
 # Signed import lands atoms; doctor still answers.
 got=$(ljos receive "$root/bag" --import 2>&1 || true)
 echo "$got" | grep -q 'atoms imported' || { echo "$got"; fail "signed import"; }
-ljos doctor | grep -q '^ok	pack' || fail "doctor after receive"
+ljos doctor --all | grep -q '^ok	pack' || fail "doctor after receive"
 # A bag altered after sealing is refused: one byte of one atom changed,
 # and the receipt must fail on the manifest, not count the atoms.
 tampered=$(ls "$root/bag/data/atoms"/* | head -1)
@@ -214,7 +217,7 @@ brio ljos vote "$tid" --for ship --used none >/dev/null
 echo "two-seat: brio voted ship"
 acme ljos vote "$tid" --for ship --used none >/dev/null
 echo "two-seat: acme voted ship"
-cons=$(brio ljos consensus "$tid")
+cons=$(brio ljos consensus "$tid" --json)
 echo "$cons" | grep -q '"engine": "degroot-fj"' || fail "two-seat: consensus"
 echo "$cons" | grep '"engine"'
 fin=$(brio ljos finish "$tid" --lesson "Two seats handed one ticket. The tracker kept the line." --close)

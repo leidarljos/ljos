@@ -11,19 +11,22 @@ second seat that checked it.
 Install the binaries once:
 
 #+begin_src console
-$ cargo binstall ljos packset deedar-cli claimdag-cli vissue-cli ljos-policyd ljos-consensus
+$ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
 #+end_src
 
 They provide =ljos=, =ljos-mcp=, =ljos-policyd=, =ljos-consensus=, =packset=,
 =packsetd=, =deedar=, =claimdag= and =vissue=. =VISSUE_ROOT= must name an existing
 directory with a prefix directory inside it, and =packset ensure= starts the
-pack writer.
+pack writer. =mktemp -d= gives a directory only you own: a fixed =/tmp= path can be
+another user's or left from an earlier run. The tracker commits each change,
+so git needs an identity (=git config --global user.email=).
 
 #+begin_src console
-$ mkdir -p /tmp/seat/tracker/Issues && cd /tmp/seat && git init -q
-$ export VISSUE_ROOT=/tmp/seat/tracker DEEDAR_URL=file:///tmp/seat/deeds
-$ export CLAIMDAG_DIR=/tmp/seat/claims
-$ packsetd --port 18761 --home /tmp/seat-pack &
+$ seat=$(mktemp -d) && mkdir -p "$seat/tracker/Software" "$seat/deeds"
+$ git -C "$seat/tracker" init -q && cd "$seat"
+$ export VISSUE_ROOT="$seat/tracker" DEEDAR_URL="file://$seat/deeds"
+$ export CLAIMDAG_DIR="$seat/claims"
+$ packsetd --port 18761 --home "$seat/pack" &
 $ export PACKSET_URL=http://127.0.0.1:18761
 $ ljos doctor
 ok	vissue	...
@@ -38,13 +41,13 @@ ok	deed store	size=0 root=...
 $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
 $ ljos prefer "CombMNZ over RRF for fusing two ballots."
 $ ljos search "which fusion"
-Score is how the scorers ranked this query. The fraction is how many of them named the hit.
 2.0000	1/3	lesson	...	today	The lexical default is BM25+. It beat BM25 by two points on turns.
 1.0000	1/3	preference	...	today	CombMNZ over RRF for fusing two ballots.
 #+end_src
 
 A claim is two sentences at most, stored as written. The pack never mines a
-transcript. Tomorrow, =ljos due= lists both claims; read each and grade it:
+transcript. A lesson you type takes effect at once, like the preference, so the
+hook shows both from the next prompt they bear on. Tomorrow, =ljos due= lists both claims; read each and grade it:
 
 #+begin_src console
 $ ljos graded 3f9c...            # recalled: comes back later
@@ -68,24 +71,39 @@ $ ljos consensus $id
 ... ship 0.667, hold 0.333 ...
 #+end_src
 
-Two settles print: the consensus crate's DeGroot or Friedkin-Johnsen
-model, then the tracker's own verb, both under the same trust rows. With no
+The first line says what a push cite on the issue decides from seat
+ballots. Then the consensus crate's DeGroot or Friedkin-Johnsen settle
+prints under the trust rows, as advice; =--compare= adds the tracker's own
+settle. With no
 rows every voter weighs the same. Now suppose =hold= turned out right:
 
 #+begin_src console
 $ ljos learn $id --outcome hold
+Learned. 6 trust rows rewritten. ...
 alice weighs bob at 0.010
-alice weighs carol at 1.000
-bob weighs alice at 0.010
-bob weighs carol at 1.000
-carol weighs alice at 0.010
-carol weighs bob at 0.010
+alice weighs carol at 0.010
+...
 $ ljos consensus $id
 ... ship 0.667, hold 0.333 ...
 #+end_src
 
-Every voter the outcome refuted shrank in every other voter's row. The settle
-printed beside those rows on this tracker is still the equal-weight count.
+By default =learn= uses the =record= rule, which weighs each voter by its hits and
+misses across outcomes. One outcome cannot tell a lucky voter from a good
+one. Every row sits at the floor, and the settle stays the equal-weight
+count. The rows separate once more issues have outcomes. With
+=--rule hedge=, only the voters the outcome refuted shrink, by =--beta=
+(0.5 unset):
+
+#+begin_src console
+$ ljos learn $id --outcome hold --rule hedge
+alice weighs bob at 0.500
+alice weighs carol at 1.000
+...
+$ ljos consensus $id
+settle (DeGroot, 3 voters): hold 0.500, ship 0.500
+#+end_src
+
+That is the same three ballots on a fresh pack, so the rows start at 1.
 The rows are =trust= atoms in the pack, so they carry a validity window, can be
 superseded, and travel in a handover. A person can also set one by hand:
 =ljos trust alice carol 0.9 --why deed-...=.
@@ -100,6 +118,8 @@ $ ljos sitting $id --assignee alice
 2 due; 0 scheduled
 == island: Ship the fuse change?
 1.000	seed	...	CombMNZ over RRF for fusing two ballots.
+== reclaim
+no claim quiet longer than 900s
 == claim
 gen=2
 $ echo 'fn main() {}' > patch.rs
@@ -107,16 +127,18 @@ $ deedar create file --name "the fuse patch" --path patch.rs --agent alice
 id=deed-file-the-fuse-patch ...
 $ ljos deed $id --add deed-file-the-fuse-patch
 $ ljos finish $id --assignee alice --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold
-remembered ...
+proposed 1735... as agent-derived; `ljos accept 1735...` writes it
 fired the island for "Ship the fuse change?": 3 memories
 completed the session node for demo-... as done
 learned from outcome "hold": 6 trust rows rewritten
+tracker git: committed chore(issues): demo-... finished; push refused: fatal: No configured push destination.
+$ ljos accept 1735...
 #+end_src
 
 =sitting= opens: it runs =doctor=, prints the cards and what is due,
 activates the island the issue's title touches, recalls the working set,
 and claims a session node. =deed= cites what the work produced. =finish=
-closes: the lesson is remembered, the island fires, the node completes,
+closes: the lesson is proposed (=ljos accept ID=, typed by the person, makes it a standing lesson), the island fires, the node completes,
 and the outcome reweighs the voters as in step 2. Completing the session node does not close the ticket. =ljos finish ISSUE --close= does, when the work is accepted. To stop without finishing,
 =ljos release $id --assignee alice= hands the node back; until then a second
 =claim= under the same name is refused, and the refusal names this issue.
@@ -137,8 +159,11 @@ the payload matches the manifest ...
 1 deeds proven against a log of 1 entries ...
 0 atoms enclosed, 0 trust rows
 $ ljos receive /tmp/bag --import
-0 atoms imported, 0 refused
+Error: receive: unsigned satchel; will not import
 #+end_src
+
+A scratch seat has no host key, so its bag goes out unsigned, and
+=--import= refuses an unsigned bag. =ljos onboard --harness NAME= writes the key.
 
 The receiver now knows what the sender learned, who the sender trusts, and
 which deeds the work produced, and checked all of it before importing. The
@@ -159,7 +184,16 @@ $ ljos protocol | head -3
 
 One seat, five stores, five questions. Ask the store that owns the question.
 $ ljos onboard
-{ "mcpServers": { "ljos": { "type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {} } } }
+{
+  "mcpServers": {
+    "ljos": {
+      "type": "stdio",
+      "command": "/home/you/.cargo/bin/ljos-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
 #+end_src
 
 That entry goes into any runner, where it keeps its
@@ -173,6 +207,16 @@ sitting then runs in the order above. A runner that registers servers by
 a command of its own can be described once in
 =~/.config/ljos/harnesses.toml= and onboarded with =ljos onboard --harness
 NAME=; the [[file:howto.org][how-to]] shows the file.
+
+* Clean up
+
+The scratch seat is one directory and the pack writer started in step 0.
+Stop the writer and remove the directory, and the next run starts clean on
+the same port:
+
+#+begin_src console
+$ kill %1 && rm -rf "$seat"
+#+end_src
 
 * Where next
 

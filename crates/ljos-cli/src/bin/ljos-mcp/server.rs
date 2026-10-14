@@ -41,6 +41,125 @@ const PROTOCOL_URI: &str = "ljos://protocol";
 /// the caching fields on every cacheable result.
 const RESOURCE_TTL_MS: u64 = 0;
 
+/// The tools a session lists when `LJOS_MCP_TOOLS` is unset: the command
+/// rules and the consent form for a held command, memory, tickets, claims,
+/// mail, decisions and the doctor. Every tool costs its description and
+/// schema in the model's context on every session, so the rest wait for an
+/// opt-in. `tools/list` keeps this order, so the guard and memory lead.
+pub const CORE_TOOLS: &[&str] = &[
+    "ljos_rule",
+    "ljos_request_approval",
+    "ljos_prefer",
+    "ljos_remember",
+    "ljos_search",
+    "ljos_file",
+    "ljos_note",
+    "ljos_sitting",
+    "ljos_finish",
+    "ljos_claim",
+    "ljos_release",
+    "ljos_send",
+    "ljos_inbox",
+    "ljos_reply",
+    "ljos_vote",
+    "ljos_consensus",
+    "ljos_doctor",
+];
+
+/// The persona and playbook tools, listed after every other tool.
+const PERSONA_TOOLS: &[&str] = &[
+    "ljos_brief",
+    "ljos_persona",
+    "ljos_personas",
+    "ljos_playbook",
+    "ljos_playbooks",
+];
+
+/// The order `tools/list` gives: the core set in its own order, then the
+/// other tools by name, then the persona tools by name.
+fn listing_order(tools: &mut [Tool]) {
+    tools.sort_by_cached_key(|t| {
+        let name = t.name.as_ref();
+        let rank = match CORE_TOOLS.iter().position(|c| *c == name) {
+            Some(at) => (0, at),
+            None if PERSONA_TOOLS.contains(&name) => (2, 0),
+            None => (1, 0),
+        };
+        (rank, name.to_string())
+    });
+}
+
+/// The tools `LJOS_MCP_TOOLS` names, or `None` for every tool. Unset or
+/// empty is the core set. `all` is every tool. Otherwise a list split on
+/// commas or spaces, where `core` stands for the core set and any other word
+/// is a tool name, with or without its `ljos_` prefix.
+#[must_use]
+pub fn tool_set(spec: Option<&str>) -> Option<Vec<String>> {
+    let spec = spec.map(str::trim).unwrap_or("");
+    if spec.is_empty() {
+        return Some(CORE_TOOLS.iter().map(|t| (*t).to_string()).collect());
+    }
+    let mut set: Vec<String> = Vec::new();
+    for word in spec.split(|c: char| c == ',' || c.is_whitespace()) {
+        match word.trim() {
+            "" => {}
+            "all" => return None,
+            "core" => set.extend(CORE_TOOLS.iter().map(|t| (*t).to_string())),
+            name if name.starts_with("ljos_") => set.push(name.to_string()),
+            name => set.push(format!("ljos_{name}")),
+        }
+    }
+    set.sort_unstable();
+    set.dedup();
+    Some(set)
+}
+
+/// The set this server was started with.
+fn env_tool_set() -> Option<Vec<String>> {
+    tool_set(std::env::var("LJOS_MCP_TOOLS").ok().as_deref())
+}
+
+fn listed(set: Option<&[String]>, name: &str) -> bool {
+    set.is_none_or(|s| s.iter().any(|t| t == name))
+}
+
+/// A refusal from a tool that ran, as a tool result the model reads. The
+/// protocol's own errors stay errors: a tool that does not exist or
+/// arguments that do not parse.
+fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
+    if e.code == ErrorCode::INTERNAL_ERROR {
+        Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())]).into())
+    } else {
+        Err(e)
+    }
+}
+
+/// What a session hears first with the core set.
+const INSTRUCTIONS_CORE: &str =
+    "One seat over five habitats: tracker, pack, deed store, claim graph, \
+     consensus. Read ljos://protocol first. This server lists the core tools: \
+     ljos_search and ljos_remember for what the seat knows, ljos_prefer and ljos_rule for \
+     what holds from now on, ljos_sitting, ljos_note, ljos_file and ljos_finish for the work \
+     on an issue, ljos_claim and ljos_release for who holds it, ljos_send, ljos_inbox and \
+     ljos_reply for mail between seats, ljos_vote and ljos_consensus for a decision, \
+     ljos_doctor when another tool fails, and ljos_request_approval for a command the hook \
+     held. LJOS_MCP_TOOLS=all in the server's environment lists the other tools. A tool \
+     that fails means a habitat refused or is not running; it is not an empty answer. \
+     The seat is named after the client that connected. The holder is that name and a \
+     short tag for the `*_SESSION_ID` the runner stamped, else that name tagged with the \
+     runner's process; a shell the runner opens finds the same names, so no field here needs an \
+     assignee.";
+
+/// The instructions for this server's tool set: `all` with every tool
+/// listed, the core text otherwise.
+fn instructions_for(all: &'static str) -> &'static str {
+    if env_tool_set().is_none() {
+        all
+    } else {
+        INSTRUCTIONS_CORE
+    }
+}
+
 #[derive(Clone)]
 pub struct LjosServer {
     /// Where the cards are read from. The command line's `--dir`.
@@ -205,6 +324,17 @@ pub struct NoteArgs {
 pub struct IssueArgs {
     /// The issue id.
     pub issue: String,
+}
+
+/// The issue to settle, and whether to run the tracker's settle too.
+#[derive(Deserialize, JsonSchema)]
+pub struct ConsensusArgs {
+    /// The issue id.
+    pub issue: String,
+    /// Also run the tracker's own settle, whose numbers can differ from the
+    /// model crate's once trust rows exist.
+    #[serde(default)]
+    pub compare: bool,
 }
 
 /// A forecast of the others' ballots.
@@ -411,6 +541,11 @@ pub struct LearnArgs {
     pub issue: String,
     /// The option that turned out right.
     pub outcome: String,
+    /// The outcome is none of the ballot's options: the person answered
+    /// with a new one. Without it such an outcome is refused, since a typo
+    /// would score every voter a miss as well.
+    #[serde(default)]
+    pub new_option: bool,
     /// The factor a refuted persona's anchor moves by; the seat's default
     /// when absent. The rows themselves follow each voter's record.
     pub beta: Option<f64>,
@@ -427,6 +562,9 @@ pub struct PackArgs {
     /// Issues to take, with what they stand on.
     #[serde(default)]
     pub issues: Vec<String>,
+    /// The log size the receiver kept last time; the bag then carries the bridge from it.
+    #[serde(default)]
+    pub since_size: Option<u64>,
 }
 
 /// A satchel that arrived.
@@ -434,8 +572,11 @@ pub struct PackArgs {
 pub struct ReceiveArgs {
     /// The satchel directory.
     pub dir: String,
-    /// A bridge file from the last handover by the same sender.
+    /// The head file `keep` wrote at the last receive from the same sender.
     pub since: Option<String>,
+    /// Write this bag's log head to this file, for `since` next time.
+    #[serde(default)]
+    pub keep: Option<String>,
     /// Put the enclosed atoms into this seat's pack.
     pub import: Option<bool>,
 }
@@ -464,7 +605,7 @@ pub struct SittingArgs {
     #[serde(default)]
     pub anyway: bool,
     /// The recipe this sitting copies before recall (`sit`, `arena`, `land`,
-    /// `company-panel`, `overnight`). Absent, a closed-set token in the
+    /// `company-panel`, `overnight`, `feature`). Absent, a closed-set token in the
     /// title else sit. Held until finish or release.
     #[serde(default)]
     pub playbook: Option<String>,
@@ -475,7 +616,7 @@ pub struct SittingArgs {
 pub struct PlaybookBindArgs {
     /// The tracker id of the issue.
     pub issue: String,
-    /// The recipe name: sit, arena, land, company-panel, overnight.
+    /// The recipe name: sit, arena, land, company-panel, overnight, feature.
     pub name: String,
 }
 
@@ -502,6 +643,10 @@ pub struct FinishSittingArgs {
     /// The option that turned out right, when the ballots are in and the
     /// world has said. Omit when nobody knows yet.
     pub outcome: Option<String>,
+    /// The outcome is none of the ballot's options: the person answered
+    /// with a new one.
+    #[serde(default)]
+    pub new_option: bool,
     /// Generation from the sitting's claim. Absent: the live one. A stale gen is refused.
     #[serde(default)]
     pub gen: Option<u64>,
@@ -668,7 +813,8 @@ fn said(out: ljos_cli::Said) -> Json<Said> {
     })
 }
 
-/// A refusal, as the protocol carries one.
+/// A refusal. `call_tool` hands it to the model as a tool result with
+/// `isError`, so the model reads the reason.
 fn refused(e: anyhow::Error) -> McpError {
     let text = format!("{e:#}");
     // The pack's prose rule refuses a hard sentence; the seat that hit it
@@ -730,6 +876,10 @@ pub struct SendMailArgs {
     /// The vissue issue this message is about. A reply keeps it.
     #[serde(default)]
     pub issue: Option<String>,
+    /// Write to a seat this pack has not heard from yet. Without it, a
+    /// seat the pack does not know is refused, with the seats it knows.
+    #[serde(default)]
+    pub new_seat: Option<bool>,
 }
 
 /// Whether the inbox includes mail already read.
@@ -820,7 +970,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Call this when the work taught something. One lesson, two short sentences at most, stored as an episode: it is kept and it is not a refresher until a recalled review or a consolidation promotes it. Pass transient false to store a standing rule now. Pass transient true to force an episode. Never a transcript. Progress notes go on the issue.",
+        description = "Call this when the work taught something. One lesson, two short sentences at most, stored as an episode: the hook shows it when a prompt bears on it, and a recalled review or a consolidation promotes it to standing. Pass transient false to store a standing rule now. Pass transient true to force an episode. Never a transcript. Progress notes go on the issue.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -1066,7 +1216,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. Returns the new id, which a later child may name as its parent at once.",
+        description = "Call this when the work turns up something to do that is not this issue: it files a child of the issue you hold (or of `parent`, or none with `top`), in that issue's project, and commits the tracker. A `project` other than the held issue's files at its top level, which is how a bug in a tool goes to the tool's project mid-sitting. Returns the new id, which a later child may name as its parent at once.",
         annotations(
             title = "File work",
             read_only_hint = false,
@@ -1149,7 +1299,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. Pass `as` for a persona.",
+        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. Pass `as` for a persona.",
         annotations(
             title = "Vote",
             read_only_hint = false,
@@ -1303,6 +1453,7 @@ impl LjosServer {
             args.status.as_deref().unwrap_or("done"),
             args.lesson.as_deref(),
             args.outcome.as_deref(),
+            args.new_option,
             LEARN_BETA,
             &resolve_assignee(args.assignee.as_deref()),
             args.gen,
@@ -1420,12 +1571,12 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after the ballots are in. The first lines are the reading: act on those, not on a later count. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached, and the settle files a child for each option a voter still leads with that is not the unique plurality. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
+        description = "Call this after the ballots are in. The first line is what the push gate decides: whether a push citing this issue stands, on seat ballots alone, with the ballots it counted; persona and judge ballots neither pass nor block a push. Then comes the weighted settle over every ballot, which is advice. Pass `compare` to add the tracker's own settle. Polarization is how far voters still sit from the mean after listening. Disagreement is how far neighbors still sit from each other. Both zero with one option means there was one option, not that a split closed. Act on the shares when polarization is about zero and two or more options were named. When polarization is away from zero, the mean is not a position the group reached, and the settle files a child for each option a voter still leads with that is not the unique plurality. Equal weights with nobody anchored repeat the count. The JSON and the tracker text follow the reading.",
         annotations(title = "Consensus", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_consensus(
         &self,
-        Parameters(args): Parameters<IssueArgs>,
+        Parameters(args): Parameters<ConsensusArgs>,
     ) -> Result<Json<Rows<Said>>, McpError> {
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.
@@ -1448,16 +1599,36 @@ impl LjosServer {
                 ljos_cli::atoms_lean(&c, &c.workspace()).context("consensus: GET /v1/atoms failed")
             })
             .unwrap_or_default();
+        // As the CLI: a persona on the ballot settles under its anchor and
+        // every other voter under the default one.
+        let ballots = ljos_cli::ballot_rows(&args.issue);
+        ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
+        let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
+        // As the CLI: the model crate's settle, and the tracker's only on
+        // `compare` or when the model crate is not there.
+        let have_model = on_path("ljos-consensus");
         let mut steps = consensus_steps_for(
             &args.issue,
-            on_path("ljos-consensus"),
-            on_path("vissue"),
+            have_model,
+            on_path("vissue") && (args.compare || !have_model),
             &trust,
-            &personas,
+            &anchors,
             &tags,
         )
         .map_err(refused)?;
         let mut out = Vec::new();
+        let names: std::collections::BTreeSet<String> =
+            personas.iter().map(|p| p.name.trim().to_string()).collect();
+        let (gate, gate_json) =
+            ljos_cli::push_cite_reading(&args.issue, &ballots, &names, &ljos_cli::seat_name());
+        out.push(Said {
+            text: gate,
+            aside: None,
+        });
+        out.push(Said {
+            text: gate_json.to_string(),
+            aside: None,
+        });
         // The CLI does the same: the named outcomes show which voters
         // err together, and those voters are discounted.
         if let Some((discount, line)) = settle_discount(&atoms) {
@@ -1469,7 +1640,18 @@ impl LjosServer {
         }
         for step in steps {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
-            out.push(habitat(step.bin, &args)?.0);
+            let said = habitat(step.bin, &args)?.0;
+            // The settle's words first, then its JSON for a caller that
+            // reads the numbers.
+            if args.first() == Some(&"settle") {
+                if let Some(words) = ljos_cli::settle_in_words(&said.text, &anchors) {
+                    out.push(Said {
+                        text: words,
+                        aside: None,
+                    });
+                }
+            }
+            out.push(said);
         }
         // Beside the settle, as the CLI: the surprisingly popular answer
         // when two or more voters forecast, and the voters' standing when
@@ -1477,7 +1659,20 @@ impl LjosServer {
         let predictions = predictions_of(&atoms, &args.issue);
         for step in panel_steps(&args.issue, on_path("ljos-consensus"), &trust, &predictions) {
             let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
-            out.push(habitat(step.bin, &args)?.0);
+            let said = habitat(step.bin, &args)?.0;
+            // As the CLI: the standing of the issue's voters in words, then
+            // the JSON with every voter the rows name.
+            if args.first() == Some(&"reputation") {
+                if let Some(words) =
+                    ljos_cli::standing_in_words(&said.text, &ljos_cli::voters_of(&ballots))
+                {
+                    out.push(Said {
+                        text: words,
+                        aside: None,
+                    });
+                }
+            }
+            out.push(said);
         }
         Ok(as_rows(out))
     }
@@ -1609,6 +1804,14 @@ impl LjosServer {
     ) -> Result<Json<LearnPage>, McpError> {
         let said = run_captured("vissue", &["vote", &args.issue, "--json"]).map_err(refused)?;
         let forecasts = forecasts_from_json(&said.stdout).map_err(refused)?;
+        let (outcome, off) = ljos_cli::named_outcome(
+            &args.issue,
+            &args.outcome,
+            &forecasts,
+            &ljos_cli::options_of_issue(&args.issue),
+            args.new_option,
+        )
+        .map_err(refused)?;
         let ballots: Vec<(String, String)> = forecasts
             .iter()
             .map(|f| (f.agent.clone(), f.choice.clone()))
@@ -1619,19 +1822,14 @@ impl LjosServer {
         let (rows, moved, calibration) = learn_and_write(
             &args.issue,
             &ballots,
-            &args.outcome,
+            &outcome,
             args.beta.unwrap_or(LEARN_BETA),
             &about,
             &forecasts,
         )
         .map_err(refused)?;
-        let reading = learn_reading(
-            rows.len(),
-            moved.len(),
-            &forecasts,
-            &args.outcome,
-            &calibration,
-        );
+        let reading = off.unwrap_or_default()
+            + &learn_reading(rows.len(), moved.len(), &forecasts, &outcome, &calibration);
         Ok(Json(LearnPage {
             reading,
             rows: rows
@@ -1756,9 +1954,14 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PackArgs>,
     ) -> Result<Json<Rows<String>>, McpError> {
-        handover(Path::new(&args.out), &args.projects, &args.issues)
-            .map(as_rows)
-            .map_err(refused)
+        handover(
+            Path::new(&args.out),
+            &args.projects,
+            &args.issues,
+            args.since_size,
+        )
+        .map(as_rows)
+        .map_err(refused)
     }
 
     #[tool(
@@ -1778,6 +1981,7 @@ impl LjosServer {
         receive(
             Path::new(&args.dir),
             args.since.as_deref().map(Path::new),
+            args.keep.as_deref().map(Path::new),
             args.import.unwrap_or(false),
         )
         .map(as_rows)
@@ -1857,7 +2061,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to see the playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight. Kind playbook, weighed not recalled. Pack latest per name, shipped seed only when the pack has no live atom. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
+        description = "Call this to see the playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature. Kind playbook, weighed not recalled. Pack latest per name, shipped seed only when the pack has no live atom. Model names on a recipe are optional spawn hints; every panel still ends in ljos_vote --as then ljos_consensus.",
         annotations(title = "Playbooks", read_only_hint = true, open_world_hint = false)
     )]
     async fn ljos_playbooks(&self) -> Result<Json<Rows<PlaybookRow>>, McpError> {
@@ -1916,7 +2120,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to write to another seat, or to every other member of a group. Pass seat or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. The id in the answer is what ljos_read and ljos_reply take.",
+        description = "Call this to write to another seat, or to every other member of a group. Pass seat or group, the text, interrupt when the next prompt should see it first, and issue when the message is about that vissue issue. A reply later keeps the issue. A seat this pack has never heard from is refused with the seats it knows; pass new_seat to write to one that has not started yet. The id in the answer is what ljos_read and ljos_reply take.",
         annotations(
             title = "Send",
             read_only_hint = false,
@@ -1935,6 +2139,7 @@ impl LjosServer {
             text: &args.text,
             interrupt: args.interrupt.unwrap_or(false),
             issue: args.issue.as_deref(),
+            new_seat: args.new_seat.unwrap_or(false),
         }))
     }
 
@@ -2251,8 +2456,9 @@ impl LjosServer {
              unanswered by the one before it: did it arrive as written (the\n\
              manifest), do the deeds predate the asking (every receipt to the head\n\
              in the bag, and the bridge from a kept head when `since` is given),\n\
-             and who wrote it (the signature, when there is one). Pass `since` when\n\
-             this sender has handed over before.\n\
+             and who wrote it (the signature, when there is one). Pass `since`, the\n\
+             head file `keep` wrote, when this sender has handed over before, and\n\
+             `keep` every time so there is a head for the next one.\n\
              \n\
              Then, for each deed the bag names, `ljos_current`: a deed that arrived\n\
              intact and is no longer the tip is a different finding from one that\n\
@@ -2317,11 +2523,11 @@ impl ServerHandler for LjosServer {
                 .build(),
         )
         .with_server_info(Implementation::new("ljos", env!("CARGO_PKG_VERSION")))
-        .with_instructions(
+        .with_instructions(instructions_for(
             "One seat over five habitats: tracker, pack, deed store, claim graph, \
              consensus. Read ljos://protocol first; it says which store answers \
              which question and the order of tools in a sitting. ljos_sitting \
-             runs the whole opening (doctor, cards, due, island, playbook, recall, timeline, claim) \
+             runs the whole opening (doctor, cards, due, island, playbook, recall, timeline, reclaim, claim) \
              and ljos_finish the whole closing (remember, fire, complete, learn); \
              prefer them. By hand: ljos_doctor, ljos_cards, ljos_due then \
              ljos_graded, ljos_search then ljos_island, ljos_playbook, ljos_recall, \
@@ -2339,10 +2545,10 @@ impl ServerHandler for LjosServer {
              ljos_release hands one back unfinished. A \
              tool that fails means a habitat refused or is not running; it is not \
              an empty answer. The seat is named after the client that connected. \
-             The holder is any `*_SESSION_ID` the runner stamped, the whole value, \
-             else that name tagged with the runner's process; a shell the runner \
+             The holder is that name and a short tag for the `*_SESSION_ID` the \
+             runner stamped, else that name tagged with the runner's process; a shell the runner \
              opens finds the same names, so no field here needs an assignee.",
-        )
+        ))
     }
 
     /// One tool call, held as the thread the call names in its `_meta`
@@ -2369,9 +2575,60 @@ impl ServerHandler for LjosServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("forward: {e}"), None))?;
         }
+        // A forwarded call comes from a stale server that listed the tool
+        // under its own set, so the fresh one answers it.
+        let set = env_tool_set();
+        if std::env::var_os(FORWARDED).is_none()
+            && !listed(set.as_deref(), &request.name)
+            && Self::tool_router().get(&request.name).is_some()
+        {
+            let verb = request.name.trim_start_matches("ljos_");
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{} is not in this server's tool set. Run `ljos {verb}` in the shell, or set \
+                 LJOS_MCP_TOOLS=all in the server's environment to list every tool",
+                request.name
+            ))])
+            .into());
+        }
         let thread = thread_in_meta(&context.meta.0);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        ljos_cli::as_thread(thread, Self::tool_router().call(tcc)).await
+        ljos_cli::as_thread(thread, Self::tool_router().call(tcc))
+            .await
+            .or_else(as_tool_error)
+    }
+
+    /// The core set unless `LJOS_MCP_TOOLS` asks for more.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let set = env_tool_set();
+        let mut tools: Vec<Tool> = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|t| listed(set.as_deref(), &t.name))
+            .collect();
+        listing_order(&mut tools);
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(CacheScope::Public),
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        let set = env_tool_set();
+        Self::tool_router()
+            .get(name)
+            .filter(|_| listed(set.as_deref(), name))
+            .cloned()
     }
 
     /// The client has said who it is: name the seat after it and leave the
@@ -2482,6 +2739,83 @@ mod tests {
             thread_in_meta(&meta(serde_json::json!({"progressToken": 1}))),
             None
         );
+    }
+
+    /// The default lists the core set, every name in it is a tool, and the
+    /// EasyBuild tools wait for an opt-in.
+    #[test]
+    fn the_core_set_is_the_default_and_all_lists_every_tool() {
+        let every: Vec<String> = LjosServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let core = tool_set(None).unwrap();
+        assert_eq!(core.len(), CORE_TOOLS.len());
+        for name in &core {
+            assert!(every.contains(name), "{name} is not a tool");
+        }
+        assert!(!core
+            .iter()
+            .any(|t| t == "ljos_bump_plan" || t == "ljos_findings"));
+        assert_eq!(tool_set(Some("")), tool_set(None));
+        assert_eq!(tool_set(Some("all")), None);
+        assert_eq!(tool_set(Some("core, all")), None);
+        let more = tool_set(Some("core,island ljos_due")).unwrap();
+        assert!(more.contains(&"ljos_island".to_string()));
+        assert!(more.contains(&"ljos_due".to_string()));
+        assert!(more.contains(&"ljos_remember".to_string()));
+        assert!(listed(None, "ljos_bump_plan"));
+        assert!(!listed(Some(&core), "ljos_bump_plan"));
+    }
+
+    /// The guard and memory tools lead the list, and the persona tools close
+    /// it, whichever set the server lists.
+    #[test]
+    fn the_guard_and_memory_lead_and_the_personas_close_the_list() {
+        let order = |set: Option<&[String]>| -> Vec<String> {
+            let mut tools: Vec<Tool> = LjosServer::tool_router()
+                .list_all()
+                .into_iter()
+                .filter(|t| listed(set, &t.name))
+                .collect();
+            listing_order(&mut tools);
+            tools.into_iter().map(|t| t.name.to_string()).collect()
+        };
+        let lead = [
+            "ljos_rule",
+            "ljos_request_approval",
+            "ljos_prefer",
+            "ljos_remember",
+            "ljos_search",
+        ];
+        let core = order(tool_set(None).as_deref());
+        assert_eq!(core, CORE_TOOLS);
+        let every = order(None);
+        assert_eq!(every.len(), LjosServer::tool_router().list_all().len());
+        assert_eq!(&every[..lead.len()], lead);
+        assert_eq!(&every[..CORE_TOOLS.len()], CORE_TOOLS);
+        let tail = &every[every.len() - PERSONA_TOOLS.len()..];
+        assert_eq!(tail, PERSONA_TOOLS);
+        for name in PERSONA_TOOLS {
+            assert!(!CORE_TOOLS.contains(name), "{name} is in the core set");
+        }
+    }
+
+    /// A tool that ran and refused answers with a result the model reads; a
+    /// call the protocol cannot route stays a protocol error.
+    #[test]
+    fn a_refusal_is_a_tool_result_with_is_error() {
+        let said = as_tool_error(refused(anyhow::anyhow!("vissue exited 1: no such issue")))
+            .expect("a refusal is a result");
+        let CallToolResponse::Complete(result) = said else {
+            panic!("a refusal completes the call");
+        };
+        assert_eq!(result.is_error, Some(true));
+        let text = &result.content[0].as_text().expect("text").text;
+        assert!(text.contains("no such issue"), "{text}");
+        let bad = McpError::invalid_params("missing field `issue`", None);
+        assert!(as_tool_error(bad).is_err());
     }
 
     /// Every tool is annotated, and the writers are the ones the contract names.
