@@ -876,17 +876,74 @@ skills = "~/.cline/skills"
 hooks = "~/Documents/Cline/Hooks"
 hooks_format = "cline"
 
-# Goose reads YAML. A snippet appended to a file that already has
-# `extensions:` is a second key, so this shape is an example to copy,
-# not one `onboard` merges. Continue's servers are a JSON array and
-# take the same treatment.
-#
-# [[harness]]
-# name = "goose"
-# config = "~/.config/goose/config.yaml"
-# marker = "  ljos:"
-# snippet = "\nextensions:\n  ljos:\n    enabled: true\n    type: stdio\n    cmd: \"{server}\"\n    args: []\n"
-# skills = "~/.config/goose/skills"
+[[harness]]
+name = "auggie"
+# Augment's Auggie CLI (and its VS Code and JetBrains extensions). A
+# PreToolUse hook on launch-process denies with permissionDecision; a hook
+# command must be a .sh script, so onboard writes one beside the settings.
+config_json = "~/.augment/settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.augment/skills"
+hooks = "~/.augment/settings.json"
+hooks_format = "auggie"
+
+[[harness]]
+name = "amp"
+# Sourcegraph's Amp. Its Bash tool is delegated to a program that rejects
+# with exit 2 and asks with exit 1; onboard puts the delegate rule first
+# in amp.permissions, since Amp applies the first rule that matches.
+config_json = "~/.config/amp/settings.json"
+json_pointer = "/amp.mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.config/amp/skills"
+hooks = "~/.config/amp/settings.json"
+hooks_format = "amp"
+
+[[harness]]
+name = "goose"
+# Block's goose. Servers are extensions in config.yaml; the skill and a
+# PreToolUse hook that fails closed ship as a user plugin.
+config = "~/.config/goose/config.yaml"
+marker = "\n  ljos:\n"
+snippet = "\nextensions:\n  ljos:\n    enabled: true\n    type: stdio\n    name: ljos\n    cmd: \"{server}\"\n    args: []\n    timeout: 300\n"
+skills = "~/.agents/plugins/ljos/skills"
+hooks = "~/.agents/plugins/ljos/hooks/hooks.json"
+hooks_format = "goose"
+
+[[harness]]
+name = "openhands"
+# The OpenHands CLI. Its hooks are read from a repository's
+# .openhands/hooks.json only, so the user-level guard is the skill alone.
+config_json = "~/.openhands/mcp.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.openhands/skills"
+
+[[harness]]
+name = "continue"
+# Continue (the IDE extension and the cn CLI) reads Claude-shaped JSON
+# server files from its mcpServers directory. No tool hook: advisory.
+config_json = "~/.continue/mcpServers/ljos.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": []}'
+skills = "~/.continue/rules"
+
+[[harness]]
+name = "roo"
+# Roo Code, the VS Code extension. No tool hook: advisory.
+config_json = "~/.config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": [], "disabled": false}'
+skills = "~/.roo/skills"
+
+[[harness]]
+name = "kilo"
+# Kilo Code, the VS Code extension. No tool hook: advisory.
+config_json = "~/.config/Code/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json"
+json_pointer = "/mcpServers/ljos"
+json_entry = '{"command": "{server}", "args": [], "disabled": false}'
+skills = "~/.kilocode/skills"
 
 # The tools a persona's runner lives in. Two ship as shapes: herdr, through
 # its agent API when its server answers, and tmux. `ljos doctor` names the
@@ -2550,7 +2607,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
             }
-            text.push_str(&snippet);
+            let text = append_config(&text, &snippet);
             let written = config
                 .parent()
                 .map_or(Ok(()), std::fs::create_dir_all)
@@ -2569,6 +2626,48 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             }
         }
     }
+}
+
+/// `snippet` added to a config file's `text`. A YAML snippet that opens
+/// with a top-level key the file already has (`extensions:` in Goose's
+/// config.yaml) goes under that key, since a second one is a duplicate
+/// key; anything else is appended.
+#[must_use]
+pub fn append_config(text: &str, snippet: &str) -> String {
+    let body = snippet.trim_start_matches('\n');
+    let mut lines = body.splitn(2, '\n');
+    let head = lines.next().unwrap_or("");
+    let rest = lines.next().unwrap_or("");
+    let top_key = head.ends_with(':')
+        && !head.starts_with(' ')
+        && !head.starts_with('[')
+        && !head.starts_with('#');
+    if top_key && !rest.is_empty() {
+        let mut out = String::new();
+        let mut merged = false;
+        for line in text.split_inclusive('\n') {
+            out.push_str(line);
+            if !merged && line.trim_end() == head {
+                if !line.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(rest);
+                if !rest.ends_with('\n') {
+                    out.push('\n');
+                }
+                merged = true;
+            }
+        }
+        if merged {
+            return out;
+        }
+    }
+    let mut out = text.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(snippet);
+    out
 }
 
 /// Register the server and install the skill for one runner named in the
@@ -2596,6 +2695,8 @@ const RUNNER_COMMANDS: &[(&str, &[&str])] = &[
     ("antigravity", &["agy", "antigravity"]),
     ("vscode", &["code"]),
     ("amazonq", &["q"]),
+    ("continue", &["cn"]),
+    ("openhands", &["openhands"]),
 ];
 
 /// Shapes a bare onboard never picks: each is a second shape for a runner
@@ -27340,7 +27441,7 @@ mod tests {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
-        assert_eq!(all.harness.len(), 26);
+        assert_eq!(all.harness.len(), 33);
         assert!(all.harness[3..].iter().all(|h| h.shell
             || h.register.len()
                 + usize::from(h.config.is_some())
@@ -34036,6 +34137,39 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     Some(v) => std::env::set_var(k, v),
                     None => std::env::remove_var(k),
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_yaml_snippet_goes_under_the_key_the_file_already_has() {
+        let snippet = "\nextensions:\n  ljos:\n    cmd: \"/x\"\n";
+        let have = "GOOSE_PROVIDER: openai\nextensions:\n  developer:\n    enabled: true\n";
+        let out = super::append_config(have, snippet);
+        assert_eq!(out.matches("extensions:").count(), 1);
+        assert!(out.contains("extensions:\n  ljos:\n    cmd: \"/x\"\n  developer:"));
+        let fresh = super::append_config("GOOSE_PROVIDER: openai\n", snippet);
+        assert!(fresh.ends_with(snippet));
+        let toml = super::append_config("[a]\n", "\n[mcp_servers.ljos]\ncommand = \"x\"\n");
+        assert!(toml.ends_with("[mcp_servers.ljos]\ncommand = \"x\"\n"));
+    }
+
+    #[test]
+    fn the_new_runners_ship_as_shapes() {
+        let shipped: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).unwrap();
+        for name in [
+            "auggie",
+            "amp",
+            "goose",
+            "openhands",
+            "continue",
+            "roo",
+            "kilo",
+        ] {
+            let h = shipped.harness.iter().find(|h| h.name == name).unwrap();
+            assert!(h.skills.is_some(), "{name}");
+            if let Some(f) = h.hooks_format.as_deref() {
+                assert!(super::runner_hooks::is_runner(f), "{name}");
             }
         }
     }

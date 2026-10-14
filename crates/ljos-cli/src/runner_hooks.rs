@@ -1,6 +1,6 @@
 //! Hook setups for runners whose hook contract is not Claude Code's own:
 //! GitHub Copilot, Gemini CLI, Windsurf (Devin Desktop), Factory Droid,
-//! Kiro, Cline, Qwen Code and Crush.
+//! Kiro, Cline, Qwen Code, Crush, Auggie, goose and Amp.
 //!
 //! `onboard` writes each runner's hook file with the command
 //! `ljos hook --runner NAME`. That command turns the runner's stdin into
@@ -16,8 +16,24 @@ use crate::Step;
 
 /// The runners this module serves, by the name `--runner` takes.
 pub const RUNNERS: &[&str] = &[
-    "copilot", "gemini", "windsurf", "factory", "kiro", "cline", "qwen", "crush",
+    "copilot", "gemini", "windsurf", "factory", "kiro", "cline", "qwen", "crush", "auggie",
+    "goose", "amp",
 ];
+
+/// Runners whose hook entry must name one program with no arguments (Amp's
+/// delegate) or a `.sh` file (Auggie): onboard writes this script beside
+/// the settings file, and the entry names it.
+fn needs_script(runner: &str) -> bool {
+    matches!(runner, "auggie" | "amp")
+}
+
+/// The wrapper script's path for a runner whose hooks live in `file`.
+#[must_use]
+pub fn script_path(runner: &str, file: &Path) -> std::path::PathBuf {
+    file.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("ljos-guard-{runner}.sh"))
+}
 
 /// Whether `name` is a runner this module writes hooks for.
 #[must_use]
@@ -27,7 +43,7 @@ pub fn is_runner(name: &str) -> bool {
 
 /// Whether the runner shows the person a prompt on an `ask`.
 fn asks(runner: &str) -> bool {
-    matches!(runner, "copilot" | "factory" | "qwen")
+    matches!(runner, "copilot" | "factory" | "qwen" | "amp")
 }
 
 /// The event names Gemini CLI uses, as the seat's.
@@ -153,6 +169,47 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
             }
             return v.to_string();
         }
+        "goose" => {
+            let event = v["event"].as_str().unwrap_or("PreToolUse");
+            out.insert("hook_event_name".into(), json!(event));
+            put(&mut out, "session_id", v["session_id"].as_str());
+            put(&mut out, "cwd", v["working_dir"].as_str());
+            put(&mut out, "tool_name", v["tool_name"].as_str());
+            put(&mut out, "prompt", v["message"].as_str());
+            if !v["tool_input"].is_null() {
+                out.insert("tool_input".into(), v["tool_input"].clone());
+            }
+        }
+        "auggie" => {
+            let mut v = v;
+            if v["tool_name"].as_str() == Some("launch-process") {
+                v["tool_name"] = json!("Bash");
+            }
+            return v.to_string();
+        }
+        "amp" => {
+            // Amp pipes the tool's arguments alone and names the tool in
+            // the environment; Bash takes `cmd`.
+            let tool = std::env::var("AGENT_TOOL_NAME").unwrap_or_else(|_| "Bash".into());
+            out.insert("hook_event_name".into(), json!("PreToolUse"));
+            out.insert("tool_name".into(), json!(tool));
+            if let Ok(t) = std::env::var("AMP_THREAD_ID") {
+                put(&mut out, "session_id", Some(&t));
+            }
+            put(&mut out, "cwd", v["cwd"].as_str());
+            match v["cmd"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| command_of(&v))
+            {
+                Some(c) => {
+                    out.insert("tool_input".into(), json!({ "command": c }));
+                }
+                None => {
+                    out.insert("tool_input".into(), v.clone());
+                }
+            }
+        }
         "crush" if v.get("hook_event_name").is_none() => {
             let mut v = v;
             let event = v["event"].as_str().unwrap_or("PreToolUse").to_string();
@@ -253,7 +310,28 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
             }
             (line(Value::Object(v)), String::new(), 0)
         }
-        ("windsurf" | "kiro", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("goose", None) => (String::new(), String::new(), 0),
+        ("amp", Some("ask")) => (String::new(), said.reason + "\n", 1),
+        ("amp", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("amp", None) => (String::new(), String::new(), 0),
+        ("auggie", Some(d)) => (
+            line(json!({ "hookSpecificOutput": {
+                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+                "permissionDecision": d,
+                "permissionDecisionReason": said.reason,
+            }})),
+            String::new(),
+            0,
+        ),
+        ("auggie", None) if !said.context.is_empty() => (
+            line(json!({ "hookSpecificOutput": {
+                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+                "additionalContext": said.context,
+            }})),
+            String::new(),
+            0,
+        ),
         ("kiro", None) if !said.context.is_empty() => (said.context + "\n", String::new(), 0),
         ("windsurf" | "kiro", None) => (String::new(), String::new(), 0),
         ("cline", Some(_)) => (
@@ -415,7 +493,8 @@ pub fn runner_command(base: &str, runner: &str) -> String {
 }
 
 fn ours(v: &Value, runner: &str) -> bool {
-    v.to_string().contains(&format!("--runner {runner}"))
+    let t = v.to_string();
+    t.contains(&format!("--runner {runner}")) || t.contains(&format!("ljos-guard-{runner}.sh"))
 }
 
 /// Push `item` onto the array at `key` of `obj` unless one already names
@@ -543,6 +622,48 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
                 runner,
             )
         }
+        "auggie" => {
+            let hooks = hooks_of(obj)?;
+            ensure_in(
+                hooks,
+                "PreToolUse",
+                group(Some("launch-process"), command, 20_000, runner),
+                runner,
+            )
+        }
+        "goose" => {
+            // The plugin's hooks file is the seat's whole; a hook that
+            // cannot run blocks the call.
+            let want = json!({ "hooks": {
+                "PreToolUse": [{ "matcher": "shell", "hooks": [{
+                    "type": "command", "command": command, "timeout": 20, "on_failure": "block"
+                }]}],
+                "UserPromptSubmit": [{ "hooks": [{
+                    "type": "command", "command": command, "timeout": 15
+                }]}]
+            }});
+            let same = Value::Object(obj.clone()) == want;
+            *obj = want.as_object().cloned().unwrap_or_default();
+            !same
+        }
+        "amp" => {
+            let list = obj
+                .entry("amp.permissions".to_string())
+                .or_insert_with(|| json!([]));
+            let Some(list) = list.as_array_mut() else {
+                return Err("amp.permissions is not a list".into());
+            };
+            if list.iter().any(|r| ours(r, runner)) {
+                false
+            } else {
+                // First, since Amp applies the first rule that matches.
+                list.insert(
+                    0,
+                    json!({ "tool": "Bash", "action": "delegate", "to": command }),
+                );
+                true
+            }
+        }
         "crush" => {
             let hooks = hooks_of(obj)?;
             ensure_in(
@@ -567,9 +688,19 @@ pub fn cline_script(command: &str) -> String {
 #[must_use]
 pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> Step {
     let what = "hook".to_string();
-    let command = runner_command(base_command, runner);
+    let mut command = runner_command(base_command, runner);
     if runner == "cline" {
         return cline_step(file, &command, dry);
+    }
+    let script = needs_script(runner).then(|| script_path(runner, file));
+    let script_text = format!(
+        "#!/bin/sh\n# Written by ljos onboard: the seat's guard for {runner}.\nexec {command}\n"
+    );
+    let script_stale = script
+        .as_ref()
+        .is_some_and(|p| std::fs::read_to_string(p).ok().as_deref() != Some(script_text.as_str()));
+    if let Some(p) = &script {
+        command = p.display().to_string();
     }
     let mut root: Value = match std::fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
@@ -594,7 +725,15 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
             }
         }
     };
-    if !changed {
+    let manifest = (runner == "goose")
+        .then(|| {
+            file.parent()
+                .and_then(Path::parent)
+                .map(|d| d.join("plugin.json"))
+        })
+        .flatten();
+    let manifest_missing = manifest.as_ref().is_some_and(|m| !m.is_file());
+    if !changed && !script_stale && !manifest_missing {
         return Step {
             what,
             detail: format!("{} carries the seat's {runner} hook", file.display()),
@@ -612,7 +751,19 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| serde_json::to_string_pretty(&root).map_err(std::io::Error::other))
-        .and_then(|text| std::fs::write(file, text + "\n"));
+        .and_then(|text| std::fs::write(file, text + "\n"))
+        .and_then(|()| match &script {
+            Some(p) => std::fs::write(p, &script_text).and_then(|()| set_executable(p)),
+            None => Ok(()),
+        })
+        .and_then(|()| match &manifest {
+            Some(m) if manifest_missing => std::fs::write(
+                m,
+                "{\n  \"name\": \"ljos\",\n  \"version\": \"1.0.0\",\n  \"description\": \
+                 \"The ljos seat's memory and guard, written by ljos onboard\"\n}\n",
+            ),
+            _ => Ok(()),
+        });
     match written {
         Ok(()) => Step {
             what,
@@ -1029,6 +1180,20 @@ mod tests {
                     assert_eq!(found("/hooks/PreToolUse/0/matcher"), json!("^bash$"));
                     assert_eq!(found("/hooks/PreToolUse/0/command"), json!(command));
                 }
+                "goose" => {
+                    assert_eq!(found("/hooks/PreToolUse/0/hooks/0/command"), json!(command));
+                }
+                "auggie" => {
+                    assert_eq!(
+                        found("/hooks/PreToolUse/0/matcher"),
+                        json!("launch-process")
+                    );
+                    let script = script_path("auggie", &file).display().to_string();
+                    assert_eq!(found("/hooks/PreToolUse/0/hooks/0/command"), json!(script));
+                }
+                "amp" => {
+                    assert_eq!(found("/amp.permissions/0/action"), json!("delegate"));
+                }
                 _ => unreachable!(),
             }
         }
@@ -1041,5 +1206,94 @@ mod tests {
             "{}",
             step.detail
         );
+    }
+
+    #[test]
+    fn goose_payload_reaches_the_seat_and_a_deny_exits_2() {
+        let n = normalize_input(
+            "goose",
+            r#"{"event":"PreToolUse","session_id":"g-1","tool_name":"shell","tool_input":{"command":"rm -rf /"},"working_dir":"/r"}"#,
+        );
+        let v: Value = serde_json::from_str(&n).unwrap();
+        assert_eq!(v["hook_event_name"], "PreToolUse");
+        assert_eq!(v["tool_input"]["command"], "rm -rf /");
+        assert_eq!(v["cwd"], "/r");
+        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
+        assert_eq!(
+            answer("goose", "PreToolUse", deny),
+            (String::new(), "no\n".into(), 2)
+        );
+        assert_eq!(answer("goose", "PreToolUse", "{}").2, 0);
+    }
+
+    #[test]
+    fn amp_reads_cmd_and_rejects_with_2_and_asks_with_1() {
+        let n = normalize_input("amp", r#"{"cmd":"git push --force"}"#);
+        let v: Value = serde_json::from_str(&n).unwrap();
+        assert_eq!(v["tool_input"]["command"], "git push --force");
+        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
+        assert_eq!(answer("amp", "", deny).2, 2);
+        let ask = r#"{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"sure?"}}"#;
+        assert_eq!(answer("amp", "", ask).2, 1);
+        assert_eq!(answer("amp", "", "").2, 0);
+    }
+
+    #[test]
+    fn auggie_launch_process_is_the_shell_and_its_deny_is_claude_shaped() {
+        let n = normalize_input(
+            "auggie",
+            r#"{"hook_event_name":"PreToolUse","tool_name":"launch-process","tool_input":{"command":"ls"}}"#,
+        );
+        let v: Value = serde_json::from_str(&n).unwrap();
+        assert_eq!(v["tool_name"], "Bash");
+        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
+        let (out, _, code) = answer("auggie", "PreToolUse", deny);
+        let o: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(o["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn auggie_and_amp_hooks_name_a_script_and_are_written_once() {
+        for (runner, name) in [("auggie", "settings.json"), ("amp", "settings.json")] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join(name);
+            std::fs::write(
+                &file,
+                r#"{"keep": 1, "amp.permissions": [{"tool": "Read", "action": "allow"}]}"#,
+            )
+            .unwrap();
+            let step = hook_step(runner, &file, "/bin/ljos hook", false);
+            assert!(step.ok, "{}", step.detail);
+            let script = script_path(runner, &file);
+            let text = std::fs::read_to_string(&script).unwrap();
+            assert!(text.contains(&format!("/bin/ljos hook --runner {runner}")));
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(v["keep"], 1);
+            assert!(v.to_string().contains(&script.display().to_string()));
+            if runner == "amp" {
+                assert_eq!(v["amp.permissions"][0]["action"], "delegate");
+                assert_eq!(v["amp.permissions"][1]["tool"], "Read");
+            }
+            let again = hook_step(runner, &file, "/bin/ljos hook", false);
+            assert!(again.detail.contains("carries"), "{}", again.detail);
+        }
+    }
+
+    #[test]
+    fn goose_hook_is_a_plugin_that_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ljos/hooks/hooks.json");
+        let step = hook_step("goose", &file, "/bin/ljos hook", false);
+        assert!(step.ok, "{}", step.detail);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["on_failure"],
+            "block"
+        );
+        assert!(dir.path().join("ljos/plugin.json").is_file());
+        assert!(hook_step("goose", &file, "/bin/ljos hook", false)
+            .detail
+            .contains("carries"));
     }
 }

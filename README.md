@@ -12,8 +12,9 @@ runs. It plugs into the agent through the agent's own hook and MCP settings.
 Nothing leaves the machine unless you turn on a remote judge.
 
 It works with Claude Code, Codex, Cursor, GitHub Copilot CLI, Gemini CLI,
-Windsurf, Factory's Droid, Kiro, Cline, Qwen Code, Crush, Grok Build,
-opencode, omp, hermes and Antigravity's `agy`.
+Windsurf, Factory's Droid, Kiro, Cline, Qwen Code, Crush, Auggie, Amp, goose,
+OpenHands, Continue, Roo Code, Kilo Code, Grok Build, opencode, omp, hermes
+and Antigravity's `agy`.
 
 ## Five minutes
 
@@ -53,7 +54,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to r
 
 `--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
 `opencode`, `omp`, `hermes`, `windsurf`, `zed`, `vscode`, `claude-desktop`,
-`gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush` or `cline`.
+`gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush`, `cline`,
+`auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 
 Start a new session and ask for something the preference bears on, such as
