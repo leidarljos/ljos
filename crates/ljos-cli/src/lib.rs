@@ -21,6 +21,7 @@ pub mod jev;
 pub mod mail;
 pub mod persona_session;
 pub mod plugin;
+pub mod reap;
 pub mod runner_hooks;
 pub mod sync;
 pub mod tools;
@@ -2213,6 +2214,31 @@ pub fn ballot_seat(verb: &str) -> Result<String> {
         );
     }
     Ok(who.seat)
+}
+
+/// Append one line, `ts seat verb what`, to the state dir's recall.log, so
+/// an audit can tell when a seat last asked its memory. Best effort: a
+/// log that cannot be written never fails the call.
+pub fn log_recall(verb: &str, what: &str) {
+    use std::io::Write;
+    let dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
+        .join("ljos");
+    let what: String = what
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .take(120)
+        .collect();
+    let line = format!("{} {} {verb} {what}\n", now_utc(), seat_name());
+    let _ = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("recall.log"))?
+            .write_all(line.as_bytes())
+    });
 }
 
 /// The name this seat remembers, votes and earns trust under.

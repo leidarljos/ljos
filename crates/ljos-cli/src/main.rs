@@ -305,6 +305,15 @@ enum Cmd {
     },
     /// The working set for an issue: plan, its inputs' deeds, its own citations.
     Recall { issue: String },
+    /// Release claims idle past a window and mail each seat. A dry run without --apply.
+    Reap {
+        /// How long a claim may sit with no claim or tracker commit: 6h, 90m, 2d.
+        #[arg(long, default_value = "6h")]
+        idle: String,
+        /// Release and mail. Absent: print what would happen.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Cast this identity's ballot (VISSUE_AGENT), or read the tally with no --for.
     Vote {
         issue: String,
@@ -1009,6 +1018,7 @@ fn run_command() -> Result<()> {
             as_of,
             explain,
         } => {
+            ljos_cli::log_recall("search", &query.join(" "));
             print!(
                 "{}",
                 format_hits(
@@ -1221,7 +1231,16 @@ fn run_command() -> Result<()> {
             argv.extend(args.iter().map(String::as_str));
             run("vissue", &argv)?;
         }
-        Cmd::Recall { issue } => run("vissue", &["recall", &issue])?,
+        Cmd::Recall { issue } => {
+            ljos_cli::log_recall("recall", &issue);
+            run("vissue", &["recall", &issue])?
+        }
+        Cmd::Reap { idle, apply } => {
+            print!(
+                "{}",
+                ljos_cli::reap::reap(ljos_cli::reap::parse_idle(&idle)?, apply)?
+            )
+        }
         Cmd::Vote {
             issue,
             choice,
@@ -1551,6 +1570,7 @@ fn run_command() -> Result<()> {
             use std::io::Read;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
+            ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
             if let Some(runner) = runner.as_deref() {
                 if !ljos_cli::runner_hooks::is_runner(runner) {
                     anyhow::bail!(
