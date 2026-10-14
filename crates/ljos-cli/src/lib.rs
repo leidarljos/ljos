@@ -2827,6 +2827,14 @@ fn export_assignment(name: &str) -> String {
     }
 }
 
+/// The env file's seat line. A seat already exported (each Grok Bot on one
+/// box sits its own seat) is kept; the harness name is only the default.
+fn keep_seat_assignment(name: &str) -> String {
+    let quoted = export_assignment(name);
+    let value = quoted.trim_start_matches("export LJOS_SEAT=");
+    format!("export LJOS_SEAT=\"${{LJOS_SEAT:-{value}}}\"")
+}
+
 /// What a shell runner sources. `LJOS_SEAT` is the harness name, because
 /// this agent has no MCP client and the process tree is not its seat.
 /// The holder is the runner's conversation when the runner stamps an id
@@ -2850,7 +2858,7 @@ fn seat_env_text(name: &str) -> String {
          {}\n\
          {}\n",
         shared_holder_id(name),
-        export_assignment(name),
+        keep_seat_assignment(name),
         session_assignment(name)
     )
 }
@@ -27723,6 +27731,19 @@ mod tests {
         };
         assert_eq!(holder_in_a_new_shell(""), "grokbot-shell");
         assert_eq!(holder_in_a_new_shell(""), holder_in_a_new_shell(""));
+        let seat_in_a_new_shell = |pre: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{pre} . '{}' && printf %s \"$LJOS_SEAT\"", env.display()))
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        // A seat already exported survives sourcing; the harness name is the default.
+        assert_eq!(seat_in_a_new_shell(""), "grokbot");
+        assert_eq!(seat_in_a_new_shell("export LJOS_SEAT=inky;"), "inky");
         assert_eq!(
             holder_in_a_new_shell("export LJOS_SESSION_ID=runner-own-id;"),
             "runner-own-id"
@@ -27921,7 +27942,7 @@ mod tests {
         assert!(skill.starts_with("---\nname: ljos\n"));
         assert!(skill.contains("## Before the work"));
         let env = std::fs::read_to_string(dir.join("grokbot.env")).unwrap();
-        assert!(env.contains("export LJOS_SEAT=grokbot\n"), "{env}");
+        assert!(env.contains("export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
