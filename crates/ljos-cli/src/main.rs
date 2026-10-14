@@ -1227,8 +1227,18 @@ fn run_command() -> Result<()> {
             print!("{said}");
         }
         Cmd::Claims { args } => {
+            // vissue names the holder filter `--by`; `--agent` is ljos's word.
+            let mapped: Vec<String> = args
+                .iter()
+                .map(|a| match a.as_str() {
+                    "--agent" => "--by".to_string(),
+                    a => a
+                        .strip_prefix("--agent=")
+                        .map_or_else(|| a.to_string(), |v| format!("--by={v}")),
+                })
+                .collect();
             let mut argv = vec!["claims"];
-            argv.extend(args.iter().map(String::as_str));
+            argv.extend(mapped.iter().map(String::as_str));
             run("vissue", &argv)?;
         }
         Cmd::Recall { issue } => {
