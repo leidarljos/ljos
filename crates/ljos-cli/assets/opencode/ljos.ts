@@ -137,17 +137,21 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
       )
   },
 
+  // opencode puts the tool arguments on the input here and the tool's
+  // result on the output. The before hook is the other way around.
+  // Reading output.args throws, and that throw is reported as the tool failing.
   "tool.execute.after": async (input, output) => {
     const seat = seatTool(input.tool)
     if (!seat) return
-    const command = output.args?.command
+    const args = input.args ?? output?.args ?? {}
+    const command = args.command
     if (seat.bash && typeof command !== "string") return
     await hook({
       session_id: input.sessionID,
       hook_event_name: "PostToolUse",
       tool_name: seat.tool,
-      tool_input: seat.bash ? { command } : (output.args ?? {}),
-      cwd: output.args.workdir ?? directory,
+      tool_input: seat.bash ? { command } : args,
+      cwd: args.workdir ?? directory,
     })
   },
 
