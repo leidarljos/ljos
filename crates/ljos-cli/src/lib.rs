@@ -28495,6 +28495,11 @@ mod tests {
             before.contains("cwd: output.args.workdir ?? directory"),
             "the payload names the directory"
         );
+        let after = &text[text.find("\"tool.execute.after\"").expect("an after hook")..];
+        assert!(
+            after.contains("input.args"),
+            "after reads the args opencode puts on the input"
+        );
         assert!(!text.contains("lets the work go on"));
     }
 
