@@ -1507,7 +1507,7 @@ fn seat_for_client(client: &str) -> String {
     ancestry()
         .into_iter()
         .find(|(_, comm)| !WRAPPERS.contains(&comm.as_str()))
-        .map(|(pid, comm)| seat_slug(&program_name(pid, &comm)))
+        .map(|(pid, comm)| program_seat(&program_name(pid, &comm)))
         .unwrap_or(name)
 }
 
@@ -1848,7 +1848,7 @@ fn program_name(pid: u32, comm: &str) -> String {
 /// [`program_name`] from an argv already split.
 fn name_from_argv(args: &[String]) -> Option<String> {
     let mut candidates: Vec<&str> = Vec::new();
-    if let Some(first) = args.first() {
+    if let Some(first) = args.first().map(|a| program_path(a)) {
         let base = Path::new(first)
             .file_name()
             .and_then(|f| f.to_str())
@@ -1893,6 +1893,80 @@ fn program_name(_pid: u32, comm: &str) -> String {
     comm.to_string()
 }
 
+/// The program part of an argv's first word. Electron and Chromium apps
+/// rewrite their command line into one word, spaces and all:
+/// `/opt/Grok Bot/grok-bot --standard-schemes=sand-media --type=renderer`.
+/// Read whole, that word slugged into a seat hundreds of characters long.
+/// Everything from the first space followed by a dash is a flag, not the
+/// path; a path may itself hold spaces, so only a dash ends it.
+fn program_path(first: &str) -> &str {
+    let mut cut = first.len();
+    for (i, _) in first.match_indices(char::is_whitespace) {
+        if first[i..].trim_start().starts_with('-') {
+            cut = i;
+            break;
+        }
+    }
+    first[..cut].trim()
+}
+
+/// The longest seat a process name may become. A seat is a word people
+/// read in a doctor row and a board column, never a command line.
+const SEAT_NAME_MAX: usize = 32;
+
+/// A program's name as a seat: slugged, and cut at a hyphen to at most
+/// [`SEAT_NAME_MAX`] characters.
+fn program_seat(program: &str) -> String {
+    let slug = seat_slug(program);
+    if slug.len() <= SEAT_NAME_MAX {
+        return slug;
+    }
+    let head = &slug[..SEAT_NAME_MAX];
+    head.rfind('-')
+        .filter(|&i| i > 0)
+        .map_or(head, |i| &head[..i])
+        .to_string()
+}
+
+/// Harnesses known by name without a runners file, so a harness in the
+/// chain is found even where none is configured.
+const HARNESS_NAMES: &[&str] = &[
+    "claude",
+    "claude-code",
+    "codex",
+    "opencode",
+    "opencode-ai",
+    "agy",
+    "antigravity",
+    "grok",
+    "gemini",
+];
+
+/// The ancestor to name a seat after, in a chain already cut at the
+/// session: the nearest harness when one is there, so a harness run under
+/// a desktop app's shell is the seat and not the app; else the nearest
+/// program that is not a wrapper. Takes (pid, kernel name, program name).
+fn pick_program<'a>(
+    chain: &'a [(u32, String, String)],
+    harnesses: &[String],
+) -> Option<&'a (u32, String, String)> {
+    let is_harness = |comm: &str, program: &str| {
+        let (c, p) = (seat_slug(comm), program_seat(program));
+        HARNESS_NAMES.iter().any(|h| *h == c || *h == p)
+            || harnesses
+                .iter()
+                .any(|h| seat_slug(h) == c || seat_slug(h) == p)
+    };
+    let programs = || {
+        chain
+            .iter()
+            .filter(|(_, comm, _)| !WRAPPERS.contains(&comm.as_str()))
+    };
+    programs()
+        .find(|(_, comm, program)| is_harness(comm, program))
+        .or_else(|| programs().next())
+}
+
 /// The seat from the process tree: the record a server left for the runner
 /// above this shell, else the nearest ancestor that is neither a shell nor
 /// a wrapper, named from how it was started and tagged with its pid. None
@@ -1909,23 +1983,24 @@ fn seat_from_tree() -> Option<Seat> {
 /// named after the program. No record is read: this is the name a seat
 /// falls back to when nothing named one.
 fn program_above() -> Option<Seat> {
-    let chain = ancestry();
-    for (pid, comm) in &chain {
-        let name = comm.as_str();
-        if WRAPPERS.contains(&name) {
-            continue;
-        }
-        if is_session(name) {
-            return None;
-        }
-        let program = program_name(*pid, name);
-        return Some(Seat::tagged(
-            seat_slug(&program),
-            &conversation_tag(*pid),
-            format!("the process tree, {program} {pid}"),
-        ));
-    }
-    None
+    let chain: Vec<(u32, String, String)> = ancestry()
+        .into_iter()
+        .take_while(|(_, comm)| !is_session(comm))
+        .map(|(pid, comm)| {
+            let program = program_name(pid, &comm);
+            (pid, comm, program)
+        })
+        .collect();
+    let harnesses: Vec<String> = harnesses_with_shipped(&harnesses_path())
+        .map(|all| all.harness.into_iter().map(|h| h.name).collect())
+        .unwrap_or_default();
+    let (pid, _, program) = pick_program(&chain, &harnesses)?;
+    let seat = program_seat(program);
+    Some(Seat::tagged(
+        seat.clone(),
+        &conversation_tag(*pid),
+        format!("the process tree, {seat} {pid}"),
+    ))
 }
 
 /// The record a server left for the nearest runner above this shell. It
@@ -4652,6 +4727,24 @@ const CUE_ALIASES: &[&[&str]] = &[
         "pipx",
         "poetry",
     ],
+    // A package manager by its job. A prompt that asks which package
+    // manager to use, or how to add a dependency, names a rule that says
+    // `pnpm` or `uv`, and shares no other word with it. The managers sit
+    // in their language's group too: a word may name several groups.
+    // `cargo` is left out, since most Rust rules name it to build or test.
+    &[
+        "package",
+        "dependency",
+        "lockfile",
+        "npm",
+        "pnpm",
+        "yarn",
+        "bun",
+        "pip",
+        "uv",
+        "pipx",
+        "poetry",
+    ],
     &["secret", "key", "token", "credential", "password", "apikey"],
     &["trunk", "master", "main"],
     &["whitespace", "indentation", "indent", "tab"],
@@ -4683,14 +4776,16 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
         .filter(|w| claim || !CLAIM_ONLY_ALIASES.contains(&w.as_str()))
-        .filter_map(|w| {
+        .flat_map(|w| {
             // `postgres` is a name, not the plural of `postgre`, so the
-            // word is looked up as written and then singular.
+            // word is looked up as written and then singular, in every group.
             let one = singular(&w);
             CUE_ALIASES
                 .iter()
-                .position(|group| group.contains(&w.as_str()) || group.contains(&one.as_str()))
-                .map(|i| format!("alias:{i}"))
+                .enumerate()
+                .filter(|(_, group)| group.contains(&w.as_str()) || group.contains(&one.as_str()))
+                .map(|(i, _)| format!("alias:{i}"))
+                .collect::<Vec<_>>()
         })
         .collect();
     out.sort_unstable();
@@ -22302,6 +22397,57 @@ mod tests {
     }
 
     #[test]
+    fn an_electron_command_line_names_a_short_seat() {
+        let line = "/opt/Grok Bot/grok-bot --standard-schemes=sand-media,app \
+                    --secure-schemes=sand-media --fetch-schemes=sand-media \
+                    --type=renderer --enable-features=Foo/Bar --lang=en-US";
+        let name = name_from_argv(&[line.to_string()]).unwrap();
+        assert_eq!(name, "grok-bot");
+        // Split argv the same: flags never reach the name.
+        let split: Vec<String> = ["/opt/Grok Bot/grok-bot", "--type=gpu-process", "--x=/a/b"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(name_from_argv(&split).as_deref(), Some("grok-bot"));
+        // Whatever the name, the seat stays a word.
+        let long = "a".repeat(20) + "-" + &"b".repeat(20) + "-" + &"c".repeat(300);
+        let seat = program_seat(&long);
+        assert!(seat.len() <= SEAT_NAME_MAX, "{seat}");
+        assert_eq!(seat, "a".repeat(20));
+        assert!(program_seat(&"x".repeat(100)).len() <= SEAT_NAME_MAX);
+        assert_eq!(program_seat("Grok Bot"), "grok-bot");
+    }
+
+    #[test]
+    fn a_harness_in_the_chain_beats_the_desktop_app_above_it() {
+        let row =
+            |pid: u32, comm: &str, program: &str| (pid, comm.to_string(), program.to_string());
+        let chain = vec![
+            row(10, "bash", "bash"),
+            row(11, "node", "codex"),
+            row(12, "zsh", "zsh"),
+            row(13, "grok-bot", "grok-bot"),
+        ];
+        assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(11));
+        // The harness wins even when the app is nearer.
+        let chain = vec![
+            row(10, "bash", "bash"),
+            row(13, "grok-bot", "grok-bot"),
+            row(14, "claude", "claude"),
+        ];
+        assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(14));
+        // A runners-file harness counts too.
+        let chain = vec![row(13, "electron", "acme-app"), row(15, "node", "acme-cli")];
+        assert_eq!(
+            pick_program(&chain, &["Acme CLI".to_string()]).map(|r| r.0),
+            Some(15)
+        );
+        // No harness: the nearest program, as before.
+        let chain = vec![row(10, "sh", "sh"), row(13, "grok-bot", "grok-bot")];
+        assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(13));
+        assert!(pick_program(&[row(10, "bash", "bash")], &[]).is_none());
+    }
+
+    #[test]
     fn an_entry_script_is_named_by_the_directory_that_ships_it() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -23319,6 +23465,29 @@ mod tests {
     }
 
     #[test]
+    fn a_package_manager_question_names_the_manager_rule() {
+        let rule = "Use pnpm for JavaScript dependencies, never npm or yarn.";
+        assert!(names_the_cue(rule, "what package manager do we use"));
+        assert!(names_the_cue(
+            rule,
+            "which tool should add a new dependency"
+        ));
+        assert!(names_the_cue(
+            "Use uv for Python tools, not pip",
+            "what package manager do we use"
+        ));
+        // The manager still names its language: a JavaScript prompt finds
+        // the pnpm rule as before.
+        assert!(names_the_cue(rule, "set up the javascript build"));
+        // A Rust build rule is not about packages.
+        assert!(!names_the_cue(
+            "Run cargo clippy before every push",
+            "what package manager do we use"
+        ));
+        assert!(!names_the_cue(rule, "fix the flaky parser test"));
+    }
+
+    #[test]
     fn a_prompt_names_a_rule_through_an_alias() {
         assert!(names_the_cue(
             "Use tabs for indentation in Go files and gofmt them",
@@ -23371,7 +23540,9 @@ mod tests {
 
     #[test]
     fn the_encoder_admits_a_paraphrase_that_shares_no_word() {
-        let cue = "add lodash to the web app";
+        // `dependency` now names the package-manager group, so the cue
+        // that shares nothing with the rule says what it wants another way.
+        let cue = "bring lodash into the web app";
         let pref = signal_hit(
             "preference",
             "Use pnpm instead of npm for every JavaScript package install in this repo",
