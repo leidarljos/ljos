@@ -8267,6 +8267,21 @@ fn scope_pack_port() -> Result<()> {
     Ok(())
 }
 
+/// Start the default writer when it does not answer, as a memory verb does.
+/// A writer that answered, or a seat pointed elsewhere, is left alone.
+fn wake_writer() {
+    let unreachable = pack().is_ok_and(|client| {
+        client
+            .health()
+            .map_err(anyhow::Error::from)
+            .err()
+            .is_some_and(|e| writer_unreachable(&e))
+    });
+    if unreachable {
+        let _ = ensure_writer();
+    }
+}
+
 /// A transport failure, as distinct from a writer that answered and refused.
 fn writer_unreachable(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
@@ -15895,6 +15910,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    // A fresh install has no writer until its first memory verb starts one;
+    // doctor starts it the same way, so the rows below ask a live pack.
+    wake_writer();
     // How many stored preferences the hook enforces: a preference with no
     // rule is recalled and never holds the agent to it.
     out.push(preferences_row());
