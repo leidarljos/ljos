@@ -3,7 +3,7 @@
 # tracker, claim graph, deed store and pack workspace. No human steps.
 # REAL=1 lets grok-4.7 (cursor-agent) cast the panel ballots as real seats.
 set -uo pipefail
-unset LJOS_SEAT VISSUE_AGENT LJOS_PANE_TOOL
+unset LJOS_SEAT VISSUE_AGENT LJOS_PANE_TOOL LJOS_HARNESS_SESSION LJOS_PROCESS_NONCE LJOS_PANEL_CHILD LJOS_MEMBER_BIN LJOS_PANEL_PERSONAS
 for k in $(env | sed -n 's/^\([A-Za-z0-9_]*_\(SESSION\|THREAD\|CONVERSATION\)_ID\)=.*/\1/p'); do unset "$k"; done
 BIN=${SUITE_BIN:-}; [ -n "$BIN" ] && export PATH="$BIN:$PATH"
 root=$(mktemp -d "${SUITE_DIR:-${TMPDIR:-/tmp}}/suite-e2e.XXXX"); echo "root $root"
@@ -73,7 +73,7 @@ run vissue vote "$D1" --json; N=$(echo "$LAST" | jq length 2>/dev/null || echo 0
 chk "three seats cast on $D1" test "$N" -ge 3
 chk "each ballot on $D1 is its own seat's" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "alice,bob,carol"' "$LAST"
 run vissue consensus "$D1" --gate --quorum 3; chk "D1 settles with quorum 3" test $? -eq 0
-run ljos consensus "$D1"; chk "ljos consensus names a leader on D1" bash -c '! printf "%s" "$0" | grep -q "tie"' "$LAST"
+run ljos consensus "$D1"; rc=$?; chk "ljos consensus names a leader on D1" bash -c 'test "$0" -eq 0 && ! printf "%s" "$1" | grep -q "tie" && ! printf "%s" "$1" | grep -q "refuses to settle"' "$rc" "$LAST"
 
 run as alice ljos consensus "$D1"; chk "signed seat ballots stand at the push gate" has "decides ship for a push by alice"
 chk "each seat's key is pinned on the tracker" test "$(wc -l < "$VISSUE_ROOT/.ljos-seat-keys")" -eq 3
@@ -96,6 +96,24 @@ run as carol ljos consensus "$D6"; chk "bob's own key makes it stand" has "decid
 VISSUE_AGENT=carol vissue vote "$D6" --for on --used none >/dev/null 2>&1
 run as alice ljos consensus "$D6"; chk "a ballot cast around ljos, unsigned, is rejected" has "carol's ballot is unsigned"
 run as alice ljos consensus "$D6" --json; chk "push_cite stands false with the refusal in JSON" bash -c 'printf "%s" "$0" | jq -e ".push_cite.stands == false" >/dev/null' "$LAST"
+
+# 4c. one harness session minting N seats does not settle
+run as alice vissue create -p demo "Independence: one worker, three seats?" -q; IND=$(echo "$LAST"|tail -1)
+chk "independence issue filed" test -n "$IND"
+mkdir -p "$root/home-shared"
+shared() { local s=$1; shift; HOME="$root/home-shared" LJOS_SEAT=$s VISSUE_AGENT=$s SEAT_SESSION_ID=sess-shared-0001 "$@"; }
+for s in ada bea cyra; do shared "$s" ljos vote "$IND" --for ship --used none >/dev/null; done
+run vissue vote "$IND" --json; chk "three seats minted in one session cast on $IND" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "ada,bea,cyra"' "$LAST"
+run ljos consensus "$IND"; rc=$?
+EXACT="refuses to settle ${IND}: one session authored more than one ballot: sess-shared-0001 cast 3 (ada, bea, cyra); all ballots trace to one session (sess-shared-0001). Seats minted inside a session do not multiply its vote"
+chk "one session of three seats is refused" bash -c 'test "$0" -eq 1 && printf "%s\n" "$1" | grep -F -x -q "$2"' "$rc" "$LAST" "$EXACT"
+
+# 4d. three sessions settle, and panel run is one session per designer
+run as alice vissue create -p demo "Independence: three sessions?" -q; OKI=$(echo "$LAST"|tail -1)
+for s in alice bob carol; do as "$s" ljos vote "$OKI" --for ship --used none >/dev/null; done
+run ljos consensus "$OKI"; rc=$?
+chk "three sessions settle" bash -c 'test "$0" -eq 0 && printf "%s" "$1" | grep -q "decides ship" && ! printf "%s" "$1" | grep -q "refuses to settle"' "$rc" "$LAST"
+run ljos panel run "$OKI" --dry-run --designers 3; chk "panel run names a session per designer and does not spawn" bash -c 'test "$(printf "%s" "$0" | grep -c "designer, brief only")" = 3 && printf "%s" "$0" | grep -q "dry run: nothing spawned" && printf "%s" "$0" | grep -q "Do not read another design" && printf "%s" "$0" | grep -q "argv: cursor-agent -p"' "$LAST"
 
 # 5. tie must not settle
 run as alice vissue create -p demo "Tie: rename the crate?" -q; D2=$(echo "$LAST"|tail -1)

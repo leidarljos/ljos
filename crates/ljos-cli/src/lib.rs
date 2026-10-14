@@ -22,6 +22,7 @@ pub mod hud;
 pub mod jev;
 pub mod mail;
 pub mod memories;
+pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
 pub mod reap;
@@ -1284,6 +1285,13 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
     (raw.trim().to_string(), key.to_string())
 }
 
+/// The conversation id a runner stamped into the environment, when there
+/// is one. Used to bind a ballot when no MCP call and no hook named a
+/// session of its own.
+pub(crate) fn runner_session_id() -> Option<String> {
+    session_actor().map(|(id, _)| id)
+}
+
 /// The holder for the conversation this process belongs to, named after
 /// its seat: `SEAT@TAG`, where TAG is [`session_tag`] of the id the runner
 /// stamped. A person reads `saddle@k3j9x0a1b2` on a board and knows whose
@@ -2295,6 +2303,9 @@ pub fn log_recall(verb: &str, what: &str) {
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos");
     log_recall_in(&dir, verb, what);
+    if verb == "recall" {
+        panel_gate::note_tracker_read(what);
+    }
 }
 
 /// [`log_recall`] into `dir`, so a test names its own directory instead of
@@ -8597,7 +8608,7 @@ pub fn check_seat_signatures(
     if seats.is_empty() {
         return Ok(Vec::new());
     }
-    let v = tracker_show_json(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
+    let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
         ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
@@ -10904,16 +10915,22 @@ pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
         .filter(|(_, c)| c.stage == Stage::Panel)
         .max_by_key(|(i, c)| (panel_round_number(&c.title).unwrap_or(0), *i))
         .map(|(_, c)| c.id.clone());
-    let ballots = match latest {
+    let ballots = match &latest {
         Some(id) => {
-            let said = run_captured("vissue", &["vote", &id, "--json"])?;
+            let said = run_captured("vissue", &["vote", id, "--json"])?;
             forecasts_from_json(&said.stdout)?
         }
         None => Vec::new(),
     };
-    Ok(Some(workflow_status_of(
-        parent, &name, &children, &ballots, &cfg,
-    )))
+    let mut status = workflow_status_of(parent, &name, &children, &ballots, &cfg);
+    if let Some(id) = latest {
+        if let Some(why) = panel_gate::settle_refusal(&id) {
+            status.passed = false;
+            status.stage = "panel";
+            status.next = why;
+        }
+    }
+    Ok(Some(status))
 }
 
 /// Why `ljos finish PARENT --close` is refused on a workflow parent, or none
@@ -11708,6 +11725,7 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
         Some(&voter),
     )?;
     let _ = write_trust(&judge_trust_row(&model), &[]);
+    let _ = ballot_sig::sign_ballot(issue, &voter, &b.choice);
     note_jev(
         issue,
         &format!(
@@ -14155,6 +14173,9 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 /// be on an issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
+        if let Some(why) = panel_gate::settle_refusal(cite) {
+            return Err(why);
+        }
         let (ballots, personas) = cite_ballots(cite)?;
         let old = check_seat_signatures(cite, &ballots, &personas)?;
         let mut d = seats_decide(cite, &ballots, &personas, &seat_name())?;
@@ -19624,6 +19645,19 @@ pub fn tracker_show_json(id: &str) -> Result<Value> {
     vissue_core::agent::show_json(&found.layout, id).map_err(anyhow::Error::from)
 }
 
+/// The issue as the tracker crate reads it, or as `vissue show --json`
+/// prints it when the crate has no record. A stub tracker in a test
+/// answers only the second.
+pub fn issue_record(issue: &str) -> Result<Value> {
+    if let Ok(v) = tracker_show_json(issue) {
+        if v.get("id").is_some() || v.get("title").is_some() || v.get("logbook").is_some() {
+            return Ok(v);
+        }
+    }
+    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    serde_json::from_str(&said.stdout).context("vissue show --json")
+}
+
 /// Whether an issue asks for a decision: a `decision` tag, a `decision`
 /// type, or a body line opening `Options:`.
 #[must_use]
@@ -22004,6 +22038,9 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
     if let Some(who) = identity_or_seat(identity) {
         cmd.env("VISSUE_AGENT", who);
     }
+    if let Some(s) = ballot_sig::call_session() {
+        cmd.env("LJOS_HARNESS_SESSION", s);
+    }
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -22053,6 +22090,9 @@ pub fn run_captured_as(
     let mut cmd = Command::new(path);
     if let Some(who) = identity {
         cmd.env("VISSUE_AGENT", who);
+    }
+    if let Some(s) = ballot_sig::call_session() {
+        cmd.env("LJOS_HARNESS_SESSION", s);
     }
     for a in args {
         cmd.arg(a.as_ref());

@@ -233,7 +233,17 @@ Every piece of work has an issue before it has a claim.
   subagent; no resume across phases. Each brief is a file to start a
   subagent from. A panel
   member's own lesson goes in with `ljos remember --as NAME "..."` and
-  comes back to it first in its next brief; the seat still reads it. The kind of work sets the dynamics: tag
+  comes back to it first in its next brief; the seat still reads it. A ballot
+  and a design candidate carry the harness session that wrote them (the hook's
+  session, the MCP call's session, or a `*_SESSION_ID` in the environment) and
+  a nonce of that process, and the signature covers both. `ljos consensus`
+  refuses to settle when one session authored more than one ballot, when a
+  session authored a candidate and also voted, or when every ballot traces to
+  one session: a seat minted inside a session does not multiply its vote. A
+  design candidate whose session already read another candidate is flagged.
+  `ljos panel run ISSUE` starts each designer and each persona in its own
+  session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a
+  designer only the brief. The kind of work sets the dynamics: tag
   the issue `broad` when the panel is a broad audience, and the settle runs
   bounded confidence, so clusters are allowed and reported instead of being
   averaged into one position.

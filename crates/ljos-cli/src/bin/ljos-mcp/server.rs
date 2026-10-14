@@ -799,13 +799,22 @@ pub struct PolicyRow {
 /// The thread a call names in its `_meta`: a `thread_id` at the top, or in
 /// any object the runner keys its own metadata under.
 fn thread_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
-    let id = |v: &serde_json::Value| {
-        v.get("thread_id")
-            .and_then(|t| t.as_str())
-            .map(String::from)
-    };
+    named_in_meta(meta, "thread_id")
+}
+
+/// The harness session a call names: `session_id` at the top or in the
+/// runner's metadata object, else `conversation_id`.
+fn session_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    named_in_meta(meta, "session_id")
+        .or_else(|| named_in_meta(meta, "sessionId"))
+        .or_else(|| named_in_meta(meta, "conversation_id"))
+}
+
+fn named_in_meta(meta: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    let id = |v: &serde_json::Value| v.get(key).and_then(|t| t.as_str()).map(String::from);
     id(&serde_json::Value::Object(meta.clone()))
         .or_else(|| meta.values().filter(|v| v.is_object()).find_map(id))
+        .filter(|s| !s.is_empty())
 }
 
 fn said(out: ljos_cli::Said) -> Json<Said> {
@@ -843,8 +852,12 @@ fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<S
     };
     use std::process::{Command, Stdio};
     let path = which::which(bin).map_err(|_| refused(anyhow::anyhow!("{bin} not on PATH")))?;
-    let out = Command::new(path)
-        .env("VISSUE_AGENT", who)
+    let mut cmd = Command::new(path);
+    cmd.env("VISSUE_AGENT", who);
+    if let Some(s) = ljos_cli::ballot_sig::call_session() {
+        cmd.env("LJOS_HARNESS_SESSION", s);
+    }
+    let out = cmd
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1282,6 +1295,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Said>, McpError> {
+        ljos_cli::log_recall("recall", &args.issue);
         habitat("vissue", &["recall", &args.issue])
     }
 
@@ -1297,6 +1311,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Said>, McpError> {
+        ljos_cli::panel_gate::note_tracker_read(&args.issue);
         let text = timeline(&args.issue, 60).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
@@ -1337,6 +1352,12 @@ impl LjosServer {
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let mut said = habitat_as("vissue", &refs, args.as_persona.as_deref())?;
+                let who = identity_or_seat(args.as_persona.as_deref())
+                    .unwrap_or_else(|| "seat".to_string());
+                match ljos_cli::ballot_sig::sign_ballot(&args.issue, &who, c) {
+                    Ok(line) => said.0.text.push_str(&line),
+                    Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
+                }
                 if let Some(text) = args.expect.as_ref().and_then(expect_text) {
                     let who = identity_or_seat(args.as_persona.as_deref())
                         .unwrap_or_else(|| "seat".to_string());
@@ -1606,6 +1627,13 @@ impl LjosServer {
         // every other voter under the default one.
         let ballots = ljos_cli::ballot_rows(&args.issue);
         ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
+        if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&args.issue) {
+            let mut text = msg;
+            for line in ljos_cli::panel_gate::blind_lines_for(&args.issue) {
+                text.push_str(&format!("\nblind design: {line}"));
+            }
+            return Err(refused(anyhow::anyhow!(text)));
+        }
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         // As the CLI: the model crate's settle, and the tracker's only on
         // `compare` or when the model crate is not there.
@@ -1763,6 +1791,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<BriefArgs>,
     ) -> Result<Json<Said>, McpError> {
+        ljos_cli::panel_gate::note_tracker_read(&args.issue);
         let text = brief(&args.name, &args.issue).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
@@ -2598,10 +2627,14 @@ impl ServerHandler for LjosServer {
             .into());
         }
         let thread = thread_in_meta(&context.meta.0);
+        let session = session_in_meta(&context.meta.0);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        ljos_cli::as_thread(thread, Self::tool_router().call(tcc))
-            .await
-            .or_else(as_tool_error)
+        ljos_cli::ballot_sig::scope_session(
+            session,
+            ljos_cli::as_thread(thread, Self::tool_router().call(tcc)),
+        )
+        .await
+        .or_else(as_tool_error)
     }
 
     /// The core set unless `LJOS_MCP_TOOLS` asks for more.
@@ -2745,6 +2778,12 @@ mod tests {
         assert_eq!(
             thread_in_meta(&meta(serde_json::json!({"progressToken": 1}))),
             None
+        );
+        assert_eq!(
+            session_in_meta(&meta(serde_json::json!({
+                "x-runner-turn-metadata": {"session_id": "sess-mcp-0001", "thread_id": "0199a1b2-thread"}
+            }))),
+            Some("sess-mcp-0001".to_string())
         );
     }
 

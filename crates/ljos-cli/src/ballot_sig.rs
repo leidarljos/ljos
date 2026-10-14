@@ -9,6 +9,10 @@
 //! by another key is a mismatch. The push gate counts a seat ballot only
 //! when its latest signature covers exactly that voter, issue and choice
 //! under the pinned key.
+//!
+//! A ballot cast now also carries the harness session and a per-process
+//! nonce, and the signature covers both (`ljos-ballot/v2`). Minting another
+//! seat inside the same session does not make a second voter.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -21,7 +25,9 @@ pub const SIG_NOTE: &str = "ballot-sig: ";
 /// The pin file at the tracker root.
 pub const PIN_FILE: &str = ".ljos-seat-keys";
 
-/// The bytes a ballot signature covers.
+/// The bytes a ballot signature covers. v1 is the choice alone. v2 also
+/// covers the harness session and the process nonce, so a later edit of
+/// either fails the check.
 #[must_use]
 pub fn message(issue: &str, voter: &str, choice: &str) -> Vec<u8> {
     format!(
@@ -33,29 +39,57 @@ pub fn message(issue: &str, voter: &str, choice: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A signature note's fields.
+/// [`message`] plus the session binding.
+#[must_use]
+pub fn message_v2(issue: &str, voter: &str, choice: &str, harness: &str, nonce: &str) -> Vec<u8> {
+    format!(
+        "ljos-ballot/v2\n{}\n{}\n{}\n{}\n{}\n",
+        issue.trim(),
+        voter.trim(),
+        choice.trim(),
+        harness.trim(),
+        nonce.trim()
+    )
+    .into_bytes()
+}
+
+/// A signature note's fields. `harness` and `nonce` are set when the note
+/// is a v2 binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigNote {
     pub voter: String,
     pub choice: String,
     pub key: String,
     pub sig: String,
+    pub harness: Option<String>,
+    pub nonce: Option<String>,
 }
 
-/// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`.
+/// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
+/// `HARNESS NONCE` when the ballot is bound to a session.
 #[must_use]
 pub fn parse_note(note: &str) -> Option<SigNote> {
     let rest = note.trim().strip_prefix(SIG_NOTE)?;
     let parts: Vec<&str> = rest.split_whitespace().collect();
-    let [voter, choice, key, sig] = parts.as_slice() else {
-        return None;
-    };
-    Some(SigNote {
-        voter: (*voter).to_string(),
-        choice: (*choice).to_string(),
-        key: (*key).to_string(),
-        sig: (*sig).to_string(),
-    })
+    match parts.as_slice() {
+        [voter, choice, key, sig] => Some(SigNote {
+            voter: (*voter).to_string(),
+            choice: (*choice).to_string(),
+            key: (*key).to_string(),
+            sig: (*sig).to_string(),
+            harness: None,
+            nonce: None,
+        }),
+        [voter, choice, key, sig, harness, nonce] => Some(SigNote {
+            voter: (*voter).to_string(),
+            choice: (*choice).to_string(),
+            key: (*key).to_string(),
+            sig: (*sig).to_string(),
+            harness: Some((*harness).to_string()),
+            nonce: Some((*nonce).to_string()),
+        }),
+        _ => None,
+    }
 }
 
 fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
@@ -155,7 +189,7 @@ pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
         .ok()
 }
 
-/// The note text for a ballot signed by `key`.
+/// The note text for a ballot signed by `key` (v1, choice only).
 #[must_use]
 pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> String {
     let sig = key.sign(&message(issue, voter, choice));
@@ -166,6 +200,37 @@ pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> St
         hex::encode(key.verifying_key().to_bytes()),
         hex::encode(sig.to_bytes())
     )
+}
+
+/// The note text for a ballot bound to a harness session and a process nonce.
+#[must_use]
+pub fn sign_bound(
+    key: &SigningKey,
+    issue: &str,
+    voter: &str,
+    choice: &str,
+    harness: &str,
+    nonce: &str,
+) -> String {
+    let harness = field(harness);
+    let nonce = field(nonce);
+    let sig = key.sign(&message_v2(issue, voter, choice, &harness, &nonce));
+    format!(
+        "{SIG_NOTE}{} {} {} {} {} {}",
+        voter.trim(),
+        choice.trim(),
+        hex::encode(key.verifying_key().to_bytes()),
+        hex::encode(sig.to_bytes()),
+        harness,
+        nonce
+    )
+}
+
+fn covered<'a>(issue: &str, note: &'a SigNote) -> Vec<u8> {
+    match (&note.harness, &note.nonce) {
+        (Some(h), Some(n)) => message_v2(issue, &note.voter, &note.choice, h, n),
+        _ => message(issue, &note.voter, &note.choice),
+    }
 }
 
 /// Whether `note` is a valid signature over this issue's ballot.
@@ -180,11 +245,8 @@ pub fn verifies(issue: &str, note: &SigNote) -> bool {
     let Ok(vk) = VerifyingKey::from_bytes(&k) else {
         return false;
     };
-    vk.verify(
-        &message(issue, &note.voter, &note.choice),
-        &Signature::from_bytes(&s),
-    )
-    .is_ok()
+    vk.verify(&covered(issue, note), &Signature::from_bytes(&s))
+        .is_ok()
 }
 
 /// The tracker root the pins live at.
@@ -213,15 +275,161 @@ pub fn pins() -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Sign this seat's ballot and leave the note on the issue, pinning the key
-/// on first use. A seat whose key differs from its pin is refused, and the
-/// ballot stays unsigned (so the gate will not count it).
-///
-/// # Errors
-///
-/// No seat key, a key that does not match the pin, or a tracker write that
-/// failed.
-pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
+/// A token safe to put in a signature note: no whitespace.
+#[must_use]
+pub fn field(raw: &str) -> String {
+    let t: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '@') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if t.is_empty() {
+        "-".into()
+    } else {
+        t
+    }
+}
+
+/// The harness session and the nonce of this process. The session id comes
+/// from the MCP call, the hook payload, or the environment, in that order.
+/// The nonce is one per process (`LJOS_PROCESS_NONCE` when a test pins it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub harness: String,
+    pub nonce: String,
+}
+
+tokio::task_local! {
+    static CALL_SESSION: String;
+}
+
+std::thread_local! {
+    static HOOK_SESSION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The session id the MCP call named, when this task is inside one.
+#[must_use]
+pub fn call_session() -> Option<String> {
+    CALL_SESSION
+        .try_with(|s| s.clone())
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Run `f` as an MCP call that named `session`.
+pub async fn scope_session<F: std::future::Future>(session: Option<String>, f: F) -> F::Output {
+    match session.map(|s| field(&s)).filter(|s| s != "-") {
+        Some(s) => CALL_SESSION.scope(s, f).await,
+        None => f.await,
+    }
+}
+
+/// Remember the hook payload's session for this process, and export it for
+/// a child when the environment has not already named one.
+pub fn export_hook_session(id: Option<&str>) {
+    let id = id.map(str::trim).filter(|s| !s.is_empty()).map(field);
+    HOOK_SESSION.with(|c| *c.borrow_mut() = id.clone());
+    if let Some(id) = id {
+        if std::env::var("LJOS_HARNESS_SESSION")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_none()
+        {
+            std::env::set_var("LJOS_HARNESS_SESSION", id);
+        }
+    }
+}
+
+fn env_token(key: &str) -> Option<String> {
+    let v = std::env::var(key).ok()?;
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(field(v))
+}
+
+/// The harness session id: the MCP call, then the hook, then
+/// `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread id.
+#[must_use]
+pub fn harness_session() -> String {
+    if let Some(s) = call_session() {
+        return s;
+    }
+    if let Some(s) = HOOK_SESSION.with(|c| c.borrow().clone()) {
+        return s;
+    }
+    if let Some(s) = env_token("LJOS_HARNESS_SESSION") {
+        return s;
+    }
+    const PREFER: &[&str] = &[
+        "CURSOR_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "GROK_SESSION_ID",
+        "SEAT_SESSION_ID",
+        "LJOS_SESSION_ID",
+    ];
+    for key in PREFER {
+        if let Some(s) = env_token(key) {
+            if s.len() >= 8 {
+                return s;
+            }
+        }
+    }
+    crate::runner_session_id()
+        .map(|s| field(&s))
+        .unwrap_or_default()
+}
+
+fn random_hex(n: usize) -> String {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok()
+    {
+        return hex::encode(buf);
+    }
+    format!("{:x}{:x}", std::process::id(), std::process::id())
+}
+
+static PROCESS_NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The nonce of this process. Seats this process mints share it.
+#[must_use]
+pub fn process_nonce() -> String {
+    if let Some(s) = env_token("LJOS_PROCESS_NONCE") {
+        if s != "-" {
+            return s;
+        }
+    }
+    PROCESS_NONCE.get_or_init(|| random_hex(16)).clone()
+}
+
+/// This process's session identity.
+#[must_use]
+pub fn identity() -> SessionIdentity {
+    let harness = harness_session();
+    SessionIdentity {
+        harness: if harness.is_empty() {
+            "-".into()
+        } else {
+            harness
+        },
+        nonce: process_nonce(),
+    }
+}
+
+/// The key `voter` signs with, pinned on first use.
+fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
     let path = seat_key_path(voter)
         .ok_or_else(|| anyhow::anyhow!("no place for a seat key: HOME and XDG_DATA_HOME are unset; the ballot is unsigned and no gate counts it"))?;
     let key = load_or_create(&path)?;
@@ -249,11 +457,160 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
             }
         }
     }
-    let note = sign_with(&key, issue, voter, choice);
+    Ok((key, mine))
+}
+
+/// Sign this seat's ballot, bound to the harness session and this process's
+/// nonce, and leave the note on the issue. A seat whose key differs from
+/// its pin is refused, and the ballot stays unsigned (so the gate will not
+/// count it).
+///
+/// # Errors
+///
+/// No seat key, a key that does not match the pin, or a tracker write that
+/// failed.
+pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
+    let (key, mine) = signing_key(voter)?;
+    let id = identity();
+    let note = sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce);
     crate::run_captured("vissue", &["note", issue, &note])?;
+    let session = if id.harness == "-" {
+        format!("nonce {}", &id.nonce[..12.min(id.nonce.len())])
+    } else {
+        id.harness.clone()
+    };
     Ok(format!(
-        "ballot signed by {voter} with key {}…\n",
-        &mine[..12]
+        "ballot signed by {voter} with key {}… session {session}\n",
+        &mine[..12.min(mine.len())]
+    ))
+}
+
+/// The note prefix a design candidate's signature rides under.
+pub const CANDIDATE_NOTE: &str = "candidate-sig: ";
+
+/// The bytes a candidate signature covers, including which other candidates
+/// this session had already read.
+#[must_use]
+pub fn candidate_message(
+    issue: &str,
+    seat: &str,
+    harness: &str,
+    nonce: &str,
+    saw: &str,
+) -> Vec<u8> {
+    format!(
+        "ljos-candidate/v1\n{}\n{}\n{}\n{}\n{}\n",
+        issue.trim(),
+        seat.trim(),
+        harness.trim(),
+        nonce.trim(),
+        saw.trim()
+    )
+    .into_bytes()
+}
+
+/// A signed candidate binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateNote {
+    pub issue: String,
+    pub seat: String,
+    pub harness: String,
+    pub nonce: String,
+    pub saw: Vec<String>,
+    pub key: String,
+    pub sig: String,
+}
+
+fn saw_token(saw: &[String]) -> String {
+    if saw.is_empty() {
+        "-".into()
+    } else {
+        saw.iter().map(|s| field(s)).collect::<Vec<_>>().join(",")
+    }
+}
+
+fn saw_list(token: &str) -> Vec<String> {
+    if token.is_empty() || token == "-" {
+        Vec::new()
+    } else {
+        token
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "-")
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// `candidate-sig: ISSUE SEAT HARNESS NONCE SAW KEYHEX SIGHEX`.
+#[must_use]
+pub fn parse_candidate(note: &str) -> Option<CandidateNote> {
+    let rest = note.trim().strip_prefix(CANDIDATE_NOTE)?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [issue, seat, harness, nonce, saw, key, sig] = parts.as_slice() else {
+        return None;
+    };
+    Some(CandidateNote {
+        issue: (*issue).to_string(),
+        seat: (*seat).to_string(),
+        harness: (*harness).to_string(),
+        nonce: (*nonce).to_string(),
+        saw: saw_list(saw),
+        key: (*key).to_string(),
+        sig: (*sig).to_string(),
+    })
+}
+
+/// Whether `note` is a valid signature over that candidate binding.
+#[must_use]
+pub fn candidate_verifies(note: &CandidateNote) -> bool {
+    let (Ok(k), Ok(s)) = (hex::decode(&note.key), hex::decode(&note.sig)) else {
+        return false;
+    };
+    let (Ok(k), Ok(s)) = (<[u8; 32]>::try_from(k), <[u8; 64]>::try_from(s)) else {
+        return false;
+    };
+    let Ok(vk) = VerifyingKey::from_bytes(&k) else {
+        return false;
+    };
+    vk.verify(
+        &candidate_message(
+            &note.issue,
+            &note.seat,
+            &note.harness,
+            &note.nonce,
+            &saw_token(&note.saw),
+        ),
+        &Signature::from_bytes(&s),
+    )
+    .is_ok()
+}
+
+/// Sign `issue` as a design candidate of `seat` and return the note.
+///
+/// # Errors
+///
+/// No seat key, or a key that does not match the pin.
+pub fn sign_candidate(
+    issue: &str,
+    seat: &str,
+    id: &SessionIdentity,
+    saw: &[String],
+) -> Result<String> {
+    let (key, _) = signing_key(seat)?;
+    let harness = field(&id.harness);
+    let nonce = field(&id.nonce);
+    let saw_tok = saw_token(saw);
+    let sig = key.sign(&candidate_message(issue, seat, &harness, &nonce, &saw_tok));
+    Ok(format!(
+        "{CANDIDATE_NOTE}{} {} {} {} {} {} {}",
+        field(issue),
+        field(seat),
+        harness,
+        nonce,
+        saw_tok,
+        hex::encode(key.verifying_key().to_bytes()),
+        hex::encode(sig.to_bytes())
     ))
 }
 
@@ -419,5 +776,27 @@ mod tests {
         let new = sign_with(&a, "d-1", "a", "hold");
         let old = sign_with(&a, "d-1", "a", "ship");
         assert!(seat_problems("d-1", &[("a", "hold")], &[new, old], &pins).is_empty());
+    }
+
+    #[test]
+    fn a_session_binding_is_signed_and_a_changed_session_is_not() {
+        let alice = key(4);
+        let note = sign_bound(&alice, "d-1", "alice", "ship", "sess-alice-0001", "nonce-1");
+        let parsed = parse_note(&note).unwrap();
+        assert_eq!(parsed.harness.as_deref(), Some("sess-alice-0001"));
+        assert_eq!(parsed.nonce.as_deref(), Some("nonce-1"));
+        assert!(verifies("d-1", &parsed));
+        let mut moved = parsed.clone();
+        moved.harness = Some("sess-other-0001".into());
+        assert!(
+            !verifies("d-1", &moved),
+            "a rewritten session still verified"
+        );
+        let pins: BTreeMap<String, String> = [(
+            "alice".to_string(),
+            hex::encode(alice.verifying_key().to_bytes()),
+        )]
+        .into();
+        assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
     }
 }

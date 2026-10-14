@@ -560,10 +560,13 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 60)]
         limit: usize,
     },
-    /// A panel without MCP: one brief per persona written to a directory, then the settle line.
+    /// A panel without MCP: one brief per persona, or `run` to spawn each designer and persona in its own harness session.
     Panel {
-        /// The tracker id of the issue.
+        /// The issue id. `run` spawns the panel (`ljos panel run ISSUE`).
         issue: String,
+        /// The issue id when the first argument is `run`.
+        #[arg(value_name = "ISSUE")]
+        run_issue: Option<String>,
         /// Where the briefs go, one `<persona>.md` each.
         #[arg(long, default_value = "panel")]
         out: PathBuf,
@@ -571,6 +574,15 @@ enum Cmd {
         /// for get a brief.
         #[arg(long)]
         jev: bool,
+        /// `cursor-agent` or `claude`. Overrides `LJOS_PANEL_HARNESS`.
+        #[arg(long)]
+        harness: Option<String>,
+        /// How many designers `run` spawns. Each files one candidate from the brief alone.
+        #[arg(long, default_value_t = 3)]
+        designers: usize,
+        /// Print the sessions and prompts and do not spawn.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
     Persona {
@@ -1363,6 +1375,7 @@ fn run_command() -> Result<()> {
                     argv.push(v.clone());
                 }
             }
+            let filed_title = title.clone();
             argv.push(title);
             let out =
                 std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
@@ -1392,6 +1405,17 @@ fn run_command() -> Result<()> {
             match inbox {
                 Some(path) => print!("{}", ljos_cli::persist_tracker_file(&path, &id, "filed")),
                 None => print!("{}", ljos_cli::persist_tracker(&id, "filed")),
+            }
+            if !id.is_empty() {
+                match ljos_cli::panel_gate::record_candidate(
+                    &id,
+                    &filed_title,
+                    parent.as_deref(),
+                    tags.as_deref(),
+                ) {
+                    Ok(said) => print!("{said}"),
+                    Err(e) => eprintln!("ljos file: {e:#}"),
+                }
             }
         }
         Cmd::Note { issue, text } => {
@@ -1606,14 +1630,12 @@ fn run_command() -> Result<()> {
                     );
                 }
                 println!("recorded on the tracker: {who} for {} on {issue}", args[3]);
-                if as_persona.is_none() {
-                    // A seat ballot is signed with the seat's key; the push
-                    // gate counts no unsigned one.
-                    let voter = identity_or_seat(None).unwrap_or_else(whoami_tracker);
-                    match ljos_cli::ballot_sig::sign_ballot(&issue, &voter, &args[3]) {
-                        Ok(said) => print!("{said}"),
-                        Err(e) => eprintln!("ljos vote: {e:#}"),
-                    }
+                // Every ballot, a persona's included, is signed and bound to
+                // this harness session. The push gate still counts only seat
+                // ballots; the panel gate counts the session, not the seat.
+                match ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3]) {
+                    Ok(said) => print!("{said}"),
+                    Err(e) => eprintln!("ljos vote: {e:#}"),
                 }
                 if let Some(expect) = expect.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
                     let who =
@@ -1627,10 +1649,37 @@ fn run_command() -> Result<()> {
             }
             None => run("vissue", &["vote", &issue])?,
         },
-        Cmd::Brief { name, issue } => print!("{}", brief(&name, &issue)?),
-        Cmd::Timeline { issue, limit } => print!("{}", timeline(&issue, limit)?),
-        Cmd::Panel { issue, out, jev } => {
-            if jev {
+        Cmd::Brief { name, issue } => {
+            ljos_cli::panel_gate::note_tracker_read(&issue);
+            print!("{}", brief(&name, &issue)?);
+        }
+        Cmd::Timeline { issue, limit } => {
+            ljos_cli::panel_gate::note_tracker_read(&issue);
+            print!("{}", timeline(&issue, limit)?);
+        }
+        Cmd::Panel {
+            issue,
+            run_issue,
+            out,
+            jev,
+            harness,
+            designers,
+            dry_run,
+        } => {
+            if issue == "run" {
+                let issue = run_issue.context("`ljos panel run` needs an issue")?;
+                print!(
+                    "{}",
+                    ljos_cli::panel_gate::panel_run(
+                        &issue,
+                        harness.as_deref(),
+                        designers,
+                        dry_run
+                    )?
+                );
+            } else if run_issue.is_some() {
+                bail!("panel: one issue, or `ljos panel run ISSUE`");
+            } else if jev {
                 print!("{}", ljos_cli::panel_jev(&issue, &out)?);
                 print!("{}", ljos_cli::persist_tracker(&issue, "panel through Jev"));
             } else {
@@ -1871,6 +1920,7 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::hook_call_as(&input, event.as_deref())
             };
+            ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
             // A runner the seat asked for a judgment hears nothing from the
             // seat, so the judgment cannot open sittings or judge again;
             // the law on its tool calls still holds.
@@ -2284,6 +2334,26 @@ fn run_command() -> Result<()> {
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
             ljos_cli::require_ballots(&id, &ballots)?;
+            if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&id) {
+                let flags = ljos_cli::panel_gate::blind_lines_for(&id);
+                if json {
+                    let doc = serde_json::json!({
+                        "settled": false,
+                        "panel": {"settled": false, "refusal": msg, "blind": flags},
+                        "push_cite": {"issue": id, "stands": false, "refusal": msg},
+                    });
+                    println!("{}", serde_json::to_string_pretty(&doc)?);
+                } else {
+                    println!("{msg}");
+                    for line in flags {
+                        println!("blind design: {line}");
+                    }
+                }
+                std::process::exit(1);
+            }
+            for line in ljos_cli::panel_gate::blind_lines_for(&id) {
+                println!("blind design: {line}");
+            }
             if let Some(n) = quorum {
                 quorum_or_exit(&id, n, deadline.as_deref(), json)?;
             }
