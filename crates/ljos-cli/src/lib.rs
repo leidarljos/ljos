@@ -19755,6 +19755,58 @@ pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
 /// the person types the same words. Called after the node completed, so
 /// a refusal is a line that names the pack's reason and the command that
 /// keeps the lesson, never an error.
+/// A lesson cut into claims the pack takes: at most two sentences each.
+/// The pack refuses an atom of three or more sentences, so a longer
+/// lesson is kept as several, in order, instead of being turned away.
+/// A full stop inside a token (`0.29.0`, `Cargo.lock`) or before a
+/// lowercase word does not end a sentence.
+pub fn lesson_claims(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, '.' | '!' | '?') {
+            let mut j = i + 1;
+            while j < chars.len() && matches!(chars[j], '.' | '!' | '?' | '"' | '\'' | ')') {
+                j += 1;
+            }
+            let spaced = j < chars.len() && chars[j].is_whitespace();
+            let mut k = j;
+            while k < chars.len() && chars[k].is_whitespace() {
+                k += 1;
+            }
+            let opens = k < chars.len()
+                && (chars[k].is_uppercase()
+                    || matches!(chars[k], '`' | '"' | '(')
+                    || chars[k].is_ascii_digit());
+            if spaced && opens {
+                sentences.push(
+                    chars[start..j]
+                        .iter()
+                        .collect::<String>()
+                        .trim()
+                        .to_string(),
+                );
+                start = k;
+                i = k;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let tail: String = chars[start..].iter().collect::<String>().trim().to_string();
+    if !tail.is_empty() {
+        sentences.push(tail);
+    }
+    sentences
+        .chunks(2)
+        .map(|pair| pair.join(" "))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
         let scope = sync::scope_for_issue(issue);
@@ -19866,7 +19918,11 @@ pub fn finish(
         out.push('\n');
     }
     match lesson.map(str::trim).filter(|l| !l.is_empty()) {
-        Some(text) => out.push_str(&finish_lesson(issue, text)),
+        Some(text) => {
+            for claim in lesson_claims(text) {
+                out.push_str(&finish_lesson(issue, &claim));
+            }
+        }
         None => out.push_str(
             "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n",
         ),
@@ -33390,6 +33446,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// A pack that refuses the lesson after the work is done leaves the
     /// node completed. Finish says why the lesson was not kept and how to
     /// keep it, and it does not fail.
+    #[test]
+    fn a_long_lesson_is_kept_as_two_sentence_claims() {
+        let three = "gvfsd reads XDG_DATA_HOME when it starts. Set the scratch folder first. \
+                     Restart gvfsd after a change to 0.29.0 or Cargo.lock.";
+        assert_eq!(
+            lesson_claims(three),
+            vec![
+                "gvfsd reads XDG_DATA_HOME when it starts. Set the scratch folder first."
+                    .to_string(),
+                "Restart gvfsd after a change to 0.29.0 or Cargo.lock.".to_string(),
+            ]
+        );
+        let two = "One claim here. And its reason.";
+        assert_eq!(lesson_claims(two), vec![two.to_string()]);
+        assert_eq!(
+            lesson_claims("e.g. use it. then stop"),
+            vec!["e.g. use it. then stop".to_string()]
+        );
+        assert!(lesson_claims("   ").is_empty());
+    }
+
     #[test]
     fn a_refused_lesson_leaves_the_node_completed() {
         let _g = env_guard();
