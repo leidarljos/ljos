@@ -16,8 +16,18 @@ use crate::Step;
 
 /// The runners this module serves, by the name `--runner` takes.
 pub const RUNNERS: &[&str] = &[
-    "copilot", "gemini", "windsurf", "factory", "kiro", "cline", "qwen", "crush", "auggie",
-    "goose", "amp",
+    "copilot",
+    "gemini",
+    "windsurf",
+    "factory",
+    "kiro",
+    "cline",
+    "qwen",
+    "crush",
+    "auggie",
+    "goose",
+    "amp",
+    "openhands",
 ];
 
 /// Runners whose hook entry must name one program with no arguments (Amp's
@@ -180,6 +190,20 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
                 out.insert("tool_input".into(), v["tool_input"].clone());
             }
         }
+        "openhands" => {
+            let event = v["event_type"].as_str().unwrap_or("PreToolUse");
+            out.insert("hook_event_name".into(), json!(event));
+            put(&mut out, "session_id", v["session_id"].as_str());
+            put(&mut out, "cwd", v["working_dir"].as_str());
+            put(&mut out, "prompt", v["message"].as_str());
+            let tool = v["tool_name"]
+                .as_str()
+                .map(|t| if t == "terminal" { "Bash" } else { t });
+            put(&mut out, "tool_name", tool);
+            if !v["tool_input"].is_null() {
+                out.insert("tool_input".into(), v["tool_input"].clone());
+            }
+        }
         "auggie" => {
             let mut v = v;
             if v["tool_name"].as_str() == Some("launch-process") {
@@ -312,6 +336,16 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
         }
         ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), said.reason + "\n", 2),
         ("goose", None) => (String::new(), String::new(), 0),
+        ("openhands", Some(_)) => (
+            line(json!({ "decision": "deny", "reason": said.reason })),
+            said.reason + "\n",
+            2,
+        ),
+        ("openhands", None) if !said.context.is_empty() => (
+            line(json!({ "additionalContext": said.context })),
+            String::new(),
+            0,
+        ),
         ("amp", Some("ask")) => (String::new(), said.reason + "\n", 1),
         ("amp", Some(_)) => (String::new(), said.reason + "\n", 2),
         ("amp", None) => (String::new(), String::new(), 0),
@@ -364,9 +398,15 @@ pub fn raw_event(input: &str) -> String {
     serde_json::from_str::<Value>(input.trim())
         .ok()
         .and_then(|v| {
-            ["hook_event_name", "agent_action_name", "hookName", "event"]
-                .iter()
-                .find_map(|k| v[*k].as_str().map(str::to_string))
+            [
+                "hook_event_name",
+                "agent_action_name",
+                "hookName",
+                "event",
+                "event_type",
+            ]
+            .iter()
+            .find_map(|k| v[*k].as_str().map(str::to_string))
         })
         .unwrap_or_default()
 }
@@ -480,10 +520,56 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> an
         }
         Err(e) => failed_closed(&raw, &format!("could not find its own binary ({e})")),
     };
-    let (out, err, code) = answer(runner, &raw, &text);
+    let (mut out, err, code) = answer(runner, &raw, &text);
+    if let Some(line) = first_prompt_start_line(runner, &raw, input) {
+        out = with_start_line(&out, &line);
+    }
     print!("{out}");
     eprint!("{err}");
     Ok(code)
+}
+
+/// OpenHands drops a `SessionStart` hook's output, so the session-start
+/// line rides on the session's first prompt: once per session id, marked
+/// under the state directory.
+fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<String> {
+    if runner != "openhands" || raw != "UserPromptSubmit" {
+        return None;
+    }
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    let sid: String = v["session_id"]
+        .as_str()?
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if sid.is_empty() {
+        return None;
+    }
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/state")))?;
+    let mark = state.join("ljos/openhands-started").join(&sid);
+    if mark.exists() {
+        return None;
+    }
+    let _ = mark.parent().map(std::fs::create_dir_all);
+    let _ = std::fs::write(&mark, "");
+    Some(crate::session_start_line())
+}
+
+/// An OpenHands answer with `line` put ahead of its context.
+fn with_start_line(out: &str, line: &str) -> String {
+    let mut v: Value = serde_json::from_str(out.trim()).unwrap_or_else(|_| json!({}));
+    if v.get("decision").is_some() {
+        return out.to_string();
+    }
+    let rest = v["additionalContext"].as_str().unwrap_or("").to_string();
+    v["additionalContext"] = json!(if rest.is_empty() {
+        line.to_string()
+    } else {
+        format!("{line}\n\n{rest}")
+    });
+    v.to_string() + "\n"
 }
 
 /// The hook command a runner's file names.
@@ -621,6 +707,22 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
                 json!({ "command": command, "show_output": false }),
                 runner,
             )
+        }
+        "openhands" => {
+            let hooks = hooks_of(obj)?;
+            let a = ensure_in(
+                hooks,
+                "PreToolUse",
+                group(Some("terminal"), command, 20, runner),
+                runner,
+            );
+            let b = ensure_in(
+                hooks,
+                "UserPromptSubmit",
+                group(None, command, 15, runner),
+                runner,
+            );
+            a || b
         }
         "auggie" => {
             let hooks = hooks_of(obj)?;
@@ -1194,6 +1296,10 @@ mod tests {
                 "amp" => {
                     assert_eq!(found("/amp.permissions/0/action"), json!("delegate"));
                 }
+                "openhands" => {
+                    assert_eq!(found("/hooks/PreToolUse/0/matcher"), json!("terminal"));
+                    assert_eq!(found("/hooks/PreToolUse/0/hooks/0/command"), json!(command));
+                }
                 _ => unreachable!(),
             }
         }
@@ -1295,5 +1401,31 @@ mod tests {
         assert!(hook_step("goose", &file, "/bin/ljos hook", false)
             .detail
             .contains("carries"));
+    }
+
+    #[test]
+    fn openhands_terminal_is_the_shell_and_a_deny_exits_2() {
+        let n = normalize_input(
+            "openhands",
+            r#"{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"rm -rf ~"},"working_dir":"/w"}"#,
+        );
+        let v: Value = serde_json::from_str(&n).unwrap();
+        assert_eq!(v["tool_name"], "Bash");
+        assert_eq!(v["cwd"], "/w");
+        let deny = r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"no"}}"#;
+        let (out, _, code) = answer("openhands", "PreToolUse", deny);
+        assert!(out.contains("\"decision\":\"deny\""));
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn the_start_line_leads_an_openhands_prompt_note() {
+        let out = with_start_line("{\"additionalContext\":\"lesson\"}\n", "ljos is on: x");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["additionalContext"], "ljos is on: x\n\nlesson");
+        assert_eq!(
+            with_start_line("", "ljos is on").trim(),
+            r#"{"additionalContext":"ljos is on"}"#
+        );
     }
 }

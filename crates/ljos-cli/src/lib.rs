@@ -913,12 +913,15 @@ hooks_format = "goose"
 
 [[harness]]
 name = "openhands"
-# The OpenHands CLI. Its hooks are read from a repository's
-# .openhands/hooks.json only, so the user-level guard is the skill alone.
+# The OpenHands CLI. It reads Claude-shaped hooks from
+# ~/.openhands/hooks.json as well as a repository's; terminal is its shell,
+# and exit 2 or a deny decision blocks.
 config_json = "~/.openhands/mcp.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.openhands/skills"
+hooks = "~/.openhands/hooks.json"
+hooks_format = "openhands"
 
 [[harness]]
 name = "continue"
