@@ -496,6 +496,7 @@ pub fn export_agents(harness: Option<&str>, dry: bool) -> Result<Vec<Step>> {
 /// `{ljos}` in each is filled with the absolute path at onboard.
 pub const PLUGIN_TEMPLATES: &[(&str, &str)] = &[
     ("opencode", include_str!("../assets/opencode/ljos.ts")),
+    ("opencode-v2", include_str!("../assets/opencode/ljos-v2.ts")),
     ("omp", include_str!("../assets/omp/ljos.ts")),
 ];
 
@@ -627,6 +628,17 @@ skills = "~/.config/opencode/skills"
 # on each bash call, the session id in every shell it opens.
 plugin = "~/.config/opencode/plugins/ljos.ts"
 plugin_template = "opencode"
+
+[[harness]]
+name = "opencode-v2"
+# opencode V2 runs only plugins that default-export Plugin.define; a V1
+# plugin loads and does nothing. Onboard this shape on a V2 opencode.
+config_json = "~/.config/opencode/opencode.json"
+json_pointer = "/mcp/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "timeout": 30000}'
+skills = "~/.config/opencode/skills"
+plugin = "~/.config/opencode/plugins/ljos.ts"
+plugin_template = "opencode-v2"
 
 [[harness]]
 name = "hermes"
@@ -2469,6 +2481,10 @@ const RUNNER_COMMANDS: &[(&str, &[&str])] = &[
     ("amazonq", &["q"]),
 ];
 
+/// Shapes a bare onboard never picks: each is a second shape for a runner
+/// another shape already finds, onboarded with `--harness NAME`.
+const OPT_IN_SHAPES: &[&str] = &["opencode-v2"];
+
 /// The runners among `shapes` this machine has: a runner's command is on
 /// the PATH, or the directory its MCP config or its hooks file sits in
 /// exists under `home`. Shell-only runners and the example shapes are
@@ -2483,7 +2499,13 @@ pub fn detect_runners(
         |p: &str| -> Option<PathBuf> { p.strip_prefix("~/").map(|rest| home.join(rest)) };
     let mut found: Vec<String> = Vec::new();
     for h in shapes {
-        if h.shell || h.name.starts_with("runner-with-") || found.contains(&h.name) {
+        // A second shape for a runner another shape already finds is named
+        // on purpose: `opencode-v2` writes the plugin `opencode` writes.
+        if h.shell
+            || h.name.starts_with("runner-with-")
+            || OPT_IN_SHAPES.contains(&h.name.as_str())
+            || found.contains(&h.name)
+        {
             continue;
         }
         let extra = RUNNER_COMMANDS
@@ -19394,14 +19416,30 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
     use std::io::Read as _;
     let refused = |why: &str| format!("deny\tljos-policyd {why}, so the line is refused");
-    let child = std::process::Command::new(bin)
-        .arg("check")
-        .arg("--")
-        .args(argv)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    // A binary just written, by an install or a test, can be busy for a
+    // moment: another thread's fork still holds the write descriptor until
+    // its exec, and the kernel answers ETXTBSY. That is not a guard that
+    // failed, so the spawn is tried again for a few milliseconds.
+    let spawn = || {
+        std::process::Command::new(bin)
+            .arg("check")
+            .arg("--")
+            .args(argv)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+    let mut child = spawn();
+    for _ in 0..20 {
+        match &child {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                child = spawn();
+            }
+            _ => break,
+        }
+    }
     let Ok(mut child) = child else {
         return refused("did not start");
     };
@@ -25373,9 +25411,46 @@ mod tests {
     }
 
     #[test]
+    fn the_opencode_v2_plugin_registers_on_its_domains_and_fails_closed() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let h = all
+            .harness
+            .iter()
+            .find(|h| h.name == "opencode-v2")
+            .unwrap();
+        let text = super::plugin_text(h, Path::new("/opt/seat/bin/ljos")).unwrap();
+        assert!(
+            text.contains("export default Plugin.define("),
+            "a V2 entrypoint"
+        );
+        for hook in [
+            "ctx.tool.hook(\"execute.before\"",
+            "ctx.session.hook(\"prompt\"",
+            "ctx.session.hook(\"context\"",
+            "ctx.shell.hook(\"create.before\"",
+            "ctx.event.subscribe(",
+        ] {
+            assert!(text.contains(hook), "{hook}");
+        }
+        assert!(
+            !text.contains("\"tool.execute.before\""),
+            "no V1 string keys"
+        );
+        assert!(
+            text.contains("the gate did not answer"),
+            "a failed gate refuses"
+        );
+        assert!(text.contains("cwd"), "the payload names the directory");
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
+        let found = super::detect_runners(&all.harness, home.path(), &|_| false);
+        assert_eq!(found, ["opencode"], "a bare onboard leaves V2 to --harness");
+    }
+
+    #[test]
     fn a_plugin_runner_gets_its_bundled_plugin_with_ljos_filled() {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
-        for name in ["opencode", "omp"] {
+        for name in ["opencode", "opencode-v2", "omp"] {
             let h = all.harness.iter().find(|h| h.name == name).expect(name);
             assert!(h.plugin.is_some(), "{name} names a plugin path");
             let text = super::plugin_text(h, Path::new("/opt/seat/bin/ljos")).expect(name);
@@ -25427,7 +25502,7 @@ mod tests {
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         // Three shapes, then the runners this seat ships. Two of them are
         // shell-only and register nothing.
-        assert_eq!(all.harness.len(), 25);
+        assert_eq!(all.harness.len(), 26);
         assert!(all.harness[3..].iter().all(|h| h.shell
             || h.register.len()
                 + usize::from(h.config.is_some())
