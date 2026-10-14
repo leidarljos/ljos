@@ -1,0 +1,1 @@
+A session's end keeps its facts: the SessionEnd hook reads the transcript and writes up to five durable sentences (rules, causes, fixes) as agent-derived lessons tagged `via:session-end` and the session, deduplicated by normalized form, with no model call. `ljos memories review` and `prune` clean them up; `LJOS_EXTRACT=off` turns it off.

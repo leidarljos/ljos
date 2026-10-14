@@ -1956,6 +1956,7 @@ fn run_command() -> Result<()> {
             // and there is nothing to say.
             if call.event == "SessionEnd" {
                 session_end(call.session.as_deref());
+                ljos_cli::extract::at_session_end(&input, call.session.as_deref());
                 return Ok(());
             }
             // On a tool call the pack's rules give a verdict; on a prompt

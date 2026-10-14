@@ -17,6 +17,7 @@ pub mod ask_pack;
 pub mod ballot_sig;
 pub mod capture;
 pub mod command_prefs;
+pub mod extract;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -8996,6 +8997,29 @@ pub fn packset_write_agent(
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
     }
+    with_writer(|| {
+        admit::write_agent(&client, atom.clone())
+            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })
+}
+
+/// [`packset_write_agent`] with extra entities on the atom, such as the
+/// `via:` and `session:` tags session-end extraction stamps for provenance.
+///
+/// # Errors
+///
+/// As [`packset_write_agent`].
+pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("{label}: empty text is not a claim");
+    }
+    let kind = atom_kind(label)?;
+    let mut atom = atom_body(kind, trimmed, &workspace);
+    stamp_horizon(&mut atom, kind, trimmed, Some(true));
+    add_entities(&mut atom, tags.iter().cloned());
     with_writer(|| {
         admit::write_agent(&client, atom.clone())
             .with_context(|| format!("{label}: POST /v1/atoms failed"))

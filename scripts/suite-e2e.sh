@@ -136,6 +136,21 @@ run as carol ljos reap --apply; chk "reap --apply lapses the short vote" has "la
 chk "the lapse is on the tracker once" bash -c 'test "$(vissue show "$0" | grep -c "quorum timed out")" = 1' "$D5"
 run as carol ljos reap --apply; chk "a second reap does not lapse it again" bash -c '! printf "%s" "$0" | grep -q "lapsed $1"' "$LAST" "$D5"
 
+# 7c. a session's end keeps its facts, once, as agent-derived memories
+cat > "$root/transcript.jsonl" <<'TJ'
+{"type":"user","message":{"role":"user","content":"Why does the demo build fail on this box?"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The root cause was the demo crate pinning an old linker flag. The fix is to drop the flag from build.rs on every target. Never pass that flag to rustc on this box."}]}}
+TJ
+end_hook() { printf '{"hook_event_name":"SessionEnd","session_id":"sess-alice-end","transcript_path":"%s"}' "$root/transcript.jsonl" | as alice ljos hook >/dev/null 2>&1; }
+end_hook
+run as alice ljos memories list; chk "session end wrote the facts as agent memories" has "root cause was the demo crate"
+N1=$(printf '%s' "$LAST" | grep -c "demo crate pinning\|drop the flag\|Never pass that flag")
+chk "three facts extracted, the question left out" bash -c 'test "$0" -eq 3 && ! printf "%s" "$1" | grep -q "Why does the demo"' "$N1" "$LAST"
+end_hook
+run as alice ljos memories list; N2=$(printf '%s' "$LAST" | grep -c "demo crate pinning\|drop the flag\|Never pass that flag")
+chk "a second session end writes no duplicates" test "$N2" -eq 3
+run as bob ljos search "linker flag demo crate"; chk "another seat recalls the extracted fact" has "linker flag"
+
 # 8. finish
 run as bob ljos finish "$T1" --gen "$GEN" --assignee bob --lesson "The CHANGES line shipped in one commit. Review passed first time." --close
 chk "bob finishes $T1" has "completed"
