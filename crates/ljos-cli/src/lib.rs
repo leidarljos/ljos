@@ -4316,6 +4316,12 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let opens_turn = v["invocationNum"].as_u64().unwrap_or(0) <= 1;
+    // agy has no session-start event of its own: the first model call of a
+    // conversation is where the seat says ljos is on.
+    STEPS_OPENS_CONVERSATION.store(
+        event == "PreInvocation" && v["invocationNum"].as_u64().is_some_and(|n| n <= 1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let (event, cue) = match event.as_str() {
         "PreToolUse" => {
             let args = &v["toolCall"]["args"];
@@ -7413,7 +7419,24 @@ pub fn came_due_since(due: &[Value], since: &str) -> usize {
 /// runner asks the person itself. No verdict is `allow`: an object with
 /// no decision is a deny with an empty reason, so a seat with no rule
 /// lets the tool run. Context is one ephemeral step.
+/// Set when this call is the first model call of an agy conversation.
+static STEPS_OPENS_CONVERSATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
+    let opened;
+    let context = if call.event == "UserPromptSubmit"
+        && STEPS_OPENS_CONVERSATION.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        opened = if context.is_empty() {
+            session_start_line()
+        } else {
+            format!("{}\n{context}", session_start_line())
+        };
+        opened.as_str()
+    } else {
+        context
+    };
     let out = match (call.event.as_str(), verdict) {
         ("PreToolUse", Some(r)) => serde_json::json!({
             "decision": r.verdict,
@@ -31394,6 +31417,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             edit.cue, "write_to_file",
             "file text is not a command line, and no path is named"
         );
+        let first = hook_call_as(
+            r#"{"invocationNum":1,"conversationId":"c-1"}"#,
+            Some("PreInvocation"),
+        );
+        assert_eq!(first.event, "UserPromptSubmit");
+        let v: Value = serde_json::from_str(&hook_output_ruled(&first, "a memory", None)).unwrap();
+        let said = v["injectSteps"][0]["ephemeralMessage"].as_str().unwrap();
+        assert!(
+            said.starts_with("ljos is on"),
+            "agy's first model call hears the start line: {said}"
+        );
+        assert!(said.ends_with("a memory"), "{said}");
         let later = hook_call_as(
             r#"{"invocationNum":3,"conversationId":"c-1"}"#,
             Some("PreInvocation"),
