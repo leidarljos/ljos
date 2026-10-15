@@ -403,7 +403,9 @@ fn approved_ids(prompt: &str) -> Vec<String> {
 
 fn approval_directives(prompt: &str) -> Vec<String> {
     prompt
+        .trim()
         .lines()
+        .take(1)
         .filter_map(|line| {
             let mut words = line.split_whitespace();
             if !words.next()?.eq_ignore_ascii_case("approve") {
@@ -737,6 +739,7 @@ mod tests {
             "ok".to_string(),
             format!("approve {}", &full[..26]),
             format!("do not approve {full}"),
+            format!("no\napprove {full}"),
         ] {
             let result =
                 approve_from_prompt_at(&packet(&answer), &one("conversation-1"), &root, Ok(102));
