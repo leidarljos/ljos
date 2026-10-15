@@ -24,7 +24,7 @@ class ConsentWireTest(unittest.TestCase):
     protocol = "2025-11-25"
 
     def exchange(self, *, answer=None, capabilities=None, session=THREAD,
-                 age=0, change=None, arguments=None):
+                 age=0, change=None, arguments=None, server_seat="consent-test"):
         with tempfile.TemporaryDirectory(prefix="ljos-consent-") as tmp:
             root = Path(tmp)
             store = root / "ljos" / "approvals"
@@ -43,8 +43,12 @@ class ConsentWireTest(unittest.TestCase):
             tracker = root / "tracker"
             tracker.mkdir()
             (tracker / "vissue.toml").write_text('seats = ["consent-test"]\n')
-            env = dict(os.environ, XDG_RUNTIME_DIR=tmp, LJOS_SEAT="consent-test",
+            env = dict(os.environ, XDG_RUNTIME_DIR=tmp,
                        VISSUE_ROOT=str(tracker), ISSUE_ROOT=str(tracker))
+            if server_seat is None:
+                env.pop("LJOS_SEAT", None)
+            else:
+                env["LJOS_SEAT"] = server_seat
             server = root / "ljos-mcp"
             if self.replace_binary:
                 shutil.copyfile(BINARY, server)
@@ -140,6 +144,19 @@ class ConsentWireTest(unittest.TestCase):
         self.assertNotIn("error", reply)
         self.assertFalse(reply["result"].get("isError", False))
         self.assertTrue(rows[0]["approved"])
+
+    def test_tool_can_name_a_registered_seat(self):
+        reply, rows = self.exchange(
+            server_seat=None, arguments={"id": REQUEST_ID, "seat": "consent-test"},
+            answer={"action": "accept", "content": {"approve": True}},
+        )
+        self.assertNotIn("error", reply)
+        self.assertFalse(reply["result"].get("isError", False), reply)
+        self.assertTrue(rows[0]["approved"])
+
+    def test_unknown_seat_cannot_request_consent(self):
+        self.assert_blocked(server_seat=None,
+                            arguments={"id": REQUEST_ID, "seat": "unknown-test-seat"})
 
     def test_empty_legacy_capability_supports_forms(self):
         reply, rows = self.exchange(capabilities={"elicitation": {}},
