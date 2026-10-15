@@ -617,32 +617,14 @@ fn commit_log(root: &Path, scope: &str) -> String {
             root.display()
         );
     }
-    let mut pushed = vec![];
-    // A push another host beat is merged and tried once more; left ahead,
-    // the next catch-up could only fast-forward and never would.
-    let pushed_first = git(root, &["push", "-q"]).is_ok_and(|o| o.status.success());
-    let pushed_after_merge = !pushed_first
-        && git(root, &["pull", "-q", "--no-rebase", "--no-edit"]).is_ok_and(|o| o.status.success())
-        && git(root, &["push", "-q"]).is_ok_and(|o| o.status.success());
-    if pushed_first || pushed_after_merge {
-        pushed.push("upstream".to_string());
+    // No upstream yet: push_checkout sets it with `-u origin <branch>`.
+    // A sibling bot's push is rebased, and an org conflict keeps both
+    // headings. Failure stays a failure; the line does not say the log was
+    // pushed.
+    match crate::tracker_push::push_checkout(root) {
+        Ok(()) => format!("sync: committed {message}; pushed\n"),
+        Err(e) => format!("sync: committed {message}; push refused: {e}\n"),
     }
-    if let Some(up) = crate::tracker_upstream(root) {
-        for (remote, branch) in crate::tracker_mirrors(root, &up).unwrap_or_default() {
-            let refspec = format!("HEAD:refs/heads/{branch}");
-            if git(root, &["push", "-q", &remote, &refspec]).is_ok_and(|o| o.status.success()) {
-                pushed.push(remote);
-            }
-        }
-    }
-    format!(
-        "sync: committed {message}; {}\n",
-        if pushed.is_empty() {
-            "the push did not land".to_string()
-        } else {
-            format!("pushed to {}", pushed.join(", "))
-        }
-    )
 }
 
 /// Fetch every remote and fast-forward to each one that is ahead. Machines

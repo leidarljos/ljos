@@ -156,9 +156,7 @@ fn next_step(tool: &str) -> &'static str {
             "next: keep going, or ljos_finish with the lesson when the task is done"
         }
         "ljos_guard_check" => "next: run the command only when this allowed it",
-        "ljos_finish" => {
-            "next: the claim is released and the tracker is pushed; this sitting is closed"
-        }
+        "ljos_finish" => "next: the claim is released; this sitting is closed",
         name if ljos_cli::bookkeep::mcp_tool_writes(name) => {
             "next: ljos_finish with the lesson when the task is done"
         }
@@ -169,10 +167,45 @@ fn next_step(tool: &str) -> &'static str {
 fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
     match response {
         CallToolResponse::Complete(mut result) => {
-            result.content.push(ContentBlock::text(next_step(name)));
+            let line = if name == "ljos_finish" {
+                let body = result
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                finish_next_from(&body)
+            } else {
+                next_step(name)
+            };
+            result.content.push(ContentBlock::text(line));
             CallToolResponse::Complete(result)
         }
         other => other,
+    }
+}
+
+/// The finish line says the tracker was pushed only when the push landed.
+fn finish_next_from(body: &str) -> &'static str {
+    let failed = body.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("push refused")
+            || line.contains("push failed")
+            || line.contains("push did not land")
+            || line.contains("the push did not land")
+            || line.contains("push not started")
+    });
+    if failed {
+        "next: the claim is released; the tracker push failed, see the lines above"
+    } else if body.contains("committed and pushed")
+        || body.contains("pushed to ")
+        || body.contains("; pushed")
+    {
+        "next: the claim is released and the tracker is pushed; this sitting is closed"
+    } else if body.contains("still running") {
+        "next: the claim is released; the tracker push is still running, see the lines above"
+    } else {
+        "next: the claim is released; this sitting is closed"
     }
 }
 
@@ -3140,6 +3173,18 @@ mod tests {
         assert_eq!(last.text, next_step("ljos_start"));
         assert!(next_step("ljos_guard_check").contains("allowed"));
         assert!(next_step("ljos_finish").contains("released"));
+        assert!(!next_step("ljos_finish").contains("is pushed"));
+        let failed =
+            "tracker git: committed chore(issues): probe claimed; push refused: no upstream\n";
+        let next = finish_next_from(failed);
+        assert!(next.contains("failed"), "{next}");
+        assert!(!next.contains("is pushed"), "{next}");
+        let landed =
+            finish_next_from("tracker git: committed and pushed chore(issues): probe claimed\n");
+        assert!(landed.contains("is pushed"), "{landed}");
+        let sync_failed =
+            finish_next_from("sync: committed chore; push refused: non-fast-forward\n");
+        assert!(sync_failed.contains("failed"), "{sync_failed}");
         assert!(next_step("ljos_note").contains("ljos_finish"));
         assert!(next_step("ljos_remember").contains("ljos_finish"));
         assert!(next_step("ljos_search").contains("ljos_start"));
