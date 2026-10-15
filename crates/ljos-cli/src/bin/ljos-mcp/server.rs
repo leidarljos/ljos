@@ -2859,6 +2859,12 @@ impl ServerHandler for LjosServer {
             })
             .await;
         }
+        // Seat validation belongs to the server; strict handlers receive only
+        // their operation arguments and still reject undeclared fields.
+        let mut request = request;
+        if let Some(arguments) = request.arguments.as_mut() {
+            arguments.remove("seat");
+        }
         let thread = thread_in_meta(&context.meta.0);
         let session = session_in_meta(&context.meta.0);
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
