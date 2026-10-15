@@ -437,12 +437,13 @@ pub fn approve(id: &str) -> Result<String> {
 /// Ask the connected client's user to consent to an existing request.
 /// Tool arguments identify the request; only the client's form response grants it.
 pub async fn request_approval(id: &str, peer: &rmcp::Peer<rmcp::RoleServer>) -> Result<String> {
+    let session = crate::conversation_id().unwrap_or_else(crate::holder_name);
     let seat = crate::seat_name();
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|dir| fs::canonicalize(dir).ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    request_approval_at(id, &crate::holder_name(), &seat, &cwd, peer, &root()).await
+    request_approval_at(id, &session, &seat, &cwd, peer, &root()).await
 }
 
 async fn request_approval_at(
@@ -568,6 +569,25 @@ fn hook_output_at(
 mod tests {
     use super::*;
     use crate::hook_call;
+
+    #[tokio::test]
+    async fn approval_uses_the_full_call_id_with_a_named_holder() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let id = request_id(&output(&input, &ask(), &root, 100));
+        crate::as_thread(Some("conversation-1".into()), async {
+            let session = crate::conversation_id().unwrap();
+            assert_eq!(session, "conversation-1");
+            assert_ne!(session, crate::holder_name());
+            assert!(Store::open(&root, 101).unwrap().pending(&id, &session).is_ok());
+            crate::as_thread(Some("conversation-2".into()), async {
+                let other = crate::conversation_id().unwrap();
+                assert!(Store::open(&root, 102).unwrap().pending(&id, &other).is_err());
+            }).await;
+            assert_eq!(crate::conversation_id().as_deref(), Some("conversation-1"));
+        }).await;
+    }
 
     fn ask() -> Rule {
         Rule {
