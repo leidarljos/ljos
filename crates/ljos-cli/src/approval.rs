@@ -392,7 +392,8 @@ fn approved_ids(prompt: &str) -> Vec<String> {
         };
         // The answer is the person's text. The question can quote a request
         // without expressing consent, including when the answer declines it.
-        return replies.iter()
+        return replies
+            .iter()
             .filter_map(|reply| reply.get("answer").and_then(Value::as_str))
             .flat_map(approval_directives)
             .collect();
@@ -401,17 +402,21 @@ fn approved_ids(prompt: &str) -> Vec<String> {
 }
 
 fn approval_directives(prompt: &str) -> Vec<String> {
-    prompt.lines().filter_map(|line| {
-        let mut words = line.split_whitespace();
-        if !words.next()?.eq_ignore_ascii_case("approve") {
-            return None;
-        }
-        let reference = words.next()?
-            .trim_start_matches(['`', '\"', '\''])
-            .trim_end_matches(['`', '\"', '\'', '.', ',', ';', ':', '!'])
-            .to_ascii_lowercase();
-        valid_reference(&reference).then_some(reference)
-    }).collect()
+    prompt
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            if !words.next()?.eq_ignore_ascii_case("approve") {
+                return None;
+            }
+            let reference = words
+                .next()?
+                .trim_start_matches(['`', '\"', '\''])
+                .trim_end_matches(['`', '\"', '\'', '.', ',', ';', ':', '!'])
+                .to_ascii_lowercase();
+            valid_reference(&reference).then_some(reference)
+        })
+        .collect()
 }
 
 /// Consent given in the chat. A prompt reaches the hook as what the person
@@ -719,24 +724,41 @@ mod tests {
         let input = input(temp.path());
         let tag = request_id(&output(&input, &ask(), &root, 100));
         let full = Store::open(&root, 101).unwrap().requests[0].id.clone();
-        let packet = |answer: &str| format!(
-            "<send_user_message_question_reply>\n{}\n</send_user_message_question_reply>",
-            serde_json::json!([{"answer": answer,
+        let packet = |answer: &str| {
+            format!(
+                "<send_user_message_question_reply>\n{}\n</send_user_message_question_reply>",
+                serde_json::json!([{"answer": answer,
                 "question": format!("Reply approve {full} to permit the command."),
                 "questionItemId": "confirmation-1"}]),
-        );
-        for answer in ["no".to_string(), "ok".to_string(),
-                       format!("approve {}", &full[..26]), format!("do not approve {full}")] {
-            let result = approve_from_prompt_at(&packet(&answer), &one("conversation-1"), &root, Ok(102));
+            )
+        };
+        for answer in [
+            "no".to_string(),
+            "ok".to_string(),
+            format!("approve {}", &full[..26]),
+            format!("do not approve {full}"),
+        ] {
+            let result =
+                approve_from_prompt_at(&packet(&answer), &one("conversation-1"), &root, Ok(102));
             assert!(result.is_none(), "{answer}: {result:?}");
             assert!(!Store::open(&root, 103).unwrap().requests[0].approved);
         }
-        for quoted in [format!("Do not approve {full}"), format!("The question says approve {full}"),
-                       format!("> approve {tag}")] {
-            assert!(approve_from_prompt_at(&quoted, &one("conversation-1"), &root, Ok(104)).is_none());
+        for quoted in [
+            format!("Do not approve {full}"),
+            format!("The question says approve {full}"),
+            format!("> approve {tag}"),
+        ] {
+            assert!(
+                approve_from_prompt_at(&quoted, &one("conversation-1"), &root, Ok(104)).is_none()
+            );
         }
-        let result = approve_from_prompt_at(&packet(&format!("approve {tag} and retry")),
-                                            &one("conversation-1"), &root, Ok(105)).unwrap();
+        let result = approve_from_prompt_at(
+            &packet(&format!("approve {tag} and retry")),
+            &one("conversation-1"),
+            &root,
+            Ok(105),
+        )
+        .unwrap();
         assert!(result.contains("Approved once"), "{result}");
         assert!(output(&input, &ask(), &root, 106).is_empty());
     }
