@@ -46,29 +46,31 @@ fn a_forwarded_call_is_answered_by_the_fresh_server() {
     let cards = tempfile::tempdir().unwrap();
     std::fs::write(cards.path().join("USER.md"), "frozen by the test\n").unwrap();
     let tracker = tempfile::tempdir().unwrap();
-    std::fs::write(tracker.path().join("vissue.toml"), "seats = [\"acme-cli\"]\n").unwrap();
+    std::fs::write(
+        tracker.path().join("vissue.toml"),
+        "seats = [\"acme-cli\"]\n",
+    )
+    .unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let program = runtime.path().join("server");
-    std::fs::write(&program, format!(
-        "#!/bin/sh\nexport XDG_RUNTIME_DIR={}\nexport LJOS_CARDS_DIR={}\n\
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nexport XDG_RUNTIME_DIR={}\nexport LJOS_CARDS_DIR={}\n\
          export VISSUE_ROOT={}\nexport ISSUE_ROOT={}\nexport LJOS_SEAT=acme-cli\nexec {}\n",
-        quote(runtime.path().to_str().unwrap()),
-        quote(cards.path().to_str().unwrap()),
-        quote(tracker.path().to_str().unwrap()),
-        quote(tracker.path().to_str().unwrap()),
-        quote(env!("CARGO_BIN_EXE_ljos-mcp")),
-    )).unwrap();
+            quote(runtime.path().to_str().unwrap()),
+            quote(cards.path().to_str().unwrap()),
+            quote(tracker.path().to_str().unwrap()),
+            quote(tracker.path().to_str().unwrap()),
+            quote(env!("CARGO_BIN_EXE_ljos-mcp")),
+        ),
+    )
+    .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let params = serde_json::json!({"name": "ljos_cards", "arguments": {}});
     let init = serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {},
         "clientInfo": {"name": "acme-cli", "version": "1"}});
-    let answer = ljos_cli::mcp_forward(
-        &program,
-        "LJOS_MCP_FORWARDED",
-        Some(init),
-        params,
-    )
-    .unwrap();
+    let answer = ljos_cli::mcp_forward(&program, "LJOS_MCP_FORWARDED", Some(init), params).unwrap();
     assert_eq!(answer["id"], 1, "{answer}");
     assert!(
         answer["result"].to_string().contains("frozen by the test"),
