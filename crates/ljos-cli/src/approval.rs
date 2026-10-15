@@ -232,7 +232,18 @@ impl Store {
         if self.requests.len() >= MAX_REQUESTS {
             bail!("too many pending approvals; expired requests clear after fifteen minutes");
         }
-        let mut random = File::open("/dev/urandom")?;
+        let id = self.allocate_id(&mut File::open("/dev/urandom")?)?;
+        self.requests.push(Request {
+            id: id.clone(),
+            scope,
+            created: now,
+            approved: false,
+        });
+        self.save()?;
+        Ok(Some(id))
+    }
+
+    fn allocate_id(&self, random: &mut impl Read) -> Result<String> {
         for _ in 0..32 {
             let mut bytes = [0u8; 16];
             random.read_exact(&mut bytes)?;
@@ -243,14 +254,7 @@ impl Store {
             }) {
                 continue;
             }
-            self.requests.push(Request {
-                id: id.clone(),
-                scope,
-                created: now,
-                approved: false,
-            });
-            self.save()?;
-            return Ok(Some(id));
+            return Ok(id);
         }
         bail!("could not allocate a unique approval tag; retry the command")
     }
@@ -505,8 +509,9 @@ async fn request_approval_at(
         // The original elicitation capability is an empty object and means form.
         cap.form.is_some() || cap.url.is_none()
     });
+    let tag = request_tag(&pending.id).unwrap_or_else(|| pending.id.clone());
     if !supports_form {
-        bail!("this client cannot display a consent form; run `ljos approve {id}` in your own terminal");
+        bail!("this client cannot display a consent form; run `ljos approve {tag}` in your own terminal");
     }
     let schema = ElicitationSchema::from_json_schema(
         serde_json::json!({
@@ -530,7 +535,7 @@ async fn request_approval_at(
         serde_json::to_string(&pending.scope.command)?,
         serde_json::to_string(&pending.scope.cwd)?,
         pending.scope.session, pending.scope.pattern, pending.scope.reason,
-        request_tag(&pending.id).unwrap_or_else(|| pending.id.clone())
+        tag
     );
     // No store lock spans the user interaction. Confirmation reopens it and
     // checks expiry, identity and contents before granting the one retry.
@@ -688,6 +693,67 @@ mod tests {
             .next()
             .unwrap()
             .into()
+    }
+
+    #[test]
+    fn short_tags_and_full_ids_share_one_grant() {
+        for use_tag in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("approvals");
+            let input = input(temp.path());
+            let tag = request_id(&output(&input, &ask(), &root, 100));
+            assert!(tag.len() <= 12 && tag.contains('-'), "{tag}");
+            let full = Store::open(&root, 101).unwrap().requests[0].id.clone();
+            assert_eq!(full.len(), 32);
+            let reference = if use_tag { &tag } else { &full };
+            let answer = approve_from_prompt_at(
+                &format!("APPROVE {}.", reference.to_ascii_uppercase()),
+                &one("conversation-1"), &root, Ok(102),
+            ).unwrap();
+            assert!(answer.contains("Approved once"), "{answer}");
+            assert!(output(&input, &ask(), &root, 103).is_empty());
+            let mut store = Store::open(&root, 104).unwrap();
+            assert!(store.approve(&tag).is_err());
+            assert!(store.approve(&full).is_err());
+        }
+    }
+
+    #[test]
+    fn short_tag_references_match_exactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let tag = request_id(&output(&input, &ask(), &root, 100));
+        let mut store = Store::open(&root, 101).unwrap();
+        let mut changed = tag.clone();
+        let last = changed.pop().unwrap();
+        changed.push(if last == '0' { '1' } else { '0' });
+        for invalid in [tag[..tag.len()-1].to_string(), format!("{tag}0"), changed,
+                        store.requests[0].id[..31].to_string(), "é".repeat(16)] {
+            assert!(store.pending(&invalid, "conversation-1").is_err(), "{invalid}");
+            assert!(store.approve(&invalid).is_err(), "{invalid}");
+            assert!(!store.requests[0].approved);
+        }
+    }
+
+    #[test]
+    fn allocation_resamples_a_short_tag_collision() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        request_id(&output(&input, &ask(), &root, 100));
+        let mut store = Store::open(&root, 101).unwrap();
+        store.requests[0].id = "00112233000000000000000000000000".into();
+        let mut bytes = vec![0u8; 32];
+        bytes[..4].copy_from_slice(&[0x20, 0x11, 0x22, 0x33]);
+        bytes[16] = 1;
+        let allocated = store.allocate_id(&mut std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(allocated, "01000000000000000000000000000000");
+        assert_eq!(store.requests.len(), 1);
+        assert!(!store.requests[0].approved);
+        store.requests[0].id = "0".repeat(32);
+        assert!(store.allocate_id(&mut std::io::Cursor::new(vec![0u8; 16 * 32])).is_err());
+        assert_eq!(store.requests.len(), 1);
     }
 
     #[test]

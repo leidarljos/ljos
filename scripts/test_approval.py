@@ -22,9 +22,11 @@ COMMAND = "printf consent-test"
 class ConsentWireTest(unittest.TestCase):
     replace_binary = False
     protocol = "2025-11-25"
+    approval_id = REQUEST_ID
 
     def exchange(self, *, answer=None, capabilities=None, session=THREAD,
-                 age=0, change=None, arguments=None, server_seat="consent-test"):
+                 age=0, change=None, arguments=None, server_seat="consent-test",
+                 duplicate_tag=False):
         with tempfile.TemporaryDirectory(prefix="ljos-consent-") as tmp:
             root = Path(tmp)
             store = root / "ljos" / "approvals"
@@ -38,7 +40,13 @@ class ConsentWireTest(unittest.TestCase):
                     "reason": "The test requires explicit consent.",
                 },
             }
-            path.write_text(json.dumps([request]))
+            requests = [request]
+            if duplicate_tag:
+                other = json.loads(json.dumps(request))
+                other["id"] = REQUEST_ID[:-1] + "2"
+                other["scope"]["command"] += " different"
+                requests.append(other)
+            path.write_text(json.dumps(requests))
             path.chmod(0o600)
             tracker = root / "tracker"
             tracker.mkdir()
@@ -97,7 +105,7 @@ class ConsentWireTest(unittest.TestCase):
                     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                     send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
                         "name": "ljos_request_approval",
-                        "arguments": arguments if arguments is not None else {"id": REQUEST_ID},
+                        "arguments": arguments if arguments is not None else {"id": self.approval_id},
                         "_meta": {"thread_id": session},
                     }})
                     while True:
@@ -147,7 +155,7 @@ class ConsentWireTest(unittest.TestCase):
 
     def test_tool_can_name_a_registered_seat(self):
         reply, rows = self.exchange(
-            server_seat=None, arguments={"id": REQUEST_ID, "seat": "consent-test"},
+            server_seat=None, arguments={"id": self.approval_id, "seat": "consent-test"},
             answer={"action": "accept", "content": {"approve": True}},
         )
         self.assertNotIn("error", reply)
@@ -156,7 +164,7 @@ class ConsentWireTest(unittest.TestCase):
 
     def test_unknown_seat_cannot_request_consent(self):
         self.assert_blocked(server_seat=None,
-                            arguments={"id": REQUEST_ID, "seat": "unknown-test-seat"})
+                            arguments={"id": self.approval_id, "seat": "unknown-test-seat"})
 
     def test_empty_legacy_capability_supports_forms(self):
         reply, rows = self.exchange(capabilities={"elicitation": {}},
@@ -185,7 +193,7 @@ class ConsentWireTest(unittest.TestCase):
         self.assert_blocked(session="different-test-thread")
 
     def test_tool_arguments_cannot_supply_consent(self):
-        self.assert_blocked(arguments={"id": REQUEST_ID, "approve": True})
+        self.assert_blocked(arguments={"id": self.approval_id, "approve": True})
 
     def test_expired_request_cannot_open_a_dialog(self):
         self.assert_blocked(age=901)
@@ -208,6 +216,28 @@ class ForwardedConsentWireTest(ConsentWireTest):
 
 
 class AssociatedForwardedConsentWireTest(ForwardedConsentWireTest):
+    protocol = "2026-07-28"
+
+
+class ShortTagConsentWireTest(ConsentWireTest):
+    approval_id = "olive-111111"
+
+    def test_ambiguous_tag_cannot_open_a_form(self):
+        self.assert_blocked(duplicate_tag=True)
+
+    def test_full_id_disambiguates_a_tag_collision(self):
+        reply, rows = self.exchange(
+            duplicate_tag=True, arguments={"id": REQUEST_ID},
+            answer={"action": "accept", "content": {"approve": True}},
+        )
+        self.assertNotIn("error", reply)
+        self.assertFalse(reply["result"].get("isError", False), reply)
+        self.assertTrue(rows[0]["approved"])
+        self.assertFalse(rows[1]["approved"])
+
+
+class ForwardedShortTagConsentWireTest(ShortTagConsentWireTest):
+    replace_binary = True
     protocol = "2026-07-28"
 
 
