@@ -749,7 +749,7 @@ enum Cmd {
     },
     /// Argv law kept in the pack: a glob over the command line with a verdict the hook and `policy` enforce.
     Rule {
-        /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push*`.
+        /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
         /// deny stops the action; ask hands it to the person.
         #[arg(long, default_value = "ask")]
@@ -2063,9 +2063,8 @@ fn run_command() -> Result<()> {
             } else {
                 None
             };
-            // An asked push is gated by where it goes: free to the person's
-            // own unreleased repository, passed on a cited decision to a
-            // released one, the person's to run anywhere else.
+            // An ordinary branch push is allowed. Force, a remote-branch
+            // delete and a tag push stay an ask when a rule is about that push.
             let cwd = ljos_cli::hook_directory(input.trim());
             let gated = if tcb_rule.is_some() {
                 None

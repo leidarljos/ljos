@@ -31,6 +31,7 @@ pub mod reap;
 pub mod runner_hooks;
 pub mod sync;
 pub mod tools;
+mod tracker_push;
 pub mod upgrade;
 pub mod wake;
 
@@ -12396,17 +12397,9 @@ pub struct Rule {
 
 /// POST one rule.
 pub fn write_rule(rule: &Rule) -> Result<Value> {
+    validate_rule(rule)?;
     let pattern = rule.pattern.trim();
-    if pattern.is_empty() {
-        bail!("rule: a pattern over the command line is required");
-    }
-    if !matches!(rule.verdict.as_str(), "deny" | "ask") {
-        bail!("rule: the verdict is deny or ask, not {:?}", rule.verdict);
-    }
     let reason = rule.reason.trim();
-    if reason.is_empty() {
-        bail!("rule: say in a sentence why, so the reader who is stopped knows");
-    }
     let client = pack()?;
     let workspace = client.workspace();
     let mut atom = atom_body("rule", reason, &workspace);
@@ -12438,7 +12431,102 @@ pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<V
     if rules.iter().any(|r| r.pattern.is_empty()) {
         bail!("prefer: a --deny or --ask pattern over the command line is required");
     }
+    if let Some(rule) = rules.iter().find(|r| blankets_ordinary_pushes(&r.pattern)) {
+        bail!(
+            "prefer: `{}` matches an ordinary git push. Cite the exact command; `git push*` is refused",
+            rule.pattern
+        );
+    }
+    if under_a_runner() {
+        if let Some(rule) = rules
+            .iter()
+            .find(|r| broader_than_cited(&r.pattern, &r.reason))
+        {
+            bail!(
+                "prefer: `{}` is broader than the command this cites",
+                rule.pattern
+            );
+        }
+    }
     Ok(rules)
+}
+
+/// A pattern is broad when it matches ordinary branch pushes, not one
+/// command. `git push*`, `git *` and `*` do. `git push --force*` does not.
+#[must_use]
+pub fn blankets_ordinary_pushes(pattern: &str) -> bool {
+    const LINES: &[&str] = &[
+        "git push",
+        "git push origin main",
+        "git push upstream develop",
+        "git push origin feature/x",
+    ];
+    LINES
+        .iter()
+        .filter(|line| rule_matches(pattern, line))
+        .count()
+        >= 2
+}
+
+/// An agent-written pattern is broader than the command its reason cites
+/// when it also matches some other ordinary push.
+#[must_use]
+pub fn broader_than_cited(pattern: &str, reason: &str) -> bool {
+    let Some(cited) = cited_push(reason) else {
+        return false;
+    };
+    const LINES: &[&str] = &[
+        "git push",
+        "git push origin main",
+        "git push upstream develop",
+        "git push origin feature/x",
+    ];
+    LINES.iter().any(|line| {
+        rule_matches(pattern, line) && *line != cited && !line.starts_with(&format!("{cited} "))
+    })
+}
+
+fn cited_push(reason: &str) -> Option<String> {
+    let quoted = reason.split('`').nth(1)?.trim();
+    let cmd = quoted.split(['\n', ';']).next()?.trim();
+    cmd.starts_with("git push").then(|| cmd.to_string())
+}
+
+/// The checks [`write_rule`] makes before it touches the pack, so a broad
+/// pattern is refused with no atom written.
+///
+/// # Errors
+///
+/// The pattern or the reason is empty, the verdict is not `deny` or `ask`,
+/// the pattern matches ordinary branch pushes, or an agent wrote a pattern
+/// wider than the command its reason cites.
+pub fn validate_rule(rule: &Rule) -> Result<()> {
+    let pattern = rule.pattern.trim();
+    if pattern.is_empty() {
+        bail!("rule: a pattern over the command line is required");
+    }
+    if !matches!(rule.verdict.as_str(), "deny" | "ask") {
+        bail!("rule: the verdict is deny or ask, not {:?}", rule.verdict);
+    }
+    let reason = rule.reason.trim();
+    if reason.is_empty() {
+        bail!("rule: say in a sentence why, so the reader who is stopped knows");
+    }
+    if blankets_ordinary_pushes(pattern) {
+        bail!(
+            "rule: `{pattern}` matches an ordinary git push. A rule stays as exact as the command \
+             it cites; `git push*` and any pattern that covers ordinary branch pushes is refused. \
+             Force (`git push --force*`, `*--force*`), deleting a remote branch \
+             (`git push*--delete*`), and tag pushes (`git push*--tags*`) can still ask"
+        );
+    }
+    if under_a_runner() && broader_than_cited(pattern, reason) {
+        bail!(
+            "rule: `{pattern}` is broader than the command this cites. An agent-written rule \
+             matches that command and nothing wider"
+        );
+    }
+    Ok(())
 }
 
 /// The rules as `ljos rules` prints them: `verdict\tpattern\treason`, deny
@@ -14184,36 +14272,64 @@ pub struct PushFacts {
     pub released: bool,
 }
 
-/// What the gate makes of a push, from its arguments and the facts about
-/// its remote. Pure, so the ladder is tested without a repository.
+/// What the gate makes of a push, from its arguments. A branch push is
+/// free on any remote: an unreadable owner, a foreign account, a shared
+/// repository and a release do not ask or deny. Force, a remote-branch
+/// delete and a tag push are the person's to run. Pure, so the ladder is
+/// tested without a repository. `facts` stays so a caller that already
+/// looked the remote up still compiles; it does not change the tier.
 #[must_use]
 pub fn push_tier(args: &[String], facts: &PushFacts) -> PushTier {
-    let forced = args
-        .iter()
-        .any(|a| a == "-f" || a.starts_with("--force") || (a.starts_with('+') && a.len() > 1));
-    if forced {
-        return PushTier::Person("a force push rewrites what others may hold".into());
+    let _facts = (&facts.slug, facts.access, facts.released);
+    if let Some(why) = dangerous_push_reason(args) {
+        return PushTier::Person(why);
     }
-    let tags = args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--tags" | "--follow-tags" | "--mirror" | "--all"
-        ) || a.starts_with("refs/tags/")
+    PushTier::Free
+}
+
+/// Force, deleting a remote branch, or publishing tags. Anything else,
+/// including `-u` and a plain refspec, is an ordinary branch push.
+fn dangerous_push_reason(args: &[String]) -> Option<String> {
+    let force = args.iter().any(|a| {
+        a == "-f"
+            || a.starts_with("--force")
+            || short_force(a)
+            || (a.starts_with('+') && a.len() > 1)
     });
-    if tags {
-        return PushTier::Person("tags and mirrors publish releases".into());
+    if force {
+        return Some("a force push rewrites what others may hold".into());
     }
-    let Some((owner, repo)) = &facts.slug else {
-        return PushTier::Person("the remote's owner could not be read".into());
+    if args.iter().any(|a| a == "--delete" || delete_refspec(a)) {
+        return Some("deleting a remote branch removes what others may hold".into());
+    }
+    if args.iter().any(|a| {
+        matches!(a.as_str(), "--tags" | "--follow-tags" | "--mirror") || a.contains("refs/tags/")
+    }) || args
+        .windows(2)
+        .any(|w| w[0] == "tag" && !w[1].starts_with('-'))
+    {
+        return Some("tags and mirrors publish releases".into());
+    }
+    None
+}
+
+/// `-fu` and `-uf`: git's short cluster that includes force. `-u` alone
+/// only sets the upstream.
+fn short_force(arg: &str) -> bool {
+    let Some(flags) = arg.strip_prefix('-') else {
+        return false;
     };
-    let slug = format!("{owner}/{repo}");
-    match facts.access {
-        Access::Foreign => PushTier::Person(format!("{slug} is not the person's to push to")),
-        Access::Unknown => PushTier::Person(format!("nothing said whose {slug} is")),
-        Access::Shared => PushTier::Cite(format!("{slug} is shared")),
-        Access::Exclusive if facts.released => PushTier::Cite(format!("{slug} has releases")),
-        Access::Exclusive => PushTier::Free,
-    }
+    !flags.is_empty()
+        && !flags.starts_with('-')
+        && flags.chars().all(|c| c.is_ascii_alphabetic())
+        && flags.contains('f')
+}
+
+/// `:branch` and `+:branch` delete the remote ref. A `+` prefix is also
+/// a force and is named first.
+fn delete_refspec(arg: &str) -> bool {
+    let spec = arg.strip_prefix('+').unwrap_or(arg);
+    spec.starts_with(':') && spec.len() > 1
 }
 
 /// The forge's account name for the person, from `gh`.
@@ -14259,15 +14375,10 @@ pub fn repo_fact_text(owner: &str, repo: &str, facts: &Value) -> String {
     } else {
         "an organisation's or another account's"
     };
-    let pushes = match access_of(facts) {
-        Access::Foreign => "the person cannot push to it, so a push there is theirs to run",
-        Access::Shared => "others push there too, so a push cites the decision behind it",
-        Access::Exclusive if facts["released"].as_bool().unwrap_or(true) => {
-            "it has releases, so a push cites the decision behind it"
-        }
-        _ => "nobody else pushes there and it has no release, so a branch push runs",
-    };
-    format!("{owner}/{repo} is {whose} repository; {pushes}.")
+    format!(
+        "{owner}/{repo} is {whose} repository; a branch push runs, and a force push, \
+         a remote-branch delete, or a tag push is the person's to run."
+    )
 }
 
 /// What the seat knows of a GitHub repository: the pack's claim about it,
@@ -15021,48 +15132,43 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 }
 
 /// The verdict the push gate makes of a line the rules asked about: `None`
-/// lets it run. Only an `ask` on a push is gated; every other verdict, and
-/// a line with no push, is the rule's own. A cited pass is noted on the
-/// cited issue, so the record says which decision let it through.
+/// lets it run. An ordinary branch push is allowed, including when a seat
+/// rule says `git push*` and when the remote's owner cannot be read. Force,
+/// deleting a remote branch, and pushing tags stay an `ask` when the rule
+/// that fired is about that push. A rule about some other command on the
+/// same line is left as it is.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
+    let _ = cwd;
     let r = rule?;
-    let Some(p) = (r.verdict == "ask").then(|| push_call(line)).flatten() else {
+    let Some(call) = push_call(line) else {
         return Some(r.clone());
     };
-    let ruled = |reason: String| Rule {
+    let segment = push_segment(&call);
+    let about_push = rule_matches(&r.pattern, &segment) || rule_matches(&r.pattern, "git push");
+    if !about_push {
+        return Some(r.clone());
+    }
+    let Some(why) = dangerous_push_reason(&call.args) else {
+        return None;
+    };
+    if r.verdict != "ask" {
+        return Some(r.clone());
+    }
+    Some(Rule {
         pattern: r.pattern.clone(),
         verdict: "ask".into(),
-        reason,
-    };
-    match push_tier_at(&p, cwd) {
-        PushTier::Free => None,
-        PushTier::Cite(why) => match p.cite.as_deref().map(cite_stands) {
-            Some(Ok(stood)) => {
-                if let Some(issue) = p.cite.as_deref().filter(|c| tracker_show_json(c).is_ok()) {
-                    let _ = run_captured(
-                        "vissue",
-                        &[
-                            "note",
-                            issue,
-                            &format!("push passed on {stood}: {}", line.trim()),
-                        ],
-                    );
-                }
-                None
-            }
-            Some(Err(e)) => Some(ruled(format!("{why}; the cite does not stand: {e}"))),
-            None => Some(ruled(format!(
-                "{why}, so the push cites the decision behind it: run it as `LJOS_CITE=ISSUE {}`, \
-                 where the seats that voted on ISSUE agree and one of them is not this seat \
-                 (persona and judge ballots do not count)",
-                line.trim()
-            ))),
-        },
-        PushTier::Person(why) => Some(ruled(format!(
-            "{} ({why}); the person runs this one",
-            r.reason
-        ))),
+        reason: format!("{} ({why}); the person runs this one", r.reason),
+    })
+}
+
+/// `git push` plus the arguments [`push_call`] kept, so a rule is tried on
+/// the push itself and not on the `LJOS_CITE=` prefix in front of it.
+fn push_segment(call: &PushCall) -> String {
+    if call.args.is_empty() {
+        "git push".to_string()
+    } else {
+        format!("git push {}", call.args.join(" "))
     }
 }
 
@@ -21288,18 +21394,11 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let mirrors = tracker_upstream(dir)
         .and_then(|up| tracker_mirrors(dir, &up))
         .unwrap_or_default();
-    // A push another host beat is merged, not left ahead: the next catch-up
-    // only fast-forwards, so a clone left diverged never recovered. A merge
-    // rather than a rebase, because other seats keep uncommitted edits in
-    // the same worktree; issues.org merges by heading through vissue.
-    let mut script =
-        String::from("git push -q || { git pull -q --no-rebase --no-edit && git push -q; }; rc=$?");
-    for (remote, branch) in &mirrors {
-        script.push_str(&format!(
-            "; git push -q '{remote}' 'HEAD:refs/heads/{branch}' || rc=1"
-        ));
-    }
-    script.push_str("; exit $rc");
+    // Another bot's push is fetched and rebased, not merged and not forced.
+    // The first attempt is this script. A non-fast-forward comes back here
+    // and [`tracker_push::push_checkout`] unions the org headings, then
+    // retries. A branch with no upstream is pushed with `-u origin <branch>`.
+    let script = tracker_push::push_script(dir, &mirrors);
     let mut push = std::process::Command::new("sh");
     push.current_dir(dir)
         .args(["-c", &script])
@@ -21324,9 +21423,16 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             }
             Ok(Some(_)) => {
                 let said = std::fs::read(&log).unwrap_or_default();
+                let said = String::from_utf8_lossy(&said);
+                if tracker_push::rejected(&said) {
+                    return match tracker_push::push_checkout(dir) {
+                        Ok(()) => format!("tracker git: committed and pushed {message}\n"),
+                        Err(e) => format!("tracker git: committed {message}; push refused: {e}\n"),
+                    };
+                }
                 return format!(
                     "tracker git: committed {message}; push refused: {}\n",
-                    first_line(&said)
+                    first_line(said.as_bytes())
                 );
             }
             Ok(None) if started.elapsed() < wait => {
@@ -31015,24 +31121,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             push_tier(&args(&["origin", "main"]), &facts(Access::Exclusive, false)),
             PushTier::Free
         );
+        let unread = PushFacts {
+            slug: None,
+            access: Access::Unknown,
+            released: false,
+        };
+        assert_eq!(
+            push_tier(&args(&[]), &unread),
+            PushTier::Free,
+            "an unreadable owner does not ask"
+        );
+        assert_eq!(
+            push_tier(&args(&["upstream", "develop"]), &unread),
+            PushTier::Free
+        );
+        for access in [
+            Access::Exclusive,
+            Access::Shared,
+            Access::Foreign,
+            Access::Unknown,
+        ] {
+            assert_eq!(
+                push_tier(&args(&["origin", "main"]), &facts(access, true)),
+                PushTier::Free,
+                "{access:?}"
+            );
+        }
         assert!(matches!(
-            push_tier(&args(&[]), &facts(Access::Exclusive, true)),
-            PushTier::Cite(_)
-        ));
-        assert!(matches!(
-            push_tier(&args(&[]), &facts(Access::Shared, false)),
-            PushTier::Cite(_)
-        ));
-        assert!(matches!(
-            push_tier(&args(&[]), &facts(Access::Foreign, false)),
+            push_tier(&args(&["--tags"]), &unread),
             PushTier::Person(_)
         ));
         assert!(matches!(
-            push_tier(&args(&[]), &facts(Access::Unknown, false)),
+            push_tier(&args(&["--force-with-lease"]), &unread),
             PushTier::Person(_)
         ));
         assert!(matches!(
-            push_tier(&args(&["--tags"]), &facts(Access::Exclusive, false)),
+            push_tier(&args(&["-f"]), &unread),
+            PushTier::Person(_)
+        ));
+        assert!(matches!(
+            push_tier(&args(&["origin", "--delete", "old"]), &unread),
+            PushTier::Person(_)
+        ));
+        assert!(matches!(
+            push_tier(&args(&["origin", ":old"]), &unread),
             PushTier::Person(_)
         ));
         assert!(matches!(
@@ -31075,6 +31207,76 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "a deny is the rule's own"
         );
         assert_eq!(gate_push(None, "git push", None), None);
+        let trust = Rule {
+            pattern: "git push*".into(),
+            verdict: "ask".into(),
+            reason: "A push is the trust gate.".into(),
+        };
+        for line in [
+            "git push",
+            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
+            "git push origin main",
+            "git push -u origin feature/x",
+        ] {
+            let gated = gate_push(Some(&trust), line, None);
+            assert!(gated.is_none(), "{line} stayed {gated:?}");
+            let ruled = ruled_verdict(&[trust.clone()], line);
+            let gated = gate_push(ruled.as_ref(), line, None);
+            assert!(gated.is_none(), "{line} via ruled_verdict stayed {gated:?}");
+        }
+        let codex = hook_call(
+            r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"git push"}}"#,
+        );
+        let gated = gate_push(
+            ruled_verdict(&[trust.clone()], &codex.cue).as_ref(),
+            &codex.cue,
+            None,
+        );
+        let said = hook_output_ruled(&codex, "", gated.as_ref());
+        assert!(
+            !said.contains("ask the person") && !said.contains("could not be read"),
+            "{said}"
+        );
+        let cited = hook_call(
+            r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"LJOS_CITE=gpr_optim-1yg5 git push upstream develop"}}"#,
+        );
+        let gated = gate_push(
+            ruled_verdict(&[trust.clone()], &cited.cue).as_ref(),
+            &cited.cue,
+            None,
+        );
+        assert!(gated.is_none(), "{gated:?}");
+        for line in ["git status", "git commit -m save", "cargo build", "rg foo"] {
+            let ruled = ruled_verdict(&[], line);
+            let gated = gate_push(ruled.as_ref(), line, None);
+            assert!(gated.is_none(), "{line} -> {gated:?}");
+            let with_rule = gate_push(ruled_verdict(&[trust.clone()], line).as_ref(), line, None);
+            assert!(
+                with_rule.is_none(),
+                "{line} under git push* -> {with_rule:?}"
+            );
+        }
+        let forced = gate_push(Some(&trust), "git push --force origin main", None);
+        assert!(
+            forced.as_ref().is_some_and(|r| r.verdict == "ask"),
+            "{forced:?}"
+        );
+        assert!(
+            validate_rule(&trust).is_err(),
+            "git push* is refused at write time"
+        );
+        assert!(validate_rule(&Rule {
+            pattern: "*--force*".into(),
+            verdict: "deny".into(),
+            reason: "Never force.".into(),
+        })
+        .is_ok());
+        assert!(validate_rule(&Rule {
+            pattern: "git push origin *".into(),
+            verdict: "ask".into(),
+            reason: "the command was `git push origin feature/x`".into(),
+        })
+        .is_err());
     }
 
     #[test]

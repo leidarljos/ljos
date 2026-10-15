@@ -17,9 +17,17 @@ const TTL_SECONDS: u64 = 15 * 60;
 const MAX_REQUESTS: usize = 256;
 const MAX_STORE_BYTES: u64 = 2 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Scope {
     session: String,
+    /// The seat that raised the request. The approval tool matches this
+    /// plus the directory plus the request id, so a different conversation
+    /// string from the same session still grants. It is not part of the
+    /// hook retry's equality: that retry stays bound to the command,
+    /// directory, conversation, tool and rule, and a seat rename between
+    /// the ask and the retry does not drop the grant.
+    #[serde(default)]
+    seat: String,
     shape: String,
     tool: String,
     cwd: PathBuf,
@@ -27,6 +35,20 @@ struct Scope {
     pattern: String,
     reason: String,
 }
+
+impl PartialEq for Scope {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.shape == other.shape
+            && self.tool == other.tool
+            && self.cwd == other.cwd
+            && self.command == other.command
+            && self.pattern == other.pattern
+            && self.reason == other.reason
+    }
+}
+
+impl Eq for Scope {}
 
 impl Scope {
     fn from_hook(input: &str, call: &HookCall, rule: &Rule) -> Result<Self> {
@@ -64,6 +86,7 @@ impl Scope {
         }
         Ok(Self {
             session: session.into(),
+            seat: crate::seat_name(),
             shape: format!("{:?}", call.shape),
             tool: tool.into(),
             cwd,
@@ -195,6 +218,13 @@ impl Store {
     }
 
     fn pending(&self, id: &str, session: &str) -> Result<Request> {
+        self.pending_for(id, session, "", Path::new(""))
+    }
+
+    /// A grant from this session. The conversation string may differ between
+    /// the hook and the approval tool; the seat, the directory and the
+    /// request id are the match.
+    fn pending_for(&self, id: &str, session: &str, seat: &str, cwd: &Path) -> Result<Request> {
         let request = self
             .requests
             .iter()
@@ -202,7 +232,11 @@ impl Store {
             .context(
                 "approval request is unknown, expired, or consumed; retry the original command",
             )?;
-        if request.scope.session != session {
+        let conversation_ok =
+            request.scope.session == session || same_conversation(&request.scope.session, session);
+        let place_ok =
+            !seat.is_empty() && request.scope.seat == seat && same_dir(&request.scope.cwd, cwd);
+        if !conversation_ok && !place_ok {
             bail!("approval belongs to a different conversation");
         }
         if request.approved {
@@ -261,6 +295,15 @@ impl Store {
         }
         self.approve(id)
     }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    if a.as_os_str().is_empty() || b.as_os_str().is_empty() {
+        return false;
+    }
+    let left = fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let right = fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    left == right
 }
 
 /// Two spellings of one conversation. A runner sends `session_id` on a tool
@@ -369,36 +412,51 @@ fn root() -> PathBuf {
     crate::runtime_dir().join("approvals")
 }
 
+/// A person's terminal may grant, including one whose environment still
+/// carries a runner's conversation id. An agent tool call has no terminal;
+/// the seat guard also refuses the command itself.
+fn terminal_consent(is_terminal: bool) -> Result<()> {
+    if is_terminal {
+        return Ok(());
+    }
+    bail!(
+        "approve: consent is the person's. This needs a terminal; the person runs \
+         `ljos approve` in a terminal of their own"
+    )
+}
+
 /// Record explicit consent for the pending request named by the hook.
 /// The grant permits one matching attempt within the request's lifetime.
 pub fn approve(id: &str) -> Result<String> {
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
     let terminal = unsafe { libc::isatty(0) } == 1;
-    if crate::under_a_runner() || !terminal {
-        bail!(
-            "approve: consent is the person's. This runs under an agent runner or without a \
-             terminal; the person runs `ljos approve {id}` in a terminal of their own"
-        );
-    }
+    terminal_consent(terminal)?;
     Store::open(&root(), now()?)?.approve(id)
 }
 
 /// Ask the connected client's user to consent to an existing request.
 /// Tool arguments identify the request; only the client's form response grants it.
 pub async fn request_approval(id: &str, peer: &rmcp::Peer<rmcp::RoleServer>) -> Result<String> {
-    request_approval_at(id, &crate::holder_name(), peer, &root()).await
+    let seat = crate::seat_name();
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|dir| fs::canonicalize(dir).ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    request_approval_at(id, &crate::holder_name(), &seat, &cwd, peer, &root()).await
 }
 
 async fn request_approval_at(
     id: &str,
     session: &str,
+    seat: &str,
+    cwd: &Path,
     peer: &rmcp::Peer<rmcp::RoleServer>,
     root: &Path,
 ) -> Result<String> {
     use rmcp::model::{ElicitRequestParams, ElicitationSchema};
 
     let started = now()?;
-    let pending = Store::open(root, started)?.pending(id, session)?;
+    let pending = Store::open(root, started)?.pending_for(id, session, seat, cwd)?;
     let info = peer
         .peer_info()
         .context("approval client has not initialized")?;
@@ -496,7 +554,7 @@ fn hook_output_at(
         result => {
             let mut pending = rule.clone();
             let detail = match result {
-                Ok(Some(id)) => format!("Call the ljos_request_approval MCP tool with id {id} to show the person a consent form. Or ask the person to reply `approve {id}` in this conversation, or to run `ljos approve {id}` in a terminal of their own (it refuses under an agent). Retry only after consent is recorded. The grant is for one attempt in this directory and conversation and expires fifteen minutes after the request."),
+                Ok(Some(id)) => format!("Call the ljos_request_approval MCP tool with id {id} to show the person a consent form. Or ask the person to reply `approve {id}` in this conversation, or to run `ljos approve {id}` in a terminal of their own. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request."),
                 Err(error) => format!("Approval could not be recorded: {error:#}. The command remains blocked."),
                 Ok(None) => unreachable!(),
             };
@@ -861,6 +919,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_grant_matches_seat_and_directory_when_the_conversation_id_differs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let id = request_id(&output(&input, &ask(), &root, 100));
+        let seat = crate::seat_name();
+        let cwd = fs::canonicalize(temp.path()).unwrap();
+        let store = Store::open(&root, 101).unwrap();
+        assert!(store.pending(&id, "not-this-conversation").is_err());
+        store
+            .pending_for(&id, "not-this-conversation", &seat, &cwd)
+            .expect("the same seat, directory and request id grant");
+        assert!(store
+            .pending_for(&id, "not-this-conversation", "someone-else", &cwd)
+            .is_err());
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(store
+            .pending_for(
+                &id,
+                "not-this-conversation",
+                &seat,
+                &fs::canonicalize(elsewhere.path()).unwrap(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn a_terminal_grants_even_when_a_runner_is_in_the_environment() {
+        assert!(terminal_consent(true).is_ok());
+        let err = terminal_consent(false).unwrap_err().to_string();
+        assert!(err.contains("terminal"), "{err}");
     }
 
     #[test]

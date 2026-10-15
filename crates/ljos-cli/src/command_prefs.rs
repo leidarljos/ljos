@@ -146,6 +146,12 @@ pub fn rule_candidates(text: &str) -> Vec<Rule> {
             });
         }
     }
+    // An auto-written rule is the command the preference cites, not a
+    // blanket over every branch push.
+    rules.retain(|rule| !crate::blankets_ordinary_pushes(&rule.pattern));
+    if crate::under_a_runner() {
+        rules.retain(|rule| !crate::broader_than_cited(&rule.pattern, &rule.reason));
+    }
     rules
 }
 

@@ -115,11 +115,11 @@ runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
   `rm -rf` outside temp, `git reset --hard` and the like, read through `env`,
   `timeout`, `xargs` and other wrappers) and your rules in the pack
   (`ljos rule`), tried on each command a line runs, plus a guard that keeps agents from rewriting the
-  checker's own binaries and hook files. With an ask rule on pushes
-  (`ljos rule 'git push*' --verdict ask --why "..."`), a push to your own
-  unreleased repository goes through, a push to a released or shared one
-  has to cite a decision another seat voted on, and anything else goes to
-  you. Without that rule a plain push is not checked.
+  checker's own binaries and hook files. An ordinary `git push` of a branch
+  is allowed, whichever remote it names and whether or not that remote's
+  owner can be read. Force (`--force`, `-f`, `--force-with-lease`, a
+  `+refspec`), deleting a remote branch, and pushing tags can still ask.
+  A pattern as wide as `git push*` is refused when a rule is written.
 - Decisions with more than one defensible answer go to personas, voters with
   a view of their own. They settle by trust-weighted
   [consensus](https://github.com/leidarljos/consensus) that learns from the
