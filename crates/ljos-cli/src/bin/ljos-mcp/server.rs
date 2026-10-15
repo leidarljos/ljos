@@ -2741,9 +2741,16 @@ async fn forward_call(
     let mut worker = tokio::task::spawn_blocking(move || {
         ljos_cli::mcp_forward_with_requests(&program, FORWARDED, init, params, |method, params| {
             let (reply, answer) = std::sync::mpsc::channel();
-            let closed = || serde_json::json!({"code": -32603,
-                "message": "the forwarding client disconnected"});
-            sender.send(ForwardRequest { method: method.into(), params, reply })
+            let closed = || {
+                serde_json::json!({"code": -32603,
+                "message": "the forwarding client disconnected"})
+            };
+            sender
+                .send(ForwardRequest {
+                    method: method.into(),
+                    params,
+                    reply,
+                })
                 .map_err(|_| closed())?;
             answer.recv().map_err(|_| closed())?
         })
