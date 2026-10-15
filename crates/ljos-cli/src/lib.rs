@@ -1468,6 +1468,26 @@ pub fn mcp_forward(
     init: Option<Value>,
     params: Value,
 ) -> Result<Value> {
+    mcp_forward_with_requests(program, marker, init, params, |method, _| {
+        Err(serde_json::json!({"code": -32601,
+            "message": format!("forwarding does not support {method}")}))
+    })
+}
+
+/// Forward one call and relay requests from the child to the connected client.
+/// Request ids belong to each direction independently; a child request with
+/// id 1 is not the response to the forwarded tool call with id 1.
+///
+/// # Errors
+///
+/// The child cannot start, a pipe fails, or the child exits without answering.
+pub fn mcp_forward_with_requests(
+    program: &Path,
+    marker: &str,
+    init: Option<Value>,
+    params: Value,
+    mut request: impl FnMut(&str, Value) -> std::result::Result<Value, Value>,
+) -> Result<Value> {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
     let mut child = Command::new(program)
@@ -1498,7 +1518,18 @@ pub fn mcp_forward(
         let Ok(v) = serde_json::from_str::<Value>(&line?) else {
             continue;
         };
-        if v["id"] == serde_json::json!(1) {
+        if let Some(method) = v.get("method").and_then(Value::as_str) {
+            if let Some(id) = v.get("id") {
+                let mut response = serde_json::json!({"jsonrpc": "2.0", "id": id});
+                match request(method, v["params"].clone()) {
+                    Ok(result) => response["result"] = result,
+                    Err(error) => response["error"] = error,
+                }
+                let stdin = child.stdin.as_mut().context("forward: stdin closed")?;
+                writeln!(stdin, "{response}")?;
+                stdin.flush()?;
+            }
+        } else if v["id"] == serde_json::json!(1) {
             answer = Some(v);
             break;
         }
@@ -5915,7 +5946,7 @@ pub fn hook_context(call: &HookCall, limit: usize) -> String {
 
 /// Tokens in `text` shaped like tracker ids: a prefix that opens with a
 /// capital, a dash, then four or more lowercase letters or digits, as
-/// `Rig-ab12` or `Software-kzdk`. Each once, in order.
+/// `Example-0000000000` or `Example-1111111111`. Each once, in order.
 #[must_use]
 pub fn issue_ids_in(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -23536,24 +23567,24 @@ mod tests {
     fn a_prompt_naming_an_issue_gets_its_recall() {
         assert_eq!(
             super::issue_ids_in(
-                "You're picking up tracker issue Rig-ab12 in this workspace; see Rig-ab12."
+                "You're picking up tracker issue Example-0000000000 in this workspace; see Example-0000000000."
             ),
-            vec!["Rig-ab12".to_string()]
+            vec!["Example-0000000000".to_string()]
         );
         assert!(super::issue_ids_in("a well-known re-run of e-mail").is_empty());
         let note = super::recall_note(
-            "Rig-ab12",
+            "Example-0000000000",
             "\nMemory\n  - [lesson, today] PURPLE-HERON-42\n",
         );
         assert!(
-            note.starts_with("Recall for Rig-ab12 (`ljos recall Rig-ab12`"),
+            note.starts_with("Recall for Example-0000000000 (`ljos recall Example-0000000000`"),
             "{note}"
         );
         assert!(
             note.ends_with("- [lesson, today] PURPLE-HERON-42"),
             "{note}"
         );
-        assert!(super::recall_note("Rig-ab12", "").is_empty());
+        assert!(super::recall_note("Example-0000000000", "").is_empty());
     }
 
     /// Real models given the old denial moved the directory to /tmp and
@@ -28035,11 +28066,11 @@ mod tests {
         let board = |extra: &str, later: &str| {
             format!(
                 "#+VISSUE: 1\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
-                 * STARTED [#C] anneal the notes\n:PROPERTIES:\n:ID:         anneal-z64x\n:VISSUE_TAGS: workflow-feature\n:END:\n\
-                 * DONE [#C] design: anneal the notes\n:PROPERTIES:\n:ID:         anneal-d\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-design\n:END:\n\
-                 * DONE [#C] impl: anneal the notes\n:PROPERTIES:\n:ID:         anneal-i\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-implement\n:END:\n\
-                 * DONE [#C] review: anneal the notes\n:PROPERTIES:\n:ID:         anneal-v\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-review\n:END:\n\
-                 * DONE [#C] panel r1: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r1\n:PARENT:     anneal-z64x\n:TYPE:       decision\n:VISSUE_TAGS: stage-panel\n:END:\n\
+                 * STARTED [#C] anneal the notes\n:PROPERTIES:\n:ID:         proj-1a2b\n:VISSUE_TAGS: workflow-feature\n:END:\n\
+                 * DONE [#C] design: anneal the notes\n:PROPERTIES:\n:ID:         anneal-d\n:PARENT:     proj-1a2b\n:VISSUE_TAGS: stage-design\n:END:\n\
+                 * DONE [#C] impl: anneal the notes\n:PROPERTIES:\n:ID:         anneal-i\n:PARENT:     proj-1a2b\n:VISSUE_TAGS: stage-implement\n:END:\n\
+                 * DONE [#C] review: anneal the notes\n:PROPERTIES:\n:ID:         anneal-v\n:PARENT:     proj-1a2b\n:VISSUE_TAGS: stage-review\n:END:\n\
+                 * DONE [#C] panel r1: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r1\n:PARENT:     proj-1a2b\n:TYPE:       decision\n:VISSUE_TAGS: stage-panel\n:END:\n\
                  :LOGBOOK:\n\
                  {nit}{wording}{extra}:END:\n\
                  {later}",
@@ -28083,7 +28114,7 @@ mod tests {
         }
         std::fs::write(&ballots, format!("[{}]", rows.join(","))).unwrap();
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LOG\"\ncase \"$1\" in\n  children) cat \"$CHILDREN\" ;;\n  vote) cat \"$BALLOTS\" ;;\n  q) echo anneal-f001 ;;\n  note|update|append) exit 0 ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n"
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LOG\"\ncase \"$1\" in\n  children) cat \"$CHILDREN\" ;;\n  vote) cat \"$BALLOTS\" ;;\n  q) echo proj-f001 ;;\n  note|update|append) exit 0 ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n"
         );
         let fake = bin.join("vissue");
         std::fs::write(&fake, script).unwrap();
@@ -28138,7 +28169,7 @@ mod tests {
         std::env::set_var("CHILDREN", &children);
         std::env::set_var("BALLOTS", &ballots);
 
-        let out = workflow_round("anneal-z64x").unwrap();
+        let out = workflow_round("proj-1a2b").unwrap();
         assert!(out.contains("settled-with-notes"), "{out}");
         assert!(out.contains("comma in note 0"), "{out}");
         assert_eq!(out.matches("heading tone").count(), 1, "{out}");
@@ -28159,8 +28190,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let out = workflow_round("anneal-z64x").unwrap();
-        assert!(out.contains("filed fix anneal-f001"), "{out}");
+        let out = workflow_round("proj-1a2b").unwrap();
+        assert!(out.contains("filed fix proj-f001"), "{out}");
         assert!(out.contains("the gate ignores a failure"), "{out}");
         let said = std::fs::read_to_string(&log).unwrap();
         assert_eq!(
@@ -28171,12 +28202,12 @@ mod tests {
 
         std::fs::write(&log, "").unwrap();
         let later = "\
-* DONE [#C] panel r2: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r2\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-panel\n:END:\n\
-* DONE [#C] panel r3: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r3\n:PARENT:     anneal-z64x\n:VISSUE_TAGS: stage-panel\n:END:\n\
+* DONE [#C] panel r2: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r2\n:PARENT:     proj-1a2b\n:VISSUE_TAGS: stage-panel\n:END:\n\
+* DONE [#C] panel r3: anneal the notes\n:PROPERTIES:\n:ID:         anneal-r3\n:PARENT:     proj-1a2b\n:VISSUE_TAGS: stage-panel\n:END:\n\
 :LOGBOOK:\n- Note: \"finding: tester: blocking: the wait is still unchecked :: the wait is unchecked\" [2026-10-14 Wed 12:05]\n:END:\n";
         std::fs::write(&issues, board("", later)).unwrap();
         std::fs::write(&children, ids(&["anneal-r2", "anneal-r3"])).unwrap();
-        let out = workflow_round("anneal-z64x").unwrap();
+        let out = workflow_round("proj-1a2b").unwrap();
         assert!(out.contains("settled-with-notes"), "{out}");
         assert!(out.contains("round 3"), "{out}");
         assert!(out.contains("the wait is unchecked"), "{out}");
@@ -36032,11 +36063,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn a_yaml_snippet_goes_under_the_key_the_file_already_has() {
         let snippet = "\nextensions:\n  ljos:\n    cmd: \"/x\"\n";
-        let have = "GOOSE_PROVIDER: openai\nextensions:\n  developer:\n    enabled: true\n";
+        let have = "GOOSE_PROVIDER: example\nextensions:\n  developer:\n    enabled: true\n";
         let out = super::append_config(have, snippet);
         assert_eq!(out.matches("extensions:").count(), 1);
         assert!(out.contains("extensions:\n  ljos:\n    cmd: \"/x\"\n  developer:"));
-        let fresh = super::append_config("GOOSE_PROVIDER: openai\n", snippet);
+        let fresh = super::append_config("GOOSE_PROVIDER: example\n", snippet);
         assert!(fresh.ends_with(snippet));
         let toml = super::append_config("[a]\n", "\n[mcp_servers.ljos]\ncommand = \"x\"\n");
         assert!(toml.ends_with("[mcp_servers.ljos]\ncommand = \"x\"\n"));
