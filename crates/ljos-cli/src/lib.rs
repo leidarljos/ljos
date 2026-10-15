@@ -1643,6 +1643,8 @@ fn inherited_record(name: &str) -> Option<Seat> {
 tokio::task_local! {
     /// The seat of one MCP call whose runner named its thread on the call.
     static CALL_SEAT: Seat;
+    /// The full conversation identifier used to bind command consent.
+    static CALL_CONVERSATION: String;
 }
 
 /// Run `f` as the thread a runner named on this call, when it named one.
@@ -1650,9 +1652,23 @@ tokio::task_local! {
 /// the call's metadata rather than in the server's environment.
 pub async fn as_thread<F: std::future::Future>(thread: Option<String>, f: F) -> F::Output {
     match thread.filter(|t| t.trim().len() >= 8) {
-        Some(t) => CALL_SEAT.scope(seat_for_thread(&t), f).await,
+        Some(t) => {
+            let seat = seat_for_thread(&t);
+            CALL_CONVERSATION
+                .scope(t.trim().to_string(), CALL_SEAT.scope(seat, f))
+                .await
+        }
         None => f.await,
     }
+}
+
+/// The full identifier of this call or process, independent of its display name.
+#[must_use]
+pub fn conversation_id() -> Option<String> {
+    CALL_CONVERSATION
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| session_actor().map(|(id, _)| id))
 }
 
 /// Run `f` as the seat this call named. Nest it inside [`as_thread`]: the
@@ -2407,11 +2423,9 @@ fn login_user() -> String {
 }
 
 /// The seat a ballot or a forecast counts for. Refused when nothing named
-/// the seat and it is only the program above this shell: a subagent with
-/// no `LJOS_SEAT` cast 25 forecasts as `exec-daemon`, the box's command
-/// daemon, and nothing said so (Software-o9bu). `LJOS_SEAT`,
+/// the seat and it is only the program above this shell. `LJOS_SEAT`,
 /// `VISSUE_AGENT`, an MCP client's name or a runner's record name a seat;
-/// a person at a terminal is their login user, as before.
+/// a person at a terminal is their login user.
 ///
 /// # Errors
 ///
@@ -24708,8 +24722,8 @@ mod tests {
         assert!(said.contains("filed at the top of Tools"), "{said}");
         assert!(said.contains("--parent garden-06v8"), "{said}");
         // --parent and --top still win.
-        let (parent, project, _) = file_placement(false, s("Tools-x6vs"), s("Tools"), held());
-        assert_eq!(parent, s("Tools-x6vs"));
+        let (parent, project, _) = file_placement(false, s("Tools-example"), s("Tools"), held());
+        assert_eq!(parent, s("Tools-example"));
         assert_eq!(project, s("Tools"));
         let (parent, project, said) = file_placement(true, None, None, held());
         assert_eq!((parent, project, said), (None, None, None));
@@ -34014,7 +34028,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// Mail to a seat the pack has never heard from is refused with the
-    /// seats it knows, and posts nothing (Software-mwy5).
+    /// seats it knows, and posts nothing.
     #[test]
     fn a_send_to_a_seat_the_pack_does_not_know_is_refused() {
         let _g = env_guard();
