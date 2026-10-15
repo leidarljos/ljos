@@ -696,6 +696,35 @@ mod tests {
     }
 
     #[test]
+    fn a_question_quoted_in_a_reply_cannot_grant_consent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let tag = request_id(&output(&input, &ask(), &root, 100));
+        let full = Store::open(&root, 101).unwrap().requests[0].id.clone();
+        let packet = |answer: &str| format!(
+            "<send_user_message_question_reply>\n{}\n</send_user_message_question_reply>",
+            serde_json::json!([{"answer": answer,
+                "question": format!("Reply approve {full} to permit the command."),
+                "questionItemId": "confirmation-1"}]),
+        );
+        for answer in ["no".to_string(), "ok".to_string(),
+                       format!("approve {}", &full[..26]), format!("do not approve {full}")] {
+            let result = approve_from_prompt_at(&packet(&answer), &one("conversation-1"), &root, Ok(102));
+            assert!(result.is_none(), "{answer}: {result:?}");
+            assert!(!Store::open(&root, 103).unwrap().requests[0].approved);
+        }
+        for quoted in [format!("Do not approve {full}"), format!("The question says approve {full}"),
+                       format!("> approve {tag}")] {
+            assert!(approve_from_prompt_at(&quoted, &one("conversation-1"), &root, Ok(104)).is_none());
+        }
+        let result = approve_from_prompt_at(&packet(&format!("approve {tag} and retry")),
+                                            &one("conversation-1"), &root, Ok(105)).unwrap();
+        assert!(result.contains("Approved once"), "{result}");
+        assert!(output(&input, &ask(), &root, 106).is_empty());
+    }
+
+    #[test]
     fn short_tags_and_full_ids_share_one_grant() {
         for use_tag in [false, true] {
             let temp = tempfile::tempdir().unwrap();
