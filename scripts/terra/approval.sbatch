@@ -22,6 +22,7 @@ if [[ -n "${2:-}" ]]; then
 fi
 cargo build --locked --release -p ljos --bin ljos --bin ljos-mcp
 cargo test --locked -p ljos --lib approval::tests
+cargo test --locked -p ljos --bin ljos-mcp
 cargo test --locked -p ljos --test mcp_forward
 python3 scripts/test_approval.py target/release/ljos-mcp
 sha256sum target/release/ljos target/release/ljos-mcp
