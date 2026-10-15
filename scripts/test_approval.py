@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,6 +20,9 @@ COMMAND = "printf consent-test"
 
 
 class ConsentWireTest(unittest.TestCase):
+    replace_binary = False
+    protocol = "2025-11-25"
+
     def exchange(self, *, answer=None, capabilities=None, session=THREAD,
                  age=0, change=None, arguments=None):
         with tempfile.TemporaryDirectory(prefix="ljos-consent-") as tmp:
@@ -35,8 +41,15 @@ class ConsentWireTest(unittest.TestCase):
             path.write_text(json.dumps([request]))
             path.chmod(0o600)
             env = dict(os.environ, XDG_RUNTIME_DIR=tmp, LJOS_SEAT="consent-test")
-            with subprocess.Popen([BINARY], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, env=env, text=True) as proc:
+            server = root / "ljos-mcp"
+            if self.replace_binary:
+                shutil.copyfile(BINARY, server)
+                server.chmod(0o700)
+            marker = root / "forwarded"
+            with subprocess.Popen([str(server) if self.replace_binary else BINARY],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, text=True,
+                                  start_new_session=True) as proc:
                 def send(value):
                     proc.stdin.write(json.dumps(value) + "\n")
                     proc.stdin.flush()
@@ -58,12 +71,21 @@ class ConsentWireTest(unittest.TestCase):
 
                 try:
                     send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-                        "protocolVersion": "2025-11-25",
+                        "protocolVersion": self.protocol,
                         "clientInfo": {"name": "consent-wire-test", "version": "1"},
                         "capabilities": capabilities if capabilities is not None
                         else {"elicitation": {"form": {}}},
                     }})
                     self.assertIn("result", response(1))
+                    if self.replace_binary:
+                        replacement = root / "replacement"
+                        replacement.write_text(
+                            "#!/bin/sh\n"
+                            f"printf started > {shlex.quote(str(marker))}\n"
+                            f"exec {shlex.quote(BINARY)}\n"
+                        )
+                        replacement.chmod(0o700)
+                        replacement.replace(server)
                     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                     send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
                         "name": "ljos_request_approval",
@@ -88,15 +110,20 @@ class ConsentWireTest(unittest.TestCase):
                                 path.write_text(json.dumps(rows))
                             send({"jsonrpc": "2.0", "id": value["id"], "result": answer})
                         elif value.get("id") == 2:
+                            if self.replace_binary:
+                                self.assertEqual(marker.read_text(), "started")
                             return value, json.loads(path.read_text())
                         else:
                             self.assertNotIn("id", value, value)
                 finally:
-                    proc.terminate()
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                     try:
                         proc.wait(timeout=3)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
+                        os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait()
 
     def assert_blocked(self, **kwargs):
@@ -153,6 +180,14 @@ class ConsentWireTest(unittest.TestCase):
             rows[0]["scope"]["command"] += " different"
         self.assert_blocked(answer={"action": "accept", "content": {"approve": True}},
                             change=change)
+
+
+class ForwardedConsentWireTest(ConsentWireTest):
+    replace_binary = True
+
+
+class AssociatedForwardedConsentWireTest(ForwardedConsentWireTest):
+    protocol = "2026-07-28"
 
 
 if __name__ == "__main__":

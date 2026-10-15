@@ -2692,12 +2692,42 @@ fn replaced_binary() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+type ForwardReply = Result<serde_json::Value, serde_json::Value>;
+
+struct ForwardRequest {
+    method: String,
+    params: serde_json::Value,
+    reply: std::sync::mpsc::Sender<ForwardReply>,
+}
+
+/// The relay awaits the client inside the original request handler, retaining
+/// the request association required by the protocol for elicitation.
+async fn relay_forward_request(
+    peer: &rmcp::Peer<rmcp::RoleServer>,
+    method: &str,
+    params: serde_json::Value,
+) -> ForwardReply {
+    if method != "elicitation/create" {
+        return Err(serde_json::json!({"code": -32601,
+            "message": format!("forwarding does not support {method}")}));
+    }
+    let params = serde_json::from_value::<ElicitRequestParams>(params)
+        .map_err(|e| serde_json::json!({"code": -32602, "message": e.to_string()}))?;
+    let answer = peer
+        .create_elicitation_with_timeout(params, Some(std::time::Duration::from_secs(15 * 60)))
+        .await
+        .map_err(|e| serde_json::json!({"code": -32603, "message": e.to_string()}))?;
+    serde_json::to_value(answer)
+        .map_err(|e| serde_json::json!({"code": -32603, "message": e.to_string()}))
+}
+
 /// Answer one tool call with the installed binary, typed for the server.
-fn forward_call(
+async fn forward_call(
     fresh: &Path,
     init: Option<serde_json::Value>,
     request: rmcp::model::CallToolRequestParams,
     meta: serde_json::Map<String, serde_json::Value>,
+    peer: &rmcp::Peer<rmcp::RoleServer>,
 ) -> Result<rmcp::model::CallToolResponse, McpError> {
     let fail = |e: &dyn std::fmt::Display| {
         McpError::internal_error(format!("forward to {}: {e}", fresh.display()), None)
@@ -2706,7 +2736,30 @@ fn forward_call(
     if !meta.is_empty() {
         params["_meta"] = serde_json::Value::Object(meta);
     }
-    let answer = ljos_cli::mcp_forward(fresh, FORWARDED, init, params).map_err(|e| fail(&e))?;
+    let program = fresh.to_path_buf();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel::<ForwardRequest>();
+    let mut worker = tokio::task::spawn_blocking(move || {
+        ljos_cli::mcp_forward_with_requests(&program, FORWARDED, init, params, |method, params| {
+            let (reply, answer) = std::sync::mpsc::channel();
+            let closed = || serde_json::json!({"code": -32603,
+                "message": "the forwarding client disconnected"});
+            sender.send(ForwardRequest { method: method.into(), params, reply })
+                .map_err(|_| closed())?;
+            answer.recv().map_err(|_| closed())?
+        })
+    });
+    let answer = loop {
+        tokio::select! {
+            result = &mut worker => break result.map_err(|e| fail(&e))?.map_err(|e| fail(&e))?,
+            request = requests.recv() => match request {
+                Some(request) => {
+                    let answer = relay_forward_request(peer, &request.method, request.params).await;
+                    let _ = request.reply.send(answer);
+                }
+                None => break worker.await.map_err(|e| fail(&e))?.map_err(|e| fail(&e))?,
+            },
+        }
+    };
     if let Some(err) = answer.get("error") {
         return Err(serde_json::from_value(err.clone())
             .unwrap_or_else(|_| McpError::internal_error(err.to_string(), None)));
@@ -2740,9 +2793,7 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
-        // Elicitation needs this live client connection. The one-call forwarder
-        // only carries a tool result and cannot relay a consent dialog.
-        if let Some(fresh) = replaced_binary().filter(|_| request.name != "ljos_request_approval") {
+        if let Some(fresh) = replaced_binary() {
             let init = context
                 .peer
                 .peer_info()
@@ -2751,9 +2802,7 @@ impl ServerHandler for LjosServer {
                 Ok(serde_json::Value::Object(map)) => map,
                 _ => serde_json::Map::new(),
             };
-            return tokio::task::spawn_blocking(move || forward_call(&fresh, init, request, meta))
-                .await
-                .map_err(|e| McpError::internal_error(format!("forward: {e}"), None))?;
+            return forward_call(&fresh, init, request, meta, &context.peer).await;
         }
         // A forwarded call comes from a stale server that listed the tool
         // under its own set, so the fresh one answers it.
