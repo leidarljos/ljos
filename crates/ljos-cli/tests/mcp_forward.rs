@@ -1,8 +1,8 @@
 //! A stale `ljos-mcp` forwards a tool call to the installed binary through
 //! `mcp_forward`; this drives that exchange against the built binary.
 
-use std::path::Path;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 #[test]
 fn a_child_request_can_share_the_tool_response_id() {
@@ -20,13 +20,18 @@ printf '{"jsonrpc":"2.0","id":1,"result":%s}\n' "$answer"
     let params = serde_json::json!({"name": "consent", "arguments": {}});
     let mut requests = 0;
     let answer = ljos_cli::mcp_forward_with_requests(
-        &program, "TEST_FORWARDED", None, params.clone(), |method, params| {
+        &program,
+        "TEST_FORWARDED",
+        None,
+        params.clone(),
+        |method, params| {
             requests += 1;
             assert_eq!(method, "elicitation/create");
             assert_eq!(params["message"], "confirm");
             Ok(serde_json::json!({"action":"decline"}))
         },
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(requests, 1);
     assert_eq!(answer["result"]["id"], 1);
     assert_eq!(answer["result"]["result"]["action"], "decline");
