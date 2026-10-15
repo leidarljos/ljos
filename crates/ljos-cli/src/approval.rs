@@ -382,19 +382,36 @@ fn stamped_session_ids() -> Vec<String> {
 /// The references a person approves: `approve TAG` or `approve ID`.
 /// The verb and reference are case-insensitive; partial references grant nothing.
 fn approved_ids(prompt: &str) -> Vec<String> {
-    let words: Vec<&str> = prompt
-        .split(|c: char| c.is_whitespace() || c == '`' || c == '"' || c == '\'')
-        .filter(|w| !w.is_empty())
-        .collect();
-    words
-        .windows(2)
-        .filter(|w| w[0].eq_ignore_ascii_case("approve"))
-        .map(|w| {
-            w[1].trim_end_matches(['.', ',', ';', ':', '!'])
-                .to_ascii_lowercase()
-        })
-        .filter(|id| valid_reference(id))
-        .collect()
+    let prompt = prompt.trim();
+    if let Some(body) = prompt.strip_prefix("<send_user_message_question_reply>") {
+        let Some(body) = body.strip_suffix("</send_user_message_question_reply>") else {
+            return Vec::new();
+        };
+        let Ok(replies) = serde_json::from_str::<Vec<Value>>(body) else {
+            return Vec::new();
+        };
+        // The answer is the person's text. The question can quote a request
+        // without expressing consent, including when the answer declines it.
+        return replies.iter()
+            .filter_map(|reply| reply.get("answer").and_then(Value::as_str))
+            .flat_map(approval_directives)
+            .collect();
+    }
+    approval_directives(prompt)
+}
+
+fn approval_directives(prompt: &str) -> Vec<String> {
+    prompt.lines().filter_map(|line| {
+        let mut words = line.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("approve") {
+            return None;
+        }
+        let reference = words.next()?
+            .trim_start_matches(['`', '\"', '\''])
+            .trim_end_matches(['`', '\"', '\'', '.', ',', ';', ':', '!'])
+            .to_ascii_lowercase();
+        valid_reference(&reference).then_some(reference)
+    }).collect()
 }
 
 /// Consent given in the chat. A prompt reaches the hook as what the person
