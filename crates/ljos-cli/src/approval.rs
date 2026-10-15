@@ -708,8 +708,11 @@ mod tests {
             let reference = if use_tag { &tag } else { &full };
             let answer = approve_from_prompt_at(
                 &format!("APPROVE {}.", reference.to_ascii_uppercase()),
-                &one("conversation-1"), &root, Ok(102),
-            ).unwrap();
+                &one("conversation-1"),
+                &root,
+                Ok(102),
+            )
+            .unwrap();
             assert!(answer.contains("Approved once"), "{answer}");
             assert!(output(&input, &ask(), &root, 103).is_empty());
             let mut store = Store::open(&root, 104).unwrap();
@@ -728,9 +731,17 @@ mod tests {
         let mut changed = tag.clone();
         let last = changed.pop().unwrap();
         changed.push(if last == '0' { '1' } else { '0' });
-        for invalid in [tag[..tag.len()-1].to_string(), format!("{tag}0"), changed,
-                        store.requests[0].id[..31].to_string(), "é".repeat(16)] {
-            assert!(store.pending(&invalid, "conversation-1").is_err(), "{invalid}");
+        for invalid in [
+            tag[..tag.len() - 1].to_string(),
+            format!("{tag}0"),
+            changed,
+            store.requests[0].id[..31].to_string(),
+            "é".repeat(16),
+        ] {
+            assert!(
+                store.pending(&invalid, "conversation-1").is_err(),
+                "{invalid}"
+            );
             assert!(store.approve(&invalid).is_err(), "{invalid}");
             assert!(!store.requests[0].approved);
         }
@@ -752,7 +763,9 @@ mod tests {
         assert_eq!(store.requests.len(), 1);
         assert!(!store.requests[0].approved);
         store.requests[0].id = "0".repeat(32);
-        assert!(store.allocate_id(&mut std::io::Cursor::new(vec![0u8; 16 * 32])).is_err());
+        assert!(store
+            .allocate_id(&mut std::io::Cursor::new(vec![0u8; 16 * 32]))
+            .is_err());
         assert_eq!(store.requests.len(), 1);
     }
 
