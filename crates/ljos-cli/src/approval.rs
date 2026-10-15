@@ -284,13 +284,17 @@ impl Store {
     /// from another conversation's request, quoted into this one, grants
     /// nothing.
     fn approve_in(&mut self, id: &str, sessions: &[String]) -> Result<String> {
-        let ours = self.requests.iter().any(|request| {
-            request.id == id
-                && sessions
-                    .iter()
-                    .any(|session| same_conversation(&request.scope.session, session))
-        });
-        if !ours {
+        let request = self
+            .requests
+            .iter()
+            .find(|request| request.id == id)
+            .context(
+                "approval request is unknown, expired, or consumed; retry the original command",
+            )?;
+        if !sessions
+            .iter()
+            .any(|session| same_conversation(&request.scope.session, session))
+        {
             bail!("approval {id} was not asked in this conversation");
         }
         self.approve(id)
@@ -718,6 +722,27 @@ mod tests {
         )
         .unwrap();
         assert!(said.contains("Approved once"), "{said}");
+    }
+
+    #[test]
+    fn a_chat_reply_to_an_expired_request_reports_expiry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let input = input(temp.path());
+        let id = request_id(&output(&input, &ask(), &root, 100));
+        let said = approve_from_prompt_at(
+            &format!("approve {id}"),
+            &one("conversation-1"),
+            &root,
+            Ok(100 + TTL_SECONDS),
+        )
+        .unwrap();
+        assert!(said.contains("unknown, expired, or consumed"), "{said}");
+        assert!(!said.contains("not asked in this conversation"), "{said}");
+        assert_ne!(
+            request_id(&output(&input, &ask(), &root, 101 + TTL_SECONDS)),
+            id
+        );
     }
 
     #[test]
