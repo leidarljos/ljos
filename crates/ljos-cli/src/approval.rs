@@ -580,13 +580,21 @@ mod tests {
             let session = crate::conversation_id().unwrap();
             assert_eq!(session, "conversation-1");
             assert_ne!(session, crate::holder_name());
-            assert!(Store::open(&root, 101).unwrap().pending(&id, &session).is_ok());
+            assert!(Store::open(&root, 101)
+                .unwrap()
+                .pending(&id, &session)
+                .is_ok());
             crate::as_thread(Some("conversation-2".into()), async {
                 let other = crate::conversation_id().unwrap();
-                assert!(Store::open(&root, 102).unwrap().pending(&id, &other).is_err());
-            }).await;
+                assert!(Store::open(&root, 102)
+                    .unwrap()
+                    .pending(&id, &other)
+                    .is_err());
+            })
+            .await;
             assert_eq!(crate::conversation_id().as_deref(), Some("conversation-1"));
-        }).await;
+        })
+        .await;
     }
 
     fn ask() -> Rule {
