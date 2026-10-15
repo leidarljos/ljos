@@ -18,10 +18,9 @@ const MAX_REQUESTS: usize = 256;
 const MAX_STORE_BYTES: u64 = 2 * 1024 * 1024;
 
 const TAG_WORDS: [&str; 32] = [
-    "ash", "bay", "birch", "cedar", "elm", "fern", "fir", "grove",
-    "hazel", "holly", "ivy", "larch", "leaf", "lime", "maple", "moss",
-    "oak", "olive", "palm", "pine", "plum", "reed", "river", "rowan",
-    "sage", "shore", "stone", "teak", "thorn", "vale", "wave", "yew",
+    "ash", "bay", "birch", "cedar", "elm", "fern", "fir", "grove", "hazel", "holly", "ivy",
+    "larch", "leaf", "lime", "maple", "moss", "oak", "olive", "palm", "pine", "plum", "reed",
+    "river", "rowan", "sage", "shore", "stone", "teak", "thorn", "vale", "wave", "yew",
 ];
 
 /// A readable label for a full request id. The store checks label collisions;
@@ -31,7 +30,11 @@ fn request_tag(id: &str) -> Option<String> {
         return None;
     }
     let word = usize::from(u8::from_str_radix(&id[..2], 16).ok()?) % TAG_WORDS.len();
-    Some(format!("{}-{}", TAG_WORDS[word], id[2..8].to_ascii_lowercase()))
+    Some(format!(
+        "{}-{}",
+        TAG_WORDS[word],
+        id[2..8].to_ascii_lowercase()
+    ))
 }
 
 fn valid_reference(reference: &str) -> bool {
@@ -596,8 +599,10 @@ fn hook_output_at(
                 Ok(Some(id)) => {
                     let tag = request_tag(&id).unwrap_or(id);
                     format!("Reply `approve {tag}` in this conversation, call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
-                },
-                Err(error) => format!("Approval could not be recorded: {error:#}. The command remains blocked."),
+                }
+                Err(error) => format!(
+                    "Approval could not be recorded: {error:#}. The command remains blocked."
+                ),
                 Ok(None) => unreachable!(),
             };
             pending.reason = format!("{} {detail}", rule.reason);
