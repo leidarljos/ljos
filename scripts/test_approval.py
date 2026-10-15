@@ -40,7 +40,11 @@ class ConsentWireTest(unittest.TestCase):
             }
             path.write_text(json.dumps([request]))
             path.chmod(0o600)
-            env = dict(os.environ, XDG_RUNTIME_DIR=tmp, LJOS_SEAT="consent-test")
+            tracker = root / "tracker"
+            tracker.mkdir()
+            (tracker / "vissue.toml").write_text('seats = ["consent-test"]\n')
+            env = dict(os.environ, XDG_RUNTIME_DIR=tmp, LJOS_SEAT="consent-test",
+                       VISSUE_ROOT=str(tracker), ISSUE_ROOT=str(tracker))
             server = root / "ljos-mcp"
             if self.replace_binary:
                 shutil.copyfile(BINARY, server)
