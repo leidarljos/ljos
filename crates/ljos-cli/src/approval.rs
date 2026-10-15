@@ -17,6 +17,34 @@ const TTL_SECONDS: u64 = 15 * 60;
 const MAX_REQUESTS: usize = 256;
 const MAX_STORE_BYTES: u64 = 2 * 1024 * 1024;
 
+const TAG_WORDS: [&str; 32] = [
+    "ash", "bay", "birch", "cedar", "elm", "fern", "fir", "grove",
+    "hazel", "holly", "ivy", "larch", "leaf", "lime", "maple", "moss",
+    "oak", "olive", "palm", "pine", "plum", "reed", "river", "rowan",
+    "sage", "shore", "stone", "teak", "thorn", "vale", "wave", "yew",
+];
+
+/// A readable label for a full request id. The store checks label collisions;
+/// the label carries no consent and does not replace the request's scope.
+fn request_tag(id: &str) -> Option<String> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let word = usize::from(u8::from_str_radix(&id[..2], 16).ok()?) % TAG_WORDS.len();
+    Some(format!("{}-{}", TAG_WORDS[word], id[2..8].to_ascii_lowercase()))
+}
+
+fn valid_reference(reference: &str) -> bool {
+    if reference.len() == 32 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return true;
+    }
+    reference.split_once('-').is_some_and(|(word, suffix)| {
+        TAG_WORDS.contains(&word)
+            && suffix.len() == 6
+            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Scope {
     session: String,
@@ -201,20 +229,45 @@ impl Store {
         if self.requests.len() >= MAX_REQUESTS {
             bail!("too many pending approvals; expired requests clear after fifteen minutes");
         }
-        let mut bytes = [0u8; 16];
-        File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-        let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        if self.requests.iter().any(|request| request.id == id) {
-            bail!("approval id collision; retry the command");
+        let mut random = File::open("/dev/urandom")?;
+        for _ in 0..32 {
+            let mut bytes = [0u8; 16];
+            random.read_exact(&mut bytes)?;
+            let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            let tag = request_tag(&id).expect("a generated request id is hexadecimal");
+            if self.requests.iter().any(|request| {
+                request.id == id || request_tag(&request.id).as_deref() == Some(tag.as_str())
+            }) {
+                continue;
+            }
+            self.requests.push(Request {
+                id: id.clone(),
+                scope,
+                created: now,
+                approved: false,
+            });
+            self.save()?;
+            return Ok(Some(id));
         }
-        self.requests.push(Request {
-            id: id.clone(),
-            scope,
-            created: now,
-            approved: false,
+        bail!("could not allocate a unique approval tag; retry the command")
+    }
+
+    fn request_index(&self, reference: &str) -> Result<usize> {
+        let reference = reference.trim().to_ascii_lowercase();
+        if !valid_reference(&reference) {
+            bail!("use the short approval tag or full request id printed by the hook");
+        }
+        let mut matches = self.requests.iter().enumerate().filter(|(_, request)| {
+            request.id.eq_ignore_ascii_case(&reference)
+                || request_tag(&request.id).as_deref() == Some(reference.as_str())
         });
-        self.save()?;
-        Ok(Some(id))
+        let (index, _) = matches.next().context(
+            "approval request is unknown, expired, or consumed; retry the original command",
+        )?;
+        if matches.next().is_some() {
+            bail!("approval tag is ambiguous; use the full request id");
+        }
+        Ok(index)
     }
 
     fn pending(&self, id: &str, session: &str) -> Result<Request> {
@@ -225,13 +278,7 @@ impl Store {
     /// the hook and the approval tool; the seat, the directory and the
     /// request id are the match.
     fn pending_for(&self, id: &str, session: &str, seat: &str, cwd: &Path) -> Result<Request> {
-        let request = self
-            .requests
-            .iter()
-            .find(|request| request.id == id)
-            .context(
-                "approval request is unknown, expired, or consumed; retry the original command",
-            )?;
+        let request = &self.requests[self.request_index(id)?];
         let conversation_ok =
             request.scope.session == session || same_conversation(&request.scope.session, session);
         let place_ok =
@@ -254,16 +301,8 @@ impl Store {
     }
 
     fn approve(&mut self, id: &str) -> Result<String> {
-        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("approval id must be the 32 hexadecimal characters printed by the hook");
-        }
-        let request = self
-            .requests
-            .iter_mut()
-            .find(|request| request.id == id)
-            .context(
-                "approval request is unknown, expired, or consumed; retry the original command",
-            )?;
+        let index = self.request_index(id)?;
+        let request = &mut self.requests[index];
         if request.approved {
             bail!("request is already approved; retry the original command");
         }
@@ -284,13 +323,7 @@ impl Store {
     /// from another conversation's request, quoted into this one, grants
     /// nothing.
     fn approve_in(&mut self, id: &str, sessions: &[String]) -> Result<String> {
-        let request = self
-            .requests
-            .iter()
-            .find(|request| request.id == id)
-            .context(
-                "approval request is unknown, expired, or consumed; retry the original command",
-            )?;
+        let request = &self.requests[self.request_index(id)?];
         if !sessions
             .iter()
             .any(|session| same_conversation(&request.scope.session, session))
@@ -339,8 +372,8 @@ fn stamped_session_ids() -> Vec<String> {
         .collect()
 }
 
-/// The ids a person's prompt approves: `approve ID` with the 32 hex
-/// characters a hook printed, case of the verb ignored.
+/// The references a person approves: `approve TAG` or `approve ID`.
+/// The verb and reference are case-insensitive; partial references grant nothing.
 fn approved_ids(prompt: &str) -> Vec<String> {
     let words: Vec<&str> = prompt
         .split(|c: char| c.is_whitespace() || c == '`' || c == '"' || c == '\'')
@@ -353,7 +386,7 @@ fn approved_ids(prompt: &str) -> Vec<String> {
             w[1].trim_end_matches(['.', ',', ';', ':', '!'])
                 .to_ascii_lowercase()
         })
-        .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|id| valid_reference(id))
         .collect()
 }
 
@@ -493,7 +526,8 @@ async fn request_approval_at(
         "Allow one attempt of this command?\nCommand (JSON): {}\nDirectory: {}\nConversation: {}\nRule: {}\nReason: {}\nRequest: {}\nThe grant expires fifteen minutes after the request was created.",
         serde_json::to_string(&pending.scope.command)?,
         serde_json::to_string(&pending.scope.cwd)?,
-        pending.scope.session, pending.scope.pattern, pending.scope.reason, pending.id
+        pending.scope.session, pending.scope.pattern, pending.scope.reason,
+        request_tag(&pending.id).unwrap_or_else(|| pending.id.clone())
     );
     // No store lock spans the user interaction. Confirmation reopens it and
     // checks expiry, identity and contents before granting the one retry.
@@ -559,7 +593,10 @@ fn hook_output_at(
         result => {
             let mut pending = rule.clone();
             let detail = match result {
-                Ok(Some(id)) => format!("Call the ljos_request_approval MCP tool with id {id} to show the person a consent form. Or ask the person to reply `approve {id}` in this conversation, or to run `ljos approve {id}` in a terminal of their own. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request."),
+                Ok(Some(id)) => {
+                    let tag = request_tag(&id).unwrap_or(id);
+                    format!("Reply `approve {tag}` in this conversation, call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
+                },
                 Err(error) => format!("Approval could not be recorded: {error:#}. The command remains blocked."),
                 Ok(None) => unreachable!(),
             };

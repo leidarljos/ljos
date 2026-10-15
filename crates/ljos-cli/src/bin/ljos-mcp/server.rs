@@ -369,7 +369,7 @@ pub struct ForgetArgs {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalArgs {
-    /// The request id. Consent is collected from the client's user interface.
+    /// The short approval tag or full request id. The client form supplies consent.
     pub id: String,
 }
 
