@@ -53,6 +53,28 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace
 
+  # A push that passed the tests keeps a bookworm build for fourteen days.
+  # The cargo line is the linux line from release.yml. Debian 12 is the
+  # glibc baseline, so the binaries run where that release runs. Nothing
+  # here tags a commit or publishes a release.
+  linux-archive:
+    name: linux archive
+    needs: test
+    if: github.event_name == 'push' && (github.ref_name == 'develop' || github.ref_name == 'main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the bookworm archive
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src debian:bookworm bash /src/scripts/bookworm-archive.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ljos-${{ github.sha }}-x86_64-linux
+          path: |
+            dist/ljos-${{ github.sha }}-x86_64-linux.tar.gz
+            dist/ljos-${{ github.sha }}-x86_64-linux.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error
+
   licenses:
     name: cargo deny check licenses
     runs-on: ubuntu-latest
