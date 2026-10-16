@@ -589,6 +589,7 @@ server.serve_forever()
     );
     assert!(recalled.contains("readme"), "{recalled}");
     let _ = pack_proc.kill();
+    let _ = pack_proc.wait();
 }
 
 #[test]
