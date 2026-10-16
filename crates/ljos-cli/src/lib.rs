@@ -21702,16 +21702,14 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
         .position(|line| line.trim() == ":LOGBOOK:")
     {
         lines.insert(start + rel + 1, entry.to_string());
-    } else if let Some(rel) = lines[start..block_end]
-        .iter()
-        .rposition(|line| line.trim() == ":END:")
-    {
+    } else {
+        let rel = lines[start..block_end]
+            .iter()
+            .rposition(|line| line.trim() == ":END:")?;
         let at = start + rel + 1;
         lines.insert(at, ":END:".into());
         lines.insert(at, entry.to_string());
         lines.insert(at, ":LOGBOOK:".into());
-    } else {
-        return None;
     }
     let mut out = lines.join("\n");
     if ends_nl {
@@ -22324,7 +22322,10 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     };
     let context = hook_context(&call, 5);
     // The rules are the law's memory: a deny or an ask fires before the
-    // context, so a reader sees the verdict first.
+    // context, so a reader sees the verdict first. A line the fast check
+    // already judged does not wait on policyd, which can hang.
+    let fast = static_guard(&line);
+    let judged = fast.is_some();
     let rules = rules_for_gate();
     let cwd = std::env::current_dir()
         .ok()
@@ -22333,17 +22334,26 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
         &line,
     );
+    let deny = gated.as_ref().is_some_and(|rule| rule.verdict == "deny");
+    let gated = match fast {
+        Some(rule) if !deny => Some(rule),
+        _ => gated,
+    };
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     // A TCB `allow` is not the verdict once this seat asks or denies. The
     // line the person reads is the ask, including a force push on a box
     // with no seat rule.
-    let tcb = match tcb_check(argv) {
-        // `git-force-push` asks, the same way the push gate does. The raw
-        // `deny` line would read as a refusal beside that ask.
-        Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
-        Some(tcb) if !(tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
-        None if policyd_required() => Some("deny\tTCB required".to_string()),
-        _ => None,
+    let tcb = if judged {
+        None
+    } else {
+        match tcb_check(argv) {
+            // `git-force-push` asks, the same way the push gate does. The raw
+            // `deny` line would read as a refusal beside that ask.
+            Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
+            Some(tcb) if !(tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
+            None if policyd_required() => Some("deny\tTCB required".to_string()),
+            _ => None,
+        }
     };
     match tcb {
         Some(tcb) => Ok(format!("{line}\n{tcb}\n{ruled}")),
@@ -22493,14 +22503,19 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
         .or_else(|| which::which("ljos-policyd").ok())
 }
 
-/// The TCB's verdict on a shell line: `ljos-policyd` judges each pipeline
-/// the line runs, in shell words, and the first deny stands. A heredoc body is
-/// data the shell feeds a command, and it is not sent as argv. With the TCB
-/// required and absent, the line is refused.
+/// The TCB's verdict on a shell line: a fast in-process check first, then
+/// `ljos-policyd` on each pipeline, and the first deny stands. A heredoc
+/// body is data the shell feeds a command, and it is not sent as argv.
+/// With the TCB required and absent, the line is refused. A policyd that
+/// times out or crashes does not refuse a line the fast check allowed.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
+    clear_guard_note();
     if bookkeep::guard_suspended() {
         return None;
+    }
+    if let Some(rule) = static_guard(line) {
+        return Some(rule);
     }
     let mut answered = false;
     // Each pipeline whole, in shell words: a quoted sentence that names a
@@ -22520,6 +22535,7 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
         }
         match tcb_check(&argv) {
             Some(t) if t.starts_with("deny") => {
+                clear_guard_note();
                 let token = policyd_token(&t);
                 let token = if token.is_empty() { "tcb" } else { token };
                 // A force push asks. The other checks still deny.
@@ -22534,7 +22550,12 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
                     reason: policyd_reason(token),
                 });
             }
-            Some(_) => answered = true,
+            Some(t) => {
+                if let Some(note) = guard_note_of(&t) {
+                    set_guard_note(note);
+                }
+                answered = true;
+            }
             None => {}
         }
     }
@@ -22547,10 +22568,205 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
     })
 }
 
-/// How long the TCB has to answer before the line is refused. A runner
-/// times a hook out after seconds and most then run the tool, so the
-/// check must give its own answer first.
-pub const POLICYD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long the guard waits for a slow check. A loaded machine used to
+/// refuse every command when a short budget lapsed. Five seconds is the
+/// default; `LJOS_GUARD_TIMEOUT` (seconds) raises or lowers it. A runner
+/// times a hook out after fifteen or twenty seconds, so this still
+/// answers first.
+pub const GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`GUARD_TIMEOUT`], kept under the name the policyd call has used.
+pub const POLICYD_DEADLINE: std::time::Duration = GUARD_TIMEOUT;
+
+/// The guard's wait: `LJOS_GUARD_TIMEOUT` seconds when that is a positive
+/// number, otherwise [`GUARD_TIMEOUT`].
+#[must_use]
+pub fn guard_timeout() -> std::time::Duration {
+    std::env::var("LJOS_GUARD_TIMEOUT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|secs| *secs > 0.0)
+        .map(std::time::Duration::from_secs_f64)
+        .unwrap_or(GUARD_TIMEOUT)
+}
+
+thread_local! {
+    static GUARD_NOTE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn set_guard_note(note: String) {
+    GUARD_NOTE.with(|slot| *slot.borrow_mut() = Some(note));
+}
+
+fn clear_guard_note() {
+    GUARD_NOTE.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// The note a timed-out or crashed guard left, once. Empty when the last
+/// check judged the line.
+#[must_use]
+pub fn take_guard_note() -> Option<String> {
+    GUARD_NOTE.with(|slot| slot.borrow_mut().take())
+}
+
+fn guard_note_of(text: &str) -> Option<String> {
+    let rest = text.trim().strip_prefix("allow\t")?;
+    rest.contains("unhealthy").then(|| rest.to_string())
+}
+
+/// What a person reads when the guard timed out or crashed: the call is
+/// allowed, and `why` says which failure it was.
+#[must_use]
+pub fn unhealthy_note(why: &str) -> String {
+    format!(
+        "the ljos guard is unhealthy ({why}) and did not judge this call, so it is allowed. \
+         No seat rule would refuse it. Run `ljos doctor`."
+    )
+}
+
+/// A force push, a seat deny rule, or an `rm -rf` outside a temp directory,
+/// judged in this process. `None` means the slow check may run: a timeout
+/// there allows the line. A temp home is not a seat, and this returns
+/// `None` there too.
+#[must_use]
+pub fn static_guard(line: &str) -> Option<Rule> {
+    let line = line.trim();
+    if line.is_empty() || bookkeep::guard_suspended() {
+        return None;
+    }
+    if let Some(rule) = seat_guard(line) {
+        return Some(rule);
+    }
+    if let Some(rule) = destructive_delete(line) {
+        return Some(rule);
+    }
+    let denies: Vec<Rule> = rules_cache_path()
+        .map(|path| kept_rules(&path))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rule| rule.verdict == "deny")
+        .collect();
+    if let Some(rule) = verdict_for(&denies, line) {
+        return Some(rule.clone());
+    }
+    gate_push(None, line, None)
+        .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
+        .map(as_static_rule)
+}
+
+/// `rm -rf` or `find -delete` aimed outside a temp directory.
+fn destructive_delete(line: &str) -> Option<Rule> {
+    for segment in nested_lines(line, 0)
+        .iter()
+        .flat_map(|part| raw_segments(part))
+    {
+        let words = shell_words(&segment);
+        let (at, _) = prefix_end(&words);
+        let words = &words[at..];
+        let Some(first) = words.first() else {
+            continue;
+        };
+        let name = first.rsplit('/').next().unwrap_or(first);
+        if name == "rm" && rm_recursive_force(words) && targets_outside_temp(words) {
+            return Some(Rule {
+                pattern: "rm-rf-outside-tmp".into(),
+                verdict: "deny".into(),
+                reason: policyd_reason("rm-rf-outside-tmp"),
+            });
+        }
+        if name == "find"
+            && words.iter().any(|word| word == "-delete")
+            && find_targets_outside(words)
+        {
+            return Some(Rule {
+                pattern: "find-delete-outside-tmp".into(),
+                verdict: "deny".into(),
+                reason: policyd_reason("find-delete-outside-tmp"),
+            });
+        }
+    }
+    None
+}
+
+fn rm_recursive_force(words: &[String]) -> bool {
+    let mut recursive = false;
+    let mut force = false;
+    for word in words.iter().skip(1) {
+        if word == "--" {
+            break;
+        }
+        if word == "--recursive" || word == "-r" || word == "-R" {
+            recursive = true;
+            continue;
+        }
+        if word == "--force" || word == "-f" {
+            force = true;
+            continue;
+        }
+        let Some(flags) = word.strip_prefix('-') else {
+            continue;
+        };
+        if flags.is_empty() || flags.starts_with('-') {
+            continue;
+        }
+        if flags.contains('r') || flags.contains('R') {
+            recursive = true;
+        }
+        if flags.contains('f') {
+            force = true;
+        }
+    }
+    recursive && force
+}
+
+/// True when a command names no path, or names one outside a temp root.
+fn targets_outside_temp(words: &[String]) -> bool {
+    let mut dashed = false;
+    let mut paths = Vec::new();
+    for word in words.iter().skip(1) {
+        if !dashed && word == "--" {
+            dashed = true;
+            continue;
+        }
+        if !dashed && word.starts_with('-') {
+            continue;
+        }
+        paths.push(word.as_str());
+    }
+    paths.is_empty()
+        || paths
+            .iter()
+            .any(|path| !bookkeep::path_is_temp(Some(std::path::Path::new(path))))
+}
+
+/// `find` paths are the operands before the expression. `-name x` is not a
+/// path. No path means find starts at `.`.
+fn find_targets_outside(words: &[String]) -> bool {
+    let mut paths = Vec::new();
+    for word in words.iter().skip(1) {
+        if word.starts_with('-') || word == "!" || word == "(" {
+            break;
+        }
+        paths.push(word.as_str());
+    }
+    paths.is_empty()
+        || paths
+            .iter()
+            .any(|path| !bookkeep::path_is_temp(Some(std::path::Path::new(path))))
+}
+
+/// A force push from the push gate, in the words policyd uses for it.
+fn as_static_rule(rule: Rule) -> Rule {
+    if rule.verdict == "ask" && rule.reason.starts_with("a force push") {
+        Rule {
+            pattern: "git-force-push".into(),
+            verdict: "ask".into(),
+            reason: policyd_reason("git-force-push"),
+        }
+    } else {
+        rule
+    }
+}
 
 /// A refusal from `ljos-policyd` in words a person and an agent can act
 /// on: the check's token first, so logs and scripts still find it, then
@@ -22614,19 +22830,20 @@ pub fn policyd_reason(token: &str) -> String {
 
 /// One line from `ljos-policyd check -- argv`. None only when there is no
 /// binary to ask: absence is not a deny unless `POLICYD_REQUIRED` says so.
-/// A binary that is there and fails to start, crashes, hangs past
-/// [`POLICYD_DEADLINE`], or prints something that is not a verdict gets a
-/// deny, because the check it was meant to make did not happen.
+/// A binary that fails to start, crashes, hangs past [`guard_timeout`], or
+/// prints something that is not a verdict allows the line and says the
+/// guard is unhealthy. A line [`static_guard`] already judged does not
+/// wait for that binary.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer(&bin, argv, POLICYD_DEADLINE))
+    Some(tcb_answer(&bin, argv, guard_timeout()))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
 #[must_use]
 pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
     use std::io::Read as _;
-    let refused = |why: &str| format!("deny\tljos-policyd {why}, so the line is refused");
+    let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
@@ -22652,7 +22869,7 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
         }
     }
     let Ok(mut child) = child else {
-        return refused("did not start");
+        return unhealthy("did not start");
     };
     let start = std::time::Instant::now();
     let status = loop {
@@ -22664,7 +22881,7 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return refused("did not answer in time");
+                return unhealthy("did not answer in time");
             }
         }
     };
@@ -22678,7 +22895,7 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     match (first, status.success()) {
         ("deny", _) => text,
         ("allow", true) => text,
-        _ => refused("gave no verdict"),
+        _ => unhealthy("gave no verdict"),
     }
 }
 
@@ -33126,10 +33343,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_tcb_that_is_there_but_fails_refuses_the_line() {
+    fn a_tcb_that_crashes_or_times_out_allows_the_line() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
-        let quick = std::time::Duration::from_millis(500);
+        let quick = std::time::Duration::from_millis(200);
         let answer = |name: &str, body: &str| {
             tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick)
         };
@@ -33147,10 +33364,148 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("hangs", "sleep 30"),
         ] {
             let said = answer(name, body);
-            assert!(said.starts_with("deny\t"), "{name}: {said}");
+            assert!(
+                said.starts_with("allow\t") && said.contains("unhealthy"),
+                "{name}: {said}"
+            );
+            assert!(!said.contains("refused unchecked"), "{name}: {said}");
         }
         let gone = tcb_answer(&dir.path().join("missing"), &argv, quick);
-        assert!(gone.starts_with("deny\t"), "{gone}");
+        assert!(
+            gone.starts_with("allow\t") && gone.contains("did not start"),
+            "{gone}"
+        );
+    }
+
+    #[test]
+    fn the_guard_waits_five_seconds_unless_told_otherwise() {
+        let _g = env_guard();
+        let saved = std::env::var_os("LJOS_GUARD_TIMEOUT");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_TIMEOUT", v),
+                        None => std::env::remove_var("LJOS_GUARD_TIMEOUT"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(saved);
+        unsafe { std::env::remove_var("LJOS_GUARD_TIMEOUT") };
+        assert_eq!(guard_timeout(), std::time::Duration::from_secs(5));
+        assert_eq!(GUARD_TIMEOUT, std::time::Duration::from_secs(5));
+        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "9") };
+        assert_eq!(guard_timeout(), std::time::Duration::from_secs(9));
+        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "0.5") };
+        assert_eq!(guard_timeout(), std::time::Duration::from_millis(500));
+        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "0") };
+        assert_eq!(guard_timeout(), GUARD_TIMEOUT);
+        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "nope") };
+        assert_eq!(guard_timeout(), GUARD_TIMEOUT);
+    }
+
+    #[test]
+    fn a_static_check_judges_the_dangerous_lines_without_waiting() {
+        let _g = env_guard();
+        let home = SeatDir::new("static-guard");
+        let marker = home.path().join("policyd-ran");
+        let bin = fake_policyd(
+            home.path(),
+            "slow-policyd",
+            &format!("touch '{}'\nsleep 30", marker.display()),
+        );
+        let data = home.path().join("data");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_WORKSPACE", "static-guard"),
+            ("LJOS_GUARD_TIMEOUT", "30"),
+            ("LJOS_OFF", "0"),
+        ]);
+        let started = std::time::Instant::now();
+        let push = static_guard("git push --force origin main").expect("ask");
+        let rm = static_guard("rm -rf /home/u/proj").expect("deny");
+        let both = static_guard("rm -rf /tmp/a /etc").expect("deny");
+        let find = static_guard("find /home/u/proj -name x -delete").expect("deny");
+        assert!(static_guard("rm -rf /tmp/scratch").is_none());
+        assert!(static_guard("rm -rf /tmp/a /tmp/b").is_none());
+        assert!(static_guard("git status").is_none());
+        assert!(static_guard("find /tmp/scratch -name x -delete").is_none());
+        let asked = tcb_verdict("git push --force origin main").expect("ask");
+        let denied = tcb_verdict("rm -rf /home/u/proj").expect("deny");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "waited {:?}",
+            started.elapsed()
+        );
+        assert!(!marker.exists(), "the slow policyd ran");
+        assert_eq!(push.verdict, "ask");
+        assert_eq!(push.pattern, "git-force-push");
+        assert!(
+            push.reason.contains("--force-with-lease"),
+            "{}",
+            push.reason
+        );
+        assert_eq!(asked.verdict, "ask");
+        assert_eq!(asked.pattern, "git-force-push");
+        assert_eq!(rm.pattern, "rm-rf-outside-tmp");
+        assert_eq!(rm.verdict, "deny");
+        assert_eq!(both.pattern, "rm-rf-outside-tmp");
+        assert_eq!(find.pattern, "find-delete-outside-tmp");
+        assert_eq!(denied.pattern, "rm-rf-outside-tmp");
+        let path = rules_cache_path().unwrap();
+        keep_rules(
+            &path,
+            &[Rule {
+                pattern: "terraform destroy*".into(),
+                verdict: "deny".into(),
+                reason: "never tear the stack down".into(),
+            }],
+        );
+        let tf = static_guard("terraform destroy -auto-approve").expect("deny");
+        assert_eq!(tf.verdict, "deny");
+        assert!(tf.reason.contains("never tear"), "{}", tf.reason);
+        keep_rules(
+            &path,
+            &[Rule {
+                pattern: "git push --force*".into(),
+                verdict: "deny".into(),
+                reason: "the person force-pushes".into(),
+            }],
+        );
+        let denied_push = static_guard("git push --force origin main").expect("deny");
+        assert_eq!(denied_push.verdict, "deny");
+        assert!(
+            denied_push.reason.contains("the person force-pushes"),
+            "{}",
+            denied_push.reason
+        );
+    }
+
+    #[test]
+    fn a_plain_command_is_allowed_when_the_guard_is_unhealthy() {
+        let _g = env_guard();
+        let home = SeatDir::new("unhealthy-guard");
+        let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_WORKSPACE", "unhealthy-guard"),
+            ("LJOS_OFF", "0"),
+        ]);
+        let _ = take_guard_note();
+        assert!(tcb_verdict("git status").is_none());
+        let note = take_guard_note().expect("the unhealthy note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(!note.contains("refused unchecked"), "{note}");
+        let rule = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(rule.verdict, "deny");
+        assert_eq!(rule.pattern, "rm-rf-outside-tmp");
+        assert!(take_guard_note().is_none());
     }
 
     #[test]

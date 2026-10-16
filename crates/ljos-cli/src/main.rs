@@ -2088,8 +2088,16 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             // On a tool call the pack's rules give a verdict; on a prompt
-            // there is nothing to stop, only something to know.
-            let (rules, preferences) = if call.event == "PreToolUse" || call.event == "argv" {
+            // there is nothing to stop, only something to know. A force
+            // push, a seat deny, and an `rm -rf` are judged in this
+            // process first, so a slow pack or a slow guard is not what
+            // the runner waits on.
+            let on_tool = call.event == "PreToolUse" || call.event == "argv";
+            if on_tool {
+                let _ = ljos_cli::take_guard_note();
+            }
+            let fast = on_tool.then(|| ljos_cli::static_guard(&call.cue)).flatten();
+            let (rules, preferences) = if on_tool && fast.is_none() {
                 ljos_cli::gate_read()
             } else {
                 (Vec::new(), Vec::new())
@@ -2097,13 +2105,12 @@ fn run_command() -> Result<()> {
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             // A tool call with no command line (a file read, a search) has
             // no argv for the law to judge; the TCB sees only shell lines.
-            let guarded = (call.event == "PreToolUse" || call.event == "argv")
-                .then(|| ljos_cli::seat_guard(&call.cue))
-                .flatten();
-            let tcb_rule = if guarded.is_some() {
-                guarded
-            } else if (call.event == "PreToolUse" || call.event == "argv") && !argv.is_empty() {
+            let tcb_rule = if let Some(rule) = fast {
+                Some(rule)
+            } else if on_tool && !argv.is_empty() {
                 ljos_cli::tcb_verdict(&call.cue)
+            } else if on_tool {
+                ljos_cli::seat_guard(&call.cue)
             } else {
                 None
             };
@@ -2156,7 +2163,7 @@ fn run_command() -> Result<()> {
                     // The preferences that name the command about to run
                     // go with it, once a session each, read from the
                     // listing the rules came from.
-                    if call.event == "PreToolUse" {
+                    let note = if call.event == "PreToolUse" {
                         let (note, keys) = ljos_cli::command_preference_note(
                             &preferences,
                             &call.cue,
@@ -2166,6 +2173,12 @@ fn run_command() -> Result<()> {
                         note
                     } else {
                         String::new()
+                    };
+                    // A timed-out or crashed guard allowed this call. Say so.
+                    match ljos_cli::take_guard_note() {
+                        Some(guard) if note.is_empty() => guard,
+                        Some(guard) => format!("{guard}\n{note}"),
+                        None => note,
                     }
                 }
                 "PostToolUse" => {

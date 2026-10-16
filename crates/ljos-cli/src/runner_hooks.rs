@@ -411,30 +411,56 @@ pub fn raw_event(input: &str) -> String {
         .unwrap_or_default()
 }
 
-/// How long the inner `ljos hook` may run before the relay kills it and
-/// denies. Each runner's own timeout is 15 or 20 seconds, and several of
-/// them let the call run when it lapses, so the relay answers first.
-pub const INNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+/// The default wait for the inner `ljos hook`. [`crate::guard_timeout`] is
+/// what [`relay`] uses, so `LJOS_GUARD_TIMEOUT` changes it. Each runner's
+/// own timeout is 15 or 20 seconds, and several of them let the call run
+/// when it lapses, so the relay answers first.
+pub const INNER_TIMEOUT: std::time::Duration = crate::GUARD_TIMEOUT;
 
-/// A deny in the Claude Code shape the inner hook prints, for an inner
-/// hook that gave no answer: `what` says how it failed.
-fn failed_closed(event: &str, what: &str) -> String {
+/// An allow, with a note, for an inner hook that gave no verdict. `what`
+/// says how it failed. A command no rule would refuse is allowed; the
+/// dangerous ones are judged before this runs.
+fn fault_output(event: &str, what: &str) -> String {
     json!({
         "hookSpecificOutput": {
             "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-            "permissionDecision": "deny",
-            "permissionDecisionReason": format!(
-                "the ljos guard hook {what}, so this call is refused unchecked. \
-                 Run `ljos doctor` and fix the hook; retrying returns this same refusal."
-            ),
+            "additionalContext": crate::unhealthy_note(what),
         }
     })
     .to_string()
 }
 
+/// The command a normalized payload would run, or empty when it has none.
+fn tool_command(normalized: &str) -> String {
+    serde_json::from_str::<Value>(normalized.trim())
+        .ok()
+        .and_then(|v| command_of(&v["tool_input"]))
+        .unwrap_or_default()
+}
+
+/// The fast in-process verdict, in the shape the inner hook prints, when
+/// the command is one the static check refuses. `None` means the slow
+/// hook still has to run.
+fn early_answer(normalized: &str, event: &str) -> Option<String> {
+    let line = tool_command(normalized);
+    let rule = crate::static_guard(&line)?;
+    let event = if event.is_empty() {
+        "PreToolUse"
+    } else {
+        event
+    };
+    let call = crate::HookCall {
+        event: event.to_string(),
+        cue: line,
+        session: None,
+        shape: crate::HookShape::CamelCase,
+    };
+    Some(crate::hook_output_ruled(&call, "", Some(&rule)))
+}
+
 /// Run `cmd` as the inner hook with `stdin` as its input, and give back
-/// what it printed, or a deny when it did not finish cleanly: a spawn
-/// error, a kill by signal, a non-zero exit, or no exit within `timeout`.
+/// what it printed. A spawn error, a kill by signal, a non-zero exit, or
+/// no exit within `timeout` is an allow that says the guard is unhealthy.
 /// A non-zero exit that still printed a deny or an ask keeps it.
 #[must_use]
 pub fn run_inner(
@@ -450,7 +476,7 @@ pub fn run_inner(
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
-        Err(e) => return failed_closed(event, &format!("did not start ({e})")),
+        Err(e) => return fault_output(event, &format!("did not start ({e})")),
     };
     // Feed and drain on their own threads, so a hook that reads nothing or
     // prints a lot cannot stall the clock below.
@@ -486,7 +512,7 @@ pub fn run_inner(
         Ok(status) => status,
         // A killed hook's children may still hold the pipe; do not wait
         // for the reader.
-        Err(what) => return failed_closed(event, &what),
+        Err(what) => return fault_output(event, &what),
     };
     let out = reader
         .and_then(|r| r.join().ok())
@@ -499,26 +525,31 @@ pub fn run_inner(
         Some(code) => format!("exited with status {code}"),
         None => "was killed by a signal".to_string(),
     };
-    failed_closed(event, &what)
+    fault_output(event, &what)
 }
 
 /// Run the seat's hook for a runner: `ljos hook` on the normalized
 /// payload, its answer put in the runner's contract. Returns the exit
-/// code the runner reads. An inner hook that crashes, exits non-zero
-/// without a decision, or runs past [`INNER_TIMEOUT`] is a deny.
+/// code the runner reads. A force push, a seat deny, and an `rm -rf` are
+/// judged here, before the inner hook. An inner hook that crashes, exits
+/// non-zero without a decision, or runs past [`crate::guard_timeout`]
+/// allows the call and says the guard is unhealthy.
 pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
     let normalized = normalize_input(runner, input);
     let raw = raw_event(input);
-    let text = match std::env::current_exe() {
-        Ok(exe) => {
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("hook").arg("--limit").arg(limit.to_string());
-            if let Some(e) = event {
-                cmd.arg("--event").arg(e);
+    let text = match early_answer(&normalized, &raw) {
+        Some(text) => text,
+        None => match std::env::current_exe() {
+            Ok(exe) => {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg("hook").arg("--limit").arg(limit.to_string());
+                if let Some(e) = event {
+                    cmd.arg("--event").arg(e);
+                }
+                run_inner(cmd, &normalized, &raw, crate::guard_timeout())
             }
-            run_inner(cmd, &normalized, &raw, INNER_TIMEOUT)
-        }
-        Err(e) => failed_closed(&raw, &format!("could not find its own binary ({e})")),
+            Err(e) => fault_output(&raw, &format!("could not find its own binary ({e})")),
+        },
     };
     let (mut out, err, code) = answer(runner, &raw, &text);
     if let Some(line) = first_prompt_start_line(runner, &raw, input) {
@@ -1140,62 +1171,149 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn an_inner_hook_that_fails_is_a_deny_in_every_runner() {
-        let cases = [
-            ("cat >/dev/null; exit 3", "exited with status 3"),
-            ("cat >/dev/null; kill -SEGV $$", "killed by a signal"),
-            ("sleep 5", "no answer within"),
-        ];
-        for (script, why) in cases {
-            let out = inner(script, 300);
-            assert_eq!(
-                read_answer(&out).decision.as_deref(),
-                Some("deny"),
-                "{script}"
+    /// Runners that show an allow's note. The others drop it and still
+    /// exit 0, which is an allow.
+    fn shows_context(runner: &str) -> bool {
+        matches!(
+            runner,
+            "gemini" | "openhands" | "auggie" | "kiro" | "cline" | "crush" | "factory" | "qwen"
+        )
+    }
+
+    fn allows_unhealthy(out: &str, why: &str) {
+        let said = read_answer(out);
+        assert!(said.decision.is_none(), "{out}");
+        assert!(out.contains("unhealthy"), "{out}");
+        assert!(out.contains(why), "{out}");
+        assert!(!out.contains("refused unchecked"), "{out}");
+        for runner in RUNNERS {
+            let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
+            let body = format!("{stdout}{stderr}");
+            assert_eq!(code, 0, "{runner}: {body}");
+            assert!(
+                !body.contains("\"deny\"") && !body.contains("\"cancel\":true"),
+                "{runner}: {body}"
             );
-            assert!(out.contains(why), "{script}: {out}");
-            for runner in RUNNERS {
-                let (stdout, stderr, code) = answer(runner, "PreToolUse", &out);
-                let said = format!("{stdout}{stderr}");
-                assert!(
-                    said.contains("refused unchecked")
-                        && (code == 2 || said.contains("deny") || said.contains("\"cancel\":true")),
-                    "{runner} on {script}: {said} exit {code}"
-                );
+            if shows_context(runner) {
+                assert!(body.contains("unhealthy"), "{runner}: {body}");
+                assert!(body.contains(why), "{runner}: {body}");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_inner_hook_that_fails_allows_and_says_the_guard_is_unhealthy() {
+        // The timeout, the exit, and the signal are injected. A wall-clock
+        // race is what made a slow runner report the timeout instead of
+        // the signal.
+        let timeout = std::time::Duration::from_secs(5);
+        let injected = [
+            format!("gave no answer within {} s", timeout.as_secs_f32()),
+            "exited with status 3".to_string(),
+            "was killed by a signal".to_string(),
+        ];
+        for why in &injected {
+            allows_unhealthy(&fault_output("PreToolUse", why), why);
+        }
+        allows_unhealthy(&inner("exit 3", 30_000), "exited with status 3");
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
             "PreToolUse",
             std::time::Duration::from_secs(1),
         );
-        assert!(missing.contains("did not start"), "{missing}");
+        allows_unhealthy(&missing, "did not start");
+        assert_eq!(INNER_TIMEOUT, crate::GUARD_TIMEOUT);
     }
 
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
-        assert_eq!(inner("cat >/dev/null", 2_000), "", "a clean allow");
+        assert_eq!(inner("true", 30_000), "", "a clean allow");
+        assert_eq!(inner(&format!("printf '%s' '{DENY}'"), 30_000), DENY);
         assert_eq!(
-            inner(&format!("cat >/dev/null; printf '%s' '{DENY}'"), 2_000),
-            DENY
-        );
-        assert_eq!(
-            inner(
-                &format!("cat >/dev/null; printf '%s' '{DENY}'; exit 1"),
-                2_000
-            ),
+            inner(&format!("printf '%s' '{DENY}'; exit 1"), 30_000),
             DENY,
             "a deny printed before a non-zero exit stands"
         );
-        let note = inner(
-            &format!("cat >/dev/null; printf '%s' '{NOTE}'; exit 1"),
-            2_000,
+        let note = inner(&format!("printf '%s' '{NOTE}'; exit 1"), 30_000);
+        assert!(read_answer(&note).decision.is_none(), "{note}");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(note.contains("exited with status 1"), "{note}");
+    }
+
+    #[test]
+    fn a_known_dangerous_command_is_judged_before_the_inner_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = crate::test_env_lock();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target")
+            .join(format!("ljos-early-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let keys = [
+            "HOME",
+            "XDG_DATA_HOME",
+            "LJOS_OFF",
+            "POLICYD_BIN",
+            "PACKSET_WORKSPACE",
+        ];
+        struct RestoreEnv(Vec<(String, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    unsafe {
+                        match v {
+                            Some(v) => std::env::set_var(k, v),
+                            None => std::env::remove_var(k),
+                        }
+                    }
+                }
+            }
+        }
+        let saved = RestoreEnv(
+            keys.iter()
+                .map(|k| ((*k).to_string(), std::env::var_os(k)))
+                .collect(),
         );
-        assert_eq!(read_answer(&note).decision.as_deref(), Some("deny"));
+        let data = dir.join("data");
+        unsafe {
+            std::env::set_var("HOME", &dir);
+            std::env::set_var("XDG_DATA_HOME", &data);
+            std::env::set_var("LJOS_OFF", "0");
+            std::env::set_var("POLICYD_BIN", dir.join("does-not-run"));
+            std::env::set_var("PACKSET_WORKSPACE", "early-guard");
+        }
+        let force = json!({"tool_input": {"command": "git push --force origin main"}}).to_string();
+        let started = std::time::Instant::now();
+        let asked = early_answer(&force, "PreToolUse").expect("a force push asks");
+        let plain = json!({"tool_input": {"command": "git status"}}).to_string();
+        assert!(
+            early_answer(&plain, "").is_none(),
+            "git status is not dangerous"
+        );
+        let rm = json!({"tool_input": {"command": "rm -rf /home/u/proj"}}).to_string();
+        let denied = early_answer(&rm, "PreToolUse").expect("rm -rf denies");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the static check waited on the guard"
+        );
+        assert_eq!(
+            read_answer(&asked).decision.as_deref(),
+            Some("ask"),
+            "{asked}"
+        );
+        assert!(asked.contains("git-force-push"), "{asked}");
+        assert_eq!(
+            read_answer(&denied).decision.as_deref(),
+            Some("deny"),
+            "{denied}"
+        );
+        assert!(denied.contains("rm-rf-outside-tmp"), "{denied}");
+        drop(saved);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
