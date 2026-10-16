@@ -208,15 +208,61 @@ impl Filter {
     }
 }
 
+/// Times search or the hook handed each atom back. The pack's `review.reps`
+/// moves only when a review is graded. This count is the uses, and it does
+/// not rewrite the atom.
+#[must_use]
+pub fn recall_uses_path() -> PathBuf {
+    reviews_path()
+        .parent()
+        .map(|dir| dir.join("recall-uses.json"))
+        .unwrap_or_else(|| PathBuf::from("recall-uses.json"))
+}
+
+/// Uses recorded for each atom id.
+#[must_use]
+pub fn recall_uses() -> BTreeMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(recall_uses_path()) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Count one recall of each id. A pack that is down still records the use
+/// locally, so the next `ljos memories list` shows it.
+pub fn bump_recalls(ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let path = recall_uses_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut uses = recall_uses();
+    for id in ids {
+        if id.is_empty() {
+            continue;
+        }
+        *uses.entry(id.clone()).or_default() += 1;
+    }
+    if let Ok(text) = serde_json::to_string(&uses) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
 /// The memories in `atoms` that `filter` admits, newest first, each with
 /// its last verdict from `reviews`.
 #[must_use]
 pub fn list(atoms: &[Value], reviews: &BTreeMap<String, Review>, filter: &Filter) -> Vec<Memory> {
+    let uses = recall_uses();
     let mut out: Vec<Memory> = atoms
         .iter()
         .filter_map(Memory::of)
         .map(|mut m| {
             m.verdict = reviews.get(&m.id).map(|r| r.verdict.clone());
+            m.recalls = m
+                .recalls
+                .saturating_add(uses.get(&m.id).copied().unwrap_or(0));
             m
         })
         .filter(|m| filter.admits(m))
@@ -1151,5 +1197,30 @@ mod tests {
             "{got}"
         );
         assert!(got.starts_with("from now on use [redacted]"));
+    }
+
+    #[test]
+    fn a_recall_bumps_the_count_the_list_shows() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let atoms = vec![atom(
+            "a1aaaaaaaaaaaaaa",
+            "pin the fuse",
+            "saddle",
+            "2026-10-16T10:00:00Z",
+            "agent-derived",
+        )];
+        let before = list(&atoms, &BTreeMap::new(), &Filter::default());
+        assert_eq!(before[0].recalls, 0);
+        bump_recalls(&["a1aaaaaaaaaaaaaa".into()]);
+        let after = list(&atoms, &BTreeMap::new(), &Filter::default());
+        assert_eq!(after[0].recalls, 1);
+        assert!(
+            describe(&after[0]).contains("recalled 1x"),
+            "{}",
+            describe(&after[0])
+        );
+        std::env::remove_var("XDG_STATE_HOME");
     }
 }

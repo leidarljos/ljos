@@ -976,9 +976,7 @@ fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<S
     let path = which::which(bin).map_err(|_| refused(anyhow::anyhow!("{bin} not on PATH")))?;
     let mut cmd = Command::new(path);
     cmd.env("VISSUE_AGENT", who);
-    if let Some(s) = ljos_cli::ballot_sig::call_session() {
-        cmd.env("LJOS_HARNESS_SESSION", s);
-    }
+    ljos_cli::bind_connection_env(&mut cmd);
     let out = cmd
         .args(args)
         .stdin(Stdio::null())
@@ -1455,6 +1453,10 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         match &args.choice {
             Some(c) => {
+                let who = identity_or_seat(args.as_persona.as_deref())
+                    .unwrap_or_else(|| "seat".to_string());
+                let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, &who)
+                    .map_err(refused)?;
                 let used = args.used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     return Err(refused(anyhow::anyhow!(
@@ -1475,6 +1477,7 @@ impl LjosServer {
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let mut said = habitat_as("vissue", &refs, args.as_persona.as_deref())?;
+                cast.keep();
                 let who = identity_or_seat(args.as_persona.as_deref())
                     .unwrap_or_else(|| "seat".to_string());
                 match ljos_cli::ballot_sig::sign_ballot(&args.issue, &who, c) {
@@ -1517,21 +1520,32 @@ impl LjosServer {
                         "jev: a Jev ballot is cast as a persona; pass as"
                     )));
                 };
+                let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, name)
+                    .map_err(refused)?;
                 let text = match ljos_cli::jev_vote(name, &args.issue).map_err(refused)? {
-                    ljos_cli::JevVote::Cast(b) => format!(
-                        "{name}: Jev cast {} at confidence {:.2}\n",
-                        b.choice, b.confidence
-                    ),
-                    ljos_cli::JevVote::Escalated(b) => format!(
-                        "{name}: Jev leaned {} at confidence {:.2}, under the {:.2} cut; not cast. \
-                         Start a subagent from ljos_brief {name} {}\n",
-                        b.choice, b.confidence, b.escalate_below, args.issue
-                    ),
+                    ljos_cli::JevVote::Cast(b) => {
+                        cast.keep();
+                        format!(
+                            "{name}: Jev cast {} at confidence {:.2}\n",
+                            b.choice, b.confidence
+                        )
+                    }
+                    ljos_cli::JevVote::Escalated(b) => {
+                        drop(cast);
+                        format!(
+                            "{name}: Jev leaned {} at confidence {:.2}, under the {:.2} cut; not cast. \
+                             Start a subagent from ljos_brief {name} {}\n",
+                            b.choice, b.confidence, b.escalate_below, args.issue
+                        )
+                    }
                 };
                 let text = text + &ljos_cli::persist_tracker(&args.issue, "Jev ballot");
                 Ok(Json(Said { text, aside: None }))
             }
-            None => habitat("vissue", &["vote", &args.issue]),
+            None => {
+                let text = ljos_cli::panel_gate::tally_report(&args.issue).map_err(refused)?;
+                Ok(Json(Said { text, aside: None }))
+            }
         }
     }
 
@@ -1820,6 +1834,7 @@ impl LjosServer {
             &tags,
         )
         .map_err(refused)?;
+        ljos_cli::bind_settle_ballots(&mut steps, &ballots);
         let mut out = Vec::new();
         let names: std::collections::BTreeSet<String> =
             personas.iter().map(|p| p.name.trim().to_string()).collect();
@@ -2851,14 +2866,20 @@ impl ServerHandler for LjosServer {
             }
         };
         bind_seat_env(&seat.seat);
-        if ljos_cli::bookkeep::mcp_tool_writes(&name) {
-            let tool = name.clone();
-            let args = request.arguments.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+        // A server spawned per call has no idle thread left running. The
+        // seat's sitting is on disk: finish it when the last call is past
+        // the idle window, then claim on a write.
+        ljos_cli::bookkeep::note_mcp_process_call();
+        let tool = name.clone();
+        let args = request.arguments.clone();
+        let writes = ljos_cli::bookkeep::mcp_tool_writes(&name);
+        let _ = tokio::task::spawn_blocking(move || {
+            ljos_cli::bookkeep::resume_seat();
+            if writes {
                 ljos_cli::bookkeep::before_mcp_write(&tool, args.as_ref());
-            })
-            .await;
-        }
+            }
+        })
+        .await;
         // Seat validation belongs to the server; strict handlers receive only
         // their operation arguments and still reject undeclared fields.
         let mut request = request;

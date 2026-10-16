@@ -561,6 +561,55 @@ fn commit_if_sealed(root: &Path, scope: &str, exported: &str) -> String {
     commit_log(root, scope)
 }
 
+/// Push commits this checkout has not sent. Atoms that did not change used
+/// to return before this, so a `.gitattributes` commit sat unpushed.
+/// Nothing to send, and a checkout with no remote, stay quiet.
+fn push_pending(root: &Path) -> String {
+    let remotes = git(root, &["remote"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if remotes.is_empty() || !commits_to_push(root) {
+        return String::new();
+    }
+    match crate::tracker_push::push_checkout(root) {
+        Ok(()) => "sync: pushed pending commits\n".into(),
+        Err(e) => format!("sync: push refused: {e}\n"),
+    }
+}
+
+/// Whether `HEAD` has a commit the upstream does not. No upstream, with a
+/// remote, is a branch that has never been pushed.
+fn commits_to_push(root: &Path) -> bool {
+    let ahead = |spec: &str| -> Option<u64> {
+        let out = git(root, &["rev-list", "--count", spec]).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    };
+    if ahead("@{upstream}..HEAD").is_some_and(|n| n > 0) {
+        return true;
+    }
+    if git(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_ok_and(|o| o.status.success()) {
+        return false;
+    }
+    let branch = git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if branch.is_empty() || branch == "HEAD" {
+        return git(root, &["rev-parse", "--verify", "HEAD"]).is_ok_and(|o| o.status.success());
+    }
+    let remote_ref = format!("origin/{branch}");
+    match ahead(&format!("{remote_ref}..HEAD")) {
+        Some(n) => n > 0,
+        None => git(root, &["rev-parse", "--verify", "HEAD"]).is_ok_and(|o| o.status.success()),
+    }
+}
+
 /// Commit this host's log alone and push it to the upstream and every other
 /// remote that carries the branch.
 fn commit_log(root: &Path, scope: &str) -> String {
@@ -586,7 +635,10 @@ fn commit_log(root: &Path, scope: &str) -> String {
         &["diff", "--cached", "--quiet", "--", &files[0], &files[1]],
     );
     if staged.is_ok_and(|o| o.status.success()) {
-        return String::new();
+        // Atoms did not change. A commit already made in this checkout,
+        // such as the tracker's merge attributes, still has to leave.
+        drop(held);
+        return push_pending(root);
     }
     let message = format!("chore(sync): {host} {scope} atoms");
     let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
@@ -763,6 +815,7 @@ mod tests {
     /// A tracker with no remote used to say the log was pushed to nothing.
     #[test]
     fn a_log_with_no_remote_says_how_to_set_one() {
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
@@ -793,6 +846,77 @@ mod tests {
         assert!(said.contains("git push -u origin HEAD"), "{said}");
         assert!(!said.contains("pushed to nothing"), "{said}");
         assert_eq!(commit_log(root, "surf"), "");
+    }
+
+    /// Atoms that did not change still push a commit already waiting,
+    /// such as the tracker's merge attributes.
+    #[test]
+    fn unchanged_atoms_still_push_a_pending_commit() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let root = dir.path().join("local");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare"]);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        let atoms = root.join(".ljos/atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        let name = host();
+        std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
+        std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
+        std::fs::write(root.join("README"), "seed\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(root.join(".gitattributes"), "*.org merge=union\n").unwrap();
+        git(&root, &["add", ".gitattributes"]);
+        git(
+            &root,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "chore(tracker): union org files and re-export atoms on merge",
+            ],
+        );
+        let said = commit_log(&root, "surf");
+        assert!(
+            said.contains("pushed pending commits"),
+            "an unchanged atom log must still push: {said}"
+        );
+        let remote_log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&remote)
+            .args(["log", "--format=%s"])
+            .output()
+            .unwrap();
+        let subjects = String::from_utf8_lossy(&remote_log.stdout);
+        assert!(
+            subjects.contains("union org files"),
+            "the pending commit was not pushed: {subjects}"
+        );
+        assert_eq!(commit_log(&root, "surf"), "");
     }
 
     /// Finish's sync used to print an os error when `age` was not installed.
@@ -889,6 +1013,7 @@ mod tests {
 
     #[test]
     fn a_sealed_log_opens_for_a_recipient_and_not_for_another() {
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let key = |name: &str| {
             let path = dir.path().join(name);

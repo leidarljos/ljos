@@ -260,7 +260,11 @@ pub fn write_agent(client: &PacksetClient, mut atom: Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .filter(|w| !w.is_empty())
                 .map_or_else(|| client.workspace(), str::to_string);
-            accept_on_writer(client, &workspace, &id)
+            let accepted = accept_on_writer(client, &workspace, &id)?;
+            // Accept stores the atom as user-declared, and `ljos memories
+            // list` then hides it. Put the origin back so the review list
+            // the CLI reads is the store this write just landed in.
+            relabel_agent(client, &workspace, accepted)
         }
     }
 }
@@ -360,6 +364,48 @@ fn accepted_line(id: &str, kind: &str, posted: &Value) -> String {
         "accepted {id} as {kind} origin {origin}{}\n",
         crate::revision_note(posted)
     )
+}
+
+/// Accept rises the origin to `user-declared`. An agent write is reviewed
+/// afterwards, so the live atom has to stay `agent-derived` or the default
+/// memory list never shows it. One update, on an atom just stored.
+fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Result<Value> {
+    let origin = accepted.get("origin").and_then(Value::as_str).unwrap_or("");
+    if origin == ORIGIN_AGENT {
+        return Ok(accepted);
+    }
+    let Some(id) = accepted
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        bail!(
+            "accept stored the lesson without an id, so its origin could not be put back to agent-derived"
+        );
+    };
+    let url = format!("{}/v1/atoms/update", client.base());
+    let body = serde_json::json!({
+        "workspace": workspace,
+        "id": id,
+        "fields": {"origin": ORIGIN_AGENT},
+    });
+    match packset_client::authorize(ureq::post(&url))
+        .timeout(http_timeout())
+        .send_json(body)
+    {
+        Ok(resp) => resp
+            .into_json()
+            .context("update: the pack's answer was not json"),
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            bail!(
+                "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {code}: {text}"
+            );
+        }
+        Err(e) => bail!(
+            "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {e}"
+        ),
+    }
 }
 
 fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result<Value> {

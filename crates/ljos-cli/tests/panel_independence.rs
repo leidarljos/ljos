@@ -5,15 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const ONE_SESSION: &str = "\
-refuses to settle demo-ind1: one session authored more than one ballot: \
-sess-shared-0001 cast 3 (alice, bob, carol); all ballots trace to one session \
-(sess-shared-0001). Seats minted inside a session do not multiply its vote";
-
-const AUTHOR_VOTED: &str = "\
-refuses to settle demo-vote: session sess-alice-0001 authored candidate demo-d001 \
-and voted on demo-vote. Seats minted inside a session do not multiply its vote";
-
 const BLIND: &str = "\
 design demo-a is not blind: session sess-designer-0001 read demo-b before filing it";
 
@@ -226,34 +217,114 @@ fn vote(world: &World, seat: &str, session: &str, issue: &str) {
 }
 
 #[test]
-fn one_session_of_n_seats_is_refused_with_the_whole_sentence() {
+fn one_session_of_n_seats_is_refused_at_the_cast() {
     let world = World::new();
-    for seat in ["alice", "bob", "carol"] {
-        vote(&world, seat, "sess-shared-0001", "demo-ind1");
+    vote(&world, "alice", "sess-shared-0001", "demo-ind1");
+    for seat in ["bob", "carol"] {
+        let out = world.ljos(
+            seat,
+            "sess-shared-0001",
+            &["vote", "demo-ind1", "--for", "ship", "--used", "none"],
+        );
+        let said = text(&out);
+        assert!(!out.status.success(), "{said}");
+        assert!(
+            said.contains("already cast") && said.contains("Nothing was cast"),
+            "{said}"
+        );
     }
-    let out = world.ljos("alice", "sess-shared-0001", &["consensus", "demo-ind1"]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(1), "{said}");
+    let tally = world.ljos("alice", "sess-alice-0001", &["vote", "demo-ind1"]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("alice"), "{said}");
+    assert!(!stdout.contains("bob"), "{said}");
+}
+
+#[test]
+fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
+    let world = World::new();
+    let session = "sand-subagent-fcdb9c57-9988-7d91-4311-9fc5e42f7529";
+    let personas = ["academic", "transit", "safety", "cat-owner", "finance"];
+    let issue = "travel-rx1d";
+    // The drawer as the live tracker held it: five personas, then the same
+    // five again, one session on every ballot-sig. Newest note first.
+    let mut notes = Vec::new();
+    for persona in personas.iter().rev() {
+        notes.push(serde_json::json!({"note": format!("ballot-sig: {persona} bus ab cd {session} n-{persona}-2")}));
+    }
+    for persona in personas.iter().rev() {
+        notes.push(serde_json::json!({"note": format!("ballot-sig: {persona} rail ab cd {session} n-{persona}-1")}));
+    }
+    let mut ballots = serde_json::Map::new();
+    ballots.insert(
+        issue.into(),
+        serde_json::json!(personas
+            .iter()
+            .map(|persona| serde_json::json!({"agent": persona, "choice": "bus"}))
+            .collect::<Vec<_>>()),
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({issue: notes})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("ballots.json"),
+        serde_json::to_string(&serde_json::Value::Object(ballots)).unwrap(),
+    )
+    .unwrap();
+    let tally = world.ljos("academic", session, &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("academic  rail"), "{said}");
     assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|line| line == ONE_SESSION),
+        stdout.contains("a later ballot on this session is ignored"),
         "{said}"
     );
+    for persona in &personas[1..] {
+        assert!(stdout.contains(persona), "{said}");
+        assert!(stdout.contains("same session"), "{said}");
+    }
+    assert!(stdout.contains(session), "{said}");
+    assert!(!stdout.contains("finance  bus"), "{said}");
 
-    let json = world.ljos(
-        "alice",
-        "sess-shared-0001",
-        &["consensus", "demo-ind1", "--json"],
+    for persona in personas {
+        let out = world.ljos(
+            persona,
+            session,
+            &[
+                "vote", issue, "--for", "bus", "--used", "none", "--as", persona,
+            ],
+        );
+        let said = text(&out);
+        assert!(!out.status.success(), "{persona}: {said}");
+        assert!(
+            said.contains("already cast")
+                && said.contains("Nothing was cast")
+                && said.contains(session),
+            "{persona}: {said}"
+        );
+    }
+    let other = world.ljos(
+        "clerk",
+        "sess-clerk-0001",
+        &[
+            "vote", issue, "--for", "rail", "--used", "none", "--as", "clerk",
+        ],
     );
-    assert_eq!(json.status.code(), Some(1), "{}", text(&json));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
-    assert_eq!(doc["settled"], false, "{doc}");
-    assert_eq!(doc["panel"]["settled"], false, "{doc}");
-    assert_eq!(doc["panel"]["refusal"], ONE_SESSION, "{doc}");
-    assert_eq!(doc["push_cite"]["stands"], false, "{doc}");
-    assert_eq!(doc["push_cite"]["refusal"], ONE_SESSION, "{doc}");
+    let said = text(&other);
+    assert!(other.status.success(), "{said}");
+    let again = world.ljos("clerk", "sess-clerk-0001", &["vote", issue]);
+    let said = text(&again);
+    assert!(again.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&again.stdout);
+    assert!(stdout.contains("2 ballots count"), "{said}");
+    assert!(stdout.contains("clerk  rail"), "{said}");
+    assert!(stdout.contains("academic  rail"), "{said}");
 }
 
 #[test]
@@ -297,15 +368,23 @@ fn an_author_who_votes_is_refused() {
         said.contains("candidate demo-d001 bound to session sess-alice-0001"),
         "{said}"
     );
-    vote(&world, "alice", "sess-alice-0001", "demo-vote");
+    let author = world.ljos(
+        "alice",
+        "sess-alice-0001",
+        &["vote", "demo-vote", "--for", "ship", "--used", "none"],
+    );
+    let said = text(&author);
+    assert!(!author.status.success(), "{said}");
+    assert!(
+        said.contains("authored candidate") && said.contains("Nothing was cast"),
+        "{said}"
+    );
     vote(&world, "bob", "sess-bob-0001", "demo-vote");
     let out = world.ljos("bob", "sess-bob-0001", &["consensus", "demo-vote"]);
     let said = text(&out);
-    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.status.success(), "{said}");
     assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|line| line == AUTHOR_VOTED),
+        !String::from_utf8_lossy(&out.stdout).contains("refuses to settle"),
         "{said}"
     );
 }

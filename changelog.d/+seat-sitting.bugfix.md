@@ -1,0 +1,1 @@
+ljos-mcp keeps the open claim on disk under the seat, so a server spawned once per tool call still claims on the first write and finishes that sitting when a later start finds it idle. The book used to be keyed by the process id, and shutdown of a one-call process never closed it.
