@@ -10,9 +10,10 @@
 //! when its latest signature covers exactly that voter, issue and choice
 //! under the pinned key.
 //!
-//! A ballot cast now also carries the harness session and a per-process
-//! nonce, and the signature covers both (`ljos-ballot/v2`). Minting another
-//! seat inside the same session does not make a second voter.
+//! A ballot carries the harness session and a nonce (`ljos-ballot/v2`).
+//! The session is the harness id, else `VISSUE_AGENT`, else `LJOS_SEAT`,
+//! else the MCP connection. It is never a fresh nonce of this process.
+//! Minting another seat inside the same session does not make a second voter.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -296,9 +297,10 @@ pub fn field(raw: &str) -> String {
     }
 }
 
-/// The harness session and the nonce of this process. The session id comes
-/// from the MCP call, the hook payload, or the environment, in that order.
-/// The nonce is one per process (`LJOS_PROCESS_NONCE` when a test pins it).
+/// The harness session, and a nonce that is not a process id. The session
+/// comes from the MCP connection, the hook, or the environment, then from
+/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce stays `-`: one holder is one
+/// session across processes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {
     pub harness: String,
@@ -359,16 +361,18 @@ static CONNECTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Pin the MCP connection's session for this process. The first call wins.
 /// A later `_meta` session id and a later `seat` argument do not replace it.
-/// With no hint, the runner's `LJOS_HARNESS_SESSION` is the connection, else
-/// this process's nonce.
+/// With no hint, the runner's `LJOS_HARNESS_SESSION` is the connection.
+/// Nothing is pinned when that is empty: a per-process nonce is not a session.
 pub fn pin_connection_session(hint: Option<&str>) {
-    let chosen = hint
+    let Some(chosen) = hint
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(field)
         .filter(|s| s != "-")
         .or_else(|| env_token("LJOS_HARNESS_SESSION"))
-        .unwrap_or_else(process_nonce);
+    else {
+        return;
+    };
     let _ = CONNECTION.set(chosen);
 }
 
@@ -442,17 +446,30 @@ pub fn process_nonce() -> String {
     PROCESS_NONCE.get_or_init(|| random_hex(16)).clone()
 }
 
-/// This process's session identity.
+/// A person-named agent or seat, when it is not a pronoun.
+fn named_session_actor(key: &str) -> Option<String> {
+    let name = env_token(key)?;
+    let lower = name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "seat" | "you" | "agent" | "runner" | "-") {
+        return None;
+    }
+    Some(name)
+}
+
+/// This process's session identity. Stable across processes of one holder.
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
+    let harness = if !harness.is_empty() {
+        harness
+    } else {
+        named_session_actor("VISSUE_AGENT")
+            .or_else(|| named_session_actor("LJOS_SEAT"))
+            .unwrap_or_else(|| "-".into())
+    };
     SessionIdentity {
-        harness: if harness.is_empty() {
-            "-".into()
-        } else {
-            harness
-        },
-        nonce: process_nonce(),
+        harness,
+        nonce: "-".into(),
     }
 }
 
@@ -488,8 +505,8 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
     Ok((key, mine))
 }
 
-/// Sign this seat's ballot, bound to the harness session and this process's
-/// nonce, and leave the note on the issue. A seat whose key differs from
+/// Sign this seat's ballot, bound to the harness session, and leave the
+/// note on the issue. A seat whose key differs from
 /// its pin is refused, and the ballot stays unsigned (so the gate will not
 /// count it).
 ///

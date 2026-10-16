@@ -2106,9 +2106,7 @@ fn run_command() -> Result<()> {
             // An ordinary branch push is allowed. Force, a +refspec, a
             // remote-branch delete and a tag push ask by default.
             let cwd = ljos_cli::hook_directory(input.trim());
-            let gated = if tcb_rule.is_some() {
-                None
-            } else if let Err(error) = &cwd {
+            let gated = if let Err(error) = &cwd {
                 Some(ljos_cli::Rule {
                     pattern: "tool working directory".into(),
                     verdict: "deny".into(),
@@ -2124,7 +2122,13 @@ fn run_command() -> Result<()> {
                     &call.cue,
                 )
             };
-            let verdict = tcb_rule.as_ref().or(gated.as_ref());
+            // A seat rule that denies this push still denies it. Otherwise
+            // the policyd ask (a force push) is the verdict, then the gate.
+            let verdict = if gated.as_ref().is_some_and(|rule| rule.verdict == "deny") {
+                gated.as_ref()
+            } else {
+                tcb_rule.as_ref().or(gated.as_ref())
+            };
             // A command the ask pack would have asked about runs because a
             // setting turned that class off: the bypass log keeps a row.
             if verdict.is_none() && call.event == "PreToolUse" {
@@ -2342,6 +2346,9 @@ fn run_command() -> Result<()> {
             // The book is kept here, after a deny has already been decided,
             // so a tracker that does not answer cannot turn into a refusal.
             // A Stop the audit held never reaches this line.
+            if let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") {
+                ljos_cli::bookkeep::note_ask(&input, &call, &rule.reason);
+            }
             if verdict.is_none() {
                 let (extra, ids) = ljos_cli::bookkeep::observe(&input, &call);
                 if !extra.is_empty() {

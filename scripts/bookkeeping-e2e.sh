@@ -180,6 +180,7 @@ PY
   run_hook "$(codex_body SessionStart '{}')"
   run_hook "$(codex_body PreToolUse '{"tool_name":"apply_patch","tool_input":{"file_path":"README.md"}}')"
   run_hook "$(codex_body PreToolUse '{"tool_name":"shell","tool_input":{"command":"git -C . commit -m \"readme\""}}')"
+  run_hook "$(codex_body PostToolUse '{"tool_name":"shell","tool_input":{"command":"git -C . commit -m \"readme\""},"tool_response":{"exit_code":0}}')"
   run_hook "$(codex_body Stop '{}')"
   run_hook "$(codex_body SessionEnd '{}')"
 }
@@ -222,6 +223,12 @@ session, cwd = sys.argv[1:]
 print(json.dumps({"conversationId": session, "cwd": cwd, "toolCall": {"name": "bash", "args": {"CommandLine": "git commit -m \"readme\""}}}))
 PY
 )"
+  agy PostToolUse "$(python3 - "$session" "$repo" << 'PY'
+import json, sys
+session, cwd = sys.argv[1:]
+print(json.dumps({"conversationId": session, "cwd": cwd, "toolCall": {"name": "bash", "args": {"CommandLine": "git commit -m \"readme\""}}, "tool_response": {"exit_code": 0}}))
+PY
+)"
   agy Stop "$(python3 - "$session" "$repo" << 'PY'
 import json, sys
 print(json.dumps({"conversationId": sys.argv[1], "cwd": sys.argv[2], "executionNum": 1}))
@@ -247,6 +254,7 @@ PY
   run_hook "$(cursor_body beforeSubmitPrompt '{}')"
   run_hook "$(cursor_body preToolUse '{"tool_name":"Write","tool_input":{"file_path":"README.md"}}')"
   run_hook "$(cursor_body beforeShellExecution '{"command":"git commit -m \"readme\""}')"
+  run_hook "$(cursor_body postToolUse '{"tool_name":"Shell","tool_input":{"command":"git commit -m \"readme\""},"tool_response":{"exit_code":0}}')"
   run_hook "$(cursor_body stop '{}')"
   run_hook "$(cursor_body sessionEnd '{}')"
 }

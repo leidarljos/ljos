@@ -68,11 +68,11 @@ What this seat already knows that bears on this (from the pack, each with its ag
 ```
 
 When the agent then reaches for `git push --force origin main`, the runner
-refuses the command before it runs. `ljos-policyd` answers first, with the
-rules it ships, and lets `--force-with-lease` through:
+asks before it runs. `ljos-policyd` answers first, with the rules it ships,
+and lets `--force-with-lease` through:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `git-force-push`)"}}
 ```
 
 `sh -c "cd repo && git push -f origin main"` gets the same answer. A command

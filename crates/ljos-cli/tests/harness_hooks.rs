@@ -1,0 +1,766 @@
+//! The five real-harness fixes, each driven through `ljos hook` (the ballot
+//! case through `ljos vote`, which is the process that casts and tallies).
+
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+fn script(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn head(dir: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+struct Habitat {
+    root: PathBuf,
+    tracker: PathBuf,
+    repo: PathBuf,
+    bin: PathBuf,
+    run: PathBuf,
+    home: PathBuf,
+}
+
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn habitat() -> (Scratch, Habitat) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = PathBuf::from(format!(
+        "/workspace/target/harness-hooks-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch(dir);
+    let tracker = dir.0.join("tracker");
+    let repo = dir.0.join("repo");
+    let bin = dir.0.join("bin");
+    let run = dir.0.join("run");
+    let home = dir.0.join("home");
+    for path in [&tracker, &repo, &bin, &run, &home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    for root in [&tracker, &repo] {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "seat@example.invalid"]);
+        git(root, &["config", "user.name", "seat"]);
+        git(root, &["config", "core.hooksPath", "/dev/null"]);
+    }
+    std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+    script(
+        &bin,
+        "vissue",
+        r#"#!/usr/bin/env python3
+import os, sys, pathlib, re
+root = pathlib.Path(os.environ["VISSUE_ROOT"])
+log = root / "vissue.log"
+args = sys.argv[1:]
+with log.open("a") as fh:
+    fh.write(" ".join(args) + "\n")
+cmd, rest = args[0], args[1:]
+
+def files():
+    return list(root.rglob("issues.org"))
+
+def rewrite(iid, state):
+    pat = re.compile(r"(\* )[A-Z]+( \[#[A-Z]\] [^\n]*\n:PROPERTIES:\n:ID:\s+" + re.escape(iid) + r"\n)")
+    for f in files():
+        text = f.read_text()
+        new, n = pat.subn(r"\1" + state + r"\2", text, count=1)
+        if n:
+            f.write_text(new)
+            return
+    sys.exit("no heading for " + iid)
+
+if cmd == "create":
+    proj, title, i = "agent", "agent work", 0
+    while i < len(rest):
+        if rest[i] == "-p" and i + 1 < len(rest):
+            proj = rest[i + 1]
+            i += 2
+            continue
+        if rest[i] == "-q":
+            i += 1
+            continue
+        title = rest[i]
+        i += 1
+    seq = root / ".seq"
+    n = int(seq.read_text()) + 1 if seq.exists() else 1
+    seq.write_text(str(n))
+    iid = f"{proj}-{n:04x}"
+    dest = root / "Software" / proj
+    dest.mkdir(parents=True, exist_ok=True)
+    with (dest / "issues.org").open("a") as fh:
+        fh.write(f"* TODO [#C] {title}\n:PROPERTIES:\n:ID:         {iid}\n:END:\n")
+    print(iid)
+elif cmd == "claim":
+    rewrite(rest[0], "STARTED")
+elif cmd == "update":
+    state = rest[rest.index("-s") + 1]
+    rewrite(rest[0], state)
+elif cmd == "deed":
+    iid, acc = rest[0], rest[rest.index("--add") + 1]
+    needle = f":ID:         {iid}\n:END:\n"
+    for f in files():
+        text = f.read_text()
+        if needle in text:
+            f.write_text(text.replace(needle, needle + f"cited {acc}\n", 1))
+            sys.exit(0)
+    sys.exit("no issue " + iid)
+elif cmd == "claims":
+    print("[]")
+elif cmd == "show":
+    print("{}")
+else:
+    sys.exit("unknown " + cmd)
+"#,
+    );
+    script(
+        &bin,
+        "deedar",
+        r#"#!/usr/bin/env python3
+import os, pathlib, sys
+root = pathlib.Path(os.environ["VISSUE_ROOT"])
+args = sys.argv[1:]
+(root / "deedar.log").open("a").write(" ".join(args) + "\n")
+ident = None
+i = 0
+while i < len(args):
+    if args[i] == "--id" and i + 1 < len(args):
+        ident = args[i + 1]
+    if args[i] == "--path" and i + 1 < len(args):
+        (root / "deedar-body.log").open("a").write(pathlib.Path(args[i + 1]).read_text())
+    i += 1
+if not ident:
+    sys.exit("deedar was not given --id")
+print(f"id={ident}")
+"#,
+    );
+    let hab = Habitat {
+        root: dir.0.clone(),
+        tracker,
+        repo,
+        bin,
+        run,
+        home,
+    };
+    (dir, hab)
+}
+
+fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::Output {
+    let path = format!("{}:/usr/bin:/bin", hab.bin.display());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.arg("hook")
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &hab.home)
+        .env("XDG_CONFIG_HOME", hab.home.join(".config"))
+        .env("XDG_DATA_HOME", hab.home.join(".local/share"))
+        .env("XDG_CACHE_HOME", hab.home.join(".cache"))
+        .env("XDG_STATE_HOME", hab.home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", &hab.run)
+        .env("VISSUE_ROOT", &hab.tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_TRACKER_GIT", "commit")
+        .env("LJOS_PROJECT", "probe")
+        .env("LJOS_SEAT", "probe-seat")
+        .env("LJOS_HOLD", "book-holder")
+        .env("PACKSET_URL", "off")
+        .current_dir(&hab.repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "ljos hook failed\nstdout:\n{}\nstderr:\n{}\npayload:\n{payload}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+fn claude(event: &str, session: &str, cwd: &Path, extra: serde_json::Value) -> String {
+    let mut body = serde_json::json!({
+        "hook_event_name": event,
+        "session_id": session,
+        "cwd": cwd,
+    });
+    if let (serde_json::Value::Object(dst), serde_json::Value::Object(src)) = (&mut body, extra) {
+        for (k, v) in src {
+            dst.insert(k, v);
+        }
+    }
+    body.to_string()
+}
+
+fn commit_file(repo: &Path, name: &str) -> String {
+    std::fs::write(repo.join(name), "x\n").unwrap();
+    git(repo, &["add", name]);
+    git(repo, &["commit", "-q", "-m", name]);
+    head(repo)
+}
+
+#[test]
+fn the_hook_cites_a_commit_only_after_it_exits_zero() {
+    let (_dir, hab) = habitat();
+    std::fs::create_dir_all(hab.run.join("ljos")).unwrap();
+    std::fs::write(
+        hab.run.join("ljos/hold-book-holder"),
+        "book-holder\nprobe-seat\n999999\nbash\n2026-01-01T00:00:00Z\nother-9999\n-\n",
+    )
+    .unwrap();
+    let session = "deed-session";
+    let cwd = hab.repo.clone();
+    ljos(
+        &hab,
+        &claude(
+            "UserPromptSubmit",
+            session,
+            &cwd,
+            serde_json::json!({"prompt": "Add a readme line"}),
+        ),
+        &[],
+    );
+    ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            session,
+            &cwd,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        ),
+        &[],
+    );
+    let claimed = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    assert!(claimed.contains("create"), "{claimed}");
+    assert!(!claimed.contains("other-9999"), "{claimed}");
+    ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            session,
+            &cwd,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m one"}}),
+        ),
+        &[],
+    );
+    assert!(
+        !hab.tracker.join("deedar.log").exists(),
+        "the pre-hook cited a deed before the commit ran"
+    );
+    let first = commit_file(&hab.repo, "one.txt");
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m one"},
+                "tool_response": {"exit_code": 0}
+            }),
+        ),
+        &[],
+    );
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m boom"},
+                "tool_response": {"exit_code": 1}
+            }),
+        ),
+        &[],
+    );
+    let after_fail = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
+    assert_eq!(after_fail.lines().count(), 1, "{after_fail}");
+    let second = commit_file(&hab.repo, "two.txt");
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m two"}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{first}")),
+        "{deeds}"
+    );
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{second}")),
+        "{deeds}"
+    );
+    assert_eq!(deeds.lines().count(), 2, "{deeds}");
+    let body = std::fs::read_to_string(hab.tracker.join("deedar-body.log")).unwrap();
+    assert!(body.contains(&first) && body.contains(&second), "{body}");
+    assert!(!body.contains("git commit"), "{body}");
+    let org = std::fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains(&format!("cited deed-file-commit-{first}")),
+        "{org}"
+    );
+    assert!(
+        org.contains(&format!("cited deed-file-commit-{second}")),
+        "{org}"
+    );
+    assert!(!org.contains("other-9999"), "{org}");
+}
+
+#[test]
+fn the_hook_claims_on_the_first_write_and_on_a_tracked_redirect() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let tools = [
+        (
+            "Write",
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        ),
+        (
+            "Edit",
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "README.md"}}),
+        ),
+        (
+            "MultiEdit",
+            serde_json::json!({"tool_name": "MultiEdit", "tool_input": {"file_path": "README.md"}}),
+        ),
+        (
+            "apply_patch",
+            serde_json::json!({"tool_name": "apply_patch", "tool_input": {"file_path": "README.md"}}),
+        ),
+        (
+            "redirect",
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "echo hi > README.md"}}),
+        ),
+    ];
+    for (name, extra) in tools {
+        ljos(
+            &hab,
+            &claude("PreToolUse", &format!("claim-{name}"), &cwd, extra),
+            &[],
+        );
+    }
+    ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            "claim-new-file",
+            &cwd,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "echo hi > brand-new.txt"}}),
+        ),
+        &[],
+    );
+    let log = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    let creates = log.matches("create").count();
+    assert_eq!(creates, 5, "{log}");
+}
+
+fn context(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return text.into_owned();
+    };
+    value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[test]
+fn stop_writes_a_lesson_and_the_next_sessions_first_prompt_recalls_it() {
+    let (_dir, hab) = habitat();
+    let store = hab.root.join("atoms.json");
+    let pack = hab.root.join("pack.py");
+    std::fs::write(
+        &pack,
+        r#"#!/usr/bin/env python3
+import json, os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+store = os.environ["ATOM_STORE"]
+atoms = []
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/v1/status":
+            body = {"embedder": {"available": True, "answering": None}}
+        elif path == "/v1/atoms":
+            body = {"atoms": atoms}
+        else:
+            body = {"hits": []}
+        self._send(body)
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(n)
+        try:
+            atom = json.loads(raw)
+        except Exception:
+            atom = {}
+        if isinstance(atom, dict) and atom.get("text"):
+            atom.setdefault("id", "atom-%d" % (len(atoms) + 1))
+            atoms.append(atom)
+            open(store, "w").write(json.dumps(atoms))
+        self._send(atom if isinstance(atom, dict) else {})
+    def _send(self, body):
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+"#,
+    )
+    .unwrap();
+    let mut pack_proc = Command::new("python3")
+        .arg(&pack)
+        .env("ATOM_STORE", &store)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut port = String::new();
+    let mut stdout = pack_proc.stdout.take().unwrap();
+    let mut byte = [0u8; 1];
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if stdout.read(&mut byte).unwrap() == 0 {
+            break;
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        port.push(byte[0] as char);
+    }
+    let port: u16 = port.trim().parse().expect("pack port");
+    let url = format!("http://127.0.0.1:{port}");
+    let cwd = hab.repo.clone();
+    let first = ljos(
+        &hab,
+        &claude(
+            "UserPromptSubmit",
+            "memory-1",
+            &cwd,
+            serde_json::json!({"prompt": "Add a readme line"}),
+        ),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    let warming = context(&first.stdout);
+    assert!(
+        warming.contains("pack is loading its search model"),
+        "{warming}"
+    );
+    assert!(
+        !warming.contains("What this seat already knows"),
+        "{warming}"
+    );
+    ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            "memory-1",
+            &cwd,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "README.md"}}),
+        ),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUseFailure",
+            "memory-1",
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo test"},
+                "tool_response": {"error": "readme test failed"}
+            }),
+        ),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    let asked = ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            "memory-1",
+            &cwd,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}),
+        ),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    let asked = String::from_utf8_lossy(&asked.stdout);
+    assert!(asked.contains("\"permissionDecision\":\"ask\""), "{asked}");
+    ljos(
+        &hab,
+        &claude("Stop", "memory-1", &cwd, serde_json::json!({})),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    let saved = std::fs::read_to_string(&store).unwrap_or_default();
+    assert!(saved.contains("agent-derived"), "{saved}");
+    assert!(saved.contains("Add a readme line"), "{saved}");
+    assert!(saved.contains("horizon:standing"), "{saved}");
+    assert!(
+        saved.contains("probe-seat") || saved.contains("\"seat\""),
+        "{saved}"
+    );
+    let start_line = ljos(
+        &hab,
+        &claude("SessionStart", "memory-2", &cwd, serde_json::json!({})),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    let start_line = context(&start_line.stdout);
+    assert!(!start_line.contains("no memories here yet"), "{start_line}");
+    assert!(start_line.contains("memor"), "{start_line}");
+    let recalled = ljos(
+        &hab,
+        &claude(
+            "UserPromptSubmit",
+            "memory-2",
+            &cwd,
+            serde_json::json!({"prompt": "Add a readme line to the notes"}),
+        ),
+        &[("PACKSET_URL", url.as_str())],
+    );
+    let recalled = context(&recalled.stdout);
+    assert!(
+        recalled.contains("What this seat already knows"),
+        "{recalled}"
+    );
+    assert!(recalled.contains("readme"), "{recalled}");
+    let _ = pack_proc.kill();
+}
+
+#[test]
+fn a_force_push_asks_on_claude_codex_and_opencode() {
+    let (_dir, hab) = habitat();
+    let policyd = hab.bin.join("ljos-policyd");
+    script(
+        &hab.bin,
+        "ljos-policyd",
+        "#!/bin/sh\nprintf 'deny\\tgit-force-push\\n'\nexit 2\n",
+    );
+    let cwd = hab.repo.clone();
+    let command = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "git push --force origin main"}
+    });
+    let cases = [
+        ("claude", "PreToolUse", None),
+        ("codex", "PreToolUse", Some("turn-1")),
+        ("opencode", "PreToolUse", None),
+    ];
+    for (name, event, turn) in cases {
+        let mut extra = command.clone();
+        if let Some(turn) = turn {
+            extra["turn_id"] = serde_json::json!(turn);
+        }
+        let out = ljos(
+            &hab,
+            &claude(event, &format!("force-{name}"), &cwd, extra),
+            &[("POLICYD_BIN", policyd.to_str().unwrap())],
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("\"permissionDecision\":\"ask\""),
+            "{name}: {text}"
+        );
+        assert!(text.contains("git-force-push"), "{name}: {text}");
+        assert!(
+            !text.contains("\"permissionDecision\":\"deny\""),
+            "{name}: {text}"
+        );
+    }
+    let _ = policyd;
+}
+
+#[test]
+fn persona_ballots_from_one_holder_count_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    let state = dir.path().join("state");
+    let root = dir.path().join("tracker");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.email", "seat@example.invalid"]);
+    git(&root, &["config", "user.name", "seat"]);
+    let state_s = state.display().to_string();
+    script(
+        &bin,
+        "vissue",
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys, pathlib
+root = pathlib.Path({state_s:?})
+root.mkdir(parents=True, exist_ok=True)
+ballots = root / "ballots.json"
+notes = root / "notes.json"
+hide = root / "hide-notes"
+def load(path):
+    return json.loads(path.read_text()) if path.exists() else {{}}
+def save(path, value):
+    path.write_text(json.dumps(value))
+args = sys.argv[1:]
+cmd = args[0] if args else ""
+issue = args[1] if len(args) > 1 else ""
+if cmd == "vote" and "--json" in args:
+    print(json.dumps(load(ballots).get(issue, [])))
+elif cmd == "vote" and "--for" in args:
+    choice = args[args.index("--for") + 1]
+    rows = load(ballots)
+    rows.setdefault(issue, []).append({{"agent": os.environ.get("VISSUE_AGENT", ""), "choice": choice}})
+    save(ballots, rows)
+    print("ok")
+elif cmd == "show":
+    kept = [] if hide.exists() else load(notes).get(issue, [])
+    logbook = [{{"note": note}} for note in reversed(kept)]
+    print(json.dumps({{"id": issue, "title": "rig", "logbook": logbook}}))
+elif cmd == "note":
+    rows = load(notes)
+    rows.setdefault(issue, []).append(" ".join(args[2:]))
+    save(notes, rows)
+    print("noted")
+else:
+    print("ok")
+"#
+        ),
+    );
+    let consensus_log = dir.path().join("consensus.log");
+    script(
+        &bin,
+        "ljos-consensus",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\n' '{{\"options\":[\"A\"],\"shares\":[1.0],\"settled\":true}}'\n",
+            consensus_log.display()
+        ),
+    );
+    std::fs::write(state.join("hide-notes"), "1").unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let vote = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_STATE_HOME", home.join(".local/state"))
+            .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+            .env("VISSUE_ROOT", &root)
+            .env("VISSUE_STATE", &state)
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("VISSUE_AGENT", "sess-1")
+            .env("LJOS_SEAT", "sess-1")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let personas = ["", "alpha", "beta", "gamma", "delta"];
+    for (i, persona) in personas.iter().enumerate() {
+        let choice = if i < 3 { "A" } else { "B" };
+        let mut args = vec!["vote", "Rig-uw1n", "--for", choice, "--used", "none"];
+        if !persona.is_empty() {
+            args.push("--as");
+            args.push(persona);
+        }
+        let (ok, stdout, stderr) = vote(&args);
+        assert!(ok, "vote {persona}: {stdout}\n{stderr}");
+    }
+    std::fs::remove_file(state.join("hide-notes")).unwrap();
+    let (ok, tally, stderr) = vote(&["vote", "Rig-uw1n"]);
+    assert!(ok, "{tally}\n{stderr}");
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(!tally.contains("5 ballots"), "{tally}");
+    let (ok, said, stderr) = vote(&["consensus", "Rig-uw1n", "--no-file", "--json"]);
+    assert!(ok, "{said}\n{stderr}");
+    let logged = std::fs::read_to_string(&consensus_log).unwrap_or_default();
+    assert!(logged.contains("--ballots"), "{logged}");
+    let ballots = logged
+        .split("--ballots")
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(ballots.trim()).unwrap_or_default();
+    assert_eq!(rows.len(), 1, "{logged}");
+    let (ok, stdout, stderr) = vote(&["vote", "Rig-uw2n", "--for", "A", "--used", "none"]);
+    assert!(ok, "{stdout}\n{stderr}");
+    let (ok, stdout, stderr) = vote(&[
+        "vote", "Rig-uw2n", "--for", "B", "--used", "none", "--as", "alpha",
+    ]);
+    assert!(!ok, "a second persona was counted\n{stdout}\n{stderr}");
+    let refused = format!("{stdout}\n{stderr}");
+    assert!(refused.contains("already cast"), "{refused}");
+}

@@ -1,5 +1,6 @@
 //! One harness session is one voice. A ballot and a design candidate are
-//! bound to the session that wrote them and to a nonce of that process.
+//! bound to the session that wrote them. That session is the harness id,
+//! the holder, or the MCP connection, not a nonce minted per process.
 //! The consensus gate refuses to settle when one session authored more
 //! than one ballot, when a session both filed a candidate and voted, or
 //! when every ballot traces to one session. Seats minted inside a session
