@@ -24104,6 +24104,34 @@ mod tests {
         assert!(super::seat_env_text("grokbot").contains("ljos/guard-bin"));
     }
 
+    /// A directory this test creates, outside the temp roots, mode `0o755`.
+    /// A temp home is not a seat, so a proof that the guard runs cannot
+    /// live in `tempfile`.
+    struct SeatDir(std::path::PathBuf);
+
+    impl SeatDir {
+        fn new(name: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../target")
+                .join(format!("ljos-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for SeatDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A temp home, a temp working directory, or LJOS_OFF runs the real
     /// binary. The policyd denial that blocked `git branch -D` in a scratch
     /// repository does not apply there.
@@ -24162,22 +24190,21 @@ mod tests {
         );
         assert_eq!(String::from_utf8_lossy(&skipped.stdout).trim(), "ran");
         assert!(!marker.exists(), "policyd was asked in a temp directory");
-        let off = run(
-            std::path::Path::new("/home/ubuntu"),
-            true,
-            std::path::Path::new("/workspace"),
-        );
+        let outside = SeatDir::new("guard-shim");
+        let outside_home = outside.path().join("home");
+        let outside_cwd = outside.path().join("work");
+        std::fs::create_dir_all(&outside_home).unwrap();
+        std::fs::create_dir_all(&outside_cwd).unwrap();
+        std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&outside_cwd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let off = run(&outside_home, true, &outside_cwd);
         assert!(
             off.status.success(),
             "{}",
             String::from_utf8_lossy(&off.stderr)
         );
         assert!(!marker.exists(), "LJOS_OFF still asked policyd");
-        let denied = run(
-            std::path::Path::new("/home/ubuntu"),
-            false,
-            std::path::Path::new("/workspace"),
-        );
+        let denied = run(&outside_home, false, &outside_cwd);
         assert_eq!(denied.status.code(), Some(126));
         assert!(marker.exists());
         let err = String::from_utf8_lossy(&denied.stderr);
@@ -30950,11 +30977,10 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let home = std::path::PathBuf::from("/workspace/target/force-push-home");
-        std::fs::create_dir_all(&home).unwrap();
+        let home = SeatDir::new("force-push-hook");
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
-            ("HOME", home.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
         ]);
         assert!(tcb_verdict("git status").is_none());
         let rule = tcb_verdict("git push --force origin main").expect("the check asks");
@@ -31004,11 +31030,10 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let home = std::path::PathBuf::from("/workspace/target/force-push-home");
-        std::fs::create_dir_all(&home).unwrap();
+        let home = SeatDir::new("force-push-check");
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
-            ("HOME", home.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
         ]);
         let report = guard_report("git push --force origin main").expect("the check asks");
         assert_eq!(report.verdict, "ask");
