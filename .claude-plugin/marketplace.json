@@ -11,8 +11,7 @@
       "description": "Memory, a work tracker and a shell-command gate for Claude Code, with the seat protocol, sitting and finish commands, and the memory hooks.",
       "version": "0.29.0",
       "author": {
-        "name": "Rohit Goswami",
-        "url": "https://github.com/leidarljos"
+        "name": "leidarljos"
       },
       "homepage": "https://leidarljos.github.io",
       "repository": "https://github.com/leidarljos/ljos",
