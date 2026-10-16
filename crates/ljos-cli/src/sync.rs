@@ -709,16 +709,23 @@ fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String
 
 fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
     let root = root.to_path_buf();
+    let mut out = String::new();
+    // Every sync writes the tracker's merge attributes and registers the
+    // atoms driver. A later conflict then unions org files and re-exports
+    // this machine's atoms.
+    if let Err(e) = crate::tracker_push::prepare_tracker(&root, false, true) {
+        out.push_str(&format!("sync: merge setup: {e}\n"));
+    }
     let Some(scope) = scope_of_repo(&root)? else {
         if !asked {
             return Ok(String::new());
         }
-        return Ok(format!(
+        out.push_str(&format!(
             "sync: {} names no scope; write .ljos/sync.toml with name and recipients (`ljos sync --key` prints this machine's)\n",
             root.display()
         ));
+        return Ok(out);
     };
-    let mut out = String::new();
     if pull_import {
         out.push_str(&catch_up(&root));
         out.push_str(&import(&root, &scope)?);

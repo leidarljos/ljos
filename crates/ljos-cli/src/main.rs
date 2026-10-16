@@ -304,6 +304,14 @@ enum Cmd {
         #[arg(long)]
         export: bool,
     },
+    /// Re-export this machine's atoms over a conflicted tracker log. git calls
+    /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
+    MergeAtoms {
+        /// The file git keeps (`%A`).
+        current: PathBuf,
+        /// The path in the tracker (`%P`).
+        path: String,
+    },
     /// What this seat's memory turns on: the claims most linked to, by a weighted PageRank over the pack's links.
     Hubs {
         /// Most hubs to print.
@@ -1214,6 +1222,9 @@ fn run_command() -> Result<()> {
             let body = packset_forget(&id, why.as_deref())?;
             println!("{}", ljos_cli::atom_out(&body, json)?);
         }
+        Cmd::MergeAtoms { current, path } => {
+            ljos_cli::merge_atoms(&current, &path)?;
+        }
         Cmd::Sync {
             key,
             import,
@@ -2063,8 +2074,8 @@ fn run_command() -> Result<()> {
             } else {
                 None
             };
-            // An ordinary branch push is allowed. Force, a remote-branch
-            // delete and a tag push stay an ask when a rule is about that push.
+            // An ordinary branch push is allowed. Force, a +refspec, a
+            // remote-branch delete and a tag push ask by default.
             let cwd = ljos_cli::hook_directory(input.trim());
             let gated = if tcb_rule.is_some() {
                 None

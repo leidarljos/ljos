@@ -118,7 +118,8 @@ runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
   checker's own binaries and hook files. An ordinary `git push` of a branch
   is allowed, whichever remote it names and whether or not that remote's
   owner can be read. Force (`--force`, `-f`, `--force-with-lease`, a
-  `+refspec`), deleting a remote branch, and pushing tags can still ask.
+  `+refspec`), deleting a remote branch, and pushing tags ask by default,
+  with or without a seat rule.
   A pattern as wide as `git push*` is refused when a rule is written.
 - Decisions with more than one defensible answer go to personas, voters with
   a view of their own. They settle by trust-weighted

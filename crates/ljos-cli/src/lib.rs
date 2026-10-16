@@ -3475,7 +3475,7 @@ pub fn onboard_in(
                 dry,
             ));
         }
-        steps.extend([pack_step(dry), host_key_step(dry)]);
+        steps.extend([tracker_step(dry), pack_step(dry), host_key_step(dry)]);
         return Ok(steps);
     }
     let all = harnesses_with_shipped(file)?;
@@ -3669,7 +3669,7 @@ pub fn aider_steps(home: &Path, dry: bool) -> Vec<Step> {
             .into(),
         ok: true,
     });
-    steps.extend([pack_step(dry), host_key_step(dry)]);
+    steps.extend([tracker_step(dry), pack_step(dry), host_key_step(dry)]);
     steps
 }
 
@@ -8599,7 +8599,14 @@ fn tracker_step(dry: bool) -> Step {
     };
     for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
         if let Some(root) = named_env(key) {
-            return step(format!("{key}={root} names the tracker"), true);
+            let detail = format!("{key}={root} names the tracker");
+            let path = PathBuf::from(&root);
+            if !dry && path.is_dir() {
+                if let Err(e) = tracker_push::prepare_tracker(&path, true, false) {
+                    return step(format!("{detail}; merge setup: {e}"), false);
+                }
+            }
+            return step(detail, true);
         }
     }
     let (Some(cfg), Some(root)) = (
@@ -8620,7 +8627,17 @@ fn tracker_step(dry: bool) -> Step {
         .take_while(|l| !l.trim_start().starts_with('['))
         .find(|l| l.split('=').next().is_some_and(|k| k.trim() == "root"))
     {
-        return step(format!("{} sets {}", cfg.display(), line.trim()), true);
+        let detail = format!("{} sets {}", cfg.display(), line.trim());
+        if !dry {
+            if let Some(path) = path_from_root_line(line) {
+                if path.is_dir() {
+                    if let Err(e) = tracker_push::prepare_tracker(&path, true, false) {
+                        return step(format!("{detail}; merge setup: {e}"), false);
+                    }
+                }
+            }
+        }
+        return step(detail, true);
     }
     if dry {
         return step(
@@ -8647,14 +8664,26 @@ fn tracker_step(dry: bool) -> Step {
         // First, so it stays top-level above any table the file has.
         .and_then(|()| std::fs::write(&cfg, format!("{line}{have}")));
     match made {
-        Ok(()) => step(
-            format!(
-                "created {}; {} names it, so vissue needs no VISSUE_ROOT",
-                root.display(),
-                cfg.display()
-            ),
-            true,
-        ),
+        Ok(()) => {
+            if let Err(e) = tracker_push::prepare_tracker(&root, true, false) {
+                return step(
+                    format!(
+                        "created {}; merge setup: {e}. {} names it",
+                        root.display(),
+                        cfg.display()
+                    ),
+                    false,
+                );
+            }
+            step(
+                format!(
+                    "created {}; {} names it, so vissue needs no VISSUE_ROOT",
+                    root.display(),
+                    cfg.display()
+                ),
+                true,
+            )
+        }
         Err(e) => step(
             format!(
                 "made {}, but {}: {e}; set VISSUE_ROOT={} instead",
@@ -8665,6 +8694,15 @@ fn tracker_step(dry: bool) -> Step {
             false,
         ),
     }
+}
+
+/// `root = "..."` as a path. The line is one TOML assignment.
+fn path_from_root_line(line: &str) -> Option<PathBuf> {
+    let value: toml::Value = toml::from_str(line).ok()?;
+    value
+        .get("root")
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from)
 }
 
 /// Make the seat's host key at `~/.config/deedar/host.key` when there is
@@ -15176,34 +15214,48 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
     Some(r)
 }
 
-/// The verdict the push gate makes of a line the rules asked about: `None`
-/// lets it run. An ordinary branch push is allowed, including when a seat
-/// rule says `git push*` and when the remote's owner cannot be read. Force,
-/// deleting a remote branch, and pushing tags stay an `ask` when the rule
-/// that fired is about that push. A rule about some other command on the
-/// same line is left as it is.
+/// The verdict the push gate makes of a line: `None` lets it run. An
+/// ordinary branch push is allowed, including when a seat rule says
+/// `git push*` and when the remote's owner cannot be read. Force, a
+/// `+refspec`, deleting a remote branch, and pushing tags ask by default.
+/// That ask does not wait for a seat rule. A seat rule that denies the
+/// dangerous push still denies it. A rule about some other command on the
+/// same line is left as it is when the push itself is ordinary.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     let _ = cwd;
-    let r = rule?;
     let Some(call) = push_call(line) else {
-        return Some(r.clone());
+        return rule.cloned();
     };
     let segment = push_segment(&call);
-    let about_push = rule_matches(&r.pattern, &segment) || rule_matches(&r.pattern, "git push");
-    if !about_push {
-        return Some(r.clone());
-    }
+    let about_push = rule.is_some_and(|r| {
+        rule_matches(&r.pattern, &segment) || rule_matches(&r.pattern, "git push")
+    });
     let Some(why) = dangerous_push_reason(&call.args) else {
-        return None;
+        if about_push {
+            return None;
+        }
+        return rule.cloned();
     };
-    if r.verdict != "ask" {
-        return Some(r.clone());
+    if let Some(r) = rule {
+        if about_push && r.verdict != "ask" {
+            return Some(r.clone());
+        }
+        if about_push {
+            return Some(Rule {
+                pattern: r.pattern.clone(),
+                verdict: "ask".into(),
+                reason: format!("{} ({why}); the person runs this one", r.reason),
+            });
+        }
+        if r.verdict == "deny" {
+            return Some(r.clone());
+        }
     }
     Some(Rule {
-        pattern: r.pattern.clone(),
+        pattern: "built-in: dangerous push".into(),
         verdict: "ask".into(),
-        reason: format!("{} ({why}); the person runs this one", r.reason),
+        reason: format!("{why}; the person runs this one"),
     })
 }
 
@@ -21771,11 +21823,33 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         &line,
     );
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());
-    match tcb_check(argv) {
-        Some(tcb) if !tcb.is_empty() => Ok(format!("{line}\n{tcb}\n{ruled}")),
-        None if policyd_required() => Ok(format!("{line}\ndeny\tTCB required\n{ruled}")),
-        _ => Ok(format!("{line}\n{ruled}")),
+    // A TCB `allow` is not the verdict once this seat asks or denies. The
+    // line the person reads is the ask, including a force push on a box
+    // with no seat rule.
+    let tcb = match tcb_check(argv) {
+        Some(tcb) if !tcb.is_empty() && !(tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
+        None if policyd_required() => Some("deny\tTCB required".to_string()),
+        _ => None,
+    };
+    match tcb {
+        Some(tcb) => Ok(format!("{line}\n{tcb}\n{ruled}")),
+        None => Ok(format!("{line}\n{ruled}")),
     }
+}
+
+fn tcb_is_allow(text: &str) -> bool {
+    text.split(['\t', ' ', '\n']).next().unwrap_or("") == "allow"
+}
+
+/// git's `ljos-atoms` merge driver. `current` is `%A` and `path` is `%P`.
+/// The file becomes a fresh export of this machine's atoms.
+///
+/// # Errors
+///
+/// This tracker has no scope, the pack does not answer, or the export
+/// cannot be written.
+pub fn merge_atoms(current: &Path, path: &str) -> Result<()> {
+    tracker_push::merge_atoms_driver(current, path).map_err(anyhow::Error::msg)
 }
 
 /// The seat's verdict on one shell command. An empty line is an error. A
@@ -31252,6 +31326,41 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "a deny is the rule's own"
         );
         assert_eq!(gate_push(None, "git push", None), None);
+        for line in [
+            "git push --force origin main",
+            "git push -f origin main",
+            "git push origin +main",
+            "git push origin --delete old",
+            "git push origin :old",
+            "git push --tags",
+            "git push --follow-tags origin main",
+        ] {
+            let gated = gate_push(None, line, None);
+            assert!(
+                gated.as_ref().is_some_and(|r| {
+                    r.verdict == "ask" && r.pattern == "built-in: dangerous push"
+                }),
+                "{line} -> {gated:?}"
+            );
+        }
+        assert!(gate_push(
+            None,
+            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
+            None
+        )
+        .is_none());
+        assert!(gate_push(None, "git push -u origin feature/x", None).is_none());
+        let never = Rule {
+            pattern: "*--force*".into(),
+            verdict: "deny".into(),
+            reason: "Never force.".into(),
+        };
+        assert_eq!(
+            gate_push(Some(&never), "git push --force origin main", None)
+                .as_ref()
+                .map(|r| r.verdict.as_str()),
+            Some("deny")
+        );
         let trust = Rule {
             pattern: "git push*".into(),
             verdict: "ask".into(),

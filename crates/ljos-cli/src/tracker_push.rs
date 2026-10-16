@@ -1,27 +1,40 @@
 //! Push a tracker checkout without losing another bot's headings.
 //!
-//! Seven seats share one tracker. Two of them append a heading, and the
-//! second push is rejected as non-fast-forward. The push fetches, rebases
-//! with autostash, and retries. When the org file conflicts, both headings
-//! stay: one entry per `:ID:`. Nothing is force-pushed.
+//! Seats share one tracker. A later push is rejected as non-fast-forward.
+//! The push fetches and rebases with autostash. When that rebase stops on
+//! a conflict, the checkout merges instead. Org files union on `:ID:`.
+//! Atom logs are re-exported by the `ljos-atoms` driver, which writes this
+//! machine's log again rather than keeping either side. A union that left
+//! two headings with one `:ID:` is folded. Nothing is force-pushed.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
-const ATTEMPTS: usize = 4;
+const ATTEMPTS: usize = 6;
+const ATTR_ORG: &str = "*.org merge=union";
+const ATTR_ATOMS: &str = ".ljos/atoms/* merge=ljos-atoms";
+const DRIVER_KEY: &str = "merge.ljos-atoms.driver";
+const DRIVER_NAME_KEY: &str = "merge.ljos-atoms.name";
+const DRIVER_NAME: &str = "re-export local atoms";
+const ATTR_COMMIT: &str = "chore(tracker): union org files and re-export atoms on merge";
+const FOLD_COMMIT: &str = "chore(tracker): fold duplicate issue headings";
 
-/// Commit `dir`'s branch and the org headings already on the remote.
+/// Commit `dir`'s branch and the headings already on the remote.
 ///
-/// A branch with no upstream is pushed with `-u origin <branch>`. A
-/// non-fast-forward fetch is rebased with `--autostash` and tried again.
-/// A conflict in an issue org file keeps every heading, keyed by `:ID:`.
+/// Merge attributes are written and, when `dir` is already a checkout,
+/// committed before the push. A branch with no upstream is pushed with
+/// `-u origin <branch>`. A non-fast-forward fetch is rebased with
+/// `--autostash`. A rebase that stops is aborted and merged. Org conflicts
+/// keep every heading, keyed by `:ID:`. This machine's atom logs are
+/// re-exported. Duplicate `:ID:` headings are folded afterwards.
 ///
 /// # Errors
 ///
 /// The push still failed after a few attempts, or a conflict was not an
-/// org file this can union.
+/// org file or this machine's atoms log.
 pub(crate) fn push_checkout(dir: &Path) -> Result<(), String> {
+    prepare_tracker(dir, false, true)?;
     let mut last = String::from("push refused");
     for _ in 0..ATTEMPTS {
         let out = push_once(dir);
@@ -301,11 +314,17 @@ fn integrate(dir: &Path) -> Result<(), String> {
         ));
     }
     let onto = rebase_target(dir);
-    let rebased = rebase_onto(dir, &onto);
-    if rebased.is_err() {
-        let _ = abort_rebase(dir);
+    if let Err(e) = rebase_onto(dir, &onto) {
+        if rebase_in_progress(dir) || has_unmerged(dir) {
+            clear_stopped(dir)?;
+            merge_onto(dir, &onto)?;
+        } else {
+            let _ = abort_rebase(dir);
+            return Err(e);
+        }
     }
-    rebased
+    fold_orgs(dir)?;
+    refuse_markers(dir)
 }
 
 fn rebase_target(dir: &Path) -> String {
@@ -330,8 +349,12 @@ fn rebase_onto(dir: &Path, onto: &str) -> Result<(), String> {
         if !rebase_in_progress(dir) {
             if has_unmerged(dir) {
                 resolve_unmerged(dir)?;
+                return Ok(());
             }
-            return Ok(());
+            // The rebase command failed and left nothing to finish. That is
+            // a refusal, not a clean replay: a missing onto used to look
+            // like success and the push then had nothing new to send.
+            return Err(last);
         }
         if !has_unmerged(dir) {
             return Err(last);
@@ -366,36 +389,93 @@ fn resolve_unmerged(dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     for file in &files {
-        if !file.ends_with(".org") {
+        if file.ends_with(".org") {
+            resolve_org(dir, file)?;
+        } else if file == ".gitattributes" {
+            resolve_attributes(dir)?;
+        } else if is_this_host_atoms(file) {
+            resolve_atoms(dir, file)?;
+        } else {
             return Err(format!(
                 "rebase stopped on {file}, which is not an issue org file"
             ));
         }
-        let ours = stage(dir, 2, file);
-        let theirs = stage(dir, 3, file);
-        let merged = match (ours, theirs) {
-            (Some(a), Some(b)) => union_org(&a, &b),
-            (Some(a), None) | (None, Some(a)) => a,
-            (None, None) => {
-                return Err(format!(
-                    "rebase stopped on {file} with nothing on either side"
-                ));
-            }
-        };
-        let path = dir.join(file);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, merged).map_err(|e| e.to_string())?;
-        let added = git(dir, &["add", "--", file]);
-        if !added.status.success() {
-            return Err(format!(
-                "could not mark {file} resolved: {}",
-                first_line(&output_text(&added))
-            ));
-        }
     }
     Ok(())
+}
+
+fn resolve_org(dir: &Path, file: &str) -> Result<(), String> {
+    let ours = stage(dir, 2, file);
+    let theirs = stage(dir, 3, file);
+    let merged = match (ours, theirs) {
+        (Some(a), Some(b)) => fold_org_text(&union_org(&a, &b)),
+        (Some(a), None) | (None, Some(a)) => fold_org_text(&a),
+        (None, None) => {
+            return Err(format!(
+                "rebase stopped on {file} with nothing on either side"
+            ));
+        }
+    };
+    if merged.contains("<<<<<<<") {
+        return Err(format!("{file} still has conflict markers"));
+    }
+    write_resolved(dir, file, merged.as_bytes())
+}
+
+fn resolve_attributes(dir: &Path) -> Result<(), String> {
+    let ours = stage(dir, 2, ".gitattributes").unwrap_or_default();
+    let theirs = stage(dir, 3, ".gitattributes").unwrap_or_default();
+    let mut merged = if ours.is_empty() {
+        theirs
+    } else if theirs.is_empty() {
+        ours
+    } else {
+        union_lines(&ours, &theirs)
+    };
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    for line in [ATTR_ORG, ATTR_ATOMS] {
+        if !attr_present(&merged, line) {
+            merged.push_str(line);
+            merged.push('\n');
+        }
+    }
+    write_resolved(dir, ".gitattributes", merged.as_bytes())
+}
+
+fn resolve_atoms(dir: &Path, file: &str) -> Result<(), String> {
+    let path = dir.join(file);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    reexport_local(dir, &path, file)?;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    if bytes.windows(7).any(|w| w == b"<<<<<<<") {
+        return Err(format!("{file} still has conflict markers"));
+    }
+    mark_resolved(dir, file)
+}
+
+fn write_resolved(dir: &Path, file: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = dir.join(file);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    mark_resolved(dir, file)
+}
+
+fn mark_resolved(dir: &Path, file: &str) -> Result<(), String> {
+    let added = git(dir, &["add", "--", file]);
+    if added.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "could not mark {file} resolved: {}",
+            first_line(&output_text(&added))
+        ))
+    }
 }
 
 fn stage(dir: &Path, n: u8, file: &str) -> Option<String> {
@@ -513,8 +593,425 @@ fn first_line(text: &str) -> String {
         .to_string()
 }
 
+/// Write the tracker's merge attributes and register the atoms driver.
+///
+/// `init` makes a repository when `root` is not one yet, which is how
+/// onboard and the tracker step start a new tracker. A sync or a push
+/// passes `init` false and leaves a directory that is not a checkout
+/// untouched. `commit` records `.gitattributes` when it changed. Running
+/// this again changes nothing once both lines and the driver are in place.
+///
+/// # Errors
+///
+/// `git init` failed, the attributes could not be written, or the
+/// attributes commit was refused.
+pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(), String> {
+    if !is_work_tree(root) {
+        if !init {
+            return Ok(());
+        }
+        init_repo(root)?;
+    }
+    write_attributes(root)?;
+    register_driver(root)?;
+    if commit {
+        commit_attributes(root)?;
+    }
+    Ok(())
+}
+
+/// git's `ljos-atoms` merge driver. `current` is `%A` and `rel` is `%P`.
+/// The file becomes a fresh export of this machine's atoms.
+pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String> {
+    let root = work_tree_of(current).or_else(|_| work_tree_cwd())?;
+    reexport_local(&root, current, rel.trim())
+}
+
+/// One org file, after a union. Two headings that share a `:ID:` become
+/// one heading that keeps both bodies. Text with no duplicate id is
+/// returned unchanged.
+#[must_use]
+pub(crate) fn fold_org_text(text: &str) -> String {
+    let (_, headings) = parse_org(text);
+    let mut seen = BTreeSet::new();
+    let mut duplicated = false;
+    for heading in &headings {
+        if let Some(id) = heading_id(&heading.raw) {
+            if !seen.insert(id) {
+                duplicated = true;
+                break;
+            }
+        }
+    }
+    if !duplicated {
+        return text.to_string();
+    }
+    union_org(text, "")
+}
+
+fn init_repo(root: &Path) -> Result<(), String> {
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let made = git(root, &["init", "-q", "-b", "main"]);
+    if made.status.success() {
+        return Ok(());
+    }
+    let again = git(root, &["init", "-q"]);
+    if again.status.success() {
+        Ok(())
+    } else {
+        Err(format!("git init: {}", first_line(&output_text(&again))))
+    }
+}
+
+fn is_work_tree(root: &Path) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    let out = git(root, &["rev-parse", "--is-inside-work-tree"]);
+    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+}
+
+fn write_attributes(root: &Path) -> Result<(), String> {
+    let path = root.join(".gitattributes");
+    let have = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut extra = String::new();
+    for line in [ATTR_ORG, ATTR_ATOMS] {
+        if attr_present(&have, line) || attr_present(&extra, line) {
+            continue;
+        }
+        if !have.is_empty() && !have.ends_with('\n') && extra.is_empty() {
+            extra.push('\n');
+        }
+        extra.push_str(line);
+        extra.push('\n');
+    }
+    if extra.is_empty() {
+        return Ok(());
+    }
+    let mut out = have;
+    out.push_str(&extra);
+    std::fs::write(path, out).map_err(|e| e.to_string())
+}
+
+fn attr_present(text: &str, line: &str) -> bool {
+    let Some((pattern, attr)) = line.split_once(' ') else {
+        return false;
+    };
+    text.lines().any(|have| {
+        let have = have.trim();
+        if have.is_empty() || have.starts_with('#') {
+            return false;
+        }
+        let mut parts = have.split_whitespace();
+        parts.next() == Some(pattern) && parts.any(|word| word == attr)
+    })
+}
+
+fn driver_command() -> String {
+    match std::env::var("LJOS_ATOMS_DRIVER") {
+        Ok(over) if !over.trim().is_empty() => over,
+        _ => "ljos merge-atoms %A %P".to_string(),
+    }
+}
+
+fn register_driver(root: &Path) -> Result<(), String> {
+    let want = driver_command();
+    if local_config(root, DRIVER_KEY).as_deref() != Some(want.as_str()) {
+        let set = git(root, &["config", "--local", DRIVER_KEY, &want]);
+        if !set.status.success() {
+            return Err(format!(
+                "could not register the atoms merge driver: {}",
+                first_line(&output_text(&set))
+            ));
+        }
+    }
+    if local_config(root, DRIVER_NAME_KEY).as_deref() != Some(DRIVER_NAME) {
+        let set = git(root, &["config", "--local", DRIVER_NAME_KEY, DRIVER_NAME]);
+        if !set.status.success() {
+            return Err(format!(
+                "could not name the atoms merge driver: {}",
+                first_line(&output_text(&set))
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn local_config(dir: &Path, key: &str) -> Option<String> {
+    let out = git(dir, &["config", "--local", "--get", key]);
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn commit_attributes(root: &Path) -> Result<(), String> {
+    let added = git(root, &["add", "--", ".gitattributes"]);
+    if !added.status.success() {
+        return Err(format!(
+            "could not stage .gitattributes: {}",
+            first_line(&output_text(&added))
+        ));
+    }
+    let staged = git(
+        root,
+        &["diff", "--cached", "--quiet", "--", ".gitattributes"],
+    );
+    if staged.status.success() {
+        return Ok(());
+    }
+    let out = git(
+        root,
+        &[
+            "commit",
+            "-q",
+            "--only",
+            "-m",
+            ATTR_COMMIT,
+            "--",
+            ".gitattributes",
+        ],
+    );
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = output_text(&out);
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("nothing to commit") || lower.contains("no changes") {
+        return Ok(());
+    }
+    Err(format!(
+        "could not commit .gitattributes: {}",
+        first_line(&said)
+    ))
+}
+
+fn work_tree_of(path: &Path) -> Result<PathBuf, String> {
+    let start = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    toplevel(start)
+}
+
+fn work_tree_cwd() -> Result<PathBuf, String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("atoms merge: {}", first_line(&output_text(&out))));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return Err("atoms merge: not a git work tree".into());
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn toplevel(start: &Path) -> Result<PathBuf, String> {
+    let out = git(start, &["rev-parse", "--show-toplevel"]);
+    if !out.status.success() {
+        return Err(format!("atoms merge: {}", first_line(&output_text(&out))));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return Err("atoms merge: not a git work tree".into());
+    }
+    Ok(PathBuf::from(path))
+}
+
+/// Replace `dest` with a fresh export of this machine's log. Another
+/// machine's file is left alone: re-exporting it would publish our atoms
+/// under their name. No scope returns before the pack is asked.
+fn reexport_local(root: &Path, dest: &Path, rel: &str) -> Result<(), String> {
+    if !is_this_host_atoms(rel) {
+        return Err(format!(
+            "atoms merge: {rel} belongs to another machine; this driver re-exports only {}",
+            crate::sync::host()
+        ));
+    }
+    let scope = crate::sync::scope_of_repo(root).map_err(|e| e.to_string())?;
+    let Some(scope) = scope else {
+        return Err("atoms merge: this tracker names no scope".into());
+    };
+    let client = crate::pack().map_err(|e| e.to_string())?;
+    let atoms = crate::atoms_lean(&client, &client.workspace()).map_err(|e| e.to_string())?;
+    crate::sync::export(root, &scope, &atoms).map_err(|e| e.to_string())?;
+    let name =
+        atoms_file_name(rel).ok_or_else(|| format!("atoms merge: {rel} has no file name"))?;
+    let fresh = root.join(".ljos").join("atoms").join(name);
+    let bytes = std::fs::read(&fresh).map_err(|e| format!("atoms merge: {e}"))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(dest, bytes).map_err(|e| e.to_string())
+}
+
+fn atoms_file_name(rel: &str) -> Option<&str> {
+    Path::new(rel.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+}
+
+fn is_this_host_atoms(rel: &str) -> bool {
+    let Some(name) = atoms_file_name(rel) else {
+        return false;
+    };
+    let host = crate::sync::host();
+    name == format!("{host}.jsonl.age") || name == format!("{host}.digest")
+}
+
+fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
+    let started = git(dir, &["merge", "-q", "--no-commit", "--no-edit", onto]);
+    let stopped = merge_in_progress(dir) || has_unmerged(dir);
+    if !started.status.success() && !stopped {
+        return Err(first_line(&output_text(&started)));
+    }
+    if !stopped {
+        return Ok(());
+    }
+    let resolved = (|| {
+        if has_unmerged(dir) {
+            resolve_unmerged(dir)?;
+        }
+        refuse_markers(dir)
+    })();
+    if let Err(e) = resolved {
+        let _ = git(dir, &["merge", "--abort"]);
+        return Err(e);
+    }
+    let cont = git(dir, &["commit", "-q", "--no-edit"]);
+    if cont.status.success() {
+        return Ok(());
+    }
+    let said = output_text(&cont);
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("nothing to commit") || lower.contains("no changes") {
+        return Ok(());
+    }
+    let _ = git(dir, &["merge", "--abort"]);
+    Err(first_line(&said))
+}
+
+fn fold_orgs(dir: &Path) -> Result<(), String> {
+    let mut changed = Vec::new();
+    for file in tracked(dir, "*.org") {
+        let path = dir.join(&file);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        let folded = fold_org_text(text);
+        if folded == text {
+            continue;
+        }
+        if folded.contains("<<<<<<<") {
+            return Err(format!("{file} still has conflict markers"));
+        }
+        std::fs::write(&path, &folded).map_err(|e| e.to_string())?;
+        mark_resolved(dir, &file)?;
+        changed.push(file);
+    }
+    if changed.is_empty() || rebase_in_progress(dir) || merge_in_progress(dir) {
+        return Ok(());
+    }
+    let mut args = vec!["commit", "-q", "--only", "-m", FOLD_COMMIT, "--"];
+    args.extend(changed.iter().map(String::as_str));
+    let out = git(dir, &args);
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = output_text(&out);
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("nothing to commit") || lower.contains("no changes") {
+        return Ok(());
+    }
+    Err(format!(
+        "could not fold duplicate headings: {}",
+        first_line(&said)
+    ))
+}
+
+fn refuse_markers(dir: &Path) -> Result<(), String> {
+    let mut files = tracked(dir, "*.org");
+    files.extend(tracked(dir, ".ljos/atoms"));
+    for file in files {
+        let bytes = match std::fs::read(dir.join(&file)) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        if bytes.windows(7).any(|window| window == b"<<<<<<<") {
+            return Err(format!("{file} still has conflict markers"));
+        }
+    }
+    Ok(())
+}
+
+fn tracked(dir: &Path, spec: &str) -> Vec<String> {
+    let out = git(dir, &["ls-files", "-z", "--", spec]);
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|file| !file.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn merge_in_progress(dir: &Path) -> bool {
+    git_path_exists(dir, "MERGE_HEAD")
+}
+
+fn clear_stopped(dir: &Path) -> Result<(), String> {
+    if rebase_in_progress(dir) {
+        return abort_rebase(dir);
+    }
+    if merge_in_progress(dir) || has_unmerged(dir) {
+        let out = git(dir, &["merge", "--abort"]);
+        if out.status.success() || !has_unmerged(dir) {
+            return Ok(());
+        }
+        return Err(first_line(&output_text(&out)));
+    }
+    Ok(())
+}
+
+fn git_path_exists(dir: &Path, name: &str) -> bool {
+    let out = git(dir, &["rev-parse", "--git-path", name]);
+    if !out.status.success() {
+        return false;
+    }
+    let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if rel.is_empty() {
+        return false;
+    }
+    let path = Path::new(&rel);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dir.join(path)
+    };
+    path.exists()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
     use super::*;
 
     fn heading(id: &str, title: &str) -> String {
@@ -623,7 +1120,12 @@ note from b
         let preamble = "#+TITLE: probe\n\n";
         let seed = heading("seed", "Seed");
         std::fs::write(a.join("issues.org"), format!("{preamble}{seed}")).unwrap();
-        run(&a, &["add", "issues.org"]);
+        std::fs::write(
+            a.join(".gitattributes"),
+            "*.org merge=union\n.ljos/atoms/* merge=ljos-atoms\n",
+        )
+        .unwrap();
+        run(&a, &["add", "issues.org", ".gitattributes"]);
         run(&a, &["commit", "-q", "-m", "seed"]);
         run(&a, &["push", "-q", "-u", "origin", "HEAD"]);
         run(
@@ -679,5 +1181,431 @@ note from b
         assert!(text.contains(":ID:         from-a"), "{text}");
         assert!(text.contains(":ID:         from-b"), "{text}");
         assert!(text.contains(":ID:         seed"), "{text}");
+        assert!(!text.contains("<<<<<<<"), "{text}");
+    }
+
+    #[test]
+    fn duplicate_ids_fold_into_one_heading() {
+        let text = "\
+* TODO [#C] One
+:PROPERTIES:
+:ID:         same
+:END:
+body a
+* TODO [#C] One
+:PROPERTIES:
+:ID:         same
+:END:
+body b
+";
+        let folded = fold_org_text(text);
+        assert_eq!(folded.matches("* TODO").count(), 1, "{folded}");
+        assert!(folded.contains("body a"), "{folded}");
+        assert!(folded.contains("body b"), "{folded}");
+        let plain = "* TODO [#C] Only\n:PROPERTIES:\n:ID:         only\n:END:\n";
+        assert_eq!(fold_org_text(plain), plain);
+    }
+
+    #[test]
+    fn prepare_writes_the_attributes_and_the_driver_once() {
+        let _lock = crate::test_env_lock();
+        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
+        unsafe { std::env::remove_var("LJOS_ATOMS_DRIVER") };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        prepare_tracker(root, true, false).unwrap();
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        prepare_tracker(root, true, true).unwrap();
+        prepare_tracker(root, false, true).unwrap();
+        let attrs = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
+        assert_eq!(
+            attrs
+                .lines()
+                .filter(|line| line.trim() == "*.org merge=union")
+                .count(),
+            1,
+            "{attrs}"
+        );
+        assert_eq!(
+            attrs
+                .lines()
+                .filter(|line| line.trim() == ".ljos/atoms/* merge=ljos-atoms")
+                .count(),
+            1,
+            "{attrs}"
+        );
+        let driver = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "--local", "--get", "merge.ljos-atoms.driver"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&driver.stdout).trim(),
+            "ljos merge-atoms %A %P"
+        );
+        let name = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "--local", "--get", "merge.ljos-atoms.name"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&name.stdout).trim(),
+            "re-export local atoms"
+        );
+        let count = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_atoms_driver_stops_before_the_pack_when_the_tracker_has_no_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let host = crate::sync::host();
+        let rel = format!(".ljos/atoms/{host}.digest");
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        let current = root.join(".ljos/atoms").join(format!("{host}.digest"));
+        std::fs::write(&current, "local\n").unwrap();
+        let err = merge_atoms_driver(&current, &rel).unwrap_err();
+        assert!(err.contains("names no scope"), "{err}");
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "local\n");
+        let other = merge_atoms_driver(&current, ".ljos/atoms/otherhost.digest").unwrap_err();
+        assert!(other.contains("another machine"), "{other}");
+    }
+
+    #[test]
+    fn three_clones_race_and_atoms_are_reexported() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin.git");
+        let host = crate::sync::host();
+        let digest = format!(".ljos/atoms/{host}.digest");
+        let age = format!(".ljos/atoms/{host}.jsonl.age");
+        let script = dir.path().join("atoms-driver");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 're-exported %s\\n' \"$2\" > \"$1\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let driver = format!("{} %A %P", script.display());
+        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
+        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        let run = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        run(&origin, &["config", "receive.denyNonFastForwards", "true"]);
+        let clones: Vec<PathBuf> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        run(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clones[0].to_str().unwrap(),
+            ],
+        );
+        configure(&clones[0]);
+        let preamble = "#+TITLE: probe\n\n";
+        let seed = heading("seed", "Seed");
+        std::fs::write(clones[0].join("issues.org"), format!("{preamble}{seed}")).unwrap();
+        std::fs::write(
+            clones[0].join(".gitattributes"),
+            "*.org merge=union\n.ljos/atoms/* merge=ljos-atoms\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(clones[0].join(".ljos/atoms")).unwrap();
+        std::fs::write(clones[0].join(&digest), "base\n").unwrap();
+        std::fs::write(clones[0].join(&age), "base\n").unwrap();
+        run(
+            &clones[0],
+            &["add", "issues.org", ".gitattributes", ".ljos/atoms"],
+        );
+        run(&clones[0], &["commit", "-q", "-m", "seed"]);
+        run(&clones[0], &["push", "-q", "-u", "origin", "HEAD"]);
+        for clone in &clones[1..] {
+            run(
+                dir.path(),
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            );
+            configure(clone);
+        }
+        for (clone, id) in clones.iter().zip(["from-a", "from-b", "from-c"]) {
+            std::fs::write(
+                clone.join("issues.org"),
+                format!("{preamble}{seed}{}", heading(id, id)),
+            )
+            .unwrap();
+            std::fs::write(clone.join(&digest), format!("side-{id}\n")).unwrap();
+            std::fs::write(clone.join(&age), format!("side-{id}\n")).unwrap();
+            run(clone, &["add", "issues.org", ".ljos/atoms"]);
+            run(clone, &["commit", "-q", "-m", id]);
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut joins = Vec::new();
+        for clone in clones {
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                push_checkout(&clone)
+            }));
+        }
+        let results: Vec<_> = joins.into_iter().map(|j| j.join().unwrap()).collect();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+            }
+        }
+        for (i, result) in results.iter().enumerate() {
+            assert!(result.is_ok(), "clone {i}: {result:?}");
+        }
+        let shown = |spec: &str| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&origin)
+                .args(["show", &format!("HEAD:{spec}")])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let text = shown("issues.org");
+        assert!(text.contains(":ID:         seed"), "{text}");
+        assert!(text.contains(":ID:         from-a"), "{text}");
+        assert!(text.contains(":ID:         from-b"), "{text}");
+        assert!(text.contains(":ID:         from-c"), "{text}");
+        assert!(!text.contains("<<<<<<<"), "{text}");
+        for spec in [&digest, &age] {
+            let body = shown(spec);
+            assert!(body.contains("re-exported"), "{spec}: {body}");
+            assert!(body.contains(spec), "{spec}: {body}");
+            assert!(!body.contains("side-"), "{spec}: {body}");
+            assert!(!body.contains("<<<<<<<"), "{spec}: {body}");
+        }
+
+        fn configure(dir: &Path) {
+            for (key, value) in [
+                ("user.email", "seat@example.invalid"),
+                ("user.name", "seat"),
+                ("core.hooksPath", "/dev/null"),
+                ("commit.gpgsign", "false"),
+            ] {
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(["config", key, value])
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rebase_conflict_merges_and_reexports_atoms() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin.git");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let count = dir.path().join("driver-count");
+        let host = crate::sync::host();
+        let digest = format!(".ljos/atoms/{host}.digest");
+        let script = dir.path().join("atoms-driver");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nf='{}'\nn=0\nif [ -f \"$f\" ]; then n=$(cat \"$f\"); fi\nn=$((n + 1))\nprintf '%s\\n' \"$n\" > \"$f\"\nif [ \"$n\" -eq 1 ]; then exit 1; fi\nprintf 're-exported %s\\n' \"$2\" > \"$1\"\nexit 0\n",
+                count.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let driver = format!("{} %A %P", script.display());
+        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
+        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        let run = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        run(&origin, &["config", "receive.denyNonFastForwards", "true"]);
+        run(
+            dir.path(),
+            &["clone", "-q", origin.to_str().unwrap(), a.to_str().unwrap()],
+        );
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&a, &["config", key, value]);
+        }
+        std::fs::write(
+            a.join(".gitattributes"),
+            "*.org merge=union\n.ljos/atoms/* merge=ljos-atoms\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(a.join(".ljos/atoms")).unwrap();
+        std::fs::write(a.join(&digest), "base\n").unwrap();
+        std::fs::write(a.join("issues.org"), heading("seed", "Seed")).unwrap();
+        run(&a, &["add", ".gitattributes", "issues.org", ".ljos/atoms"]);
+        run(&a, &["commit", "-q", "-m", "seed"]);
+        run(&a, &["push", "-q", "-u", "origin", "HEAD"]);
+        run(
+            dir.path(),
+            &["clone", "-q", origin.to_str().unwrap(), b.to_str().unwrap()],
+        );
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&b, &["config", key, value]);
+        }
+        std::fs::write(a.join(&digest), "side-a\n").unwrap();
+        run(&a, &["add", ".ljos/atoms"]);
+        run(&a, &["commit", "-q", "-m", "from a"]);
+        run(&a, &["push", "-q"]);
+        std::fs::write(b.join(&digest), "side-b\n").unwrap();
+        run(&b, &["add", ".ljos/atoms"]);
+        run(&b, &["commit", "-q", "-m", "from b"]);
+        let pushed = push_checkout(&b);
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+            }
+        }
+        assert!(pushed.is_ok(), "{pushed:?}");
+        let body = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&origin)
+            .args(["show", &format!("HEAD:{digest}")])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&body.stdout);
+        assert!(text.contains("re-exported"), "{text}");
+        assert!(text.contains(&digest), "{text}");
+        assert!(!text.contains("side-"), "{text}");
+        let parents = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&origin)
+            .args(["rev-list", "--parents", "-n", "1", "HEAD"])
+            .output()
+            .unwrap();
+        let line = String::from_utf8_lossy(&parents.stdout);
+        let parent_count = line.split_whitespace().count();
+        assert!(
+            parent_count >= 3,
+            "merge commit should have two parents: {line}"
+        );
+        let calls = std::fs::read_to_string(&count).unwrap_or_default();
+        assert!(
+            calls.trim().parse::<u32>().unwrap_or(0) >= 2,
+            "driver calls: {calls}"
+        );
     }
 }
