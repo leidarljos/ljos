@@ -554,7 +554,7 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
     }
     let _ = mark.parent().map(std::fs::create_dir_all);
     let _ = std::fs::write(&mark, "");
-    Some(crate::session_start_line())
+    Some(crate::session_start_for(Some(&sid)))
 }
 
 /// An OpenHands answer with `line` put ahead of its context.

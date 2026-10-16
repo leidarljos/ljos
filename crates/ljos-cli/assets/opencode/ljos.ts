@@ -73,7 +73,13 @@ async function hook(payload: Record<string, unknown>): Promise<Answer> {
   }
 }
 
-export const LjosSeat: Plugin = async ({ directory }) => ({
+export const LjosSeat: Plugin = async ({ directory }) => {
+  // A before-hook refusal still reaches execute.after on some builds.
+  // Remember it so the after hook does not look like a clean commit.
+  const blocked = new Map<string, string>()
+  const blockKey = (sessionID: string | undefined, tool: string) =>
+    `${sessionID ?? ""}:${tool}`
+  return {
   // A shell the agent opens carries its session, so `ljos` there holds
   // under the conversation rather than under the shell's process.
   "shell.env": async (input, output) => {
@@ -126,9 +132,15 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
       cwd: output.args.workdir ?? directory,
     })
     if (!seat.bash) return
-    if (!a.ok) throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+    if (!a.ok) {
+      blocked.set(blockKey(input.sessionID, input.tool), "deny")
+      throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+    }
     const out = a.out
     const verdict = out?.permissionDecision
+    if (verdict === "deny" || verdict === "ask") {
+      blocked.set(blockKey(input.sessionID, input.tool), verdict)
+    }
     if (verdict === "deny") throw new Error(`ljos: denied: ${out.permissionDecisionReason}`)
     if (verdict === "ask")
       throw new Error(
@@ -146,12 +158,25 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
     const args = input.args ?? output?.args ?? {}
     const command = args.command
     if (seat.bash && typeof command !== "string") return
+    const key = blockKey(input.sessionID, input.tool)
+    const verdict = blocked.get(key)
+    if (verdict) blocked.delete(key)
+    const meta = output?.metadata ?? {}
+    const exit = meta.exit ?? meta.exitCode ?? meta.exit_code
+    const error =
+      (typeof output?.error === "string" && output.error) ||
+      (verdict ? `ljos: ${verdict}` : "")
+    const tool_response: Record<string, unknown> = {}
+    if (exit !== undefined && exit !== null) tool_response.exit_code = exit
+    if (error) tool_response.error = error
     await hook({
       session_id: input.sessionID,
       hook_event_name: "PostToolUse",
       tool_name: seat.tool,
       tool_input: seat.bash ? { command } : args,
       cwd: args.workdir ?? directory,
+      ...(verdict ? { permissionDecision: verdict } : {}),
+      ...(Object.keys(tool_response).length ? { tool_response } : {}),
     })
   },
 
@@ -168,4 +193,5 @@ export const LjosSeat: Plugin = async ({ directory }) => ({
       await hook({ session_id: id, hook_event_name: "SessionEnd", cwd: directory })
     }
   },
-})
+  }
+}

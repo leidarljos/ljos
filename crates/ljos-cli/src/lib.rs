@@ -255,12 +255,27 @@ pub fn statusline(input: &str) -> String {
 /// it up, and it does not hand the agent a command to run.
 #[must_use]
 pub fn session_start_line() -> String {
+    session_start_for(None)
+}
+
+/// [`session_start_line`] for one conversation. When that conversation
+/// already holds an issue, the line names it, so a later tool call does
+/// not have to invent one.
+#[must_use]
+pub fn session_start_for(session: Option<&str>) -> String {
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();
         atoms = session_atoms(2_000);
     }
-    session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"))
+    let mut line =
+        session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"));
+    if let Some(issue) = bookkeep::session_issue(session) {
+        if !line.contains(&issue) {
+            line.push_str(&format!(" This session's issue is {issue}."));
+        }
+    }
+    line
 }
 
 fn session_atoms(ms: u64) -> Result<Vec<Value>> {
@@ -1759,7 +1774,15 @@ fn holder_naming(text: &str, id: &str) -> Option<String> {
 /// shell carries that runner's ids; it holds under its own process and
 /// leaves the parent's records alone.
 pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
-    let name = seat_for_client(client);
+    load_seat_env();
+    // The hooks sit `LJOS_SEAT` (the process, else `~/.config/ljos/env`).
+    // The client's harness name is the seat only when nobody named one.
+    let harness = seat_for_client(client);
+    let name = named_var("LJOS_SEAT")
+        .or_else(|| named_var("VISSUE_AGENT"))
+        .map(|raw| seat_slug(&raw))
+        .filter(|slug| slug != "runner" && !omitted_actor_name(slug))
+        .unwrap_or(harness);
     if let Some(parent) = inherited_record(&name) {
         let seat = Seat::tagged(
             name,
@@ -2087,6 +2110,23 @@ fn program_seat(program: &str) -> String {
         .to_string()
 }
 
+/// Whether `name` is a harness id (`claude`, `codex`, `agy`) rather than
+/// a worker a person named. The tool argument a model copies from the
+/// harness is this, and it must not replace `LJOS_SEAT`.
+fn is_harness_name(name: &str) -> bool {
+    let slug = seat_slug(name);
+    if HARNESS_NAMES.iter().any(|h| seat_slug(h) == slug) {
+        return true;
+    }
+    harnesses_with_shipped(&harnesses_path())
+        .ok()
+        .is_some_and(|all| {
+            all.harness.iter().any(|h| {
+                seat_slug(&h.name) == slug || h.clients.iter().any(|c| seat_slug(c) == slug)
+            })
+        })
+}
+
 /// Harnesses known by name without a runners file, so a harness in the
 /// chain is found even where none is configured.
 const HARNESS_NAMES: &[&str] = &[
@@ -2376,19 +2416,93 @@ fn insert_known_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) 
     seats.insert(slug);
 }
 
-/// The seat for one tool call. `arg` is the call's `seat` and wins over
-/// `LJOS_SEAT`. One of the two is required. The name has to be a seat the
-/// tracker already lists.
+/// The roster [`resolve_call_seat`] checks. An empty list is filled with
+/// `slug` and a note is logged, so a start is not a refusal a weak model
+/// cannot get past. When the file cannot be written, `slug` is the roster
+/// for this call.
+fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
+    let known = tracker_known_seats();
+    if !known.is_empty() {
+        return known;
+    }
+    match register_seat(slug) {
+        Ok(()) => {
+            let known = tracker_known_seats();
+            if !known.is_empty() {
+                return known;
+            }
+        }
+        Err(error) => bookkeep::log_line(&format!(
+            "note: this tracker named no seats; could not register {slug}: {error}"
+        )),
+    }
+    bookkeep::log_line(&format!(
+        "note: this tracker named no seats; sitting {slug}"
+    ));
+    let mut known = std::collections::BTreeSet::new();
+    known.insert(slug.to_string());
+    known
+}
+
+/// Append `slug` to the tracker's `seats` list when that list is missing
+/// or empty.
+fn register_seat(slug: &str) -> Result<(), String> {
+    let layout = vissue_core::Layout::resolve(None, None).map_err(|e| e.to_string())?;
+    let path = layout.root().join("vissue.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut value: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(&text).map_err(|e| e.to_string())?
+    };
+    let table = value
+        .as_table_mut()
+        .ok_or_else(|| "vissue.toml is not a table".to_string())?;
+    if let Some(list) = table.get("seats").and_then(toml::Value::as_array) {
+        if !list.is_empty() {
+            return Ok(());
+        }
+    } else if table.get("seats").is_some() {
+        return Err("seats is not a list".to_string());
+    }
+    table.insert(
+        "seats".to_string(),
+        toml::Value::Array(vec![toml::Value::String(slug.to_string())]),
+    );
+    let rendered = toml::to_string(&value).map_err(|e| e.to_string())?;
+    std::fs::write(&path, rendered).map_err(|e| e.to_string())?;
+    bookkeep::log_line(&format!(
+        "note: this tracker named no seats; registered {slug} in vissue.toml"
+    ));
+    Ok(())
+}
+
+/// The seat for one tool call, resolved the way the hooks resolve it.
+/// `LJOS_SEAT` in the process or in `~/.config/ljos/env` is the seat.
+/// `VISSUE_AGENT` is the same name from the tracker. A `seat` argument
+/// that is only the harness id (`claude`, `codex`, `agy`) does not
+/// replace that. A different worker named on the call still wins. With
+/// none of those, the call has to pass a seat.
+///
+/// A tracker with no `seats` list gains this seat and the call sits. A
+/// note is logged. The call is not refused.
 ///
 /// # Errors
 ///
-/// No seat was passed and `LJOS_SEAT` is unset, the tracker names no seats,
-/// or the name is not one of them.
+/// No seat was passed and `LJOS_SEAT` is unset, or the name is not one
+/// the tracker lists.
 pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
+    load_seat_env();
     let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
-    let raw = match (from_call, named_var("LJOS_SEAT")) {
+    let named = named_var("LJOS_SEAT").or_else(|| named_var("VISSUE_AGENT"));
+    let raw = match (from_call, named) {
+        (Some(name), Some(seat))
+            if is_harness_name(name) && seat_slug(name) != seat_slug(&seat) =>
+        {
+            seat
+        }
         (Some(name), _) => name.to_string(),
-        (None, Some(name)) => name,
+        (None, Some(seat)) => seat,
         (None, None) => {
             bail!("pass seat, your own bot name, on every call: this server has no LJOS_SEAT")
         }
@@ -2401,12 +2515,7 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     if slug == "runner" || omitted_actor_name(&slug) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
-    let known = tracker_known_seats();
-    if known.is_empty() {
-        bail!(
-            "this tracker names no seats, so {slug} cannot sit yet. Add seats = [\"{slug}\"] to vissue.toml at the tracker root"
-        );
-    }
+    let known = seat_roster(&slug);
     if !known.contains(&slug) {
         let guess = mail::closest_seat(&slug, &known)
             .map(|seat| format!(" Did you mean {seat}?"))
@@ -6967,6 +7076,20 @@ impl StopTurn {
     }
 }
 
+/// An agy stop whose execution loop has actually ended. Mid-loop stops
+/// omit `fullyIdle`, and those must not finish the claim.
+#[must_use]
+pub fn stop_is_idle(input: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(input.trim()) else {
+        return false;
+    };
+    value
+        .get("fullyIdle")
+        .or_else(|| value.get("fully_idle"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 /// Why an agent about to stop is held for one more round, from a Jev
 /// audit of the turn; `None` lets it stop. Only a runner's first attempt
 /// is audited, only with Jev on, and only a final message long enough to
@@ -7980,10 +8103,11 @@ fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Strin
     let context = if call.event == "UserPromptSubmit"
         && STEPS_OPENS_CONVERSATION.load(std::sync::atomic::Ordering::Relaxed)
     {
+        let line = session_start_for(call.session.as_deref());
         opened = if context.is_empty() {
-            session_start_line()
+            line
         } else {
-            format!("{}\n{context}", session_start_line())
+            format!("{line}\n{context}")
         };
         opened.as_str()
     } else {
@@ -9051,8 +9175,9 @@ pub const SEAT_WORKSPACE: &str = "seat";
 /// names another workspace, and `PACKSET_URL=off` is the one way to have no
 /// pack.
 /// Load `~/.config/ljos/env` (KEY=VALUE) when the process has not set
-/// those keys. The shell and the MCP seat then share one pack.
-fn load_seat_env() {
+/// those keys. The shell, the hooks, and the MCP seat then share one pack
+/// and one `LJOS_SEAT`.
+pub fn load_seat_env() {
     let Ok(home) = home() else {
         return;
     };
@@ -22262,13 +22387,24 @@ pub fn merge_atoms(current: &Path, path: &str) -> Result<()> {
     tracker_push::merge_atoms_driver(current, path).map_err(anyhow::Error::msg)
 }
 
-/// The seat's verdict on one shell command. An empty line is an error. A
-/// `deny` or an `ask` is an error too: the command stays unrun.
+/// What [`guard_report`] read. `verdict` is `allow` or `ask`. A deny is
+/// an error from that function, not a report whose verdict says deny.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardReport {
+    /// The policy text, including the ask line when the verdict is ask.
+    pub text: String,
+    /// `allow` or `ask`.
+    pub verdict: String,
+}
+
+/// The seat's reading of one shell command. An empty line is an error.
+/// A deny is an error. An ask is a report: the command stays unrun, and
+/// the verdict is `ask` rather than a refusal labeled deny.
 ///
 /// # Errors
 ///
-/// The command is empty, or the rules refuse it.
-pub fn guard_command(line: &str) -> Result<String> {
+/// The command is empty, or the rules deny it.
+pub fn guard_report(line: &str) -> Result<GuardReport> {
     let line = line.trim();
     if line.is_empty() {
         bail!("guard: pass the command to check");
@@ -22278,10 +22414,55 @@ pub fn guard_command(line: &str) -> Result<String> {
         bail!("guard: pass the command to check");
     }
     let text = policy_with_memory(&argv)?;
-    if command_refused(&text) {
+    let verdict = policy_verdict(&text);
+    if verdict == "deny" {
         bail!("{text}");
     }
-    Ok(text)
+    Ok(GuardReport {
+        text,
+        verdict: verdict.to_string(),
+    })
+}
+
+/// The seat's verdict on one shell command. An empty line is an error. A
+/// `deny` or an `ask` is an error too: the command stays unrun.
+///
+/// # Errors
+///
+/// The command is empty, or the rules refuse it.
+pub fn guard_command(line: &str) -> Result<String> {
+    let report = guard_report(line)?;
+    if report.verdict == "ask" {
+        bail!("{}", report.text);
+    }
+    Ok(report.text)
+}
+
+/// `allow`, `ask`, or `deny` from a policy reading. A force push that
+/// still carries the policyd deny token is an ask.
+fn policy_verdict(text: &str) -> &'static str {
+    let mut ask = false;
+    let mut deny = false;
+    for line in text.lines() {
+        let line = line.trim();
+        let head = line.split([':', '\t']).next().unwrap_or(line);
+        if head == "ask" || line.contains("\task") {
+            ask = true;
+        }
+        if head == "deny" || line.contains("\tdeny") {
+            deny = true;
+        }
+    }
+    if ask && text.contains("git-force-push") {
+        return "ask";
+    }
+    if deny {
+        return "deny";
+    }
+    if ask {
+        return "ask";
+    }
+    "allow"
 }
 
 /// Whether a policy reading refuses the command. A verdict line opens with
@@ -29708,9 +29889,7 @@ mod tests {
         let h = all.harness.iter().find(|h| h.name == "opencode").unwrap();
         let text = super::plugin_text(h, Path::new("/opt/seat/bin/ljos")).unwrap();
         let before = &text[text.find("\"tool.execute.before\"").unwrap()..];
-        let refuse = before
-            .find("if (!a.ok) throw")
-            .expect("a failed hook throws");
+        let refuse = before.find("if (!a.ok)").expect("a failed hook throws");
         let verdict = before.find("permissionDecision").unwrap();
         assert!(
             refuse < verdict,
@@ -29725,6 +29904,14 @@ mod tests {
         assert!(
             after.contains("input.args"),
             "after reads the args opencode puts on the input"
+        );
+        assert!(
+            after.contains("permissionDecision"),
+            "a refused command is forwarded so the deed hook can see it"
+        );
+        assert!(
+            after.contains("exit_code"),
+            "a command's exit reaches the deed hook"
         );
         assert!(!text.contains("lets the work go on"));
     }
@@ -30802,6 +30989,49 @@ mod tests {
             codex_answer.contains("\"permissionDecision\":\"ask\""),
             "{codex_answer}"
         );
+    }
+
+    /// `ljos_guard_check` reports this verdict. An ask is not a deny.
+    #[test]
+    fn a_force_push_guard_check_verdict_is_ask() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("ljos-policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$*\" in\n*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = std::path::PathBuf::from("/workspace/target/force-push-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("HOME", home.to_str().unwrap()),
+        ]);
+        let report = guard_report("git push --force origin main").expect("the check asks");
+        assert_eq!(report.verdict, "ask");
+        assert!(report.text.contains("ask:"), "{}", report.text);
+        assert!(
+            report.text.contains("git-force-push") || report.text.contains("dangerous push"),
+            "{}",
+            report.text
+        );
+        assert!(
+            !report.text.lines().any(|line| {
+                let head = line.trim().split([':', '\t']).next().unwrap_or("");
+                head == "deny"
+            }),
+            "{}",
+            report.text
+        );
+        let err = guard_command("git push --force origin main")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ask"), "{err}");
+        let allowed = guard_report("git status").expect("status is allowed");
+        assert_eq!(allowed.verdict, "allow");
     }
 
     fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {

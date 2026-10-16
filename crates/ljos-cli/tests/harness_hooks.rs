@@ -765,3 +765,151 @@ else:
     let refused = format!("{stdout}\n{stderr}");
     assert!(refused.contains("already cast"), "{refused}");
 }
+
+fn issue_id(tracker: &Path) -> String {
+    let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+    org.lines()
+        .find_map(|line| line.trim().strip_prefix(":ID:"))
+        .expect("an issue id")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn the_session_start_line_names_the_claimed_issue() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let session = "start-issue";
+    ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            session,
+            &cwd,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        ),
+        &[],
+    );
+    let id = issue_id(&hab.tracker);
+    let started = ljos(
+        &hab,
+        &claude("SessionStart", session, &cwd, serde_json::json!({})),
+        &[],
+    );
+    let line = context(&started.stdout);
+    assert!(
+        line.contains(&format!("This session's issue is {id}.")),
+        "{line}"
+    );
+}
+
+#[test]
+fn an_agy_idle_stop_finishes_and_a_mid_loop_stop_does_not() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let session = "agy-finish";
+    let transcript = hab.root.join("turn.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Add a readme line\"}]}}\n\
+         {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"write_to_file\",\"input\":{\"TargetFile\":\"README.md\"}}]}}\n",
+    )
+    .unwrap();
+    ljos(
+        &hab,
+        &serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "toolCall": {"name": "write_to_file", "args": {"TargetFile": "README.md"}}
+        })
+        .to_string(),
+        &[("LJOS_TRACK_WORK", "on")],
+    );
+    let claimed = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    assert!(claimed.contains("create"), "{claimed}");
+    let held = ljos(
+        &hab,
+        &serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "executionNum": 1,
+            "transcriptPath": transcript,
+        })
+        .to_string(),
+        &[("LJOS_TRACK_WORK", "on")],
+    );
+    let held_text = String::from_utf8_lossy(&held.stdout);
+    assert!(held_text.contains("continue"), "{held_text}");
+    assert!(held_text.contains("holds no issue"), "{held_text}");
+    let mid = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    assert!(!mid.contains("-s DONE"), "{mid}");
+    ljos(
+        &hab,
+        &serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "executionNum": 1,
+            "fullyIdle": true,
+            "terminationReason": "NO_TOOL_CALL",
+            "transcriptPath": transcript,
+        })
+        .to_string(),
+        &[("LJOS_TRACK_WORK", "on")],
+    );
+    let done = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    assert!(done.contains("-s DONE"), "{done}");
+}
+
+#[test]
+fn a_refused_commit_is_not_cited() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let session = "refused-commit";
+    ljos(
+        &hab,
+        &claude(
+            "PreToolUse",
+            session,
+            &cwd,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        ),
+        &[],
+    );
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m refused"},
+                "permissionDecision": "ask",
+                "error": "ljos: needs the person's approval"
+            }),
+        ),
+        &[],
+    );
+    assert!(
+        !hab.tracker.join("deedar.log").exists(),
+        "a refused commit cited a deed"
+    );
+    let sha = commit_file(&hab.repo, "one.txt");
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m one"},
+                "tool_response": {"exit_code": 0}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
+    assert!(deeds.contains(&sha), "{deeds}");
+    assert_eq!(deeds.lines().count(), 1, "{deeds}");
+}

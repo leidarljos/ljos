@@ -426,6 +426,168 @@ pub fn spawn_idle_finish() {
     });
 }
 
+/// Words a model passes when it does not know the issue id.
+#[must_use]
+pub fn blank_issue(id: &str) -> bool {
+    matches!(
+        id.trim().to_ascii_lowercase().as_str(),
+        "" | "none"
+            | "null"
+            | "nil"
+            | "n/a"
+            | "na"
+            | "undefined"
+            | "unknown"
+            | "-"
+            | "n.a."
+            | "n.a"
+    )
+}
+
+/// The issue `raw` names, or the one this session claimed when `raw` is
+/// missing or a placeholder such as `none`.
+#[must_use]
+pub fn canonical_issue(raw: Option<&str>, session: Option<&str>) -> Option<String> {
+    if let Some(id) = raw.map(str::trim).filter(|id| !blank_issue(id)) {
+        return Some(id.to_string());
+    }
+    claimed_issue(session)
+}
+
+/// The unfinished issue this conversation's book holds. A new session does
+/// not inherit another conversation's ticket.
+#[must_use]
+pub fn session_issue(session: Option<&str>) -> Option<String> {
+    issue_in_sessions(session)
+}
+
+/// The issue to use when a tool did not name one: this session's claim,
+/// the MCP sitting, or the newest unfinished claim in this directory.
+#[must_use]
+pub fn claimed_issue(session: Option<&str>) -> Option<String> {
+    issue_in_sessions(session)
+        .or_else(open_issue)
+        .or_else(latest_cwd_issue)
+}
+
+fn issue_in_sessions(session: Option<&str>) -> Option<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut keys = Vec::new();
+    let mut push = |raw: String| {
+        let key = raw.trim().to_string();
+        if key.is_empty() || !seen.insert(key.clone()) {
+            return;
+        }
+        keys.push(key);
+    };
+    if let Some(session) = session {
+        push(session.to_string());
+    }
+    if let Some(session) = crate::ballot_sig::call_session() {
+        push(session);
+    }
+    if let Ok(session) = std::env::var("LJOS_HARNESS_SESSION") {
+        push(session);
+    }
+    if let Ok(session) = std::env::var("LJOS_SESSION_ID") {
+        push(session);
+    }
+    if let Some((id, _)) = super::session_actor() {
+        push(id);
+    }
+    for key in &keys {
+        if let Some(issue) = open_in_book(&load_book(&book_path(key))) {
+            return Some(issue);
+        }
+    }
+    None
+}
+
+fn open_in_book(book: &Book) -> Option<String> {
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    if let Some(key) = book.cwd_repo.get(&cwd) {
+        if let Some(issue) = unfinished(book, key) {
+            return Some(issue);
+        }
+    }
+    let mut found = None;
+    for key in book.repos.keys() {
+        if let Some(issue) = unfinished(book, key) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(issue);
+        }
+    }
+    found
+}
+
+/// The newest unfinished claim whose book names this working directory.
+fn latest_cwd_issue() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let dir = super::runtime_dir();
+    let mut hits = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("book-") || !name.ends_with(".json") {
+            continue;
+        }
+        let book = load_book(&entry.path());
+        let Some(issue) = issue_for_cwd(&book, &cwd) else {
+            continue;
+        };
+        let when = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        hits.push((when, issue));
+    }
+    hits.sort_by_key(|hit| hit.0);
+    hits.pop().map(|hit| hit.1)
+}
+
+fn issue_for_cwd(book: &Book, cwd: &Path) -> Option<String> {
+    let cwd_s = cwd.display().to_string();
+    if let Some(key) = book.cwd_repo.get(&cwd_s) {
+        if let Some(issue) = unfinished(book, key) {
+            return Some(issue);
+        }
+    }
+    for (dir, key) in &book.cwd_repo {
+        if paths_match(dir, cwd) {
+            if let Some(issue) = unfinished(book, key) {
+                return Some(issue);
+            }
+        }
+    }
+    for key in book.repos.keys() {
+        if paths_match(key, cwd) {
+            if let Some(issue) = unfinished(book, key) {
+                return Some(issue);
+            }
+        }
+    }
+    None
+}
+
+fn paths_match(raw: &str, cwd: &Path) -> bool {
+    let path = Path::new(raw);
+    if path == cwd {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(path).ok(),
+        std::fs::canonicalize(cwd).ok(),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// The issue this MCP sitting still holds, for a finish that did not name one.
 #[must_use]
 pub fn open_issue() -> Option<String> {
@@ -490,7 +652,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
         .filter(|path| !path.is_empty())
         .unwrap_or(cwd.as_str())
         .to_string();
-    let issue_id = match issue.map(str::trim).filter(|id| !id.is_empty()) {
+    let issue_id = match issue.map(str::trim).filter(|id| !blank_issue(id)) {
         Some(id) => {
             claim_existing(id)?;
             id.to_string()
@@ -650,7 +812,7 @@ fn store_book(path: &Path, book: &Book) {
     }
 }
 
-fn log_line(line: &str) {
+pub(crate) fn log_line(line: &str) {
     let dir = super::runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
     let Ok(mut file) = std::fs::OpenOptions::new()
@@ -1128,13 +1290,18 @@ fn recall_line(issue: &str) -> String {
 }
 
 /// A post-tool result whose command finished cleanly. A missing exit on
-/// PostToolUse is success. An error string or a non-zero exit is not.
+/// PostToolUse is success. An error string, a non-zero exit, or a guard
+/// refusal (`deny` or `ask`) is not, so a commit the guard stopped does
+/// not cite the previous HEAD.
 fn tool_exit_ok(raw: &Value) -> bool {
     if raw
         .pointer("/tool_response/interrupted")
         .and_then(Value::as_bool)
         == Some(true)
     {
+        return false;
+    }
+    if refusal_signal(raw) {
         return false;
     }
     let slots = [
@@ -1156,6 +1323,38 @@ fn tool_exit_ok(raw: &Value) -> bool {
     raw.pointer("/tool_response/error")
         .and_then(Value::as_str)
         .is_none_or(|text| text.trim().is_empty())
+}
+
+/// A guard or a tool that already refused this call. A missing exit is
+/// not one of these: silent PostToolUse stays a success.
+fn refusal_signal(raw: &Value) -> bool {
+    let decisions = [
+        raw.get("permissionDecision"),
+        raw.get("permission_decision"),
+        raw.pointer("/hookSpecificOutput/permissionDecision"),
+        raw.pointer("/tool_response/permissionDecision"),
+        raw.get("decision"),
+    ];
+    for slot in decisions.into_iter().flatten() {
+        if let Some(word) = slot.as_str() {
+            if matches!(word.trim(), "deny" | "ask" | "block") {
+                return true;
+            }
+        }
+    }
+    if raw.get("is_error").and_then(Value::as_bool) == Some(true)
+        || raw.get("isError").and_then(Value::as_bool) == Some(true)
+    {
+        return true;
+    }
+    let errors = [
+        raw.get("error"),
+        raw.get("error_message"),
+        raw.pointer("/tool_response/error"),
+    ];
+    errors.into_iter().flatten().any(|slot| {
+        slot.as_str().is_some_and(|text| !text.trim().is_empty()) || slot.as_bool() == Some(true)
+    })
 }
 
 /// `>` and `>>` targets on the line, not `2>&1` and not a quoted sentence.
@@ -1994,17 +2193,145 @@ print(f"id={ident}")
         assert!(err.contains("inky"), "{err}");
         assert!(err.contains("disk-saver"), "{err}");
         assert!(err.contains("eessi"), "{err}");
-        let empty = tempfile::tempdir().unwrap();
-        std::fs::write(empty.path().join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    }
+
+    #[test]
+    fn the_mcp_seat_follows_the_hook_seat() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "HOME",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "VISSUE_ROOT",
+            "ISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "XDG_RUNTIME_DIR",
+        ]);
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config/ljos");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("env"), "LJOS_SEAT=free-claude\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("vissue.toml"),
+            "seats = [\"free-claude\", \"inky\"]\n",
+        )
+        .unwrap();
         unsafe {
-            std::env::set_var("VISSUE_ROOT", empty.path());
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::remove_var("ISSUE_ROOT");
             std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
         }
-        let err = crate::resolve_call_seat(Some("ljosbot"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("vissue.toml"), "{err}");
-        assert!(err.contains("ljosbot"), "{err}");
+        assert_eq!(
+            crate::resolve_call_seat(Some("claude")).unwrap().seat,
+            "free-claude",
+            "a harness name does not replace the seat in the config"
+        );
+        assert_eq!(crate::resolve_call_seat(None).unwrap().seat, "free-claude");
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "free-claude");
+        }
+        assert_eq!(crate::resolve_call_seat(Some("inky")).unwrap().seat, "inky");
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "inky");
+        }
+        assert_eq!(
+            crate::resolve_call_seat(Some("claude")).unwrap().seat,
+            "inky",
+            "LJOS_SEAT wins over the harness id"
+        );
+    }
+
+    #[test]
+    fn a_tracker_with_no_seats_registers_the_harness_seat() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "VISSUE_ROOT",
+            "ISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "XDG_RUNTIME_DIR",
+            "HOME",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(dir.path().join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::set_var("XDG_RUNTIME_DIR", &run);
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("HOME", dir.path().join("home"));
+        }
+        let seat = crate::resolve_call_seat(Some("ljosbot")).unwrap();
+        assert_eq!(seat.seat, "ljosbot");
+        let text = std::fs::read_to_string(dir.path().join("vissue.toml")).unwrap();
+        assert!(text.contains("ljosbot"), "{text}");
+        assert!(text.contains("seats"), "{text}");
+        assert!(text.contains("Software"), "{text}");
+        let log = std::fs::read_to_string(run.join("ljos/book.log")).unwrap();
+        assert!(log.contains("registered"), "{log}");
+        assert!(log.contains("ljosbot"), "{log}");
+    }
+
+    #[test]
+    fn an_issue_named_none_is_the_one_this_session_claimed() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+        }
+        let session = "book-none";
+        let (edit_raw, edit_call) = payload(
+            "PreToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        );
+        let _ = observe(&edit_raw, &edit_call);
+        let issue = canonical_issue(Some("none"), Some(session)).expect("the claim");
+        assert!(issue.starts_with("probe-"), "{issue}");
+        assert_eq!(
+            canonical_issue(Some("NONE"), Some(session)).as_deref(),
+            Some(issue.as_str())
+        );
+        assert_eq!(
+            canonical_issue(Some("null"), Some(session)).as_deref(),
+            Some(issue.as_str())
+        );
+        assert_eq!(
+            canonical_issue(Some("other-1"), Some(session)).as_deref(),
+            Some("other-1")
+        );
+        let line = crate::session_start_for(Some(session));
+        assert!(
+            line.contains(&format!("This session's issue is {issue}.")),
+            "{line}"
+        );
     }
 
     #[test]
