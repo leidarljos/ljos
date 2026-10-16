@@ -649,6 +649,19 @@ pub fn substance_passed(choices: &[(String, String)]) -> bool {
     ranked.len() == 1 || (ranked[0].1 > ranked[1].1 && ranked[0].1 * 2 > choices.len())
 }
 
+/// True when two choices share the highest count. A single ballot, and a
+/// strict lead, are not ties.
+fn ballot_tie(choices: &[(String, String)]) -> bool {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, choice) in choices {
+        *counts.entry(normalize(choice)).or_default() += 1;
+    }
+    let Some(max) = counts.values().copied().max() else {
+        return false;
+    };
+    counts.values().filter(|n| **n == max).count() > 1
+}
+
 /// Findings on an issue JSON: logbook notes and body lines.
 #[must_use]
 pub fn objections_in(v: &Value, default_target: &str) -> Vec<Objection> {
@@ -720,8 +733,63 @@ fn project_of(v: &Value, id: &str) -> String {
         .unwrap_or_default()
 }
 
-/// File dissent children and note the rest for `issue`. A tracker that
-/// does not answer leaves the reading as it was: filing is a side effect.
+/// Options a voter still holds that are not the unique lead. A tie, a
+/// single option, and an empty ballot name nothing: there is no minority
+/// to file.
+fn minority_options(choices: &[(String, String)]) -> Vec<String> {
+    let mut counts: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    for (_, choice) in choices {
+        let shown = choice.trim();
+        let key = normalize(shown);
+        if key.is_empty() {
+            continue;
+        }
+        let row = counts.entry(key).or_insert_with(|| (shown.to_string(), 0));
+        row.1 += 1;
+    }
+    let Some(max) = counts.values().map(|(_, n)| *n).max() else {
+        return Vec::new();
+    };
+    if counts.values().filter(|(_, n)| *n == max).count() != 1 {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = counts
+        .into_values()
+        .filter(|(_, n)| *n < max)
+        .map(|(shown, _)| shown)
+        .collect();
+    out.sort();
+    out
+}
+
+/// One `Dissent holds OPTION` child per minority on a settled majority.
+/// A child already filed for that option is named and left alone.
+fn file_settled_minority(
+    issue: &str,
+    project: &str,
+    choices: &[(String, String)],
+    children: &[String],
+    depth: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for option in minority_options(choices) {
+        let title = format!("Dissent holds {option}");
+        if children.iter().any(|t| normalize(t) == normalize(&title)) {
+            lines.push(format!("{issue}: dissent {option} already filed"));
+            continue;
+        }
+        match file_child(issue, project, &title, depth) {
+            Ok(id) => lines.push(format!("filed {id}  TODO  [#C]  {title}")),
+            Err(e) => lines.push(format!("dissent: file refused: {e:#}")),
+        }
+    }
+    lines
+}
+
+/// File dissent children and note the rest for `issue`. A settled majority
+/// still files one `Dissent holds OPTION` child for each option a voter
+/// holds that is not the lead. A tie files none. A tracker that does not
+/// answer leaves the reading as it was: filing is a side effect.
 #[must_use]
 pub fn record_dissents(issue: &str) -> Vec<String> {
     let Ok(v) = crate::issue_record(issue) else {
@@ -736,9 +804,12 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
         })
         .collect();
     let passed = substance_passed(&choices);
+    // A tie has no held side to file. Both options lead, so a dissent child
+    // for each would be the settle saying it could not choose.
+    let tied = ballot_tie(&choices);
     let mut objections = objections_in(&v, issue);
     let noted: BTreeSet<(String, String)> = objections.iter().map(Objection::key).collect();
-    if !passed {
+    if !passed && !tied {
         for (persona, choice) in &choices {
             if normalize(choice) == "pass" {
                 continue;
@@ -814,6 +885,18 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
             Ok(said) => lines.push(said.trim().to_string()),
             Err(e) => lines.push(format!("dissent: close refused: {e:#}")),
         }
+    }
+    // A strict majority has settled the substance. The option a voter
+    // still holds, and that is not the lead, is still a dissent child.
+    // The tie never reaches here with a minority to name.
+    if passed {
+        lines.extend(file_settled_minority(
+            issue,
+            &project,
+            &choices,
+            &children,
+            depth + 1,
+        ));
     }
     lines
 }
@@ -1378,6 +1461,26 @@ mod tests {
             }
             other => panic!("over the wall budget the objection is listed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_settled_majority_names_only_the_minority() {
+        let majority = vec![
+            ("alice".to_string(), "drop".to_string()),
+            ("bob".to_string(), "drop".to_string()),
+            ("keeper".to_string(), "keep".to_string()),
+        ];
+        assert_eq!(minority_options(&majority), vec!["keep".to_string()]);
+        let tie = vec![
+            ("alice".to_string(), "yes".to_string()),
+            ("bob".to_string(), "no".to_string()),
+        ];
+        assert!(minority_options(&tie).is_empty());
+        let unanimous = vec![
+            ("alice".to_string(), "ship".to_string()),
+            ("bob".to_string(), "ship".to_string()),
+        ];
+        assert!(minority_options(&unanimous).is_empty());
     }
 
     #[test]

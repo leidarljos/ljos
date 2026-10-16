@@ -355,10 +355,38 @@ fn env_token(key: &str) -> Option<String> {
     Some(field(v))
 }
 
-/// The harness session id: the MCP call, then the hook, then
-/// `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread id.
+static CONNECTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Pin the MCP connection's session for this process. The first call wins.
+/// A later `_meta` session id and a later `seat` argument do not replace it.
+/// With no hint, the runner's `LJOS_HARNESS_SESSION` is the connection, else
+/// this process's nonce.
+pub fn pin_connection_session(hint: Option<&str>) {
+    let chosen = hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(field)
+        .filter(|s| s != "-")
+        .or_else(|| env_token("LJOS_HARNESS_SESSION"))
+        .unwrap_or_else(process_nonce);
+    let _ = CONNECTION.set(chosen);
+}
+
+/// The session pinned for this MCP connection, when [`pin_connection_session`]
+/// has run.
+#[must_use]
+pub fn connection_session() -> Option<String> {
+    CONNECTION.get().cloned()
+}
+
+/// The harness session id: the MCP connection, then the MCP call, then the
+/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread id.
+/// The connection pin is the process, not the `seat` argument.
 #[must_use]
 pub fn harness_session() -> String {
+    if let Some(s) = connection_session() {
+        return s;
+    }
     if let Some(s) = call_session() {
         return s;
     }

@@ -218,9 +218,60 @@ pub fn due_quorums(export: &str, now: DateTime<chrono::Utc>) -> Vec<(String, usi
     due
 }
 
-/// Run the tracker's quorum gate with its deadline on every vote that is
-/// due. A vote short of its quorum lapses (one note, exit 3); one that met
-/// its quorum is left to its settle. A dry run says which would be checked.
+/// What a quorum count decided. The published tracker has no `--quorum`
+/// flag, so the count is the ballots that count: one per session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuorumGate {
+    /// At least as many ballots as the note asked for.
+    Met { have: usize },
+    /// Short, and the deadline has not passed.
+    Short { have: usize, needed: usize },
+    /// Short, and the deadline has passed. The tracker carries one
+    /// `quorum timed out` note.
+    Lapsed { have: usize, needed: usize },
+}
+
+/// Count the ballots on `id` against `needed`. A deadline that has passed
+/// while the count is short notes the lapse once. A session's later
+/// ballots are not in the count.
+///
+/// # Errors
+///
+/// The tracker did not list the ballots.
+pub fn gate_quorum(id: &str, needed: usize, deadline: Option<&str>) -> Result<QuorumGate> {
+    let raw = crate::raw_ballot_rows(id)
+        .map_err(|e| anyhow::anyhow!("quorum: the tracker did not list ballots on {id}: {e:#}"))?;
+    let have = crate::panel_gate::counted_ballots(id, &raw).len();
+    if have >= needed {
+        return Ok(QuorumGate::Met { have });
+    }
+    let past = deadline
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
+        .is_some_and(|at| at < chrono::Utc::now());
+    if !past {
+        return Ok(QuorumGate::Short { have, needed });
+    }
+    if !quorum_already_noted(id) {
+        let note = format!("quorum timed out: {have} of {needed}");
+        crate::run_captured("vissue", &["note", id, &note])
+            .map_err(|e| anyhow::anyhow!("quorum: the lapse on {id} was not noted: {e:#}"))?;
+    }
+    Ok(QuorumGate::Lapsed { have, needed })
+}
+
+fn quorum_already_noted(id: &str) -> bool {
+    crate::issue_record(id)
+        .ok()
+        .into_iter()
+        .flat_map(|v| crate::ballot_sig::notes_of(&v))
+        .any(|note| note.contains("quorum timed out"))
+}
+
+/// Run the quorum count on every vote that is due. A vote short of its
+/// quorum lapses (one note); one that met its quorum is left to its settle.
+/// A dry run says which would be checked.
 fn enforce_quorum_deadlines(apply: bool) -> String {
     let Ok(said) = crate::run_captured("vissue", &["export"]) else {
         return String::new();
@@ -231,26 +282,20 @@ fn enforce_quorum_deadlines(apply: bool) -> String {
             out.push_str(&format!("would check {id}: quorum {n} was due {at}\n"));
             continue;
         }
-        let gate = std::process::Command::new("vissue")
-            .args([
-                "consensus",
-                &id,
-                "--gate",
-                "--quorum",
-                &n.to_string(),
-                "--deadline",
-                &at,
-            ])
-            .output();
-        match gate.map(|o| o.status.code()) {
-            Ok(Some(3)) => {
+        match gate_quorum(&id, n, Some(&at)) {
+            Ok(QuorumGate::Lapsed { .. }) => {
                 out.push_str(&format!(
                     "lapsed {id}: fewer than {n} ballots by {at}; noted, nothing decided\n"
                 ));
                 out.push_str(&crate::persist_tracker(&id, "quorum timed out"));
             }
-            Ok(_) => out.push_str(&format!("{id}: quorum {n} met by {at}\n")),
-            Err(e) => out.push_str(&format!("reap: {id}: quorum gate did not run: {e}\n")),
+            Ok(QuorumGate::Met { .. }) => {
+                out.push_str(&format!("{id}: quorum {n} met by {at}\n"));
+            }
+            Ok(QuorumGate::Short { have, needed }) => {
+                out.push_str(&format!("{id}: quorum short, {have} of {needed} by {at}\n"))
+            }
+            Err(e) => out.push_str(&format!("reap: {id}: quorum gate did not run: {e:#}\n")),
         }
     }
     out

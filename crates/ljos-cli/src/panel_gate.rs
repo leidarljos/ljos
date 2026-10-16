@@ -8,7 +8,7 @@
 //! A design candidate whose session had already read another candidate is
 //! flagged: the round was not blind.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -269,9 +269,118 @@ fn candidate_notes(issue: &str) -> Vec<String> {
     notes
 }
 
-/// The refusal for `issue` as the tracker holds it now, or `None` when the
-/// ballots are unbound (a tracker from before session binding) or the
-/// sessions are distinct and no author voted.
+/// Why this connection must not cast on `issue`, from logbook notes already
+/// written. The session key is the connection. The voter name is not it.
+#[must_use]
+pub fn session_cast_refusal(
+    issue: &str,
+    key: &str,
+    _voter: &str,
+    notes: &[String],
+) -> Option<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Some(format!(
+            "a ballot on {issue} needs this connection's session. Nothing was cast"
+        ));
+    }
+    for note in notes {
+        if let Some(sig) = ballot_sig::parse_note(note) {
+            let other = session_key(
+                sig.harness.as_deref().unwrap_or(""),
+                sig.nonce.as_deref().unwrap_or(""),
+            );
+            // The first ballot this session cast on the question stands.
+            // A later one, including the same persona recast an hour on,
+            // is a second voice. The voter name is not the session.
+            if other == key {
+                return Some(format!(
+                    "this session already cast a ballot on {issue} ({key}). A seat argument does not make another voice. Nothing was cast"
+                ));
+            }
+        }
+        if let Some(candidate) = ballot_sig::parse_candidate(note) {
+            let other = session_key(&candidate.harness, &candidate.nonce);
+            if other == key {
+                return Some(format!(
+                    "this session authored candidate {} and its vote on {issue} is refused. A seat argument does not make another voice. Nothing was cast",
+                    candidate.issue
+                ));
+            }
+        }
+    }
+    None
+}
+
+static CAST: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// A claim on this connection's one ballot for an issue. Dropped without
+/// [`SessionBallot::keep`], the claim is released so a failed cast can be
+/// tried again. Kept, a later seat argument in this process is refused.
+#[derive(Debug)]
+pub struct SessionBallot {
+    mark: String,
+    kept: bool,
+}
+
+impl SessionBallot {
+    /// The cast landed. A later call from this connection is refused.
+    pub fn keep(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for SessionBallot {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        if let Ok(mut held) = CAST.lock() {
+            held.remove(&self.mark);
+        }
+    }
+}
+
+/// Reserve this connection's ballot on `issue` for `voter`. The session is
+/// [`ballot_sig::identity`], which a pinned MCP connection fixes for the
+/// process. A later ballot from this session is refused, whoever it names,
+/// including the same persona in a new process once the note is on the
+/// tracker. This process also holds the one claim across the gap before
+/// that note is written.
+///
+/// # Errors
+///
+/// This connection already cast on `issue`, this process already holds the
+/// claim, or it authored a candidate tied to `issue`.
+pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
+    let id = ballot_sig::identity();
+    let key = session_key(&id.harness, &id.nonce);
+    let notes = candidate_notes(issue);
+    let own = crate::issue_record(issue)
+        .map(|v| ballot_sig::notes_of(&v))
+        .unwrap_or_default();
+    let mut all = notes;
+    all.extend(own);
+    if let Some(why) = session_cast_refusal(issue, &key, voter, &all) {
+        bail!("{why}");
+    }
+    let mark = format!("{}\n{key}", issue.trim());
+    let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
+    if !held.insert(mark.clone()) {
+        bail!(
+            "this session already cast a ballot on {issue} ({key}). A seat argument does not make another voice. Nothing was cast"
+        );
+    }
+    drop(held);
+    Ok(SessionBallot { mark, kept: false })
+}
+
+/// The refusal for `issue` as the counted ballots hold it now, or `None`
+/// when one session's later ballots were left out of the tally, the
+/// ballots are unbound, or the sessions are distinct and no author voted.
+/// A second ballot is ignored by [`counted_ballots`], not settled as a
+/// second voice.
 #[must_use]
 pub fn settle_refusal(issue: &str) -> Option<String> {
     let ballots = crate::ballot_rows(issue);
@@ -296,6 +405,163 @@ pub fn settle_refusal(issue: &str) -> Option<String> {
 #[must_use]
 pub fn blind_lines_for(issue: &str) -> Vec<String> {
     blind_lines(&candidates_in(&candidate_notes(issue)))
+}
+
+/// Sessions that filed a design candidate tied to `issue`. Their ballots
+/// do not count, and a later cast is refused.
+fn author_sessions(issue: &str) -> std::collections::BTreeSet<String> {
+    candidates_in(&candidate_notes(issue))
+        .into_iter()
+        .map(|c| session_key(&c.harness, &c.nonce))
+        .filter(|key| !key.is_empty())
+        .collect()
+}
+
+/// One counted ballot, and the ballots the tally left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredBallot {
+    pub voter: String,
+    pub session: String,
+    /// `same session` or `authored a candidate`.
+    pub why: &'static str,
+}
+
+/// The ballots that count, and the ones a shared session or an author
+/// session pushed out. `notes` are newest first, as the logbook stores
+/// them. The oldest bound note for a session is the ballot that counts.
+/// A voter with no session binding is kept: a tracker from before binding.
+#[must_use]
+pub fn tally_of(
+    rows: &[Value],
+    notes: &[String],
+    authors: &std::collections::BTreeSet<String>,
+) -> (Vec<Value>, Vec<IgnoredBallot>) {
+    let sigs: Vec<ballot_sig::SigNote> = notes
+        .iter()
+        .filter_map(|n| ballot_sig::parse_note(n))
+        .collect();
+    let oldest: Vec<&ballot_sig::SigNote> = sigs.iter().rev().collect();
+    let mut first: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut voter_session: BTreeMap<String, String> = BTreeMap::new();
+    let mut session_order = Vec::new();
+    for sig in &oldest {
+        let key = session_key(
+            sig.harness.as_deref().unwrap_or(""),
+            sig.nonce.as_deref().unwrap_or(""),
+        );
+        if key.is_empty() {
+            continue;
+        }
+        voter_session
+            .entry(sig.voter.clone())
+            .or_insert_with(|| key.clone());
+        if first.contains_key(&key) {
+            continue;
+        }
+        first.insert(key.clone(), (sig.voter.clone(), sig.choice.clone()));
+        if !authors.contains(&key) {
+            session_order.push(key);
+        }
+    }
+    let mut counted = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for key in &session_order {
+        let Some((voter, choice)) = first.get(key) else {
+            continue;
+        };
+        if !seen.insert(voter.clone()) {
+            continue;
+        }
+        let mut row = rows
+            .iter()
+            .find(|r| r["agent"].as_str().map(str::trim) == Some(voter.as_str()))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "agent": voter }));
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("choice".into(), Value::String(choice.clone()));
+        }
+        counted.push(row);
+    }
+    let mut ignored = Vec::new();
+    for row in rows {
+        let voter = row["agent"].as_str().unwrap_or("").trim();
+        if voter.is_empty() || seen.contains(voter) {
+            continue;
+        }
+        if let Some(key) = voter_session.get(voter) {
+            let why = if authors.contains(key) {
+                "authored a candidate"
+            } else {
+                "same session"
+            };
+            ignored.push(IgnoredBallot {
+                voter: voter.to_string(),
+                session: key.clone(),
+                why,
+            });
+            continue;
+        }
+        counted.push(row.clone());
+        seen.insert(voter.to_string());
+    }
+    (counted, ignored)
+}
+
+/// [`tally_of`] for the notes and candidate bindings on `issue`.
+#[must_use]
+pub fn counted_ballots(issue: &str, rows: &[Value]) -> Vec<Value> {
+    let notes = crate::issue_record(issue)
+        .map(|v| ballot_sig::notes_of(&v))
+        .unwrap_or_default();
+    tally_of(rows, &notes, &author_sessions(issue)).0
+}
+
+/// The tally a reader sees: the ballots that count, then the ones left
+/// out because the session had already voted or had filed a candidate.
+///
+/// # Errors
+///
+/// The tracker did not list the ballots.
+pub fn tally_report(issue: &str) -> Result<String> {
+    let raw = crate::raw_ballot_rows(issue)?;
+    let notes = crate::issue_record(issue)
+        .map(|v| ballot_sig::notes_of(&v))
+        .unwrap_or_default();
+    let (counted, ignored) = tally_of(&raw, &notes, &author_sessions(issue));
+    let mut out = String::new();
+    let n = counted.len();
+    let word = if n == 1 {
+        "ballot counts"
+    } else {
+        "ballots count"
+    };
+    out.push_str(&format!("{issue}: {n} {word}\n"));
+    for row in &counted {
+        let agent = row["agent"].as_str().unwrap_or("").trim();
+        let choice = row["choice"].as_str().unwrap_or("").trim();
+        let raw_choice = raw
+            .iter()
+            .find(|r| r["agent"].as_str().map(str::trim) == Some(agent))
+            .and_then(|r| r["choice"].as_str())
+            .unwrap_or("");
+        if !raw_choice.is_empty() && raw_choice != choice {
+            out.push_str(&format!(
+                "  {agent}  {choice}  (a later ballot on this session is ignored)\n"
+            ));
+        } else {
+            out.push_str(&format!("  {agent}  {choice}\n"));
+        }
+    }
+    if !ignored.is_empty() {
+        out.push_str("ignored, one session is one ballot:\n");
+        for item in &ignored {
+            out.push_str(&format!(
+                "  {}  {}  ({})\n",
+                item.voter, item.session, item.why
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn reads_path() -> Option<PathBuf> {
@@ -705,6 +971,84 @@ mod tests {
             harness: harness.into(),
             nonce: format!("n-{voter}"),
         }
+    }
+
+    #[test]
+    fn one_connection_cannot_cast_again_by_naming_another_seat() {
+        let notes = [
+            "ballot-sig: alice ship ab cd sess-shared-0001 n-alice".to_string(),
+            "candidate-sig: demo-d001 alice sess-author-0001 n-author - ab cd".to_string(),
+        ];
+        let again = session_cast_refusal("demo-ind1", "sess-shared-0001", "bea", &notes).unwrap();
+        assert!(
+            again.contains("already cast") && again.contains("seat argument"),
+            "{again}"
+        );
+        let recast =
+            session_cast_refusal("demo-ind1", "sess-shared-0001", "alice", &notes).unwrap();
+        assert!(
+            recast.contains("already cast") && recast.contains("Nothing was cast"),
+            "{recast}"
+        );
+        let author =
+            session_cast_refusal("demo-vote", "sess-author-0001", "alice", &notes).unwrap();
+        assert!(author.contains("authored candidate demo-d001"), "{author}");
+        assert!(session_cast_refusal("demo-ind1", "sess-bob-0001", "bob", &notes).is_none());
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("VISSUE_ROOT", dir.path());
+        std::env::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
+        std::env::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
+        let first = claim_session_ballot("probe-seat-1", "saddle").unwrap();
+        let second = claim_session_ballot("probe-seat-1", "other").unwrap_err();
+        assert!(second.to_string().contains("already cast"), "{second:#}");
+        first.keep();
+        std::env::remove_var("VISSUE_ROOT");
+        std::env::remove_var("LJOS_HARNESS_SESSION");
+        std::env::remove_var("LJOS_PROCESS_NONCE");
+    }
+
+    #[test]
+    fn five_personas_one_sand_session_count_as_the_first_ballot() {
+        let session = "sand-subagent-fcdb9c57-9988-7d91-4311-9fc5e42f7529";
+        let personas = ["academic", "transit", "safety", "cat-owner", "finance"];
+        let mut notes = Vec::new();
+        // Newest first, as the logbook stores them: the 11:46 recast, then
+        // the 10:35 ballots, academic's first cast last.
+        for persona in personas.iter().rev() {
+            notes.push(format!(
+                "ballot-sig: {persona} bus ab cd {session} n-{persona}-2"
+            ));
+        }
+        for persona in personas.iter().rev() {
+            notes.push(format!(
+                "ballot-sig: {persona} rail ab cd {session} n-{persona}-1"
+            ));
+        }
+        let rows: Vec<Value> = personas
+            .iter()
+            .map(|persona| serde_json::json!({"agent": persona, "choice": "bus"}))
+            .collect();
+        let (counted, ignored) = tally_of(&rows, &notes, &std::collections::BTreeSet::new());
+        assert_eq!(counted.len(), 1, "{counted:?}");
+        assert_eq!(counted[0]["agent"], "academic");
+        assert_eq!(counted[0]["choice"], "rail");
+        let ignored_names: Vec<&str> = ignored.iter().map(|item| item.voter.as_str()).collect();
+        assert_eq!(
+            ignored_names,
+            vec!["transit", "safety", "cat-owner", "finance"]
+        );
+        assert!(ignored
+            .iter()
+            .all(|item| item.session == session && item.why == "same session"));
+        let mut authors = std::collections::BTreeSet::new();
+        authors.insert(session.to_string());
+        let (none, dropped) = tally_of(&rows, &notes, &authors);
+        assert!(none.is_empty(), "{none:?}");
+        assert_eq!(dropped.len(), 5, "{dropped:?}");
+        assert!(dropped
+            .iter()
+            .all(|item| item.why == "authored a candidate"));
     }
 
     #[test]

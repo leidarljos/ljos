@@ -4,6 +4,9 @@
 # REAL=1 lets grok-4.7 (cursor-agent) cast the panel ballots as real seats.
 set -uo pipefail
 unset LJOS_SEAT VISSUE_AGENT LJOS_PANE_TOOL LJOS_HARNESS_SESSION LJOS_PROCESS_NONCE LJOS_PANEL_CHILD LJOS_MEMBER_BIN LJOS_PANEL_PERSONAS
+# A parent shell that turned the pack off must not hide the writer this
+# suite starts with `packset ensure`.
+if [ "${PACKSET_URL:-}" = off ]; then unset PACKSET_URL; fi
 for k in $(env | sed -n 's/^\([A-Za-z0-9_]*_\(SESSION\|THREAD\|CONVERSATION\)_ID\)=.*/\1/p'); do unset "$k"; done
 BIN=${SUITE_BIN:-}; [ -n "$BIN" ] && export PATH="$BIN:$PATH"
 root=$(mktemp -d "${SUITE_DIR:-${TMPDIR:-/tmp}}/suite-e2e.XXXX"); echo "root $root"
@@ -72,14 +75,17 @@ done
 run vissue vote "$D1" --json; N=$(echo "$LAST" | jq length 2>/dev/null || echo 0)
 chk "three seats cast on $D1" test "$N" -ge 3
 chk "each ballot on $D1 is its own seat's" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "alice,bob,carol"' "$LAST"
-run vissue consensus "$D1" --gate --quorum 3; chk "D1 settles with quorum 3" test $? -eq 0
+run ljos consensus "$D1" --quorum 3; chk "D1 settles with quorum 3" test $? -eq 0
 run ljos consensus "$D1"; rc=$?; chk "ljos consensus names a leader on D1" bash -c 'test "$0" -eq 0 && ! printf "%s" "$1" | grep -q "tie" && ! printf "%s" "$1" | grep -q "refuses to settle"' "$rc" "$LAST"
 
 run as alice ljos consensus "$D1"; chk "signed seat ballots stand at the push gate" has "decides ship for a push by alice"
 chk "each seat's key is pinned on the tracker" test "$(wc -l < "$VISSUE_ROOT/.ljos-seat-keys")" -eq 3
 
-# 4a. only the tracker is proof
-run as alice ljos vote "$D1" --for ship --used none; chk "ljos vote reads its ballot back from the tracker" has "recorded on the tracker: alice for ship"
+# 4a. only the tracker is proof. A second ballot on $D1 is the same
+# session recasting, which the tally refuses, so the read-back is the
+# first cast on a fresh question.
+run as alice vissue create -p demo "Read the ballot back?" -q; DREAD=$(echo "$LAST"|tail -1)
+run as alice ljos vote "$DREAD" --for ship --used none; chk "ljos vote reads its ballot back from the tracker" has "recorded on the tracker: alice for ship"
 run as alice ljos vote demo-zzzz --for ship --used none; chk "a vote the tracker does not hold is not reported as cast" bash -c '! printf "%s" "$0" | grep -q "recorded on the tracker"' "$LAST"
 as carol ljos persona skeptic --anchor 0.3 --view "Asks for evidence." >/dev/null 2>&1
 run as carol ljos brief skeptic "$D1"; chk "a persona brief says only the tracker is proof" has "Only the tracker is proof"
@@ -97,16 +103,16 @@ VISSUE_AGENT=carol vissue vote "$D6" --for on --used none >/dev/null 2>&1
 run as alice ljos consensus "$D6"; chk "a ballot cast around ljos, unsigned, is rejected" has "carol's ballot is unsigned"
 run as alice ljos consensus "$D6" --json; chk "push_cite stands false with the refusal in JSON" bash -c 'printf "%s" "$0" | jq -e ".push_cite.stands == false" >/dev/null' "$LAST"
 
-# 4c. one harness session minting N seats does not settle
+# 4c. one harness session minting N seats is refused at the cast
 run as alice vissue create -p demo "Independence: one worker, three seats?" -q; IND=$(echo "$LAST"|tail -1)
 chk "independence issue filed" test -n "$IND"
 mkdir -p "$root/home-shared"
 shared() { local s=$1; shift; HOME="$root/home-shared" LJOS_SEAT=$s VISSUE_AGENT=$s SEAT_SESSION_ID=sess-shared-0001 "$@"; }
-for s in ada bea cyra; do shared "$s" ljos vote "$IND" --for ship --used none >/dev/null; done
-run vissue vote "$IND" --json; chk "three seats minted in one session cast on $IND" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "ada,bea,cyra"' "$LAST"
-run ljos consensus "$IND"; rc=$?
-EXACT="refuses to settle ${IND}: one session authored more than one ballot: sess-shared-0001 cast 3 (ada, bea, cyra); all ballots trace to one session (sess-shared-0001). Seats minted inside a session do not multiply its vote"
-chk "one session of three seats is refused" bash -c 'test "$0" -eq 1 && printf "%s\n" "$1" | grep -F -x -q "$2"' "$rc" "$LAST" "$EXACT"
+shared ada ljos vote "$IND" --for ship --used none >/dev/null
+run vissue vote "$IND" --json; chk "the first seat in a shared session casts" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "ada"' "$LAST"
+run shared bea ljos vote "$IND" --for ship --used none; chk "a second seat in that session is refused" has "A seat argument does not make another voice"
+run shared cyra ljos vote "$IND" --for drop --used none; chk "a third seat in that session is refused" has "Nothing was cast"
+run vissue vote "$IND" --json; chk "the shared session left one ballot" bash -c 'test "$(printf "%s" "$0" | jq -r "[.[].agent]|sort|join(\",\")")" = "ada"' "$LAST"
 
 # 4d. three sessions settle, and panel run is one session per designer
 run as alice vissue create -p demo "Independence: three sessions?" -q; OKI=$(echo "$LAST"|tail -1)
@@ -136,22 +142,22 @@ run as alice ljos consensus "$D2" --no-file; chk "a tie files no dissent child" 
 # 7. quorum timeout
 run as alice vissue create -p demo "Quorum: adopt the new linter?" -q; D4=$(echo "$LAST"|tail -1)
 as alice ljos vote "$D4" --for adopt --used none >/dev/null 2>&1
-run vissue consensus "$D4" --gate --quorum 3; chk "1 of 3 ballots fails the quorum" test $? -ne 0
-run vissue consensus "$D4" --gate --quorum 3 --deadline 2000-01-01T00:00:00Z; rc=$?
-chk "a passed deadline without quorum times out (exit 3, noted)" bash -c 'test "$0" -eq 3 && vissue show "$1" | grep -q "quorum timed out"' "$rc" "$D4"
+run ljos consensus "$D4" --quorum 3; chk "1 of 3 ballots fails the quorum" test $? -ne 0
+run ljos consensus "$D4" --quorum 3 --deadline 2000-01-01T00:00:00Z; rc=$?
+chk "a passed deadline without quorum times out (exit 3, noted)" bash -c 'test "$0" -eq 3 && vissue show --org "$1" | grep -q "quorum timed out"' "$rc" "$D4"
 
 run as alice ljos consensus "$D4" --quorum 3; rc=$?; chk "ljos consensus: short of quorum exits 1 and says so" bash -c 'test "$0" -eq 1 && printf "%s" "$1" | grep -q "quorum: short"' "$rc" "$LAST"
 run as alice ljos consensus "$D4" --quorum 3 --deadline 2000-01-01T00:00:00Z; rc=$?; chk "ljos consensus: lapsed quorum exits 3" bash -c 'test "$0" -eq 3 && printf "%s" "$1" | grep -q "quorum: lapsed"' "$rc" "$LAST"
-chk "the lapse is noted once" bash -c 'test "$(vissue show "$0" | grep -c "quorum timed out")" = 1' "$D4"
+chk "the lapse is noted once" bash -c 'test "$(vissue show --org "$0" | grep -c "quorum timed out")" = 1' "$D4"
 run as alice ljos consensus "$D1" --quorum 3; chk "ljos consensus: quorum met reads on" test $? -eq 0
 
 # 7b. reap enforces a quorum deadline with no one asking
 run as alice ljos file --top -p demo -t decision "Deadline: switch CI runner?" --body "Options: switch, stay" --quorum 3 --deadline 2000-01-01T00:00:00Z; D5=$(echo "$LAST" | grep -oE '^[a-z]+-[a-z0-9]{4}' | head -1)
-chk "ljos file records the quorum and deadline" bash -c 'vissue show "$0" | grep -q "quorum: 3 by"' "$D5"
+chk "ljos file records the quorum and deadline" bash -c 'vissue show --org "$0" | grep -q "quorum: 3 by"' "$D5"
 as bob ljos vote "$D5" --for switch --used none >/dev/null 2>&1
 run as carol ljos reap; chk "a reap dry run names the due vote" has "would check $D5"
 run as carol ljos reap --apply; chk "reap --apply lapses the short vote" has "lapsed $D5"
-chk "the lapse is on the tracker once" bash -c 'test "$(vissue show "$0" | grep -c "quorum timed out")" = 1' "$D5"
+chk "the lapse is on the tracker once" bash -c 'test "$(vissue show --org "$0" | grep -c "quorum timed out")" = 1' "$D5"
 run as carol ljos reap --apply; chk "a second reap does not lapse it again" bash -c '! printf "%s" "$0" | grep -q "lapsed $1"' "$LAST" "$D5"
 
 # 7c. a session's end keeps its facts, once, as agent-derived memories

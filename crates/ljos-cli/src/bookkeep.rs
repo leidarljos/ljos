@@ -72,14 +72,19 @@ const MCP_WRITES: &[&str] = &[
     "ljos_habit",
 ];
 
-/// One session's book: the prompt the title came from, and one row per
-/// repository the session has touched.
+/// One sitting's book: the prompt the title came from, and one row per
+/// repository the sitting has touched. An MCP server spawned per call
+/// keeps this under the seat, so the next process sees the open claim.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Book {
     #[serde(default)]
     prompt: String,
     #[serde(default)]
     repos: BTreeMap<String, RepoBook>,
+    /// Unix seconds of the last MCP call for this sitting. Zero means the
+    /// sitting has not been touched, and an idle check does not finish it.
+    #[serde(default)]
+    last_unix: u64,
     /// `cwd` as the hook named it, to the repository key. The warm path is
     /// a lookup, not another `git rev-parse`.
     #[serde(default)]
@@ -229,7 +234,7 @@ pub fn before_mcp_write(name: &str, args: Option<&serde_json::Map<String, Value>
     if !mcp_tool_writes(name) {
         return;
     }
-    let session = mcp_session();
+    let session = sitting_key();
     if let Some(title) = args.and_then(arg_title) {
         let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
         let path = book_path(&session);
@@ -257,15 +262,16 @@ pub fn before_mcp_write(name: &str, args: Option<&serde_json::Map<String, Value>
     let call = super::HookCall {
         event: "PreToolUse".into(),
         cue: "Write note".into(),
-        session: Some(session),
+        session: Some(session.clone()),
         shape: super::HookShape::Asks,
     };
     let _ = observe(&raw, &call);
+    stamp_sitting(&session, unix_secs());
 }
 
 /// Finish every claim this MCP process opened. Called when the server exits.
 pub fn mcp_shutdown() {
-    let session = mcp_session();
+    let session = sitting_key();
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
@@ -293,6 +299,47 @@ pub fn mcp_shutdown() {
 /// Note that a tool ran, so the idle watcher waits another window.
 pub fn touch_activity() {
     LAST_ACTIVITY.store(unix_secs(), Ordering::Relaxed);
+}
+
+/// Tool calls this process has answered. A process that answered one call
+/// and exited was spawned per call: finishing in `Drop` would close the
+/// sitting before the next call. The book stays, and the next start
+/// finishes it once the idle window has passed.
+static MCP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Count one tool call in this process, for [`ShutdownFinish`].
+pub fn note_mcp_process_call() {
+    MCP_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Finish the seat's open claims when the last call is older than the
+/// idle window, then stamp this call. A per-call server has no thread
+/// left alive to notice the idle; the next process does.
+pub fn resume_seat() {
+    resume_seat_at(unix_secs());
+}
+
+fn resume_seat_at(now: u64) {
+    let key = sitting_key();
+    if let Some(limit) = idle_limit() {
+        let book = load_book(&book_path(&key));
+        let open = book
+            .repos
+            .values()
+            .any(|row| row.issue.is_some() && !row.finished);
+        if open && idle_due(now, book.last_unix, limit) {
+            mcp_shutdown();
+        }
+    }
+    stamp_sitting(&key, now);
+}
+
+fn stamp_sitting(key: &str, now: u64) {
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let path = book_path(key);
+    let mut book = load_book(&path);
+    book.last_unix = now;
+    store_book(&path, &book);
 }
 
 /// How long a silent MCP server sits before it finishes. Unset is thirty
@@ -361,7 +408,7 @@ pub fn spawn_idle_finish() {
 /// The issue this MCP sitting still holds, for a finish that did not name one.
 #[must_use]
 pub fn open_issue() -> Option<String> {
-    let book = load_book(&book_path(&mcp_session()));
+    let book = load_book(&book_path(&sitting_key()));
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.display().to_string())
@@ -387,7 +434,7 @@ fn unfinished(book: &Book, key: &str) -> Option<String> {
 /// The explicit finish closed `issue`. Shutdown then has nothing left to close.
 pub fn note_finished(issue: &str) {
     let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
-    let path = book_path(&mcp_session());
+    let path = book_path(&sitting_key());
     let mut book = load_book(&path);
     let mut changed = false;
     for row in book.repos.values_mut() {
@@ -439,8 +486,9 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
         super::recall_memories(&issue_id)
     );
     let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
-    let path = book_path(&mcp_session());
+    let path = book_path(&sitting_key());
     let mut book = load_book(&path);
+    book.last_unix = unix_secs();
     if book.prompt.trim().is_empty() {
         book.prompt = task.chars().take(4000).collect();
     }
@@ -493,8 +541,31 @@ pub struct ShutdownFinish;
 
 impl Drop for ShutdownFinish {
     fn drop(&mut self) {
-        mcp_shutdown();
+        // One call, then the process is gone: this was spawned per call.
+        // The sitting stays on disk under the seat. The next start finishes
+        // it once the idle window has passed. A server that answered more
+        // than one call is the long-lived process, and its exit closes.
+        if MCP_CALLS.load(Ordering::Relaxed) > 1 {
+            mcp_shutdown();
+        }
     }
+}
+
+/// The book key. An MCP call is keyed by the seat, so a server spawned
+/// once per tool call keeps the claim and the idle clock. A hook, and an
+/// MCP process with no seat yet, stay on the session id.
+fn sitting_key() -> String {
+    if let Some(name) = std::env::var("LJOS_SEAT")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+    {
+        let slug = super::seat_slug(&name);
+        if slug != "runner" && !super::omitted_actor_name(&slug) {
+            return format!("seat:{slug}");
+        }
+    }
+    mcp_session()
 }
 
 fn mcp_session() -> String {
@@ -1466,6 +1537,69 @@ print(f"id=deed-{n:04x}")
             creates(&after),
             creates(&before) + 1,
             "a write after shutdown files a new claim\n{after}"
+        );
+    }
+
+    #[test]
+    fn a_per_call_server_keeps_one_sitting_for_the_seat() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_MCP_IDLE",
+            "LJOS_OFF",
+        ]);
+        let (dir, tracker, _repo) = scratch();
+        arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "Disk Saver");
+            std::env::set_var("LJOS_SESSION_ID", "mcp-call-1");
+            std::env::set_var("LJOS_MCP_IDLE", "30m");
+        }
+        let mut args = serde_json::Map::new();
+        args.insert("text".into(), Value::String("note on rtrash-adz0".into()));
+        before_mcp_write("ljos_note", Some(&args));
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", "mcp-call-2");
+        }
+        args.insert(
+            "text".into(),
+            Value::String("still noting rtrash-adz0".into()),
+        );
+        before_mcp_write("ljos_note", Some(&args));
+        let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        let creates =
+            |text: &str| text.matches("\ncreate").count() + usize::from(text.starts_with("create"));
+        assert_eq!(
+            creates(&log),
+            1,
+            "a second call from the same seat does not file another claim\n{log}"
+        );
+        assert!(
+            !git_log(&tracker).contains("finished"),
+            "the per-call exit has not happened"
+        );
+        stamp_sitting(&sitting_key(), 1_000);
+        resume_seat_at(1_000 + 30 * 60);
+        let finished = git_log(&tracker);
+        assert!(
+            finished.contains("finished"),
+            "the next start closes the idle sitting\n{finished}"
+        );
+        before_mcp_write("ljos_note", Some(&args));
+        let after = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        assert_eq!(
+            creates(&after),
+            2,
+            "a write after the idle close files the next claim\n{after}"
         );
     }
 

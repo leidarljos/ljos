@@ -407,6 +407,18 @@ enum Cmd {
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
     },
+    /// Tracker commits by one seat. The subject is `chore(issues): ID VERB by SEAT`.
+    Log {
+        /// The seat whose commits to list.
+        #[arg(long)]
+        seat: String,
+    },
+    /// How many tracker commits each seat made since a day.
+    Usage {
+        /// YYYY-MM-DD. Commits from that day on.
+        #[arg(long)]
+        since: String,
+    },
     /// Write to one seat (`SEAT TEXT...`), or to a group with `--group NAME`.
     Send {
         /// The seat and the message, or with `--group` the message alone.
@@ -827,10 +839,11 @@ enum Cmd {
         compare: bool,
         /// Read only: do not note an objection or file a child. By default
         /// a blocking objection with a reason is filed once, and so is a
-        /// held minority on an issue whose substance has not settled. A nit,
-        /// a wording note or a style note is written on the issue. The same
-        /// objection is not filed again. At the panel's round limit the
-        /// issue closes as settled-with-notes.
+        /// minority a voter still holds after a settled majority (`Dissent
+        /// holds OPTION`, once). A tie files nothing. A nit, a wording note
+        /// or a style note is written on the issue. The same objection is
+        /// not filed again. At the panel's round limit the issue closes as
+        /// settled-with-notes.
         #[arg(long)]
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and
@@ -1432,12 +1445,23 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Note { issue, text } => {
-            run("vissue", &["note", &issue, &text.join(" ")])?;
+            let text = text.join(" ");
+            run("vissue", &["note", &issue, &text])?;
+            match ljos_cli::packset_write_note(&issue, &text) {
+                Ok(body) => {
+                    let id = body["id"].as_str().unwrap_or("?");
+                    let short: String = id.chars().take(8).collect();
+                    println!("noted in memory (id {short})");
+                }
+                Err(e) => println!("the note was not kept in memory: {e:#}"),
+            }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
             }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
+        Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
+        Cmd::Usage { since } => print!("{}", ljos_cli::tracker_usage(&since)?),
         Cmd::Send {
             words,
             group,
@@ -1572,8 +1596,10 @@ fn run_command() -> Result<()> {
             }
             None if jev => {
                 let name = as_persona.as_deref().unwrap_or_default();
+                let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, name)?;
                 match ljos_cli::jev_vote(name, &issue)? {
                     ljos_cli::JevVote::Cast(b) => {
+                        cast.keep();
                         let voter = if b.model.is_empty() {
                             name.to_string()
                         } else {
@@ -1586,6 +1612,7 @@ fn run_command() -> Result<()> {
                         print!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
                     }
                     ljos_cli::JevVote::Escalated(b) => {
+                        drop(cast);
                         println!(
                             "{name}: Jev leaned {} at confidence {:.2}, under the {:.2} cut; not cast.",
                             b.choice, b.confidence, b.escalate_below
@@ -1609,6 +1636,8 @@ fn run_command() -> Result<()> {
             }
             Some(c) => {
                 ljos_cli::ballot_seat("vote")?;
+                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
+                let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, &who)?;
                 let used = used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     bail!(
@@ -1630,7 +1659,6 @@ fn run_command() -> Result<()> {
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 run_as("vissue", &refs, as_persona.as_deref())?;
                 // Read the ballot back: only the tracker is proof it exists.
-                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
                 let rows: Vec<serde_json::Value> =
                     ljos_cli::run_captured("vissue", &["vote", &issue, "--json"])
                         .ok()
@@ -1643,8 +1671,9 @@ fn run_command() -> Result<()> {
                     );
                 }
                 println!("recorded on the tracker: {who} for {} on {issue}", args[3]);
+                cast.keep();
                 // Every ballot, a persona's included, is signed and bound to
-                // this harness session. The push gate still counts only seat
+                // this connection. The push gate still counts only seat
                 // ballots; the panel gate counts the session, not the seat.
                 match ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3]) {
                     Ok(said) => print!("{said}"),
@@ -1660,7 +1689,7 @@ fn run_command() -> Result<()> {
                 }
                 print!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
             }
-            None => run("vissue", &["vote", &issue])?,
+            None => print!("{}", ljos_cli::panel_gate::tally_report(&issue)?),
         },
         Cmd::Brief { name, issue } => {
             ljos_cli::panel_gate::note_tracker_read(&issue);
@@ -2398,6 +2427,10 @@ fn run_command() -> Result<()> {
                 &anchors,
                 &tags,
             )?;
+            // The model crate's `--issue` re-reads the drawer, where a
+            // session's later personas still sit. The counted ballots are
+            // the tally.
+            ljos_cli::bind_settle_ballots(&mut steps, &ballots);
             // First what the push gate decides: seat ballots only.
             let names: std::collections::BTreeSet<String> =
                 personas.iter().map(|p| p.name.trim().to_string()).collect();
@@ -2415,9 +2448,10 @@ fn run_command() -> Result<()> {
             let predictions = predictions_of(&atoms, &id);
             let panel = panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions);
             // A blocking objection with a reason is filed once. A nit, a
-            // wording note or a style note is written on the issue. A held
-            // minority is filed only while the substance has not settled.
-            // `--no-file` keeps this a pure read. Filing never fails the reading.
+            // wording note or a style note is written on the issue. A
+            // minority a voter still holds after a settled majority is
+            // filed once. A tie files nothing. `--no-file` keeps this a
+            // pure read. Filing never fails the reading.
             let dissent = if no_file || !on_path("vissue") {
                 Vec::new()
             } else {
@@ -2453,6 +2487,18 @@ fn run_command() -> Result<()> {
             for step in steps {
                 let settle = step.bin == "ljos-consensus"
                     && step.args.first().map(String::as_str) == Some("settle");
+                if step.bin == "vissue" {
+                    // The tracker's settle text stays. A dissent it filed is
+                    // named, rather than left as the create line on stderr.
+                    let said = run_captured(step.bin, &step.args)?;
+                    print!("{}", said.stdout);
+                    for line in
+                        ljos_cli::dissent_lines(&format!("{}\n{}", said.stdout, said.stderr))
+                    {
+                        println!("dissent: {line}");
+                    }
+                    continue;
+                }
                 if !settle {
                     run(step.bin, &step.args)?;
                     continue;
@@ -2828,46 +2874,16 @@ fn pack_trust_or_none() -> Vec<Trust> {
     }
 }
 
-/// The tracker's quorum gate on `id`: `vissue consensus --gate --quorum N`
-/// with the deadline when one is set. Met, the reading goes on. Short, it
-/// says so and exits 1; short past the deadline, the tracker notes the
-/// lapse once and this exits 3.
+/// The quorum gate on `id`. Met, the reading goes on. Short, it says so
+/// and exits 1; short past the deadline, the tracker notes the lapse once
+/// and this exits 3. The count is the ballots on the tracker. The published
+/// `vissue consensus` has no `--quorum` flag, so this does not ask it for one.
 fn quorum_or_exit(id: &str, n: usize, deadline: Option<&str>, json: bool) -> Result<()> {
-    let mut args = vec![
-        "consensus".to_string(),
-        id.to_string(),
-        "--gate".into(),
-        "--quorum".into(),
-        n.to_string(),
-    ];
-    if let Some(d) = deadline {
-        args.push("--deadline".into());
-        args.push(d.to_string());
-    }
-    let out = std::process::Command::new("vissue")
-        .args(&args)
-        .output()
-        .context("consensus: vissue did not run for the quorum")?;
-    let said = String::from_utf8_lossy(&out.stderr);
-    let line = said
-        .lines()
-        .find(|l| l.contains("quorum"))
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    match out.status.code() {
-        Some(3) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"quorum": {"issue": id, "needed": n, "lapsed": true, "said": line}})
-                );
-            } else {
-                println!("quorum: lapsed, nothing was decided: {line}");
-            }
-            std::process::exit(3);
-        }
-        Some(1) if line.contains("needed for a quorum") => {
+    let gate = ljos_cli::reap::gate_quorum(id, n, deadline)?;
+    match gate {
+        ljos_cli::reap::QuorumGate::Met { .. } => Ok(()),
+        ljos_cli::reap::QuorumGate::Short { have, needed } => {
+            let line = format!("{have} of {needed} needed for a quorum");
             if json {
                 println!(
                     "{}",
@@ -2878,6 +2894,17 @@ fn quorum_or_exit(id: &str, n: usize, deadline: Option<&str>, json: bool) -> Res
             }
             std::process::exit(1);
         }
-        _ => Ok(()),
+        ljos_cli::reap::QuorumGate::Lapsed { have, needed } => {
+            let line = format!("quorum timed out: {have} of {needed}");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"quorum": {"issue": id, "needed": n, "lapsed": true, "said": line}})
+                );
+            } else {
+                println!("quorum: lapsed, nothing was decided: {line}");
+            }
+            std::process::exit(3);
+        }
     }
 }

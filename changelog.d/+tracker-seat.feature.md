@@ -1,0 +1,1 @@
+Tracker commits name the seat that did the work (`chore(issues): ID noted by saddle`), and the issue logbook gains a `Noted by saddle [timestamp]` line with no `:Seat:` property. `ljos log --seat saddle` and `ljos usage --since DATE` count those commits per seat.

@@ -9516,6 +9516,26 @@ pub fn packset_write_agent(
     })
 }
 
+/// A progress note, as an agent memory the default list shows. The tracker
+/// logbook is a separate write. A pack that refuses is the error; the
+/// caller keeps the logbook note.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the note.
+pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("note: empty text is not a memory");
+    }
+    let mut atom = atom_body("note", trimmed, &workspace);
+    stamp_horizon(&mut atom, "note", trimmed, Some(true));
+    add_entities(&mut atom, [format!("issue:{}", issue.trim())]);
+    with_writer(|| admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed"))
+}
+
 /// [`packset_write_agent`] with extra entities on the atom, such as the
 /// `via:` and `session:` tags session-end extraction stamps for provenance.
 ///
@@ -19471,15 +19491,30 @@ pub fn packset_search_as_of(
     // the writer returned it: the encoder's ballot describes the pack
     // now, and the signal read below asks for now.
     if !rerank || stamp.is_some() {
+        count_recall(&found);
         return Ok(found);
     }
     let Some((leader, signal)) = search_with_signals(q, limit)
         .ok()
         .and_then(|rows| rows.into_iter().next())
     else {
+        count_recall(&found);
         return Ok(found);
     };
-    Ok(pin_encoder_leader(found, leader, signal.rank))
+    let ranked = pin_encoder_leader(found, leader, signal.rank);
+    count_recall(&ranked);
+    Ok(ranked)
+}
+
+/// One use per hit a search or a hook actually handed back. The pack's
+/// review clock is left where it is; grading would reschedule the claim.
+fn count_recall(hits: &[Hit]) {
+    let ids: Vec<String> = hits
+        .iter()
+        .filter_map(|hit| hit.id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    memories::bump_recalls(&ids);
 }
 
 /// Keep `leader` at the front when `rank` is [`DENSE_ALONE_RANK`]: the
@@ -21145,7 +21180,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     match filed {
         Ok(line) => line,
         Err(e) => format!(
-            "the lesson was not kept: {e:#}. The node stays completed. Reword the lesson and keep it with: ljos remember {}\n",
+            "the lesson was not kept: {e:#}. Reword the lesson and keep it with: ljos remember {}\n",
             tools::sh_quote(text)
         ),
     }
@@ -21169,8 +21204,7 @@ pub fn finish(
     // A decision closes on ballots, not on the say of the seat that sat on
     // it; refused before anything is written, so nothing half-happens.
     if close && tracker_show_json(issue).is_ok_and(|v| is_decision(&v)) {
-        let said = run_captured("vissue", &["vote", issue, "--json"])?;
-        let ballots = forecasts_from_json(&said.stdout)?.len();
+        let ballots = ballot_rows(issue).len();
         if ballots < 2 {
             bail!(
                 "finish: {issue} is a decision and holds {ballots} ballot{}; run the panel \
@@ -21203,25 +21237,31 @@ pub fn finish(
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
     }
     let title = issue_title(issue)?;
-    // The node completes first. A pack that refuses the lesson or the
-    // island afterwards is reported, and the sitting stays finished.
-    let completed = complete(issue, Some(status), assignee, gen)
-        .with_context(|| format!("finish: the session node for {issue} was not completed"))?;
+    // The lesson is filed before the node completes. A complete that
+    // refuses used to return first and the lesson never reached the pack
+    // `ljos memories list` reads.
+    let lesson_lines = match lesson.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(text) => {
+            let mut lines = String::new();
+            for claim in lesson_claims(text) {
+                lines.push_str(&finish_lesson(issue, &claim));
+            }
+            lines
+        }
+        None => "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n".into(),
+    };
+    let completed = match complete(issue, Some(status), assignee, gen) {
+        Ok(done) => done,
+        Err(e) => {
+            bail!("finish: the session node for {issue} was not completed: {e:#}\n{lesson_lines}")
+        }
+    };
     let mut out = format!("completed the session node for {issue} as {status}\n");
     for line in completed.lines().filter(|l| l.starts_with("tracker: ")) {
         out.push_str(line);
         out.push('\n');
     }
-    match lesson.map(str::trim).filter(|l| !l.is_empty()) {
-        Some(text) => {
-            for claim in lesson_claims(text) {
-                out.push_str(&finish_lesson(issue, &claim));
-            }
-        }
-        None => out.push_str(
-            "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n",
-        ),
-    }
+    out.push_str(&lesson_lines);
     match packset_island(&title, true) {
         Err(e) => out.push_str(&format!(
             "did not fire the island for {title:?}: {e:#}\n"
@@ -21331,6 +21371,250 @@ impl Drop for CommitLock {
     }
 }
 
+/// The seat a tracker commit and its logbook line name. One token, so
+/// `ljos log --seat` can read it back out of the subject.
+#[must_use]
+pub fn tracker_seat() -> String {
+    let seat = seat_slug(&seat_name());
+    if seat == "runner" {
+        "seat".into()
+    } else {
+        seat
+    }
+}
+
+fn verb_heading(verb: &str) -> String {
+    let verb = verb.trim();
+    let mut chars = verb.chars();
+    match chars.next() {
+        Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+        None => "Noted".into(),
+    }
+}
+
+/// One tracker commit: `chore(issues): ISSUE VERB by SEAT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerAct {
+    pub issue: String,
+    pub verb: String,
+    pub seat: String,
+}
+
+/// The subject `persist_tracker` writes, or `None` when it names no seat.
+#[must_use]
+pub fn parse_tracker_commit(message: &str) -> Option<TrackerAct> {
+    let rest = message.trim().strip_prefix("chore(issues): ")?;
+    let (body, seat) = rest.rsplit_once(" by ")?;
+    let seat = seat.trim();
+    if seat.is_empty() || seat.contains(char::is_whitespace) {
+        return None;
+    }
+    let (issue, verb) = body.split_once(' ')?;
+    let verb = verb.trim();
+    if issue.is_empty() || verb.is_empty() {
+        return None;
+    }
+    Some(TrackerAct {
+        issue: issue.to_string(),
+        verb: verb.to_string(),
+        seat: seat.to_string(),
+    })
+}
+
+/// A logbook attribution, `- Noted by saddle [ts]` or the note vissue
+/// rewrites that into. Not a `:Seat:` property.
+#[must_use]
+pub fn parse_logbook_act(line: &str) -> Option<(String, String)> {
+    let body = line.trim().strip_prefix('-')?.trim();
+    let body = body.strip_prefix("Note:").map(str::trim).unwrap_or(body);
+    let body = match body.rfind('[') {
+        Some(idx) => body[..idx].trim(),
+        None => body,
+    };
+    let body = body.trim().trim_matches('"').trim();
+    let (verb, seat) = body.rsplit_once(" by ")?;
+    let seat = seat.trim().trim_matches('"');
+    if verb.is_empty() || seat.is_empty() || seat.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((verb.to_string(), seat.to_string()))
+}
+
+fn heading_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('*') else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(['*', ' ', '\t'])
+}
+
+fn line_is_issue_id(line: &str, issue: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix(":ID:") else {
+        return false;
+    };
+    rest.trim() == issue
+}
+
+fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
+    let ends_nl = text.ends_with('\n');
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    if ends_nl && lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let id_at = lines
+        .iter()
+        .position(|line| line_is_issue_id(line, issue))?;
+    let start = (0..=id_at)
+        .rev()
+        .find(|i| heading_line(&lines[*i]))
+        .unwrap_or(0);
+    let end = ((id_at + 1)..lines.len())
+        .find(|i| heading_line(&lines[*i]))
+        .unwrap_or(lines.len());
+    let block_end = end;
+    if let Some(rel) = lines[start..block_end]
+        .iter()
+        .position(|line| line.trim() == ":LOGBOOK:")
+    {
+        lines.insert(start + rel + 1, entry.to_string());
+    } else if let Some(rel) = lines[start..block_end]
+        .iter()
+        .rposition(|line| line.trim() == ":END:")
+    {
+        let at = start + rel + 1;
+        lines.insert(at, ":END:".into());
+        lines.insert(at, entry.to_string());
+        lines.insert(at, ":LOGBOOK:".into());
+    } else {
+        return None;
+    }
+    let mut out = lines.join("\n");
+    if ends_nl {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Put `- {Verb} by {seat} [timestamp]` at the top of the issue's logbook.
+/// The line is the seat, with no `:Seat:` property. A file that does not
+/// hold the issue is left alone.
+pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let entry = format!(
+        "- {} by {} {}",
+        verb_heading(verb),
+        seat.trim(),
+        chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
+    );
+    let Some(next) = insert_logbook_line(&text, issue, &entry) else {
+        return false;
+    };
+    std::fs::write(path, next).is_ok()
+}
+
+/// `git log` subjects on the tracker that name a seat, optionally one seat.
+///
+/// # Errors
+///
+/// The tracker is not a git checkout, or git does not run.
+pub fn tracker_log(seat: Option<&str>) -> Result<String> {
+    let root = vissue_core::Layout::resolve(None, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .root()
+        .to_path_buf();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["log", "--format=%h %s"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("git log")?;
+    if !out.status.success() {
+        bail!("git log: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let want = seat.map(str::trim).filter(|s| !s.is_empty());
+    let mut lines = String::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some(subject) = line.split_once(' ').map(|(_, s)| s) else {
+            continue;
+        };
+        let Some(act) = parse_tracker_commit(subject) else {
+            continue;
+        };
+        if want.is_some_and(|seat| act.seat != seat) {
+            continue;
+        }
+        lines.push_str(line);
+        lines.push('\n');
+    }
+    if lines.is_empty() {
+        lines.push_str("no tracker commits by that seat\n");
+    }
+    Ok(lines)
+}
+
+/// Per-seat counts of tracker commits from `since` (a day git understands,
+/// `YYYY-MM-DD`) onward.
+///
+/// # Errors
+///
+/// The tracker is not a git checkout, or git does not run.
+pub fn tracker_usage(since: &str) -> Result<String> {
+    let since = since.trim();
+    if since.is_empty() {
+        bail!("usage: pass --since YYYY-MM-DD");
+    }
+    let root = vissue_core::Layout::resolve(None, None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .root()
+        .to_path_buf();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["log", &format!("--since={since}"), "--format=%s"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("git log")?;
+    if !out.status.success() {
+        bail!("git log: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let acts: Vec<TrackerAct> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(parse_tracker_commit)
+        .collect();
+    Ok(format!("since {since}\n{}", usage_table(&acts)))
+}
+
+/// The usage table for acts already parsed.
+#[must_use]
+pub fn usage_table(acts: &[TrackerAct]) -> String {
+    let mut counts: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>> =
+        std::collections::BTreeMap::new();
+    for act in acts {
+        *counts
+            .entry(act.seat.clone())
+            .or_default()
+            .entry(act.verb.clone())
+            .or_default() += 1;
+    }
+    if counts.is_empty() {
+        return "no tracker commits by a seat in that window\n".into();
+    }
+    let mut out = String::from("seat       acts  verbs\n");
+    for (seat, verbs) in &counts {
+        let total: usize = verbs.values().sum();
+        let parts: Vec<String> = verbs
+            .iter()
+            .map(|(verb, n)| format!("{verb} {n}"))
+            .collect();
+        out.push_str(&format!("{seat:<10} {total:>4}  {}\n", parts.join(", ")));
+    }
+    out
+}
+
 /// Commit the tracker file that holds `issue` and push it, when the tracker
 /// is a git checkout. A write that stays in one working tree is lost to
 /// every other host and to a rebuilt one; closures made on one laptop and
@@ -21339,7 +21623,8 @@ impl Drop for CommitLock {
 /// an error: the verb already happened, and the line says what did not.
 /// An ignored file is named with its ignore rule. It is not a clean tree
 /// and it is not force-added. `LJOS_TRACKER_GIT=off` skips it; `=commit`
-/// commits without pushing.
+/// commits without pushing. The subject names the seat, and the logbook
+/// gains `- {Verb} by {seat} [timestamp]`.
 pub fn persist_tracker(issue: &str, verb: &str) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
@@ -21430,7 +21715,9 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         Ok(o) => return format!("tracker git: {}\n", first_line(&o.stderr)),
         Err(e) => return format!("tracker git: {e}\n"),
     }
-    let message = format!("chore(issues): {issue} {verb}");
+    let seat = tracker_seat();
+    stamp_seat_logbook(path, issue, verb, &seat);
+    let message = format!("chore(issues): {issue} {verb} by {seat}");
     // Every seat on the host commits this one checkout. The add and the
     // commit run under one lock in the git directory, so ljos writers queue
     // instead of meeting on index.lock; a git process outside ljos that
@@ -22268,15 +22555,59 @@ pub fn settle_in_words(
     Some(out)
 }
 
-/// An issue's ballots as `vissue vote ID --json` prints them; empty when
-/// the tracker does not answer.
+/// An issue's ballots as `vissue vote ID --json` prints them.
+///
+/// # Errors
+///
+/// The tracker did not list them.
+pub fn raw_ballot_rows(issue: &str) -> Result<Vec<Value>> {
+    let said = run_captured("vissue", &["vote", issue, "--json"])
+        .with_context(|| format!("vote: the tracker did not list ballots on {issue}"))?;
+    Ok(serde_json::from_str(said.stdout.trim()).unwrap_or_default())
+}
+
+/// The ballots that count. The drawer may hold several personas from one
+/// session; only the first ballot that session cast is returned, and a
+/// session that filed a candidate is left out. Empty when the tracker
+/// does not answer.
 #[must_use]
 pub fn ballot_rows(issue: &str) -> Vec<Value> {
-    run_captured("vissue", &["vote", issue, "--json"])
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s.stdout).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    match raw_ballot_rows(issue) {
+        Ok(rows) => panel_gate::counted_ballots(issue, &rows),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Point the model crate's settle at the counted ballots. `--issue` makes
+/// it read the drawer, which still holds a session's later personas.
+pub fn bind_settle_ballots(steps: &mut [ConsensusStep], rows: &[Value]) {
+    let body = serde_json::to_string(
+        &rows
+            .iter()
+            .filter_map(|row| {
+                let agent = row["agent"].as_str()?.trim();
+                let choice = row["choice"].as_str()?.trim();
+                if agent.is_empty() || choice.is_empty() {
+                    return None;
+                }
+                Some(serde_json::json!({ "agent": agent, "choice": choice }))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string());
+    for step in steps.iter_mut() {
+        if step.bin != "ljos-consensus" || step.args.first().map(String::as_str) != Some("settle") {
+            continue;
+        }
+        if let Some(at) = step.args.iter().position(|arg| arg == "--issue") {
+            step.args.remove(at);
+            if at < step.args.len() {
+                step.args.remove(at);
+            }
+        }
+        step.args.push("--ballots".into());
+        step.args.push(body.clone());
+    }
 }
 
 /// The names on an issue's ballots, from `vissue vote ID --json`.
@@ -22622,8 +22953,17 @@ pub fn consensus_document(gate: &Value, said: &[(String, String)]) -> Value {
         }
     }
     for (label, out) in said {
-        let value = serde_json::from_str::<Value>(out.trim())
+        let mut value = serde_json::from_str::<Value>(out.trim())
             .unwrap_or_else(|_| Value::String(out.trim().to_string()));
+        // ljos-consensus 0.7 sets settled beside a tie. A tie is not a
+        // decision, so the document says so.
+        if label == "settle" {
+            if let Value::Object(map) = &mut value {
+                if map.get("tie").and_then(Value::as_bool) == Some(true) {
+                    map.insert("settled".into(), Value::Bool(false));
+                }
+            }
+        }
         doc.insert(label.clone(), value);
     }
     Value::Object(doc)
@@ -22649,6 +22989,17 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
         .or_else(|| Some(seat_name()))
 }
 
+/// Give a child this process's connection. A nested `ljos vote` then signs
+/// with the same session instead of minting a nonce of its own. The seat
+/// argument is not copied onto the session.
+pub fn bind_connection_env(cmd: &mut std::process::Command) {
+    cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
+    let harness = ballot_sig::harness_session();
+    if !harness.is_empty() && harness != "-" {
+        cmd.env("LJOS_HARNESS_SESSION", harness);
+    }
+}
+
 /// [`run`] with `VISSUE_AGENT` set to `identity`, so a ballot or a claim is
 /// recorded under a persona's name rather than the seat's.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
@@ -22658,9 +23009,7 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
     if let Some(who) = identity_or_seat(identity) {
         cmd.env("VISSUE_AGENT", who);
     }
-    if let Some(s) = ballot_sig::call_session() {
-        cmd.env("LJOS_HARNESS_SESSION", s);
-    }
+    bind_connection_env(&mut cmd);
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -22711,9 +23060,7 @@ pub fn run_captured_as(
     if let Some(who) = identity {
         cmd.env("VISSUE_AGENT", who);
     }
-    if let Some(s) = ballot_sig::call_session() {
-        cmd.env("LJOS_HARNESS_SESSION", s);
-    }
+    bind_connection_env(&mut cmd);
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -23957,6 +24304,7 @@ mod tests {
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
         assert!(super::persist_tracker("probe-a1b2", "claimed").contains("nothing to commit"));
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
@@ -23964,13 +24312,19 @@ mod tests {
         run(&["add", "other.org"]);
         let said = super::persist_tracker("probe-a1b2", "claimed");
         assert!(
-            said.contains("committed chore(issues): probe-a1b2 claimed"),
+            said.contains("committed chore(issues): probe-a1b2 claimed by saddle"),
             "{said}"
         );
         assert_eq!(
             run(&["log", "-1", "--format=%s"]).trim(),
-            "chore(issues): probe-a1b2 claimed"
+            "chore(issues): probe-a1b2 claimed by saddle"
         );
+        let filed = std::fs::read_to_string(&issues).unwrap();
+        assert!(
+            filed.contains("- Claimed by saddle ["),
+            "logbook names the seat without a Seat property: {filed}"
+        );
+        assert!(!filed.contains(":Seat:"), "{filed}");
         // Another seat's staged file is not swept into the commit.
         assert_eq!(
             run(&["diff", "--cached", "--name-only"]).trim(),
@@ -23980,7 +24334,12 @@ mod tests {
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
         std::env::set_var("LJOS_TRACKER_GIT", "off");
         assert!(super::persist_tracker("probe-a1b2", "finished").contains("off"));
-        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+        ] {
             std::env::remove_var(var);
         }
     }
@@ -24044,6 +24403,7 @@ mod tests {
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
 
         let shown = super::tracker_show_json("probe-1ed6").expect("ledger issue is visible");
         assert_eq!(shown["title"], "Ledger only");
@@ -24056,7 +24416,7 @@ mod tests {
 
         let said = super::persist_tracker("probe-1ed6", "claimed");
         assert!(
-            said.contains("committed chore(issues): probe-1ed6 claimed"),
+            said.contains("committed chore(issues): probe-1ed6 claimed by saddle"),
             "{said}"
         );
         let committed = run(&["show", "--name-only", "--format=", "HEAD"]);
@@ -24068,7 +24428,12 @@ mod tests {
             !committed.contains("issues.org"),
             "the board was not the commit: {committed}"
         );
-        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+        ] {
             std::env::remove_var(var);
         }
     }
@@ -24156,9 +24521,10 @@ mod tests {
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
         std::env::remove_var("LJOS_TRACKER_GIT");
+        std::env::set_var("LJOS_SEAT", "saddle");
         let said = super::persist_tracker("probe-a1b2", "claimed");
         assert!(
-            said.contains("tracker git: committed chore(issues): probe-a1b2 claimed"),
+            said.contains("tracker git: committed chore(issues): probe-a1b2 claimed by saddle"),
             "{said}"
         );
         assert!(
@@ -24167,11 +24533,42 @@ mod tests {
         );
         assert_eq!(
             run(&["log", "-1", "--format=%s"]).trim(),
-            "chore(issues): probe-a1b2 claimed"
+            "chore(issues): probe-a1b2 claimed by saddle"
         );
-        for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+        let logged = super::tracker_log(Some("saddle")).unwrap();
+        assert!(logged.contains("probe-a1b2 claimed by saddle"), "{logged}");
+        let usage = super::tracker_usage("2000-01-01").unwrap();
+        assert!(usage.contains("saddle"), "{usage}");
+        assert!(usage.contains("claimed 1"), "{usage}");
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+        ] {
             std::env::remove_var(var);
         }
+    }
+
+    #[test]
+    fn a_tracker_subject_names_the_seat_and_the_usage_table_counts_it() {
+        let act =
+            super::parse_tracker_commit("chore(issues): probe-a1b2 ballot cast by saddle").unwrap();
+        assert_eq!(act.issue, "probe-a1b2");
+        assert_eq!(act.verb, "ballot cast");
+        assert_eq!(act.seat, "saddle");
+        assert!(super::parse_tracker_commit("chore(issues): probe-a1b2 claimed").is_none());
+        let (verb, seat) =
+            super::parse_logbook_act("- Noted by saddle [2026-10-16 Fri 10:35]").unwrap();
+        assert_eq!((verb.as_str(), seat.as_str()), ("Noted", "saddle"));
+        let (verb, seat) =
+            super::parse_logbook_act("- Note: \"Ballot cast by ink\" [2026-10-16 Fri 10:35]")
+                .unwrap();
+        assert_eq!(verb, "Ballot cast");
+        assert_eq!(seat, "ink");
+        let table = super::usage_table(std::slice::from_ref(&act));
+        assert!(table.contains("saddle"), "{table}");
+        assert!(table.contains("ballot cast 1"), "{table}");
     }
 
     /// A fresh host's missing claim graph is a first sitting, not a fault;
@@ -34856,6 +35253,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(live.len(), 1, "{live:?}");
         assert_eq!(live[0]["text"], lesson);
         assert_eq!(live[0]["origin"], "user-declared");
+    }
+
+    /// A writer that holds an agent lesson accepts it as user-declared.
+    /// The write puts the origin back, so `ljos memories list` shows it.
+    #[test]
+    fn an_agent_write_stays_agent_derived_after_accept() {
+        let _g = env_guard();
+        let (url, log) = serve_http(|req| {
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.contains("POST /v1/atoms/update") {
+                let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(asked["fields"]["origin"], "agent-derived");
+                return (
+                    200,
+                    r#"{"id":"atom-9","kind":"lesson","origin":"agent-derived","text":"pin the fuse"}"#
+                        .into(),
+                );
+            }
+            if path.contains("POST /v1/proposals/accept") {
+                return (
+                    200,
+                    r#"{"id":"atom-9","kind":"lesson","origin":"user-declared","text":"pin the fuse"}"#
+                        .into(),
+                );
+            }
+            if path.contains("POST /v1/atoms") {
+                return (
+                    400,
+                    r#"{"error":"held as proposal 6517088a3fd44661d78a9ce8b8764433: agent-derived"}"#
+                        .into(),
+                );
+            }
+            (500, r#"{"error":"unexpected"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let posted = packset_write_agent("Remember", "pin the fuse", None, Some(false)).unwrap();
+        assert_eq!(posted["origin"], "agent-derived");
+        assert_eq!(posted["id"], "atom-9");
+        let lines = log.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|line| line.contains("/v1/atoms/update")),
+            "{lines:?}"
+        );
     }
 
     #[test]
