@@ -4751,6 +4751,22 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
             }
         }
         "Stop" => ("Stop", String::new()),
+        "PostToolUse" | "PostToolUseFailure" => {
+            let args = &v["toolCall"]["args"];
+            let cue = args["CommandLine"]
+                .as_str()
+                .or_else(|| args["commandLine"].as_str())
+                .or_else(|| args["command"].as_str())
+                .or_else(|| v["tool_input"]["command"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = if event == "PostToolUseFailure" {
+                "PostToolUseFailure"
+            } else {
+                "PostToolUse"
+            };
+            (name, cue)
+        }
         _ => ("TurnEnd", String::new()),
     };
     HookCall {
@@ -5672,6 +5688,78 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
     }
 }
 
+/// Atoms that share the prompt's words, while the encoder is still loading.
+/// The same subject, horizon and seen filters as a search. Empty when none
+/// of them bear on the prompt.
+fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
+    let atoms = session_atoms(1_500).ok()?;
+    let seen = seen_ids(call.session.as_deref());
+    let mut hits: Vec<Hit> = atoms
+        .iter()
+        .filter_map(atom_as_hit)
+        .filter(|h| {
+            !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                && names_the_subject(&h.text, cue)
+                && shown_on_prompt(h)
+                && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+        })
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    hits.sort_by_key(|h| h.kind != "preference");
+    let split = hits.iter().filter(|h| h.kind == "preference").count();
+    hits[split..].sort_by_key(|h| h.ts.clone().unwrap_or_default());
+    let hits: Vec<Hit> = hits
+        .into_iter()
+        .take(limit.min(HOOK_MAX_MEMORIES))
+        .collect();
+    let now = now_utc();
+    let lines: Vec<String> = hits.iter().map(|h| hit_line(h, &now)).collect();
+    let ids: Vec<String> = hits.iter().filter_map(|h| h.id.clone()).collect();
+    Some((
+        format!(
+            "What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):\n{}",
+            lines.join("\n")
+        ),
+        ids,
+    ))
+}
+
+fn atom_as_hit(atom: &Value) -> Option<Hit> {
+    let text = atom.get("text")?.as_str()?.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let entities = atom
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Hit {
+        id: atom.get("id").and_then(Value::as_str).map(str::to_string),
+        text,
+        score: 1.0,
+        kind: atom
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("lesson")
+            .to_string(),
+        ts: atom
+            .get("ts")
+            .or_else(|| atom.get("created_at"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        entities,
+        ballots: None,
+        of: None,
+    })
+}
+
 /// What the pack holds that bears on the call, before any issue recall.
 fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let cue = call.cue.trim();
@@ -5687,9 +5775,19 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         pending.push(key);
     }
     // While the encoder loads, a search waits on it past the hook's
-    // deadline and the answer is lost. The prompt hears that memory is
-    // starting, once a session, and the search waits for a later prompt.
+    // deadline and the answer is lost. A lexical pass over the atoms
+    // already on disk still answers this prompt. With nothing to show,
+    // the prompt hears that memory is starting, once a session.
     if encoder_warming() {
+        if let Some((text, mut ids)) = lexical_recall(call, cue, limit) {
+            ids.extend(pending);
+            let out = if nudge.is_empty() {
+                text
+            } else {
+                format!("{text}\n{nudge}")
+            };
+            return (out, ids);
+        }
         if !seen_ids(call.session.as_deref()).contains(ENCODER_WARMING_KEY) {
             if !nudge.is_empty() {
                 nudge.push('\n');
@@ -8086,33 +8184,34 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
         if call.event == "PreToolUse" {
             // DenyOnly runs the tool on an `ask`, so the seat denies and
             // names the command. CamelCase and Asks show the prompt.
-            let (decision, reason) = if r.verdict == "ask" && !call.shape.asks() {
-                (
-                    "deny",
-                    format!(
-                        "{}{} (seat rule `{}`).{}",
-                        if r.reason.contains("LJOS_CITE=") {
-                            "this push needs a cited decision: "
-                        } else {
-                            "ask the person before running this: "
-                        },
-                        r.reason,
-                        r.pattern,
-                        if r.reason.contains("LJOS_CITE=") {
-                            " The same line does not pass again unchanged."
-                        } else {
-                            " This runner cannot ask and the rule does not lift on a yes in \
+            let (decision, reason) =
+                if r.verdict == "ask" && !call.shape.asks() && !force_push_ask(r) {
+                    (
+                        "deny",
+                        format!(
+                            "{}{} (seat rule `{}`).{}",
+                            if r.reason.contains("LJOS_CITE=") {
+                                "this push needs a cited decision: "
+                            } else {
+                                "ask the person before running this: "
+                            },
+                            r.reason,
+                            r.pattern,
+                            if r.reason.contains("LJOS_CITE=") {
+                                " The same line does not pass again unchanged."
+                            } else {
+                                " This runner cannot ask and the rule does not lift on a yes in \
                              chat, so retrying returns this same refusal: stop, tell the person \
                              the exact command, and leave it for them to run."
-                        }
-                    ),
-                )
-            } else {
-                (
-                    r.verdict.as_str(),
-                    format!("{} (seat rule `{}`)", r.reason, r.pattern),
-                )
-            };
+                            }
+                        ),
+                    )
+                } else {
+                    (
+                        r.verdict.as_str(),
+                        format!("{} (seat rule `{}`)", r.reason, r.pattern),
+                    )
+                };
             if call.shape == HookShape::Context {
                 // `block` is the one verb there; context rides along.
                 let mut out = serde_json::json!({ "decision": "block", "reason": reason });
@@ -8195,7 +8294,7 @@ fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Stri
         }
         "PreToolUse" => {
             let (permission, reason) = match verdict {
-                Some(r) if r.verdict == "ask" && !call.shape.asks() => (
+                Some(r) if r.verdict == "ask" && !call.shape.asks() && !force_push_ask(r) => (
                     "deny",
                     format!(
                         "ask the person before running this: {} (seat rule `{}`). This hook cannot \
@@ -22114,6 +22213,9 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // line the person reads is the ask, including a force push on a box
     // with no seat rule.
     let tcb = match tcb_check(argv) {
+        // `git-force-push` asks, the same way the push gate does. The raw
+        // `deny` line would read as a refusal beside that ask.
+        Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
         Some(tcb) if !tcb.is_empty() && !(tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
         None if policyd_required() => Some("deny\tTCB required".to_string()),
         _ => None,
@@ -22126,6 +22228,27 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
 
 fn tcb_is_allow(text: &str) -> bool {
     text.split(['\t', ' ', '\n']).next().unwrap_or("") == "allow"
+}
+
+/// The check name on a `ljos-policyd` verdict line (`deny\tgit-force-push`).
+fn policyd_token(line: &str) -> &str {
+    line.lines()
+        .next()
+        .unwrap_or("")
+        .split('\t')
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+}
+
+/// A force-push ask is the person's question, on a runner that otherwise
+/// turns `ask` into `deny`. A seat rule that merely asks about some other
+/// command stays a deny there.
+fn force_push_ask(rule: &Rule) -> bool {
+    rule.verdict == "ask"
+        && (rule.pattern == "git-force-push"
+            || rule.pattern == "built-in: dangerous push"
+            || rule.reason.starts_with("git-force-push:"))
 }
 
 /// git's `ljos-atoms` merge driver. `current` is `%A` and `path` is `%P`.
@@ -22216,10 +22339,18 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
         }
         match tcb_check(&argv) {
             Some(t) if t.starts_with("deny") => {
+                let token = policyd_token(&t);
+                let token = if token.is_empty() { "tcb" } else { token };
+                // A force push asks. The other checks still deny.
+                let ask = token == "git-force-push";
                 return Some(Rule {
-                    pattern: "ljos-policyd".into(),
-                    verdict: "deny".into(),
-                    reason: policyd_reason(t.split('\t').nth(1).unwrap_or("tcb")),
+                    pattern: if ask {
+                        token.to_string()
+                    } else {
+                        "ljos-policyd".into()
+                    },
+                    verdict: if ask { "ask" } else { "deny" }.into(),
+                    reason: policyd_reason(token),
                 });
             }
             Some(_) => answered = true,
@@ -30621,8 +30752,7 @@ mod tests {
         assert_eq!(policyd_reason(" phronesis "), "phronesis");
     }
 
-    /// The hook's verdict carries those words, and a runner still reads
-    /// the answer as a deny.
+    /// The hook's verdict carries those words, and the runner is asked.
     #[test]
     fn the_hook_explains_a_force_push_refusal_in_words() {
         let _g = env_guard();
@@ -30635,11 +30765,16 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _env = HoldEnv::set(&[("POLICYD_BIN", bin.to_str().unwrap())]);
+        let home = std::path::PathBuf::from("/workspace/target/force-push-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("HOME", home.to_str().unwrap()),
+        ]);
         assert!(tcb_verdict("git status").is_none());
-        let rule = tcb_verdict("git push --force origin main").expect("the check refuses");
-        assert_eq!(rule.verdict, "deny");
-        assert_eq!(rule.pattern, "ljos-policyd");
+        let rule = tcb_verdict("git push --force origin main").expect("the check asks");
+        assert_eq!(rule.verdict, "ask");
+        assert_eq!(rule.pattern, "git-force-push");
         assert!(
             rule.reason.starts_with("git-force-push: "),
             "{}",
@@ -30652,8 +30787,23 @@ mod tests {
             shape: HookShape::CamelCase,
         };
         let answer = hook_output_ruled(&call, "", Some(&rule));
-        assert!(answer_denies(&answer), "{answer}");
+        assert!(!answer_denies(&answer), "{answer}");
+        assert!(
+            answer.contains("\"permissionDecision\":\"ask\""),
+            "{answer}"
+        );
         assert!(answer.contains("--force-with-lease"), "{answer}");
+        let codex = HookCall {
+            event: "PreToolUse".into(),
+            cue: "git push --force origin main".into(),
+            session: Some("codex-1".into()),
+            shape: HookShape::DenyOnly,
+        };
+        let codex_answer = hook_output_ruled(&codex, "", Some(&rule));
+        assert!(
+            codex_answer.contains("\"permissionDecision\":\"ask\""),
+            "{codex_answer}"
+        );
     }
 
     fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {

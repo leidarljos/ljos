@@ -1,11 +1,11 @@
 //! The seat keeps the book when the model never calls ljos.
 //!
 //! A harness hook files a claim on the first edit in a session and
-//! repository, cites a deed when it sees a git commit, and finishes at
-//! Stop or the end of the session. `ljos-mcp` does the same on the first
-//! write and on shutdown, for a client that has no hooks. A failure is
-//! written to the runtime log and never becomes a deny: the agent's tool
-//! call goes on.
+//! repository, cites a deed after a git commit exits 0, and finishes at
+//! Stop or the end of the session. The finish writes one lesson from the
+//! sitting. `ljos-mcp` does the same on the first write and on shutdown,
+//! for a client that has no hooks. A failure is written to the runtime
+//! log and never becomes a deny: the agent's tool call goes on.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ const BOOK_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "Stop",
     "SessionEnd",
 ];
@@ -96,10 +97,19 @@ struct Book {
 struct RepoBook {
     #[serde(default)]
     issue: Option<String>,
-    /// Commit lines already cited, so PreToolUse and PostToolUse of the
-    /// same command record one deed.
+    /// Commit shas already cited. The id is `deed-file-commit-<sha>`, so a
+    /// second commit is a second deed, and the same sha is not cited twice.
     #[serde(default)]
     deeds: Vec<String>,
+    /// Short notes from tool failures, for the lesson written at Stop.
+    #[serde(default)]
+    failures: Vec<String>,
+    /// Short notes from guard asks, for the same lesson.
+    #[serde(default)]
+    asks: Vec<String>,
+    /// The sitting's lesson was written. Stop and SessionEnd share one.
+    #[serde(default)]
+    lesson: bool,
     #[serde(default)]
     finished: bool,
     /// `vissue` failed once. Later edits stay on the warm path instead of
@@ -198,13 +208,24 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         }
     }
     let repo = repo_key(&mut book, &value);
+    if call.event == "PostToolUseFailure" {
+        note_failure(&mut book, &repo, &failure_text(&value, &call.cue));
+    }
     if matches!(call.event.as_str(), "PreToolUse" | "PostToolUse") {
         let commit = is_git_commit(&call.cue);
-        if is_edit(&value, &call.cue) || commit {
+        // A write tool claims even for a new file. A shell redirect claims
+        // when it writes a file this repository already tracks. A commit
+        // claims too, so a sitting that only commits still has a ticket.
+        if is_edit(&value, &call.cue) || commit || writes_tracked(&repo, &call.cue) {
             let _ = ensure_claim(&mut book, &repo);
         }
-        if commit {
-            let _ = ensure_deed(&mut book, &repo, &call.cue);
+        // The commit has not happened on the way in. Cite it on the way
+        // out, and only when it exited 0, so a failed commit leaves no deed
+        // and the sha is the one git just wrote.
+        if call.event == "PostToolUse" && commit && tool_exit_ok(&value) {
+            let _ = ensure_deed(&mut book, &repo);
+        } else if call.event == "PostToolUse" && commit {
+            note_failure(&mut book, &repo, "git commit exited non-zero");
         }
     }
     if matches!(call.event.as_str(), "Stop" | "SessionEnd") {
@@ -707,12 +728,8 @@ fn ensure_claim(book: &mut Book, repo: &str) -> Result<(), String> {
         }
         return Ok(());
     }
-    if let Some(issue) = super::held_issue() {
-        let row = book.repos.entry(repo.to_string()).or_default();
-        row.issue = Some(issue.clone());
-        row.recall = recall_line(&issue);
-        return Ok(());
-    }
+    // A hold from another repository is a different ticket. This sitting
+    // files its own claim for the repository the tool just wrote.
     let title = title_from(&book.prompt, repo);
     let project = project_for(repo);
     match file_and_claim(&project, &title) {
@@ -761,25 +778,28 @@ fn file_and_claim(project: &str, title: &str) -> Result<String, String> {
     Ok(issue)
 }
 
-fn ensure_deed(book: &mut Book, repo: &str, cue: &str) -> Result<(), String> {
-    let key = collapse(cue);
-    if key.is_empty() {
-        return Ok(());
-    }
+fn ensure_deed(book: &mut Book, repo: &str) -> Result<(), String> {
+    let sha = match head_sha(repo) {
+        Ok(sha) => sha,
+        Err(e) => {
+            log_line(&format!("deed: {e}"));
+            return Ok(());
+        }
+    };
     let row = book.repos.entry(repo.to_string()).or_default();
-    if row.deeds.iter().any(|seen| seen == &key) {
+    if row.deeds.iter().any(|seen| seen == &sha) {
         return Ok(());
     }
     let Some(issue) = row.issue.clone() else {
         return Ok(());
     };
-    match cite_deed(&issue, &key) {
+    match cite_deed(&issue, &sha) {
         Ok(()) => {
             book.repos
                 .entry(repo.to_string())
                 .or_default()
                 .deeds
-                .push(key);
+                .push(sha);
             Ok(())
         }
         Err(e) => {
@@ -789,19 +809,28 @@ fn ensure_deed(book: &mut Book, repo: &str, cue: &str) -> Result<(), String> {
     }
 }
 
-fn cite_deed(issue: &str, command: &str) -> Result<(), String> {
+/// A file deed's accession has to start with `deed-file-`. The sha keeps
+/// each commit's id distinct; `deed-file-commit` alone is one frozen deed.
+fn deed_id(sha: &str) -> String {
+    format!("deed-file-commit-{sha}")
+}
+
+fn cite_deed(issue: &str, sha: &str) -> Result<(), String> {
     let dir = super::runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("deed-{}.txt", super::session_tag(command)));
-    std::fs::write(&path, command).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("deed-{sha}.txt"));
+    std::fs::write(&path, format!("{sha}\n")).map_err(|e| e.to_string())?;
     let seat = super::holder_name();
+    let id = deed_id(sha);
     let said = run_timed(
         "deedar",
         &[
             "create",
             "file",
+            "--id",
+            &id,
             "--name",
-            "commit",
+            sha,
             "--path",
             &path.display().to_string(),
             "--agent",
@@ -820,6 +849,16 @@ fn cite_deed(issue: &str, command: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn head_sha(repo: &str) -> Result<String, String> {
+    let said =
+        run_timed("git", &["-C", repo, "rev-parse", "HEAD"], &[]).map_err(|e| e.to_string())?;
+    let sha = said.stdout.trim().to_string();
+    if sha.len() < 7 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("HEAD is not a sha: {sha}"));
+    }
+    Ok(sha)
+}
+
 fn finish_open(book: &mut Book) {
     let repos: Vec<String> = book.repos.keys().cloned().collect();
     for repo in repos {
@@ -832,6 +871,20 @@ fn finish_open(book: &mut Book) {
         let Some(issue) = row.issue.clone() else {
             continue;
         };
+        if !row.lesson {
+            let title = title_from(&book.prompt, &repo);
+            let deeds = row.deeds.clone();
+            let failures = row.failures.clone();
+            let asks = row.asks.clone();
+            match write_lesson(&issue, &title, &deeds, &failures, &asks) {
+                Ok(()) => {
+                    if let Some(row) = book.repos.get_mut(&repo) {
+                        row.lesson = true;
+                    }
+                }
+                Err(e) => log_line(&format!("lesson: {e}")),
+            }
+        }
         match close_issue(&issue) {
             Ok(()) => {
                 if let Some(row) = book.repos.get_mut(&repo) {
@@ -843,9 +896,8 @@ fn finish_open(book: &mut Book) {
     }
 }
 
-/// A light close: the ticket is done, the claim is released, the tracker
-/// commit says finished. The full `ljos finish` also syncs and writes a
-/// lesson, which is the wrong weight for a hook the runner is about to kill.
+/// The ticket is done, the claim is released, the tracker commit says
+/// finished. The lesson was written just before this, from the sitting.
 fn close_issue(issue: &str) -> Result<(), String> {
     run_timed("vissue", &["update", issue, "-s", "DONE"], &[]).map_err(|e| e.to_string())?;
     let assignee = super::resolve_assignee(None);
@@ -859,6 +911,138 @@ fn close_issue(issue: &str) -> Result<(), String> {
         return Err(line.trim().to_string());
     }
     Ok(())
+}
+
+/// Remember a guard ask on this repository. The book file is the only
+/// write: a slow tracker must not sit on the path that is about to ask.
+pub fn note_ask(raw: &str, call: &super::HookCall, reason: &str) {
+    if !matches!(call.event.as_str(), "PreToolUse" | "argv") {
+        return;
+    }
+    let reason = collapse(reason);
+    if reason.is_empty() {
+        return;
+    }
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let path = book_path(&session_key(call));
+    let mut book = load_book(&path);
+    let repo = repo_key(&mut book, &value);
+    let row = book.repos.entry(repo).or_default();
+    let short: String = reason.chars().take(160).collect();
+    if row.asks.len() < 4 && !row.asks.iter().any(|seen| seen == &short) {
+        row.asks.push(short);
+    }
+    store_book(&path, &book);
+}
+
+fn note_failure(book: &mut Book, repo: &str, text: &str) {
+    let text = collapse(text);
+    if text.is_empty() {
+        return;
+    }
+    let short: String = text.chars().take(160).collect();
+    let row = book.repos.entry(repo.to_string()).or_default();
+    if row.failures.len() < 4 && !row.failures.iter().any(|seen| seen == &short) {
+        row.failures.push(short);
+    }
+}
+
+fn failure_text(raw: &Value, cue: &str) -> String {
+    let err = raw
+        .pointer("/tool_response/error")
+        .and_then(Value::as_str)
+        .or_else(|| raw.get("error").and_then(Value::as_str))
+        .or_else(|| raw.get("error_message").and_then(Value::as_str))
+        .unwrap_or("")
+        .trim();
+    if !err.is_empty() {
+        return err.to_string();
+    }
+    if !cue.trim().is_empty() {
+        return cue.trim().to_string();
+    }
+    "a tool failed".to_string()
+}
+
+/// One standing lesson, agent-derived, with the writer in the atom source.
+/// Two short sentences: the ticket and its commits, then a failure or an
+/// ask when the sitting had one. A pack that is off is an error here; the
+/// caller logs it and still closes the ticket.
+fn write_lesson(
+    issue: &str,
+    title: &str,
+    shas: &[String],
+    failures: &[String],
+    asks: &[String],
+) -> Result<(), String> {
+    let text = lesson_text(title, issue, shas, failures, asks);
+    super::packset_write_agent("Remember", &text, None, Some(false))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// At most two sentences, each under thirty words. The pack refuses a
+/// third sentence and a sentence of thirty words or more.
+fn lesson_text(
+    title: &str,
+    issue: &str,
+    shas: &[String],
+    failures: &[String],
+    asks: &[String],
+) -> String {
+    let title = clip_words(&title.replace(['.', '!', '?'], " "), 8);
+    let title = if title.is_empty() {
+        "agent work".to_string()
+    } else {
+        title
+    };
+    let shas: Vec<String> = shas
+        .iter()
+        .take(3)
+        .map(|sha| sha.chars().take(7).collect())
+        .collect();
+    let first = if shas.is_empty() {
+        format!("{title} ({issue}) closed with no commit.")
+    } else {
+        format!("{title} ({issue}) committed {}.", shas.join(" "))
+    };
+    let fail = failures.first().map(|text| clip_words(text, 6));
+    let ask = asks.first().map(|text| clip_words(text, 6));
+    let second = match (fail, ask) {
+        (Some(fail), Some(ask)) => {
+            format!("A tool failed ({fail}) and the guard asked ({ask}).")
+        }
+        (Some(fail), None) => format!("A tool failed: {fail}."),
+        (None, Some(ask)) => format!("The guard asked: {ask}."),
+        (None, None) => String::new(),
+    };
+    let first = fit_sentence(&first);
+    if second.is_empty() {
+        first
+    } else {
+        format!("{first} {}", fit_sentence(&second))
+    }
+}
+
+fn clip_words(text: &str, n: usize) -> String {
+    text.split_whitespace()
+        .take(n)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fit_sentence(text: &str) -> String {
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= 29 {
+        return text.to_string();
+    }
+    words.truncate(28);
+    let mut out = words.join(" ");
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    out
 }
 
 fn title_from(prompt: &str, repo: &str) -> String {
@@ -941,6 +1125,109 @@ fn recall_line(issue: &str) -> String {
         },
         Err(_) => head,
     }
+}
+
+/// A post-tool result whose command finished cleanly. A missing exit on
+/// PostToolUse is success. An error string or a non-zero exit is not.
+fn tool_exit_ok(raw: &Value) -> bool {
+    if raw
+        .pointer("/tool_response/interrupted")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return false;
+    }
+    let slots = [
+        raw.get("exit_code"),
+        raw.get("exit"),
+        raw.pointer("/tool_response/exit_code"),
+        raw.pointer("/tool_response/exit"),
+        raw.pointer("/tool_response/exitCode"),
+        raw.pointer("/tool_output/exit_code"),
+    ];
+    for slot in slots.into_iter().flatten() {
+        if let Some(code) = slot.as_i64() {
+            return code == 0;
+        }
+        if let Some(code) = slot.as_str() {
+            return code.trim() == "0";
+        }
+    }
+    raw.pointer("/tool_response/error")
+        .and_then(Value::as_str)
+        .is_none_or(|text| text.trim().is_empty())
+}
+
+/// `>` and `>>` targets on the line, not `2>&1` and not a quoted sentence.
+fn redirect_targets(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for seg in super::nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| super::raw_segments(l))
+    {
+        let words = super::shell_words(&seg);
+        let mut i = 0;
+        while i < words.len() {
+            let word = words[i].as_str();
+            if word == ">" || word == ">>" {
+                if let Some(target) = words.get(i + 1) {
+                    if let Some(target) = redirect_path(target) {
+                        out.push(target);
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            if let Some(target) = glued_redirect(word) {
+                out.push(target);
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+fn redirect_path(word: &str) -> Option<String> {
+    let word = word.trim_matches(|c| c == '"' || c == '\'');
+    if word.is_empty() || word.starts_with('&') {
+        return None;
+    }
+    Some(word.to_string())
+}
+
+fn glued_redirect(word: &str) -> Option<String> {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let body = rest
+        .strip_prefix(">>")
+        .or_else(|| rest.strip_prefix("&>"))
+        .or_else(|| rest.strip_prefix('>'))?;
+    redirect_path(body)
+}
+
+fn writes_tracked(repo: &str, line: &str) -> bool {
+    redirect_targets(line)
+        .into_iter()
+        .any(|target| file_is_tracked(repo, &target))
+}
+
+fn file_is_tracked(repo: &str, target: &str) -> bool {
+    let path = Path::new(target);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(repo)
+            .ok()
+            .map(|p| p.display().to_string())
+    } else {
+        Some(target.trim_start_matches("./").to_string())
+    };
+    let Some(relative) = relative.filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    run_timed(
+        "git",
+        &["-C", repo, "ls-files", "--error-unmatch", "--", &relative],
+        &[],
+    )
+    .is_ok()
 }
 
 fn is_edit(raw: &Value, cue: &str) -> bool {
@@ -1280,10 +1567,22 @@ else:
             r#"#!/usr/bin/env python3
 import os, pathlib, sys
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
-seq = root / ".deedseq"
-n = int(seq.read_text()) + 1 if seq.exists() else 1
-seq.write_text(str(n))
-print(f"id=deed-{n:04x}")
+args = sys.argv[1:]
+(root / "deedar.log").open("a").write(" ".join(args) + "\n")
+ident = None
+i = 0
+while i < len(args):
+    if args[i] == "--id" and i + 1 < len(args):
+        ident = args[i + 1]
+    if args[i] == "--path" and i + 1 < len(args):
+        (root / "deedar-body.log").open("a").write(pathlib.Path(args[i + 1]).read_text())
+    i += 1
+if not ident:
+    seq = root / ".deedseq"
+    n = int(seq.read_text()) + 1 if seq.exists() else 1
+    seq.write_text(str(n))
+    ident = f"deed-{n:04x}"
+print(f"id={ident}")
 "#,
         )
         .unwrap();
@@ -1401,13 +1700,19 @@ print(f"id=deed-{n:04x}")
             serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m \"readme\""}}),
         );
         let _ = observe(&commit_raw, &commit_call);
-        // The same commit on the way out cites nothing a second time.
+        let deedar_before = std::fs::read_to_string(tracker.join("deedar.log")).unwrap_or_default();
+        assert!(
+            deedar_before.is_empty(),
+            "the pre-hook does not cite a commit that has not run\n{deedar_before}"
+        );
+        // The same commit on the way out cites the sha once.
         let (post_raw, post_call) = payload(
             "PostToolUse",
             session,
             &repo,
             serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m \"readme\""}}),
         );
+        let _ = observe(&post_raw, &post_call);
         let _ = observe(&post_raw, &post_call);
 
         let (stop_raw, stop_call) = payload("Stop", session, &repo, Value::Null);
@@ -1424,6 +1729,27 @@ print(f"id=deed-{n:04x}")
         assert_eq!(log.matches("finished").count(), 1, "{log}");
         let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
         assert!(org.contains("Add a readme line"), "{org}");
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let sha = sha.trim();
+        assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+        let body = std::fs::read_to_string(tracker.join("deedar-body.log")).unwrap();
+        assert!(body.contains(sha), "{body}");
+        assert_eq!(
+            std::fs::read_to_string(tracker.join("deedar.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
 
         let vissue_log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
         let creates =
@@ -1714,6 +2040,129 @@ print(f"id=deed-{n:04x}")
         mcp_shutdown();
         assert!(git_log(&tracker).contains("finished"));
         assert!(open_issue().is_none());
+    }
+
+    #[test]
+    fn a_second_commit_is_a_second_deed_and_a_failed_one_is_not() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HOLD",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "probe-seat");
+            std::env::set_var("LJOS_HOLD", "book-holder");
+        }
+        let run = dir.path().join("run/ljos");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join("hold-book-holder"),
+            "book-holder\nprobe-seat\n999999\nbash\n2026-01-01T00:00:00Z\nother-9999\n-\n",
+        )
+        .unwrap();
+        let session = "book-two-commits";
+        let (prompt_raw, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Add a readme line"}),
+        );
+        let _ = observe(&prompt_raw, &prompt_call);
+        let (edit_raw, edit_call) = payload(
+            "PreToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        );
+        let _ = observe(&edit_raw, &edit_call);
+        let vissue = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        assert!(!vissue.contains("other-9999"), "{vissue}");
+        assert!(vissue.contains("create"), "{vissue}");
+        fn commit(repo: &Path, name: &str) -> String {
+            std::fs::write(repo.join(name), "x\n").unwrap();
+            git(repo, &["add", name]);
+            git(repo, &["commit", "-q", "-m", name]);
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        }
+        let first = commit(&repo, "one.txt");
+        let (post, post_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m one"}, "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&post, &post_call);
+        let failed = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m boom"}, "tool_response": {"exit_code": 1}}),
+        );
+        let _ = observe(&failed.0, &failed.1);
+        let second = commit(&repo, "two.txt");
+        let (post2, post2_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m two"}}),
+        );
+        let _ = observe(&post2, &post2_call);
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(org.contains(&format!("deed-file-commit-{first}")), "{org}");
+        assert!(org.contains(&format!("deed-file-commit-{second}")), "{org}");
+        assert!(!org.contains("other-9999"), "{org}");
+        let deeds = std::fs::read_to_string(tracker.join("deedar.log")).unwrap();
+        assert_eq!(deeds.lines().count(), 2, "{deeds}");
+        let (redir, redir_call) = payload(
+            "PreToolUse",
+            "book-redirect",
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "echo hi > README.md"}}),
+        );
+        let before = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        let _ = observe(&redir, &redir_call);
+        let after = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        assert!(
+            after.matches("create").count() > before.matches("create").count(),
+            "a redirect onto a tracked file claims\n{after}"
+        );
+        let text = lesson_text(
+            "Add a readme line",
+            "probe-0001",
+            &[first.clone(), second],
+            &["git commit exited non-zero".into()],
+            &["git-force-push: a force push rewrites history".into()],
+        );
+        let sentences: Vec<&str> = text.split(". ").collect();
+        assert!(sentences.len() <= 2, "{text}");
+        for sentence in text.split_inclusive('.') {
+            let sentence = sentence.trim();
+            if sentence.is_empty() {
+                continue;
+            }
+            assert!(sentence.split_whitespace().count() < 30, "{sentence}");
+        }
+        assert!(text.contains("probe-0001"), "{text}");
+        assert!(text.contains(&first[..7]), "{text}");
     }
 
     fn git_log(tracker: &Path) -> String {
