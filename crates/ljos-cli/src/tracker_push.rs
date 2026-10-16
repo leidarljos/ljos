@@ -46,10 +46,7 @@ pub(crate) fn push_checkout(dir: &Path) -> Result<(), String> {
         if !rejected(&said) {
             return Err(last);
         }
-        integrate(dir).map_err(|e| {
-            last = e.clone();
-            e
-        })?;
+        integrate(dir).inspect_err(|e| last = e.clone())?;
     }
     Err(format!(
         "{last}; still not a fast-forward after {ATTEMPTS} attempts"

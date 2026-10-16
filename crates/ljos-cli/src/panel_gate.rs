@@ -166,7 +166,7 @@ pub fn reads_that_spoil(
     saw
 }
 
-fn newest_sig<'a>(notes: &'a [String], voter: &str) -> Option<ballot_sig::SigNote> {
+fn newest_sig(notes: &[String], voter: &str) -> Option<ballot_sig::SigNote> {
     notes.iter().find_map(|n| {
         let note = ballot_sig::parse_note(n)?;
         (note.voter == voter).then_some(note)

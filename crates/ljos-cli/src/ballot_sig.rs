@@ -227,7 +227,7 @@ pub fn sign_bound(
     )
 }
 
-fn covered<'a>(issue: &str, note: &'a SigNote) -> Vec<u8> {
+fn covered(issue: &str, note: &SigNote) -> Vec<u8> {
     match (&note.harness, &note.nonce) {
         (Some(h), Some(n)) => message_v2(issue, &note.voter, &note.choice, h, n),
         _ => message(issue, &note.voter, &note.choice),

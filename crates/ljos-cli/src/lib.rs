@@ -3949,7 +3949,7 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
         for group in groups.iter_mut() {
             let seat = group["hooks"]
                 .as_array()
-                .is_some_and(|hs| hs.iter().any(|h| is_seat_hook(h)));
+                .is_some_and(|hs| hs.iter().any(is_seat_hook));
             if !seat {
                 continue;
             }
@@ -3957,7 +3957,7 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
             // Widening it would fire that other hook on apply_patch.
             let only_seat = group["hooks"]
                 .as_array()
-                .is_some_and(|hs| !hs.is_empty() && hs.iter().all(|h| is_seat_hook(h)));
+                .is_some_and(|hs| !hs.is_empty() && hs.iter().all(is_seat_hook));
             if only_seat && group["matcher"].as_str() != Some(want) {
                 group["matcher"] = want.into();
                 grew = true;
@@ -22216,7 +22216,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
         // `git-force-push` asks, the same way the push gate does. The raw
         // `deny` line would read as a refusal beside that ask.
         Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
-        Some(tcb) if !tcb.is_empty() && !(tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
+        Some(tcb) if !(tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
         None if policyd_required() => Some("deny\tTCB required".to_string()),
         _ => None,
     };
@@ -28715,9 +28715,7 @@ mod tests {
             ));
         }
         std::fs::write(&ballots, format!("[{}]", rows.join(","))).unwrap();
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LOG\"\ncase \"$1\" in\n  children) cat \"$CHILDREN\" ;;\n  vote) cat \"$BALLOTS\" ;;\n  q) echo proj-f001 ;;\n  note|update|append) exit 0 ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n"
-        );
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LOG\"\ncase \"$1\" in\n  children) cat \"$CHILDREN\" ;;\n  vote) cat \"$BALLOTS\" ;;\n  q) echo proj-f001 ;;\n  note|update|append) exit 0 ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n".to_string();
         let fake = bin.join("vissue");
         std::fs::write(&fake, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -31921,7 +31919,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ] {
             let gated = gate_push(Some(&trust), line, None);
             assert!(gated.is_none(), "{line} stayed {gated:?}");
-            let ruled = ruled_verdict(&[trust.clone()], line);
+            let ruled = ruled_verdict(std::slice::from_ref(&trust), line);
             let gated = gate_push(ruled.as_ref(), line, None);
             assert!(gated.is_none(), "{line} via ruled_verdict stayed {gated:?}");
         }
@@ -31929,7 +31927,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"git push"}}"#,
         );
         let gated = gate_push(
-            ruled_verdict(&[trust.clone()], &codex.cue).as_ref(),
+            ruled_verdict(std::slice::from_ref(&trust), &codex.cue).as_ref(),
             &codex.cue,
             None,
         );
@@ -31942,7 +31940,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"LJOS_CITE=gpr_optim-1yg5 git push upstream develop"}}"#,
         );
         let gated = gate_push(
-            ruled_verdict(&[trust.clone()], &cited.cue).as_ref(),
+            ruled_verdict(std::slice::from_ref(&trust), &cited.cue).as_ref(),
             &cited.cue,
             None,
         );
@@ -31951,7 +31949,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let ruled = ruled_verdict(&[], line);
             let gated = gate_push(ruled.as_ref(), line, None);
             assert!(gated.is_none(), "{line} -> {gated:?}");
-            let with_rule = gate_push(ruled_verdict(&[trust.clone()], line).as_ref(), line, None);
+            let with_rule = gate_push(
+                ruled_verdict(std::slice::from_ref(&trust), line).as_ref(),
+                line,
+                None,
+            );
             assert!(
                 with_rule.is_none(),
                 "{line} under git push* -> {with_rule:?}"
