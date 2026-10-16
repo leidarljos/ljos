@@ -132,7 +132,13 @@ enum Cmd {
     },
     /// Whether a deed's bytes are intact and its sources are too. `at=` is
     /// the produced time in ISO 8601 with this machine's offset.
-    Evidence { accession: String },
+    /// `record -- COMMAND` runs the repo's test command and stores a passing
+    /// record for the current tip, which `git push` requires.
+    Evidence {
+        /// A deed accession, or `record` followed by the test command.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
+        args: Vec<String>,
+    },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
     /// Cite a deed on an issue, drop one, or list what it cites. Citing a deed names it; the bytes stay in deedar.
@@ -1027,9 +1033,21 @@ fn run_command() -> Result<()> {
                 )
             );
         }
-        Cmd::Evidence { accession } => {
-            let said = run_captured("deedar", &["evidence", &accession])?;
-            print!("{}", ljos_cli::evidence_here(&said.stdout));
+        Cmd::Evidence { args } => {
+            if args.first().map(String::as_str) == Some("record") {
+                let mut cmd = args[1..].to_vec();
+                if cmd.first().map(String::as_str) == Some("--") {
+                    cmd.remove(0);
+                }
+                println!("{}", ljos_cli::gates::record_evidence(&cmd)?);
+            } else if args.len() == 1 {
+                let said = run_captured("deedar", &["evidence", &args[0]])?;
+                print!("{}", ljos_cli::evidence_here(&said.stdout));
+            } else {
+                bail!(
+                    "evidence: pass one deed accession, or `ljos evidence record -- <test command>`"
+                );
+            }
         }
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
@@ -1719,42 +1737,27 @@ fn run_command() -> Result<()> {
             } else {
                 (Vec::new(), Vec::new())
             };
-            let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
-            // A tool call with no command line (a file read, a search) has
-            // no argv for the law to judge; the TCB sees only shell lines.
-            let guarded = (call.event == "PreToolUse" || call.event == "argv")
-                .then(|| ljos_cli::seat_guard(&call.cue))
-                .flatten();
-            let tcb_rule = if guarded.is_some() {
-                guarded
-            } else if (call.event == "PreToolUse" || call.event == "argv") && !argv.is_empty() {
-                ljos_cli::tcb_verdict(&call.cue)
-            } else {
-                None
-            };
-            // An asked push is gated by where it goes: free to the person's
-            // own unreleased repository, passed on a cited decision to a
-            // released one, the person's to run anywhere else.
+            // The seat guard, the commit, push, and merge gates, policyd,
+            // and the pack's rules. One function, so the hook and
+            // `ljos_guard_check` refuse the same lines.
             let cwd = ljos_cli::hook_directory(input.trim());
-            let gated = if tcb_rule.is_some() {
-                None
-            } else if let Err(error) = &cwd {
-                Some(ljos_cli::Rule {
-                    pattern: "tool working directory".into(),
-                    verdict: "deny".into(),
-                    reason: format!("Cannot resolve the command directory: {error:#}"),
-                })
-            } else {
-                ljos_cli::redirect_seat_verb(
-                    ljos_cli::gate_push(
-                        ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
+            let verdict = if call.event == "PreToolUse" || call.event == "argv" {
+                if let Err(error) = &cwd {
+                    Some(ljos_cli::Rule {
+                        pattern: "tool working directory".into(),
+                        verdict: "deny".into(),
+                        reason: format!("Cannot resolve the command directory: {error:#}"),
+                    })
+                } else {
+                    ljos_cli::gates::guard_verdict(
                         &call.cue,
-                        cwd.as_ref().ok().and_then(|p| p.to_str()),
-                    ),
-                    &call.cue,
-                )
+                        cwd.as_ref().ok().map(std::path::PathBuf::as_path),
+                        &rules,
+                    )
+                }
+            } else {
+                None
             };
-            let verdict = tcb_rule.as_ref().or(gated.as_ref());
             // A command the ask pack would have asked about runs because a
             // setting turned that class off: the bypass log keeps a row.
             if verdict.is_none() && call.event == "PreToolUse" {
@@ -1969,7 +1972,7 @@ fn run_command() -> Result<()> {
                     prompt_hook_stdout(call.shape, call.session.as_deref(), &ctx, &ids)
                 }
             };
-            let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
+            let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict.as_ref());
             ljos_cli::answer_gate(&output);
             ljos_cli::keep_hook_answer(&call, &output);
             if !seen_later.is_empty() {

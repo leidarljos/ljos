@@ -88,14 +88,12 @@ fn save(table: &BTreeMap<String, Wake>) -> Result<()> {
     std::fs::write(&path, text).with_context(|| format!("wake: {}", path.display()))
 }
 
-/// The guard's verdict on a wake command: the seat's own guard, the
-/// trusted computing base, then the pack's rules and the ask pack.
-/// `None` lets it run.
+/// The guard's verdict on a wake command: the same check a tool call gets,
+/// including the commit, push, and merge gates. `None` lets it run.
 #[must_use]
 pub fn judge(command: &str) -> Option<super::Rule> {
-    super::seat_guard(command)
-        .or_else(|| super::tcb_verdict(command))
-        .or_else(|| super::ruled_verdict(&super::rules_for_gate(), command))
+    let cwd = std::env::current_dir().ok();
+    super::gates::guard_verdict(command, cwd.as_deref(), &super::rules_for_gate())
 }
 
 fn refusal(command: &str, rule: &super::Rule) -> String {

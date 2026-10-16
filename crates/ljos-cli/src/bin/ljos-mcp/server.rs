@@ -513,6 +513,27 @@ pub struct ArgvArgs {
     pub argv: Vec<String>,
 }
 
+/// A shell line to judge before it runs.
+#[derive(Deserialize, JsonSchema)]
+pub struct GuardArgs {
+    /// The command about to run, as the shell would see it.
+    pub command: String,
+    /// The directory it would run in. Absent: this process's directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// What the commit, push, and merge gates say about a line.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GuardRow {
+    /// `allow`, `deny`, or `ask`.
+    pub verdict: String,
+    /// The rule that fired. Empty when the line may run.
+    pub pattern: String,
+    /// What to do so a denial passes. Empty when the line may run.
+    pub reason: String,
+}
+
 /// No arguments.
 #[derive(Deserialize, JsonSchema)]
 pub struct NoArgs {}
@@ -1567,6 +1588,31 @@ impl LjosServer {
             argv: argv.to_string(),
             ruling: ruling.trim_end().to_string(),
             note: POLICY_TCB.to_string(),
+        }))
+    }
+
+    #[tool(
+        description = "Call this before a git commit, a git push, or a merge: the same verdict the hook gives that line. allow means it may run. deny names the exact command that makes it pass. ask means a person has to approve it. A line that is not one of those is allow.",
+        annotations(
+            title = "Check a command",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_guard_check(
+        &self,
+        Parameters(args): Parameters<GuardArgs>,
+    ) -> Result<Json<GuardRow>, McpError> {
+        let cwd = args.cwd.as_deref().map(PathBuf::from);
+        let rules = ljos_cli::rules_for_gate();
+        let found = match ljos_cli::gates::guard_verdict(&args.command, cwd.as_deref(), &rules) {
+            Some(rule) => (rule.verdict, rule.pattern, rule.reason),
+            None => ("allow".into(), String::new(), String::new()),
+        };
+        Ok(Json(GuardRow {
+            verdict: found.0,
+            pattern: found.1,
+            reason: found.2,
         }))
     }
 
@@ -2824,7 +2870,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            47,
+            48,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -2931,6 +2977,48 @@ mod tests {
         assert_eq!(card_named("ljos://cards/NOTES.md"), None);
         assert_eq!(card_named("ljos://cards/../USER.md"), None);
         assert_eq!(card_named("file:///etc/passwd"), None);
+    }
+
+    /// The guard tool and the hook share one verdict.
+    #[tokio::test]
+    async fn guard_check_allows_an_ordinary_command_and_refuses_a_bad_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .expect("git");
+            assert!(status.success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Rohit Goswami"]);
+        git(&["config", "user.email", "rgoswami@ieee.org"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        let server = LjosServer::at(dir.path().to_path_buf());
+        let cwd = Some(dir.path().display().to_string());
+        let allow = server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "ls".into(),
+                cwd: cwd.clone(),
+            }))
+            .await
+            .expect("allow");
+        assert_eq!(allow.0.verdict, "allow");
+        let deny = server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "git commit -m \"Co-authored-by: Cursor <c@c>\"".into(),
+                cwd,
+            }))
+            .await
+            .expect("deny");
+        assert_eq!(deny.0.verdict, "deny");
+        assert!(
+            deny.0.reason.contains("Co-authored-by"),
+            "{}",
+            deny.0.reason
+        );
     }
 
     /// The protocol is a resource every harness can read, and it names the

@@ -16,6 +16,7 @@ pub mod approval;
 pub mod ask_pack;
 pub mod capture;
 pub mod command_prefs;
+pub mod gates;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -20423,13 +20424,8 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // The rules are the law's memory: a deny or an ask fires before the
     // context, so a reader sees the verdict first.
     let rules = rules_for_gate();
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|d| d.display().to_string());
-    let gated = redirect_seat_verb(
-        gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
-        &line,
-    );
+    let cwd = std::env::current_dir().ok();
+    let gated = gates::guard_verdict(&line, cwd.as_deref(), &rules);
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     match tcb_check(argv) {
         Some(tcb) if !tcb.is_empty() => Ok(format!("{line}\n{tcb}\n{ruled}")),
@@ -20555,6 +20551,43 @@ pub fn policyd_reason(token: &str) -> String {
         "python-dash-c" | "python-requires-uv" => {
             "this Python call is not allowed as written. Put the code in a script file and run \
              it with `uv run`"
+        }
+        "git-commit-identity" => {
+            "author and committer must both be Rohit Goswami <rgoswami@ieee.org>. Run \
+             `git config user.name \"Rohit Goswami\"` and `git config user.email \
+             \"rgoswami@ieee.org\"`, and remove any `--author` or `GIT_AUTHOR_*` / \
+             `GIT_COMMITTER_*` that names someone else. Then commit again"
+        }
+        "git-commit-message" => {
+            "the commit message is not on the command line, so the gate cannot read it. Pass it \
+             with `git commit -m TEXT` or `git commit -F FILE`. The message must not contain \
+             Co-authored-by, CURSOR_AGENT, \"Generated with\", \"Open in Cursor\", or any other \
+             AI trailer"
+        }
+        "git-commit-trailer" => {
+            "the message contains an AI trailer the commit gate refuses. Remove Co-authored-by, \
+             CURSOR_AGENT, \"Generated with\", \"Open in Cursor\", and any other AI trailer, then \
+             commit again with `git commit -m TEXT`"
+        }
+        "git-commit-signoff" => {
+            "this repo's `.ljos/gates.toml` sets `signoff = true`. Add a final line \
+             `Signed-off-by: Rohit Goswami <rgoswami@ieee.org>` or pass `--signoff`, then commit \
+             again"
+        }
+        "git-push-evidence" => {
+            "no passing test evidence for this exact tip. Run `ljos evidence record -- <test \
+             command>` (the `test` line in `.ljos/gates.toml`), then push that same commit. A \
+             plain push with that record needs no approval"
+        }
+        "git-merge-unready" => {
+            "a merge waits until CI is green on the head sha and every Cursor Bugbot thread is \
+             resolved or has a reply. Sign in with `gh auth login` if the checks cannot be read, \
+             fix the red checks, reply on or resolve each open Bugbot thread, then run the merge \
+             again"
+        }
+        "git-remote-hidden" => {
+            "this runs git on another machine, so the gate cannot read the tip, the identity, or \
+             CI. Run the git command in the local checkout"
         }
         _ => return token.to_string(),
     };
