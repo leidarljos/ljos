@@ -59,12 +59,15 @@ fn habitat() -> (Scratch, Habitat) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let dir = PathBuf::from(format!(
-        "/workspace/target/harness-hooks-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../target")
+        .join(format!("ljos-harness-hooks-{}-{nanos}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let dir = Scratch(dir);
     let tracker = dir.0.join("tracker");
     let repo = dir.0.join("repo");
