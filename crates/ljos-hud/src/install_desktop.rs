@@ -127,9 +127,8 @@ mod tests {
     #[test]
     fn install_writes_desktop_and_sway() {
         let _guard = crate::env_lock();
-        let root = std::env::temp_dir().join(format!("ljos-hud-install-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = root_dir.path();
         let exe = root.join("bin/ljos-hud");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"x").unwrap();
@@ -139,7 +138,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", &config);
         }
-        let report = install(&root, &exe, Some(&data)).unwrap();
+        let report = install(root, &exe, Some(&data)).unwrap();
         assert!(report.wrote.iter().any(|p| p.ends_with("ljos-hud.desktop")));
         assert!(report.wrote.iter().any(|p| p.ends_with("sway-hud.conf")));
         let desktop = fs::read_to_string(data.join("applications/ljos-hud.desktop")).unwrap();
@@ -151,10 +150,5 @@ mod tests {
         );
         let sway = fs::read_to_string(config.join("ljos/sway-hud.conf")).unwrap();
         assert_eq!(sway, sway_overlay_rules());
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = fs::remove_dir_all(&root);
     }
 }

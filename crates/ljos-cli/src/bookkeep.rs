@@ -1600,7 +1600,7 @@ fn run_timed(bin: &str, args: &[&str], env: &[(&str, &str)]) -> anyhow::Result<S
 mod tests {
     use super::*;
 
-    fn lock() -> std::sync::MutexGuard<'static, ()> {
+    fn lock() -> crate::EnvLock {
         crate::test_env_lock()
     }
 

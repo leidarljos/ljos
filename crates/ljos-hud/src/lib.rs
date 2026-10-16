@@ -19,10 +19,59 @@ pub mod wlactivate;
 pub use cli::run_cli;
 pub use summon::{parse_request, sanitize_token, SummonAction, SummonRequest};
 
+/// Serialises HUD tests that read or write the process environment.
+/// Each holder gets a private `XDG_RUNTIME_DIR`, and the environment it
+/// found is put back while the mutex is still held.
 #[cfg(test)]
-pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+#[must_use = "the environment is restored when this guard drops"]
+pub(crate) struct EnvLock {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    runtime: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl Drop for EnvLock {
+    fn drop(&mut self) {
+        let keep: std::collections::HashSet<std::ffi::OsString> =
+            self.snapshot.iter().map(|(key, _)| key.clone()).collect();
+        for (key, value) in &self.snapshot {
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+        let added: Vec<std::ffi::OsString> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| !keep.contains(key))
+            .collect();
+        for key in added {
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+        let _ = self.runtime.path();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn env_lock() -> EnvLock {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    let guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let snapshot: Vec<_> = std::env::vars_os().collect();
+    let runtime = tempfile::tempdir().expect("private runtime dir");
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    }
+    EnvLock {
+        _guard: guard,
+        snapshot,
+        runtime,
+    }
 }
 
 #[cfg(test)]

@@ -4984,7 +4984,9 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
 }
 
 /// Where the ids already injected in a session are kept: the runtime
-/// directory, so they go with the login and never into the pack.
+/// directory, so they go with the login and never into the pack. That
+/// directory is this user's alone (`XDG_RUNTIME_DIR/ljos`, or the
+/// per-user fallback), never a shared `/tmp/ljos`.
 fn seen_path(session: &str) -> Option<PathBuf> {
     let safe: String = session
         .chars()
@@ -4993,12 +4995,7 @@ fn seen_path(session: &str) -> Option<PathBuf> {
     if safe.is_empty() {
         return None;
     }
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|r| !r.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("ljos");
-    Some(dir.join(format!("hook-seen-{safe}")))
+    Some(runtime_dir().join(format!("hook-seen-{safe}")))
 }
 
 pub fn seen_ids(session: Option<&str>) -> std::collections::BTreeSet<String> {
@@ -5195,11 +5192,9 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
 
 /// Where a prompt's pack note waits. One runner discards prompt-hook
 /// stdout and reads `Stop` feedback, so the note stays here until then.
+/// The file sits in the runtime directory, beside the seen list, so two
+/// users on one host do not read each other's holds.
 fn hook_hold_path(session: Option<&str>) -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
     let name = session
         .filter(|s| !s.is_empty())
         .map(|s| {
@@ -5210,7 +5205,7 @@ fn hook_hold_path(session: Option<&str>) -> Option<PathBuf> {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "default".into());
-    Some(dir.join(format!("ljos-hook-hold-{name}")))
+    Some(runtime_dir().join(format!("ljos-hook-hold-{name}")))
 }
 
 fn hook_hold_ids_path(session: Option<&str>) -> Option<PathBuf> {
@@ -5235,6 +5230,9 @@ pub fn hold_hook_note(session: Option<&str>, context: &str, ids: &[String]) {
     };
     if context.is_empty() {
         return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::write(&path, context);
     if let Some(ids_path) = hook_hold_ids_path(session) {
@@ -7792,19 +7790,57 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<Vec<Hit>> {
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
 }
 
+thread_local! {
+    static ENV_MUT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn env_mutation_lock() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hold the process environment still while `f` runs.
+/// A nested call on this thread does not take the lock again, so a pack
+/// read inside a bounded request cannot deadlock on it. The environment
+/// is process-global, so two threads must not edit it at once.
+pub(crate) fn with_env_mutation<R>(f: impl FnOnce() -> R) -> R {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            ENV_MUT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+    if ENV_MUT_DEPTH.with(|depth| depth.get()) > 0 {
+        return f();
+    }
+    let _gate = env_mutation_lock();
+    ENV_MUT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let _leave = Leave;
+    f()
+}
+
 /// Run `f` with the pack client's request timeout set to `ms`, then put
 /// back whatever it was.
 fn with_pack_timeout<R>(ms: u64, f: impl FnOnce() -> R) -> R {
-    let before = std::env::var_os("PACKSET_TIMEOUT_MS");
-    // SAFETY: the hook reads and sets this on one thread, before and after
-    // the one request it bounds.
-    unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", ms.to_string()) };
-    let out = f();
-    match before {
-        Some(v) => unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", v) },
-        None => unsafe { std::env::remove_var("PACKSET_TIMEOUT_MS") },
-    }
-    out
+    with_env_mutation(|| {
+        let before = std::env::var_os("PACKSET_TIMEOUT_MS");
+        // SAFETY: the hook reads and sets this on one thread, before and after
+        // the one request it bounds. The mutation lock keeps another thread
+        // from observing the temporary value.
+        unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", ms.to_string()) };
+        struct Put(Option<std::ffi::OsString>);
+        impl Drop for Put {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", v) },
+                    None => unsafe { std::env::remove_var("PACKSET_TIMEOUT_MS") },
+                }
+            }
+        }
+        let _put = Put(before);
+        f()
+    })
 }
 
 /// Phrases a person uses when the agent has forgotten something it was
@@ -9147,17 +9183,19 @@ pub fn expand_leading_tilde(raw: &str, home: &str) -> Option<String> {
 /// tracker crate that predates the fix then resolves it against the working
 /// directory, and every child `vissue` inherits the same relative root.
 pub fn normalize_tracker_env() {
-    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-        return;
-    };
-    let home = home.to_string_lossy().to_string();
-    for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
-        if let Ok(raw) = std::env::var(var) {
-            if let Some(expanded) = expand_leading_tilde(&raw, &home) {
-                std::env::set_var(var, expanded);
+    with_env_mutation(|| {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let home = home.to_string_lossy().to_string();
+        for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
+            if let Ok(raw) = std::env::var(var) {
+                if let Some(expanded) = expand_leading_tilde(&raw, &home) {
+                    std::env::set_var(var, expanded);
+                }
             }
         }
-    }
+    });
 }
 
 /// Printed on stderr. `ljos-policyd` is the TCB when it exists.
@@ -9178,27 +9216,29 @@ pub const SEAT_WORKSPACE: &str = "seat";
 /// those keys. The shell, the hooks, and the MCP seat then share one pack
 /// and one `LJOS_SEAT`.
 pub fn load_seat_env() {
-    let Ok(home) = home() else {
-        return;
-    };
-    let path = home.join(".config/ljos/env");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
+    with_env_mutation(|| {
+        let Ok(home) = home() else {
+            return;
         };
-        let k = k.trim();
-        if k.is_empty() || std::env::var_os(k).is_some() {
-            continue;
+        let path = home.join(".config/ljos/env");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let k = k.trim();
+            if k.is_empty() || std::env::var_os(k).is_some() {
+                continue;
+            }
+            std::env::set_var(k, v.trim());
         }
-        std::env::set_var(k, v.trim());
-    }
+    });
 }
 
 /// The port packset listens on when nothing names one.
@@ -9292,17 +9332,19 @@ pub fn pick_pack_port(
 /// picked goes into `PACKSET_PORT`, so `packset ensure` and the other
 /// packset commands this seat runs use it too.
 fn scope_pack_port() -> Result<()> {
-    if std::env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
-        return Ok(());
-    }
-    let named = std::env::var("PACKSET_PORT")
-        .or_else(|_| std::env::var("GROK_MEM_PORT"))
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u16>().ok());
-    if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
-        std::env::set_var("PACKSET_PORT", port.to_string());
-    }
-    Ok(())
+    with_env_mutation(|| {
+        if std::env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
+            return Ok(());
+        }
+        let named = std::env::var("PACKSET_PORT")
+            .or_else(|_| std::env::var("GROK_MEM_PORT"))
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u16>().ok());
+        if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
+            std::env::set_var("PACKSET_PORT", port.to_string());
+        }
+        Ok(())
+    })
 }
 
 /// Start the default writer when a recall found it down. The health probe
@@ -24264,13 +24306,58 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
     out
 }
 
+/// Serialises every test that reads or writes the process environment.
+/// Each holder gets a private `XDG_RUNTIME_DIR`. The environment this test
+/// found is put back while the mutex is still held, so the next test cannot
+/// observe a cleared runtime directory or a variable this one set.
+#[cfg(test)]
+#[must_use = "the environment is restored when this guard drops"]
+pub(crate) struct EnvLock {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    runtime: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl Drop for EnvLock {
+    fn drop(&mut self) {
+        with_env_mutation(|| {
+            let keep: std::collections::HashSet<std::ffi::OsString> =
+                self.snapshot.iter().map(|(key, _)| key.clone()).collect();
+            for (key, value) in &self.snapshot {
+                unsafe { std::env::set_var(key, value) };
+            }
+            let added: Vec<std::ffi::OsString> = std::env::vars_os()
+                .map(|(key, _)| key)
+                .filter(|key| !keep.contains(key))
+                .collect();
+            for key in added {
+                unsafe { std::env::remove_var(key) };
+            }
+            let _ = self.runtime.path();
+        });
+    }
+}
+
 /// The lock every test that changes the process environment takes.
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
-pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn test_env_lock() -> EnvLock {
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    ENV.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    let guard = ENV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (snapshot, runtime) = with_env_mutation(|| {
+        let snapshot: Vec<_> = std::env::vars_os().collect();
+        let runtime = tempfile::tempdir().expect("private runtime dir");
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
+        (snapshot, runtime)
+    });
+    EnvLock {
+        _guard: guard,
+        snapshot,
+        runtime,
+    }
 }
 
 #[cfg(test)]
@@ -24576,8 +24663,10 @@ mod tests {
 
     /// The tests that set or read the process environment take this lock:
     /// cargo runs tests on threads, and one process has one environment.
-    /// The runner session the test process inherited is dropped first, so a
-    /// test that sets one session id sees that one alone.
+    /// Each one gets a private runtime directory, put back with the rest of
+    /// the environment when the guard drops. The runner session the test
+    /// process inherited is dropped first, so a test that sets one session
+    /// id sees that one alone.
     /// A home, data and config directory of the test's own, no pack and no
     /// deed store or tracker named, for a dry onboard whose steps would
     /// otherwise read the machine: packset on PATH, a writer up, a host key.
@@ -24635,14 +24724,21 @@ mod tests {
         }
     }
 
-    pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_guard() -> super::EnvLock {
         let guard = super::test_env_lock();
-        for (k, v) in std::env::vars() {
-            if super::runner_session_var(&k, &v) {
-                // SAFETY: under the lock every environment-reading test takes.
-                unsafe { std::env::remove_var(&k) };
+        super::with_env_mutation(|| {
+            for (k, v) in std::env::vars() {
+                if super::runner_session_var(&k, &v) {
+                    // SAFETY: under the lock every environment-reading test takes.
+                    unsafe { std::env::remove_var(&k) };
+                }
             }
-        }
+            // The agent that launched the suite may have named a seat. A test
+            // sees only the seat it sets itself; the guard puts the name back.
+            for key in ["LJOS_SEAT", "VISSUE_AGENT", "LJOS_HOLD"] {
+                unsafe { std::env::remove_var(key) };
+            }
+        });
         guard
     }
 
@@ -25533,8 +25629,8 @@ mod tests {
     #[test]
     fn a_conversation_holds_under_its_seat_name_and_a_short_tag() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-rt-seat-tag-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let stamped: Vec<String> = std::env::vars()
             .map(|(k, _)| k)
             .filter(|k| runner_session_var(k, "long-enough-value"))
@@ -25615,8 +25711,8 @@ mod tests {
     #[test]
     fn two_seats_with_distinct_session_ids_are_distinct_holders() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-rt-two-seat-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let session_keys: Vec<String> = std::env::vars()
             .map(|(k, _)| k)
             .filter(|k| k.ends_with("_SESSION_ID"))
@@ -26035,8 +26131,8 @@ mod tests {
         let _g = env_guard();
         // A runtime directory of its own: a record another process left for
         // this id would name its holder instead.
-        let dir = std::env::temp_dir().join(format!("ljos-rt-doctor-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::remove_var("LJOS_SEAT");
@@ -26289,8 +26385,8 @@ mod tests {
     #[test]
     fn a_runner_started_inside_another_keeps_its_own_holder() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-nest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::set_var("ACME_SESSION_ID", "01a09b25-1111-7972-881a-3cee2ea6efd6");
@@ -26327,8 +26423,8 @@ mod tests {
     #[test]
     fn a_thread_named_on_a_call_holds_as_its_shells_do() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-thread-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
         assert!(runner_session_var("ACME_THREAD_ID", "0199a1b2-c3d4"));
         assert!(!runner_session_var("ACME_THREAD_ID", "short"));
@@ -26372,8 +26468,8 @@ mod tests {
     #[test]
     fn a_shell_with_one_more_session_variable_finds_the_servers_record() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-rt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::set_var("ACME_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
@@ -26468,8 +26564,8 @@ mod tests {
 
     #[test]
     fn the_server_leaves_a_record_a_shell_below_the_runner_reads() {
-        let dir = std::env::temp_dir().join(format!("ljos-seat-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         // The record path is pure in the directory, so build it the way the
         // server does and read it back the way a shell does.
         let path = dir.join("ljos").join("seat-4242");
@@ -26616,8 +26712,8 @@ mod tests {
     fn a_correction_is_nudged_once_a_session_and_only_on_a_prompt() {
         let _g = env_guard();
         // The seen file lives under the runtime directory.
-        let dir = std::env::temp_dir().join(format!("ljos-corr-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
         let prompt = HookCall {
             event: "UserPromptSubmit".into(),
@@ -27073,8 +27169,8 @@ mod tests {
     #[test]
     fn a_choice_is_sent_to_a_panel_once_a_session() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-dec-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
         let call = |cue: &str, session: &str, event: &str| HookCall {
             event: event.into(),
@@ -28049,9 +28145,8 @@ mod tests {
     /// is not added twice.
     #[test]
     fn the_memory_hook_is_merged_once() {
-        let dir = std::env::temp_dir().join(format!("ljos-hook-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let file = dir.join("settings.json");
         std::fs::write(
             &file,
@@ -28638,9 +28733,8 @@ mod tests {
     #[test]
     fn playbooks_are_latest_per_name_and_stick_until_finish() {
         let _g = env_guard();
-        let dir = std::env::temp_dir().join(format!("ljos-playbook-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let before = std::env::var_os("XDG_RUNTIME_DIR");
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
@@ -29391,10 +29485,8 @@ mod tests {
     #[test]
     fn sitting_resolves_asked_else_bound_else_title_else_sit() {
         let _g = env_guard();
-        let dir =
-            std::env::temp_dir().join(format!("ljos-playbook-resolve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let before = std::env::var_os("XDG_RUNTIME_DIR");
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &dir);
@@ -29477,9 +29569,8 @@ mod tests {
 
     #[test]
     fn bumping_mcp_generation_respawns_without_rewriting_the_entry() {
-        let dir = std::env::temp_dir().join(format!("ljos-gen-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tempdir");
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let config = dir.join("config.toml");
         std::fs::write(
             &config,
@@ -29504,8 +29595,8 @@ mod tests {
 
     #[test]
     fn a_client_name_listed_on_a_harness_is_that_runners_seat() {
-        let dir = std::env::temp_dir().join(format!("ljos-clients-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let file = dir.join("harnesses.toml");
         std::fs::write(
             &file,
@@ -29702,7 +29793,6 @@ mod tests {
     #[test]
     fn due_judge_names_a_hold_and_does_not_grade_it() {
         let _g = env_guard();
-        let _jev = jev::judge_env_lock();
         let cfg = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -30298,9 +30388,8 @@ mod tests {
         assert_eq!(all.harness[1].marker.as_deref(), Some("[mcp_servers.ljos]"));
         assert_eq!(all.harness[2].json_pointer.as_deref(), Some("/mcp/ljos"));
 
-        let dir = std::env::temp_dir().join(format!("ljos-onboard-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("tempdir");
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let config = dir.join("config.toml");
         let skills = dir.join("skills");
         let file = dir.join("harnesses.toml");
@@ -30787,9 +30876,8 @@ mod tests {
             std::env::set_var("PACKSET_URL", "off");
             std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
         }
-        let dir = std::env::temp_dir().join(format!("ljos-shell-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let file = dir.join("harnesses.toml");
         let skills = dir.join("given");
         let dry = super::onboard_in(&file, "grokbot", true, Some(&skills)).unwrap();
@@ -30911,7 +30999,8 @@ mod tests {
     fn grok_onboard_names_the_frozen_hook_file() {
         let _g = env_guard();
         let _seat = HermeticSeat::new();
-        let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
+        let _scratch = tempfile::tempdir().unwrap();
+        let file = _scratch.path().join("harnesses.toml");
         let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
         assert!(steps[0].ok, "{steps:?}");
         assert!(
@@ -31000,7 +31089,8 @@ mod tests {
     fn grok_onboard_ends_with_the_shared_dependencies() {
         let _g = env_guard();
         let _seat = HermeticSeat::new();
-        let file = std::env::temp_dir().join("ljos-missing-harnesses.toml");
+        let _scratch = tempfile::tempdir().unwrap();
+        let file = _scratch.path().join("harnesses.toml");
         let steps = super::onboard_from(&file, "grok", true).expect("grok dry");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
         assert_eq!(whats[0], "hook", "{whats:?}");
@@ -31686,9 +31776,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn cards_are_the_two_named_files_only() {
         assert_eq!(CARD_NAMES, &["USER.md", "MEMORY.md"]);
-        let dir = std::env::temp_dir().join(format!("ljos-cards-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         std::fs::write(dir.join("USER.md"), "user card\n").unwrap();
         std::fs::write(dir.join("MEMORY.md"), "memory card\n").unwrap();
         std::fs::write(dir.join("NOTES.md"), "must not appear\n").unwrap();
@@ -31951,8 +32040,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_json_config_takes_the_entry_by_pointer() {
-        let dir = std::env::temp_dir().join(format!("ljos-onboard-json-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let config = dir.join("runner.json");
         std::fs::write(&config, "{\"model\": \"x\"}\n").unwrap();
         let entry = serde_json::json!({"type": "local", "command": ["/bin/ljos-mcp"]});
@@ -34615,8 +34704,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_bundle_becomes_rows_with_edges_and_steady_ids() {
-        let dir = std::env::temp_dir().join(format!("ljos-bump-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         std::fs::create_dir_all(dir.join("locks")).unwrap();
         std::fs::write(
             dir.join("locks/default.lock.json"),
@@ -34990,8 +35079,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn enclosed_atoms_are_read_from_every_jsonl_in_the_bag() {
-        let dir = std::env::temp_dir().join(format!("ljos-bag-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _scratch = tempfile::tempdir().unwrap();
+        let dir = _scratch.path().to_path_buf();
         let atoms = dir.join("data").join("atoms");
         std::fs::create_dir_all(&atoms).unwrap();
         std::fs::write(
@@ -36176,18 +36265,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     /// Run `f` with `dir` first on PATH, then put PATH back.
     fn with_fake_on_path<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        let mut new = std::ffi::OsString::from(dir.as_os_str());
-        new.push(":");
-        new.push(&old);
-        unsafe {
-            std::env::set_var("PATH", &new);
-        }
-        let out = f();
-        unsafe {
-            std::env::set_var("PATH", old);
-        }
-        out
+        super::with_env_mutation(|| {
+            let old = std::env::var_os("PATH").unwrap_or_default();
+            let mut new = std::ffi::OsString::from(dir.as_os_str());
+            new.push(":");
+            new.push(&old);
+            unsafe {
+                std::env::set_var("PATH", &new);
+            }
+            let out = f();
+            unsafe {
+                std::env::set_var("PATH", old);
+            }
+            out
+        })
     }
 
     #[test]

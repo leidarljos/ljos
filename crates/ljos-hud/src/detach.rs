@@ -118,10 +118,8 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let _guard = crate::env_lock();
-        let dir = std::env::temp_dir().join(format!("ljos-hud-detach-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("hud.sock");
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hud.sock");
         let _listener = UnixListener::bind(&path).unwrap();
         #[allow(unused_unsafe)]
         unsafe {
@@ -134,7 +132,5 @@ mod tests {
             std::env::remove_var(crate::summon::SOCKET_ENV);
         }
         drop(_listener);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

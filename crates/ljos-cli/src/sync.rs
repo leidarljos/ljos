@@ -803,8 +803,8 @@ mod tests {
 
     #[test]
     fn a_repository_with_no_scope_is_named_only_when_sync_is_asked_for() {
-        let root = std::env::temp_dir().join(format!("ljos-sync-noscope-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        let _scratch = tempfile::tempdir().unwrap();
+        let root = _scratch.path().to_path_buf();
         let asked = sync_one(&root, true, false, true).unwrap();
         assert!(asked.contains("names no scope"), "{asked}");
         assert_eq!(sync_one(&root, true, false, false).unwrap(), "");

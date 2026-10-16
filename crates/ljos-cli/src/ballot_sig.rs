@@ -335,17 +335,19 @@ pub async fn scope_session<F: std::future::Future>(session: Option<String>, f: F
 /// Remember the hook payload's session for this process, and export it for
 /// a child when the environment has not already named one.
 pub fn export_hook_session(id: Option<&str>) {
-    let id = id.map(str::trim).filter(|s| !s.is_empty()).map(field);
-    HOOK_SESSION.with(|c| *c.borrow_mut() = id.clone());
-    if let Some(id) = id {
-        if std::env::var("LJOS_HARNESS_SESSION")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_none()
-        {
-            std::env::set_var("LJOS_HARNESS_SESSION", id);
+    crate::with_env_mutation(|| {
+        let id = id.map(str::trim).filter(|s| !s.is_empty()).map(field);
+        HOOK_SESSION.with(|c| *c.borrow_mut() = id.clone());
+        if let Some(id) = id {
+            if std::env::var("LJOS_HARNESS_SESSION")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .is_none()
+            {
+                std::env::set_var("LJOS_HARNESS_SESSION", id);
+            }
         }
-    }
+    });
 }
 
 fn env_token(key: &str) -> Option<String> {

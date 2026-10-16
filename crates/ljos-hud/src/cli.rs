@@ -138,8 +138,8 @@ mod tests {
     #[test]
     fn hide_without_socket_is_zero() {
         let _guard = crate::env_lock();
-        let path = format!("/tmp/ljos-hud-none-{}", std::process::id());
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("none.sock");
         #[allow(unused_unsafe)]
         unsafe {
             std::env::set_var(summon::SOCKET_ENV, &path);
