@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn hide_miss_is_done() {
-        let err = SummonError::NotRunning("/tmp/missing.sock".into());
+        let err = SummonError::NotRunning("missing.sock".into());
         assert_eq!(
             plan_summon_cli(SummonAction::Hide, Err(err)).unwrap(),
             SummonCli::Done
@@ -519,8 +519,8 @@ mod tests {
     #[test]
     fn send_command_show_miss_keeps_token() {
         let _guard = crate::env_lock();
-        let path = format!("/tmp/ljos-hud-miss-show-{}", std::process::id());
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("miss-show.sock");
         #[allow(unused_unsafe)]
         unsafe {
             std::env::set_var(SOCKET_ENV, &path);
@@ -545,8 +545,8 @@ mod tests {
     #[test]
     fn send_command_hide_miss_unsets_token() {
         let _guard = crate::env_lock();
-        let path = format!("/tmp/ljos-hud-miss-hide-{}", std::process::id());
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("miss-hide.sock");
         #[allow(unused_unsafe)]
         unsafe {
             std::env::set_var(SOCKET_ENV, &path);

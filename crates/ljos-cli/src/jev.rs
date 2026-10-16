@@ -1804,10 +1804,11 @@ pub fn doctor_row() -> Option<crate::Habitat> {
 }
 
 /// Serialises tests that swap `XDG_CONFIG_HOME`.
+/// The same lock as every other environment test, so a judge test cannot
+/// clear a variable a hook test still needs.
 #[cfg(test)]
-pub(crate) fn judge_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+pub(crate) fn judge_env_lock() -> crate::EnvLock {
+    crate::test_env_lock()
 }
 
 #[cfg(test)]
@@ -1815,7 +1816,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> crate::EnvLock {
         judge_env_lock()
     }
 

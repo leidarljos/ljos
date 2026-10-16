@@ -192,20 +192,68 @@ fn lesson(text: &str) -> Value {
     atom
 }
 
+/// One process, one environment. This binary's tests take turns, and each
+/// one puts the variables back, including when it returns early.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+struct SeatEnv {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _runtime: tempfile::TempDir,
+}
+
+impl SeatEnv {
+    fn set(pairs: &[(&'static str, &str)]) -> Self {
+        let runtime = tempfile::tempdir().expect("runtime");
+        let mut keys: Vec<&str> = pairs.iter().map(|(key, _)| *key).collect();
+        keys.push("XDG_RUNTIME_DIR");
+        let saved = keys
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
+        unsafe {
+            for (key, value) in pairs {
+                std::env::set_var(key, value);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        }
+        Self {
+            saved,
+            _runtime: runtime,
+        }
+    }
+}
+
+impl Drop for SeatEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
+    let _lock = env_lock();
     let daemon = Daemon::start();
     let state = tempfile::tempdir().expect("state");
     let home = tempfile::tempdir().expect("home");
-    // Safety: this test binary runs one test. The child packsetd does not
-    // read these; the seat does.
-    unsafe {
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("XDG_STATE_HOME", state.path());
-        std::env::set_var("PACKSET_URL", &daemon.url);
-        std::env::set_var("PACKSET_WORKSPACE", ljos_cli::SEAT_WORKSPACE);
-        std::env::set_var("LJOS_SEAT", "smoke");
-    }
+    // The child packsetd is given its env on the command. The seat in this
+    // process reads these, and they are put back when the test ends.
+    let _env = SeatEnv::set(&[
+        ("HOME", home.path().to_str().expect("home")),
+        ("XDG_STATE_HOME", state.path().to_str().expect("state")),
+        ("PACKSET_URL", daemon.url.as_str()),
+        ("PACKSET_WORKSPACE", ljos_cli::SEAT_WORKSPACE),
+        ("LJOS_SEAT", "smoke"),
+    ]);
 
     let client = ljos_cli::pack().unwrap_or_else(|err| panic!("{err:#}"));
     let text = "Build the lesson on the cluster fuse.";

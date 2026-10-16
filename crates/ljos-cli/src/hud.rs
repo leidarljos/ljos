@@ -106,29 +106,29 @@ pub fn run(opts: HudLaunch) -> i32 {
 mod tests {
     use super::*;
 
-    /// The tests below set `LJOS_HUD_BIN`; cargo runs tests on threads and
-    /// one process has one environment, so they take turns.
-    fn hud_env() -> std::sync::MutexGuard<'static, ()> {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    /// The tests below set `LJOS_HUD_BIN`. They take the same environment
+    /// lock as the rest of the crate, and the guard puts the variable back.
+    fn hud_env() -> crate::EnvLock {
+        crate::test_env_lock()
+    }
+
+    fn missing_hud() -> PathBuf {
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("private runtime dir"))
+            .join("ljos-hud-missing")
     }
 
     #[test]
     fn missing_bin_is_127() {
         let _env = hud_env();
-        let _before = std::env::var_os(HUD_BIN_ENV);
+        let missing = missing_hud();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(HUD_BIN_ENV, "/tmp/ljos-hud-missing-bin");
+            std::env::set_var(HUD_BIN_ENV, &missing);
         }
         let code = run(HudLaunch {
             foreground: true,
             ..HudLaunch::default()
         });
-        match _before {
-            Some(v) => unsafe { std::env::set_var(HUD_BIN_ENV, v) },
-            None => unsafe { std::env::remove_var(HUD_BIN_ENV) },
-        }
         assert_eq!(code, 127);
         assert!(missing_bin_message().contains("ljos-hud"));
     }
@@ -136,19 +136,15 @@ mod tests {
     #[test]
     fn hide_without_binary_is_zero() {
         let _env = hud_env();
-        let _before = std::env::var_os(HUD_BIN_ENV);
+        let missing = missing_hud();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(HUD_BIN_ENV, "/tmp/ljos-hud-missing-bin");
+            std::env::set_var(HUD_BIN_ENV, &missing);
         }
         let code = run(HudLaunch {
             hide: true,
             ..HudLaunch::default()
         });
-        match _before {
-            Some(v) => unsafe { std::env::set_var(HUD_BIN_ENV, v) },
-            None => unsafe { std::env::remove_var(HUD_BIN_ENV) },
-        }
         assert_eq!(code, 0);
     }
 
@@ -167,16 +163,11 @@ mod tests {
     #[test]
     fn resolve_honors_override() {
         let _env = hud_env();
-        let _before = std::env::var_os(HUD_BIN_ENV);
-        let path = PathBuf::from("/tmp/custom-ljos-hud");
+        let path = missing_hud();
         #[allow(unused_unsafe)]
         unsafe {
             std::env::set_var(HUD_BIN_ENV, path.to_str().unwrap());
         }
         assert_eq!(resolve_hud_bin(), Some(path));
-        match _before {
-            Some(v) => unsafe { std::env::set_var(HUD_BIN_ENV, v) },
-            None => unsafe { std::env::remove_var(HUD_BIN_ENV) },
-        }
     }
 }

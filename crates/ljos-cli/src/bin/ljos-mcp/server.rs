@@ -3246,7 +3246,8 @@ mod tests {
     /// The instructions a bot hears are the loop, and every tool accepts seat.
     #[test]
     fn the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
-        let info = LjosServer::at(std::env::temp_dir()).get_info();
+        let cards = tempfile::tempdir().unwrap();
+        let info = LjosServer::at(cards.path().to_path_buf()).get_info();
         assert_eq!(info.instructions.as_deref(), Some(SERVER_INSTRUCTIONS));
         let mut tools = LjosServer::tool_router().list_all();
         assert!(tools.iter().any(|tool| tool.name == "ljos_start"));
@@ -3314,7 +3315,8 @@ mod tests {
     /// A refusal is an error, not a success carrying an error message.
     #[tokio::test]
     async fn a_refusal_is_an_error() {
-        let server = LjosServer::at(std::env::temp_dir());
+        let cards = tempfile::tempdir().unwrap();
+        let server = LjosServer::at(cards.path().to_path_buf());
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
@@ -3416,7 +3418,8 @@ mod tests {
             names,
             ["check_a_handover", "run_a_panel", "start_a_sitting"]
         );
-        let server = LjosServer::at(std::env::temp_dir());
+        let cards = tempfile::tempdir().unwrap();
+        let server = LjosServer::at(cards.path().to_path_buf());
         let panel = server
             .run_a_panel_prompt(Parameters(IssueArgs {
                 issue: "proj-1a2b".into(),
@@ -3436,7 +3439,7 @@ mod tests {
                 "`ljos_calibrate`",
             ],
         );
-        let server = LjosServer::at(std::env::temp_dir());
+        let server = LjosServer::at(cards.path().to_path_buf());
         let begun = server
             .start_a_sitting_prompt(Parameters(PickUpArgs {
                 issue: Some("proj-1a2b".into()),
