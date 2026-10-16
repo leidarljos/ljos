@@ -209,6 +209,31 @@ fn finish_next_from(body: &str) -> &'static str {
     }
 }
 
+/// Replace `issue: "none"` (and the other placeholders) with the issue
+/// this session claimed. A placeholder with no claim is removed, so
+/// vissue is not asked for an issue named none.
+fn supply_issue(arguments: &mut serde_json::Map<String, serde_json::Value>, session: Option<&str>) {
+    let Some(raw) = arguments.get("issue") else {
+        return;
+    };
+    let text = match raw {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        _ => return,
+    };
+    if !ljos_cli::bookkeep::blank_issue(&text) {
+        return;
+    }
+    match ljos_cli::bookkeep::canonical_issue(None, session) {
+        Some(id) => {
+            arguments.insert("issue".into(), serde_json::Value::String(id));
+        }
+        None => {
+            arguments.remove("issue");
+        }
+    }
+}
+
 /// The call's `seat`, when the bot passed one.
 fn seat_argument(
     args: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -866,6 +891,18 @@ pub struct TrustRow {
 pub struct Said {
     /// The habitat's answer, as it printed it.
     pub text: String,
+    /// What it said aside, when anything.
+    pub aside: Option<String>,
+}
+
+/// The seat's reading of one command. `verdict` is `allow` or `ask`.
+/// A deny is a tool error, so this field does not say deny for an ask.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GuardSaid {
+    /// The policy text.
+    pub text: String,
+    /// `allow` or `ask`.
+    pub verdict: String,
     /// What it said aside, when anything.
     pub aside: Option<String>,
 }
@@ -1572,7 +1609,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this before a destructive shell command. Pass the command line. It returns the seat's verdict. Run the command only when this allowed it.",
+        description = "Call this before a destructive shell command. Pass the command line. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny.",
         annotations(
             title = "Check a command",
             read_only_hint = true,
@@ -1582,9 +1619,13 @@ impl LjosServer {
     async fn ljos_guard_check(
         &self,
         Parameters(args): Parameters<GuardArgs>,
-    ) -> Result<Json<Said>, McpError> {
-        let text = ljos_cli::guard_command(&args.command).map_err(refused)?;
-        Ok(Json(Said { text, aside: None }))
+    ) -> Result<Json<GuardSaid>, McpError> {
+        let report = ljos_cli::guard_report(&args.command).map_err(refused)?;
+        Ok(Json(GuardSaid {
+            text: report.text,
+            verdict: report.verdict,
+            aside: None,
+        }))
     }
 
     #[tool(
@@ -1645,19 +1686,12 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<FinishSittingArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let issue = match args
-            .issue
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            Some(id) => id.to_string(),
-            None => ljos_cli::bookkeep::open_issue().ok_or_else(|| {
+        let issue =
+            ljos_cli::bookkeep::canonical_issue(args.issue.as_deref(), None).ok_or_else(|| {
                 refused(anyhow::anyhow!(
                     "ljos_finish: pass the issue, or call ljos_start first"
                 ))
-            })?,
-        };
+            })?;
         let text = finish(
             &issue,
             args.status.as_deref().unwrap_or("done"),
@@ -2883,11 +2917,12 @@ impl ServerHandler for LjosServer {
         // Seat validation belongs to the server; strict handlers receive only
         // their operation arguments and still reject undeclared fields.
         let mut request = request;
-        if let Some(arguments) = request.arguments.as_mut() {
-            arguments.remove("seat");
-        }
         let thread = thread_in_meta(&context.meta.0);
         let session = session_in_meta(&context.meta.0);
+        if let Some(arguments) = request.arguments.as_mut() {
+            supply_issue(arguments, session.as_deref());
+            arguments.remove("seat");
+        }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let response = ljos_cli::ballot_sig::scope_session(
             session,

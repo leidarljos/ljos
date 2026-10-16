@@ -2041,8 +2041,12 @@ fn run_command() -> Result<()> {
             }
             // An agent about to end its turn is audited once: a done claim
             // beside a red test run, or asked work put off, holds it for
-            // one more round.
-            if call.event == "Stop" && call.shape != ljos_cli::HookShape::Context {
+            // one more round. An agy stop with `fullyIdle` is the session
+            // end: it finishes even when a mid-loop stop would have held.
+            let agy_idle = call.shape == ljos_cli::HookShape::Steps
+                && call.event == "Stop"
+                && ljos_cli::stop_is_idle(&input);
+            if call.event == "Stop" && call.shape != ljos_cli::HookShape::Context && !agy_idle {
                 // At a usage limit the stores hear what the conversation
                 // knows before the runner cuts it off.
                 if let Some(reason) = ljos_cli::limit_stop(&input, call.session.as_deref()) {
@@ -2247,8 +2251,9 @@ fn run_command() -> Result<()> {
                     } else if !compacted && call.shape != ljos_cli::HookShape::CamelCase {
                         // A fresh session hears that ljos is on, in one
                         // line, so the person and the agent know the seat
-                        // is there before the first prompt.
-                        ljos_cli::session_start_line()
+                        // is there before the first prompt. The line names
+                        // the issue this session already holds.
+                        ljos_cli::session_start_for(call.session.as_deref())
                     } else {
                         String::new()
                     }
@@ -2345,11 +2350,16 @@ fn run_command() -> Result<()> {
             };
             // The book is kept here, after a deny has already been decided,
             // so a tracker that does not answer cannot turn into a refusal.
-            // A Stop the audit held never reaches this line.
+            // A Stop the audit held never reaches this line, except an agy
+            // stop that is idle: that one is the session end and finishes.
+            // A mid-loop agy stop, fullyIdle absent, does not finish.
             if let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") {
                 ljos_cli::bookkeep::note_ask(&input, &call, &rule.reason);
             }
-            if verdict.is_none() {
+            let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
+                && call.event == "Stop"
+                && !ljos_cli::stop_is_idle(&input);
+            if verdict.is_none() && !agy_mid_loop {
                 let (extra, ids) = ljos_cli::bookkeep::observe(&input, &call);
                 if !extra.is_empty() {
                     context = if context.is_empty() {

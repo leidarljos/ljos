@@ -16,6 +16,7 @@ use rmcp::{transport::stdio, ServiceExt};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     ljos_cli::normalize_tracker_env();
+    ljos_cli::load_seat_env();
     // One process is one connection. A later seat argument cannot mint a
     // second session for a ballot.
     ljos_cli::ballot_sig::pin_connection_session(None);
