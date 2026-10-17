@@ -86,6 +86,11 @@ struct Book {
     /// sitting has not been touched, and an idle check does not finish it.
     #[serde(default)]
     last_unix: u64,
+    /// Pid of the runner that last wrote this book. A later session finishes
+    /// the claim when that pid is gone, which is how a timeout (the runner
+    /// exits 124 before Stop) still closes.
+    #[serde(default)]
+    owner_pid: u32,
     /// `cwd` as the hook named it, to the repository key. The warm path is
     /// a lookup, not another `git rev-parse`.
     #[serde(default)]
@@ -199,8 +204,16 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
     let session = session_key(call);
     let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    // A runner killed before Stop leaves its claims open. The next session
+    // finishes those whose pid is gone, and replaces a deed whose commit is
+    // no longer in the checkout with the one that is.
+    if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
+        finish_orphans(&session);
+        refresh_landed_deeds();
+    }
     let path = book_path(&session);
     let mut book = load_book(&path);
+    book.owner_pid = hook_owner();
     if call.event == "UserPromptSubmit" {
         let prompt = collapse(&call.cue);
         if !prompt.is_empty() {
@@ -1011,6 +1024,138 @@ fn cite_deed(issue: &str, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The runner that spawned this hook. When it is gone, the next session
+/// finishes the claims this book still has open.
+fn hook_owner() -> u32 {
+    // SAFETY: getppid only reads the parent pid.
+    unsafe { libc::getppid() as u32 }
+}
+
+/// Finish every other sitting whose runner has exited.
+fn finish_orphans(current: &str) {
+    let keep = book_path(current);
+    for path in book_files() {
+        if path == keep {
+            continue;
+        }
+        let mut book = load_book(&path);
+        let open = book
+            .repos
+            .values()
+            .any(|row| row.issue.is_some() && !row.finished);
+        if !open || book.owner_pid == 0 || super::pid_alive(book.owner_pid) {
+            continue;
+        }
+        finish_open(&mut book);
+        store_book(&path, &book);
+    }
+}
+
+/// Replace a cited commit that is not in HEAD with the commit that is, and
+/// write the lesson again when it already named the one that did not land.
+fn refresh_landed_deeds() {
+    for path in book_files() {
+        let mut book = load_book(&path);
+        let repos: Vec<String> = book.repos.keys().cloned().collect();
+        let mut changed = false;
+        for repo in repos {
+            changed |= reconcile_deeds(&mut book, &repo);
+        }
+        if !changed {
+            continue;
+        }
+        let repos: Vec<String> = book.repos.keys().cloned().collect();
+        for repo in repos {
+            let Some(row) = book.repos.get(&repo) else {
+                continue;
+            };
+            if !row.finished || row.lesson {
+                continue;
+            }
+            let Some(issue) = row.issue.clone() else {
+                continue;
+            };
+            let title = title_from(&book.prompt, &repo);
+            let deeds = row.deeds.clone();
+            let failures = row.failures.clone();
+            let asks = row.asks.clone();
+            match write_lesson(&issue, &title, &deeds, &failures, &asks) {
+                Ok(()) => {
+                    if let Some(row) = book.repos.get_mut(&repo) {
+                        row.lesson = true;
+                    }
+                }
+                Err(e) => log_line(&format!("lesson: {e}")),
+            }
+        }
+        store_book(&path, &book);
+    }
+}
+
+fn book_files() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(super::runtime_dir()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("book-") && name.ends_with(".json") {
+            out.push(entry.path());
+        }
+    }
+    out
+}
+
+/// Drop deed shas that are not ancestors of HEAD, then cite HEAD when the
+/// sitting had cited one that never landed. `false` when nothing changed,
+/// or when git could not say.
+fn reconcile_deeds(book: &mut Book, repo: &str) -> bool {
+    let Some(row) = book.repos.get(repo) else {
+        return false;
+    };
+    if row.deeds.is_empty() || row.issue.is_none() {
+        return false;
+    }
+    let mut kept = Vec::new();
+    for sha in &row.deeds {
+        match sha_landed(repo, sha) {
+            Some(true) => kept.push(sha.clone()),
+            Some(false) => {}
+            None => return false,
+        }
+    }
+    if kept.len() == row.deeds.len() {
+        return false;
+    }
+    if let Some(row) = book.repos.get_mut(repo) {
+        row.deeds = kept;
+        row.lesson = false;
+    }
+    let _ = ensure_deed(book, repo);
+    true
+}
+
+/// `Some` when git could answer. `None` when this directory is not a
+/// checkout, so a missing git does not wipe a deed.
+fn sha_landed(repo: &str, sha: &str) -> Option<bool> {
+    match run_timed(
+        "git",
+        &["-C", repo, "merge-base", "--is-ancestor", sha, "HEAD"],
+        &[],
+    ) {
+        Ok(_) => Some(true),
+        Err(e) => {
+            let text = format!("{e:#}");
+            if text.contains("not a git repository") || text.contains("not on PATH") {
+                None
+            } else {
+                Some(false)
+            }
+        }
+    }
+}
+
 fn head_sha(repo: &str) -> Result<String, String> {
     let said =
         run_timed("git", &["-C", repo, "rev-parse", "HEAD"], &[]).map_err(|e| e.to_string())?;
@@ -1024,15 +1169,14 @@ fn head_sha(repo: &str) -> Result<String, String> {
 fn finish_open(book: &mut Book) {
     let repos: Vec<String> = book.repos.keys().cloned().collect();
     for repo in repos {
+        let _ = reconcile_deeds(book, &repo);
         let Some(row) = book.repos.get(&repo) else {
             continue;
         };
-        if row.finished {
-            continue;
-        }
         let Some(issue) = row.issue.clone() else {
             continue;
         };
+        let finished = row.finished;
         if !row.lesson {
             let title = title_from(&book.prompt, &repo);
             let deeds = row.deeds.clone();
@@ -1046,6 +1190,9 @@ fn finish_open(book: &mut Book) {
                 }
                 Err(e) => log_line(&format!("lesson: {e}")),
             }
+        }
+        if finished {
+            continue;
         }
         match close_issue(&issue) {
             Ok(()) => {
@@ -1141,11 +1288,34 @@ fn write_lesson(
     let text = lesson_text(title, issue, shas, failures, asks);
     super::packset_write_agent("Remember", &text, None, Some(false))
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| noted_err(&e))
 }
 
-/// At most two sentences, each under thirty words. The pack refuses a
-/// third sentence and a sentence of thirty words or more.
+/// The error and its causes, so a refused `POST /v1/atoms` keeps the HTTP
+/// status and the body. `Display` on the context alone drops both.
+fn noted_err(err: &anyhow::Error) -> String {
+    let mut out = String::new();
+    for cause in err.chain() {
+        let text = cause.to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(": ");
+        }
+        out.push_str(&text);
+    }
+    if out.is_empty() {
+        err.to_string()
+    } else {
+        out
+    }
+}
+
+/// At most two short sentences. The pack refuses a third sentence, a
+/// sentence of thirty words or more, and a readability grade past 14 once
+/// the text has twelve words. The title is what the next prompt is recalled
+/// by, so its short words stay and its long ones go until the gate accepts.
 fn lesson_text(
     title: &str,
     issue: &str,
@@ -1153,58 +1323,63 @@ fn lesson_text(
     failures: &[String],
     asks: &[String],
 ) -> String {
-    let title = clip_words(&title.replace(['.', '!', '?'], " "), 8);
-    let title = if title.is_empty() {
-        "agent work".to_string()
-    } else {
-        title
-    };
+    let issue = issue.trim();
     let shas: Vec<String> = shas
         .iter()
         .take(3)
-        .map(|sha| sha.chars().take(7).collect())
+        .map(|sha| sha.chars().take(7).collect::<String>())
+        .filter(|sha| !sha.is_empty())
         .collect();
-    let first = if shas.is_empty() {
-        format!("{title} ({issue}) closed with no commit.")
-    } else {
-        format!("{title} ({issue}) committed {}.", shas.join(" "))
+    let second = match (failures.first(), asks.first()) {
+        (Some(_), Some(_)) => "A tool failed and the guard asked.",
+        (Some(_), None) => "A tool failed.",
+        (None, Some(_)) => "The guard asked.",
+        (None, None) => "",
     };
-    let fail = failures.first().map(|text| clip_words(text, 6));
-    let ask = asks.first().map(|text| clip_words(text, 6));
-    let second = match (fail, ask) {
-        (Some(fail), Some(ask)) => {
-            format!("A tool failed ({fail}) and the guard asked ({ask}).")
+    let mut words: Vec<&str> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(8)
+        .collect();
+    loop {
+        let text = lesson_sentence(&words, issue, &shas, second);
+        if words.is_empty() || lesson_prose_ok(&text) {
+            return text;
         }
-        (Some(fail), None) => format!("A tool failed: {fail}."),
-        (None, Some(ask)) => format!("The guard asked: {ask}."),
-        (None, None) => String::new(),
+        let drop_at = words
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, w)| (w.len(), *i))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        words.remove(drop_at);
+    }
+}
+
+fn lesson_sentence(words: &[&str], issue: &str, shas: &[String], second: &str) -> String {
+    let head = words.join(" ");
+    let first = if shas.is_empty() {
+        if head.is_empty() {
+            format!("Work {issue} closed.")
+        } else {
+            format!("{head} ({issue}) closed.")
+        }
+    } else if head.is_empty() {
+        format!("Work {issue} committed {}.", shas.join(" "))
+    } else {
+        format!("{head} ({issue}) committed {}.", shas.join(" "))
     };
-    let first = fit_sentence(&first);
     if second.is_empty() {
         first
     } else {
-        format!("{first} {}", fit_sentence(&second))
+        format!("{first} {second}")
     }
 }
 
-fn clip_words(text: &str, n: usize) -> String {
-    text.split_whitespace()
-        .take(n)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn fit_sentence(text: &str) -> String {
-    let mut words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() <= 29 {
-        return text.to_string();
-    }
-    words.truncate(28);
-    let mut out = words.join(" ");
-    if !out.ends_with('.') {
-        out.push('.');
-    }
-    out
+/// The pack's prose gate for one atom. A lesson that fails it is not stored,
+/// and the next session then has nothing to recall.
+fn lesson_prose_ok(text: &str) -> bool {
+    packset_core::prose_refuse(text, packset_core::ProseRole::Atom).is_ok()
 }
 
 fn title_from(prompt: &str, repo: &str) -> String {
@@ -1290,9 +1465,10 @@ fn recall_line(issue: &str) -> String {
 }
 
 /// A post-tool result whose command finished cleanly. A missing exit on
-/// PostToolUse is success. An error string, a non-zero exit, or a guard
-/// refusal (`deny` or `ask`) is not, so a commit the guard stopped does
-/// not cite the previous HEAD.
+/// PostToolUse is success. A non-zero exit, or a guard refusal (`deny` or
+/// `ask`), is not, so a commit the guard stopped does not cite the previous
+/// HEAD. An explicit zero wins over an error string: some runners put the
+/// command's stderr there even when git exited 0.
 fn tool_exit_ok(raw: &Value) -> bool {
     if raw
         .pointer("/tool_response/interrupted")
@@ -1301,9 +1477,16 @@ fn tool_exit_ok(raw: &Value) -> bool {
     {
         return false;
     }
-    if refusal_signal(raw) {
+    if permission_block(raw) {
         return false;
     }
+    if let Some(code) = explicit_exit(raw) {
+        return code == 0;
+    }
+    !refusal_signal(raw)
+}
+
+fn explicit_exit(raw: &Value) -> Option<i64> {
     let slots = [
         raw.get("exit_code"),
         raw.get("exit"),
@@ -1314,20 +1497,19 @@ fn tool_exit_ok(raw: &Value) -> bool {
     ];
     for slot in slots.into_iter().flatten() {
         if let Some(code) = slot.as_i64() {
-            return code == 0;
+            return Some(code);
         }
         if let Some(code) = slot.as_str() {
-            return code.trim() == "0";
+            return code.trim().parse().ok();
         }
     }
-    raw.pointer("/tool_response/error")
-        .and_then(Value::as_str)
-        .is_none_or(|text| text.trim().is_empty())
+    None
 }
 
-/// A guard or a tool that already refused this call. A missing exit is
-/// not one of these: silent PostToolUse stays a success.
-fn refusal_signal(raw: &Value) -> bool {
+/// A guard that already refused this call. A missing exit is not one of
+/// these: silent PostToolUse stays a success. An error string is not a
+/// guard decision; [`tool_exit_ok`] reads it only when no exit was given.
+fn permission_block(raw: &Value) -> bool {
     let decisions = [
         raw.get("permissionDecision"),
         raw.get("permission_decision"),
@@ -1335,12 +1517,17 @@ fn refusal_signal(raw: &Value) -> bool {
         raw.pointer("/tool_response/permissionDecision"),
         raw.get("decision"),
     ];
-    for slot in decisions.into_iter().flatten() {
-        if let Some(word) = slot.as_str() {
-            if matches!(word.trim(), "deny" | "ask" | "block") {
-                return true;
-            }
-        }
+    decisions.into_iter().flatten().any(|slot| {
+        slot.as_str()
+            .is_some_and(|word| matches!(word.trim(), "deny" | "ask" | "block"))
+    })
+}
+
+/// A guard or a tool that already refused this call. A missing exit is
+/// not one of these: silent PostToolUse stays a success.
+fn refusal_signal(raw: &Value) -> bool {
+    if permission_block(raw) {
+        return true;
     }
     if raw.get("is_error").and_then(Value::as_bool) == Some(true)
         || raw.get("isError").and_then(Value::as_bool) == Some(true)
@@ -1599,6 +1786,7 @@ fn run_timed(bin: &str, args: &[&str], env: &[(&str, &str)]) -> anyhow::Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn lock() -> crate::EnvLock {
         crate::test_env_lock()
@@ -2490,6 +2678,515 @@ print(f"id={ident}")
         }
         assert!(text.contains("probe-0001"), "{text}");
         assert!(text.contains(&first[..7]), "{text}");
+        assert_lesson(&text);
+    }
+
+    /// ljos-myow: a refused lesson names the HTTP status and the response
+    /// body, and a lesson the pack will keep is one its prose gate accepts.
+    #[test]
+    fn lesson_post_names_status_and_passes_the_prose_gate() {
+        let hard =
+            "Implement asynchronous reconciliation of cryptographic attestations for the seat";
+        let text = lesson_text(
+            hard,
+            "probe-0001",
+            &["abcdef0123456789".into()],
+            &["the writer said the sentence was far too long to store".into()],
+            &["the guard asked before a force push".into()],
+        );
+        assert_lesson(&text);
+        assert!(text.contains("probe-0001"), "{text}");
+        assert!(text.contains("abcdef0"), "{text}");
+        assert!(
+            !text.contains(hard),
+            "a title the gate would refuse is shortened: {text}"
+        );
+        let plain = lesson_text(
+            "Add a readme line",
+            "probe-0001",
+            &[],
+            &["readme test failed".into()],
+            &["git push --force origin main".into()],
+        );
+        assert_lesson(&plain);
+        assert!(
+            plain.contains("Add a readme line"),
+            "the subject stays so the next prompt can recall it: {plain}"
+        );
+
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let refused = serve_pack(|_| {
+            (
+                400,
+                r#"{"error":"readability grade 19.4 exceeds 14"}"#.into(),
+            )
+        });
+        set_var("PACKSET_URL", &refused);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+        let session = "myow-refused";
+        prompt_and_edit(&repo, session, hard);
+        let sha = commit_file(&repo, "README.md", "hello from the lesson\n");
+        let (post, post_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m land"}, "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&post, &post_call);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+        let log = std::fs::read_to_string(dir.path().join("run/ljos/book.log")).unwrap();
+        assert!(log.contains("Remember: POST /v1/atoms failed"), "{log}");
+        assert!(log.contains("400:"), "{log}");
+        assert!(log.contains("readability grade 19.4 exceeds 14"), "{log}");
+        let refused_book = book_json(dir.path(), session);
+        assert_eq!(
+            refused_book["repos"]
+                .as_object()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap()["lesson"],
+            false,
+            "{refused_book}"
+        );
+
+        let texts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = serve_pack({
+            let texts = Arc::clone(&texts);
+            move |req| keep_atom(req, &texts)
+        });
+        set_var("PACKSET_URL", &kept);
+        let session = "myow-kept";
+        prompt_and_edit(&repo, session, hard);
+        let (post, post_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m land"}, "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&post, &post_call);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+        let stored = texts.lock().unwrap().clone();
+        let lesson = stored.last().expect("the lesson was posted");
+        assert_lesson(lesson);
+        assert!(lesson.contains(&sha[..7]), "{lesson}");
+        assert!(!lesson.contains(hard), "{lesson}");
+        let kept_book = book_json(dir.path(), session);
+        assert_eq!(
+            kept_book["repos"]
+                .as_object()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap()["lesson"],
+            true,
+            "{kept_book}"
+        );
+    }
+
+    /// ljos-6x14: agy sends no event name. Onboarding tells the after-command
+    /// hook `--event PostToolUse`, and a payload that carries `error` is
+    /// that same return when the flag is absent. Either way the commit is cited.
+    #[test]
+    fn agy_commit_without_an_event_name_is_cited() {
+        let spec = crate::named_hook_spec("ljos");
+        let command = spec["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.contains("--event PostToolUse"), "{command}");
+        let entering = r#"{"conversationId":"agy","toolCall":{"args":{"CommandLine":"git add README.md && git commit -m land"}}}"#;
+        let before = crate::hook_call(entering);
+        assert_eq!(before.event, "PreToolUse");
+        assert_eq!(before.cue, "git add README.md && git commit -m land");
+        let returning = r#"{"conversationId":"agy","toolCall":{"args":{"CommandLine":"git add README.md && git commit -m land"}},"error":""}"#;
+        let after = crate::hook_call(returning);
+        assert_eq!(after.event, "PostToolUse");
+        assert_eq!(after.cue, before.cue);
+
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let session = "agy-deed";
+        let cwd = repo.to_str().unwrap();
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Add a readme line"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        let pre = serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "toolCall": {"args": {"CommandLine": "git add README.md && git commit -m land"}},
+        });
+        let pre_text = pre.to_string();
+        let pre_call = crate::hook_call(&pre_text);
+        assert_eq!(pre_call.event, "PreToolUse");
+        let _ = observe(&pre_text, &pre_call);
+        assert!(
+            std::fs::read_to_string(tracker.join("deedar.log"))
+                .unwrap_or_default()
+                .is_empty(),
+            "the way in does not cite a commit that has not run"
+        );
+        let sha = commit_file(&repo, "README.md", "hello from agy\n");
+        let post = serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "toolCall": {"args": {"CommandLine": "git add README.md && git commit -m land"}},
+            "error": "",
+        });
+        let post_text = post.to_string();
+        let post_call = crate::hook_call(&post_text);
+        assert_eq!(post_call.event, "PostToolUse");
+        let _ = observe(&post_text, &post_call);
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+        let book = book_json(dir.path(), session);
+        let deeds = deeds_of(&book);
+        assert_eq!(deeds, vec![sha], "{book}");
+    }
+
+    /// ljos-qpiw: git's own stderr on exit 0 is still a commit to cite.
+    /// A non-zero exit is not.
+    #[test]
+    fn successful_commit_with_stderr_text_is_cited() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, _tracker, repo) = scratch();
+        arm(dir.path(), &_tracker);
+        let session = "qpiw";
+        prompt_and_edit(&repo, session, "Add a readme line");
+        let sha = commit_file(&repo, "README.md", "hello from cloudflare\n");
+        let (post, post_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({
+                "tool_name": "bash",
+                "tool_input": {"command": "git add README.md && git commit -m 'land a line'"},
+                "tool_response": {
+                    "output": "1 file changed, 1 insertion(+)",
+                    "error": "1 file changed, 1 insertion(+)",
+                    "exit_code": 0
+                }
+            }),
+        );
+        let _ = observe(&post, &post_call);
+        let book = book_json(dir.path(), session);
+        assert_eq!(deeds_of(&book), vec![sha.clone()], "{book}");
+        git(
+            &repo,
+            &["commit", "--allow-empty", "-m", "a failed attempt"],
+        );
+        let missed = head_sha_of(&repo);
+        let (failed, failed_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({
+                "tool_name": "bash",
+                "tool_input": {"command": "git commit --allow-empty -m 'a failed attempt'"},
+                "tool_response": {"error": "nothing to commit", "exit_code": 1}
+            }),
+        );
+        let _ = observe(&failed, &failed_call);
+        let book = book_json(dir.path(), session);
+        let deeds = deeds_of(&book);
+        assert!(deeds.contains(&sha), "{book}");
+        assert!(!deeds.contains(&missed), "{book}");
+        let quiet = commit_file(&repo, "quiet.txt", "no exit field\n");
+        let (stderr_only, stderr_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({
+                "tool_name": "bash",
+                "tool_input": {"command": "git commit -m quiet"},
+                "tool_response": {"error": "1 file changed, 1 insertion(+)"}
+            }),
+        );
+        let _ = observe(&stderr_only, &stderr_call);
+        let book = book_json(dir.path(), session);
+        assert!(
+            !deeds_of(&book).contains(&quiet),
+            "stderr without an exit is not a clean commit: {book}"
+        );
+    }
+
+    /// ljos-tha1: a session killed before Stop leaves its claim open.
+    /// The next session finishes a book whose runner pid is dead.
+    #[test]
+    fn dead_runner_claims_finish_at_the_next_session() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let gone = dead_pid();
+        for session in ["dead-a", "dead-b"] {
+            prompt_and_edit(&repo, session, "Add a readme line");
+            set_owner(dir.path(), session, gone);
+        }
+        prompt_and_edit(&repo, "live-one", "still running");
+        let (start, start_call) = payload(
+            "UserPromptSubmit",
+            "next-sitting",
+            &repo,
+            serde_json::json!({"prompt": "a later sitting"}),
+        );
+        let _ = observe(&start, &start_call);
+        for session in ["dead-a", "dead-b"] {
+            let book = book_json(dir.path(), session);
+            let row = book["repos"].as_object().unwrap().values().next().unwrap();
+            assert_eq!(row["finished"], true, "{session}: {book}");
+        }
+        let live = book_json(dir.path(), "live-one");
+        let row = live["repos"].as_object().unwrap().values().next().unwrap();
+        assert_eq!(row["finished"], false, "{live}");
+        assert_eq!(
+            git_log(&tracker).matches("finished").count(),
+            2,
+            "{}",
+            git_log(&tracker)
+        );
+    }
+
+    /// ljos-gfiz: a cited commit that never landed is replaced by the
+    /// commit that did, and the lesson names that one.
+    #[test]
+    fn deed_follows_the_commit_that_landed() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let texts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kept = serve_pack({
+            let texts = Arc::clone(&texts);
+            move |req| keep_atom(req, &texts)
+        });
+        set_var("PACKSET_URL", &kept);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+        let session = "gfiz";
+        prompt_and_edit(&repo, session, "Add a readme line");
+        let abandoned = commit_file(&repo, "README.md", "hello from the first sha\n");
+        let (post, post_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m 'land a line'"}, "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&post, &post_call);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+        git(&repo, &["commit", "--amend", "-m", "landed"]);
+        let landed = head_sha_of(&repo);
+        assert_ne!(abandoned, landed);
+        let (next, next_call) = payload(
+            "UserPromptSubmit",
+            "gfiz-next",
+            &repo,
+            serde_json::json!({"prompt": "next sitting"}),
+        );
+        let _ = observe(&next, &next_call);
+        let book = book_json(dir.path(), session);
+        assert_eq!(deeds_of(&book), vec![landed.clone()], "{book}");
+        let stored = texts.lock().unwrap().clone();
+        let lesson = stored.last().expect("a lesson was posted");
+        assert!(lesson.contains(&landed[..7]), "{lesson}");
+        assert!(!lesson.contains(&abandoned[..7]), "{lesson}");
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(org.contains(&format!("deed-file-commit-{landed}")), "{org}");
+    }
+
+    fn saved_env() -> Restore {
+        Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "PACKSET_TIMEOUT_MS",
+        ])
+    }
+
+    fn set_var(key: &str, value: &str) {
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    fn head_sha_of(repo: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit_file(repo: &Path, name: &str, body: &str) -> String {
+        std::fs::write(repo.join(name), body).unwrap();
+        git(repo, &["add", name]);
+        git(repo, &["commit", "-q", "-m", name]);
+        head_sha_of(repo)
+    }
+
+    fn prompt_and_edit(repo: &Path, session: &str, prompt: &str) {
+        let (raw, call) = payload(
+            "UserPromptSubmit",
+            session,
+            repo,
+            serde_json::json!({"prompt": prompt}),
+        );
+        let _ = observe(&raw, &call);
+        let (raw, call) = payload(
+            "PreToolUse",
+            session,
+            repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        );
+        let _ = observe(&raw, &call);
+    }
+
+    fn book_json(dir: &Path, session: &str) -> Value {
+        let path = dir.join(format!(
+            "run/ljos/book-{}.json",
+            crate::session_tag(session)
+        ));
+        serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("no book for {session} at {}", path.display())),
+        )
+        .unwrap()
+    }
+
+    fn deeds_of(book: &Value) -> Vec<String> {
+        book["repos"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|row| {
+                row["deeds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+            })
+            .collect()
+    }
+
+    fn set_owner(dir: &Path, session: &str, pid: u32) {
+        let path = dir.join(format!(
+            "run/ljos/book-{}.json",
+            crate::session_tag(session)
+        ));
+        let mut book: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        book["owner_pid"] = serde_json::json!(pid);
+        std::fs::write(&path, serde_json::to_string(&book).unwrap()).unwrap();
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let _ = child.wait();
+        assert!(!crate::pid_alive(pid), "pid {pid} is still alive");
+        pid
+    }
+
+    fn assert_lesson(text: &str) {
+        let mut atom = serde_json::json!({
+            "kind": "lesson",
+            "text": text,
+            "workspace": "seat",
+            "origin": "agent-derived",
+        });
+        let map = atom.as_object_mut().expect("atom");
+        if let Err(e) = packset_core::record::validate(map) {
+            panic!("{text}: {e}");
+        }
+    }
+
+    fn serve_pack(on: impl Fn(&str) -> (u16, String) + Send + 'static) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                while let Ok(n) = stream.read(&mut tmp) {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let mut need = 0usize;
+                    for line in buf[..at].split(|b| *b == b'\n') {
+                        let line = std::str::from_utf8(line).unwrap_or("").trim();
+                        let Some((name, value)) = line.split_once(':') else {
+                            continue;
+                        };
+                        if name.eq_ignore_ascii_case("content-length") {
+                            need = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    if buf.len().saturating_sub(at + 4) >= need {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf).into_owned();
+                let (code, body) = on(&req);
+                let status = if code == 200 {
+                    "200 OK"
+                } else {
+                    "400 Bad Request"
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn keep_atom(req: &str, texts: &Mutex<Vec<String>>) -> (u16, String) {
+        let path = req.lines().next().unwrap_or("");
+        let body = req
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or("");
+        if path.contains("POST /v1/atoms") {
+            let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+            if let Some(text) = atom["text"].as_str() {
+                texts.lock().unwrap().push(text.to_string());
+            }
+            return (
+                200,
+                r#"{"id":"atom-1","kind":"lesson","origin":"agent-derived"}"#.into(),
+            );
+        }
+        (200, "{}".into())
     }
 
     fn git_log(tracker: &Path) -> String {

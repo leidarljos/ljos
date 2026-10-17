@@ -2742,6 +2742,7 @@ dependencies = [
  "hex",
  "libc",
  "packset-client",
+ "packset-core",
  "regex-automata",
  "rmcp",
  "schemars",

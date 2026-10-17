@@ -77,6 +77,9 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   // A before-hook refusal still reaches execute.after on some builds.
   // Remember it so the after hook does not look like a clean commit.
   const blocked = new Map<string, string>()
+  // The before hook sees the command. Some builds do not put it on the
+  // after hook's input, and the deed still has to be cited.
+  const commands = new Map<string, string>()
   const blockKey = (sessionID: string | undefined, tool: string) =>
     `${sessionID ?? ""}:${tool}`
   return {
@@ -123,6 +126,7 @@ export const LjosSeat: Plugin = async ({ directory }) => {
     const seat = seatTool(input.tool)
     if (!seat) return
     const command = output.args?.command
+    if (typeof command === "string") commands.set(blockKey(input.sessionID, input.tool), command)
     if (seat.bash && typeof command !== "string") return
     const a = await hook({
       session_id: input.sessionID,
@@ -155,17 +159,19 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   "tool.execute.after": async (input, output) => {
     const seat = seatTool(input.tool)
     if (!seat) return
-    const args = input.args ?? output?.args ?? {}
-    const command = args.command
-    if (seat.bash && typeof command !== "string") return
     const key = blockKey(input.sessionID, input.tool)
+    const args = input.args ?? (output && typeof output === "object" ? output.args : undefined) ?? {}
+    let command = typeof args.command === "string" ? args.command : commands.get(key)
+    commands.delete(key)
+    if (seat.bash && typeof command !== "string") return
     const verdict = blocked.get(key)
     if (verdict) blocked.delete(key)
     const meta = output?.metadata ?? {}
     const exit = meta.exit ?? meta.exitCode ?? meta.exit_code
-    const error =
-      (typeof output?.error === "string" && output.error) ||
-      (verdict ? `ljos: ${verdict}` : "")
+    // A zero exit still cites the commit. stderr on that exit is not a failure.
+    const knownFail = exit !== undefined && exit !== null && String(exit) !== "0"
+    const rawError = typeof output?.error === "string" ? output.error : ""
+    const error = verdict ? `ljos: ${verdict}` : knownFail ? rawError || `exit ${exit}` : ""
     const tool_response: Record<string, unknown> = {}
     if (exit !== undefined && exit !== null) tool_response.exit_code = exit
     if (error) tool_response.error = error

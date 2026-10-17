@@ -83,6 +83,13 @@ export default Plugin.define({
     const held = new Map<string, string>()
     // Sessions that have heard the start line. The first prompt carries it.
     const started = new Set<string>()
+    // A before-hook refusal still reaches execute.after on some builds.
+    const blocked = new Map<string, string>()
+    // The before hook sees the command. The after hook cites the commit
+    // from it when the result does not carry the args.
+    const commands = new Map<string, string>()
+    const blockKey = (sessionID: string | undefined, tool: string) =>
+      `${sessionID ?? ""}:${tool}`
 
     await ctx.shell.hook("create.before", (event: any) => {
       const id = event.sessionID ?? event.session?.id
@@ -117,6 +124,8 @@ export default Plugin.define({
       const seat = seatTool(event.tool)
       if (!seat) return
       const command = (event.input as { command?: unknown })?.command
+      const key = blockKey(event.sessionID ?? event.session?.id, event.tool)
+      if (typeof command === "string") commands.set(key, command)
       if (seat.bash && typeof command !== "string") return
       const a = await hook({
         session_id: event.sessionID ?? event.session?.id,
@@ -126,14 +135,50 @@ export default Plugin.define({
         cwd: (event.input as { workdir?: string })?.workdir ?? cwd,
       })
       if (!seat.bash) return
-      if (!a.ok) throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+      if (!a.ok) {
+        blocked.set(key, "deny")
+        throw new Error(`ljos: refused, the gate did not answer: ${a.why}`)
+      }
       const verdict = a.out?.permissionDecision
+      if (verdict === "deny" || verdict === "ask") blocked.set(key, verdict)
       if (verdict === "deny") throw new Error(`ljos: denied: ${a.out.permissionDecisionReason}`)
       if (verdict === "ask")
         throw new Error(
           `ljos: needs the person's approval: ${a.out.permissionDecisionReason}. ` +
             `Ask them; do not retry until they say yes.`,
         )
+    })
+
+    // The commit is cited here, after it exits. A zero exit still cites it
+    // when the result also carries stderr.
+    await ctx.tool.hook("execute.after", async (event: any) => {
+      const seat = seatTool(event.tool)
+      if (!seat) return
+      const key = blockKey(event.sessionID ?? event.session?.id, event.tool)
+      const verdict = blocked.get(key)
+      if (verdict) blocked.delete(key)
+      const args = event.args ?? event.input ?? {}
+      let command = typeof args.command === "string" ? args.command : commands.get(key)
+      commands.delete(key)
+      if (seat.bash && typeof command !== "string") return
+      const output = event.output ?? {}
+      const meta = output.metadata ?? {}
+      const exit = meta.exit ?? meta.exitCode ?? meta.exit_code
+      const knownFail = exit !== undefined && exit !== null && String(exit) !== "0"
+      const rawError = typeof output.error === "string" ? output.error : ""
+      const error = verdict ? `ljos: ${verdict}` : knownFail ? rawError || `exit ${exit}` : ""
+      const tool_response: Record<string, unknown> = {}
+      if (exit !== undefined && exit !== null) tool_response.exit_code = exit
+      if (error) tool_response.error = error
+      await hook({
+        session_id: event.sessionID ?? event.session?.id,
+        hook_event_name: "PostToolUse",
+        tool_name: seat.tool,
+        tool_input: seat.bash ? { command } : args,
+        cwd: args.workdir ?? cwd,
+        ...(verdict ? { permissionDecision: verdict } : {}),
+        ...(Object.keys(tool_response).length ? { tool_response } : {}),
+      })
     })
 
     const stop = new AbortController()
