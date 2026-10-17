@@ -232,6 +232,7 @@ enum Cmd {
         valid_to: Option<String>,
     },
     /// Prefer one way over another, as a standing preference. Stored as written.
+    /// `--user` writes a user rule instead: shared by every seat, never reviewed.
     Prefer {
         text: Vec<String>,
         /// Prefer as this persona.
@@ -243,6 +244,27 @@ enum Cmd {
         /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
         #[arg(long, value_name = "PATTERN")]
         ask: Vec<String>,
+        /// Write a user rule in the user config, shared by every seat on this machine. It does not decay and it is not also stored as a seat preference.
+        #[arg(long)]
+        user: bool,
+        /// Why this user rule stands. Required with `--user`.
+        #[arg(long)]
+        why: Option<String>,
+        /// Promote this lesson id into a user rule. The lesson stays in the pack. Pass `--user`.
+        #[arg(long, value_name = "ID")]
+        promote: Option<String>,
+        /// Deny an outbound post whose body mentions this GitHub login. Repeatable. Used with `--user`.
+        #[arg(long = "deny-mention", value_name = "HANDLE")]
+        deny_mention: Vec<String>,
+        /// Deny an outbound post whose body names this person. Repeatable. Used with `--user`.
+        #[arg(long = "deny-name", value_name = "NAME")]
+        deny_name: Vec<String>,
+        /// Deny a reply aimed at this GitHub login. Repeatable. Used with `--user`.
+        #[arg(long = "deny-reply-to", value_name = "HANDLE")]
+        deny_reply_to: Vec<String>,
+        /// Deny a reply aimed at this person. Repeatable. Used with `--user`.
+        #[arg(long = "deny-reply-name", value_name = "NAME")]
+        deny_reply_name: Vec<String>,
     },
     /// Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer.
     Memories {
@@ -768,6 +790,7 @@ enum Cmd {
         as_persona: Option<String>,
     },
     /// Argv law kept in the pack: a glob over the command line with a verdict the hook and `policy` enforce.
+    /// `--user` keeps the same law in the user config, shared by every seat and never reviewed.
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
@@ -780,6 +803,9 @@ enum Cmd {
         /// Print the atom JSON. The default is one line: id, kind, due, text.
         #[arg(long)]
         json: bool,
+        /// Write the rule into the user config instead of the seat pack.
+        #[arg(long)]
+        user: bool,
     },
     /// The seat rules the hook and `policy` judge by: verdict, pattern and reason, one a line.
     Rules {
@@ -1171,7 +1197,55 @@ fn run_command() -> Result<()> {
             as_persona,
             deny,
             ask,
+            user,
+            why,
+            promote,
+            deny_mention,
+            deny_name,
+            deny_reply_to,
+            deny_reply_name,
         } => {
+            if user {
+                if !deny.is_empty() || !ask.is_empty() {
+                    bail!(
+                        "prefer: a user rule takes no --deny or --ask. \
+                         `ljos rule --user PATTERN --verdict deny --why REASON` writes the command pattern"
+                    );
+                }
+                if as_persona.is_some() {
+                    bail!("prefer: a user rule is this user's, not one persona's. Drop --as");
+                }
+                let why = why.as_deref().unwrap_or("");
+                let mention = ljos_cli::user_rules::People {
+                    handles: deny_mention,
+                    names: deny_name,
+                };
+                let reply = ljos_cli::user_rules::People {
+                    handles: deny_reply_to,
+                    names: deny_reply_name,
+                };
+                let rule = if let Some(id) = promote {
+                    if !text.is_empty() {
+                        bail!("prefer: pass the lesson id with --promote, or the words, not both");
+                    }
+                    ljos_cli::user_rules::promote_lesson(&id, why, &mention, &reply)?
+                } else {
+                    ljos_cli::user_rules::write_preference(&join(&text), why, &mention, &reply)?
+                };
+                println!("{}", ljos_cli::user_rules::ack(&rule));
+                return Ok(());
+            }
+            if why.is_some()
+                || promote.is_some()
+                || !deny_mention.is_empty()
+                || !deny_name.is_empty()
+                || !deny_reply_to.is_empty()
+                || !deny_reply_name.is_empty()
+            {
+                bail!(
+                    "prefer: --why, --promote and the mention flags write a user rule. Pass --user"
+                );
+            }
             let text = join(&text);
             let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
             // A preference that forbids a command it can name carries an
@@ -1911,19 +1985,44 @@ fn run_command() -> Result<()> {
             verdict,
             why,
             json,
+            user,
         } => {
-            let body = write_rule(&Rule {
-                pattern,
-                verdict,
-                reason: why,
-            })?;
-            println!("{}", ljos_cli::atom_out(&body, json)?);
+            if user {
+                let rule = ljos_cli::user_rules::write_argv(&Rule {
+                    pattern,
+                    verdict,
+                    reason: why,
+                })?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&ljos_cli::user_rules::to_value(&rule))?
+                    );
+                } else {
+                    println!("{}", ljos_cli::user_rules::ack(&rule));
+                }
+            } else {
+                let body = write_rule(&Rule {
+                    pattern,
+                    verdict,
+                    reason: why,
+                })?;
+                println!("{}", ljos_cli::atom_out(&body, json)?);
+            }
         }
         Cmd::Rules { json } => {
-            print!(
-                "{}",
-                ljos_cli::format_rules(&ljos_cli::rules_from_pack()?, json)
-            );
+            match ljos_cli::rules_from_pack() {
+                Ok(rules) => print!("{}", ljos_cli::format_rules(&rules, json)),
+                Err(err) => {
+                    if ljos_cli::user_rules::load().unwrap_or_default().is_empty() {
+                        return Err(err);
+                    }
+                    eprintln!("ljos: seat rules: {err:#}");
+                }
+            }
+            if !json {
+                print!("{}", ljos_cli::user_rules::format_list());
+            }
         }
         Cmd::Approve { id } => {
             print!("{}", ljos_cli::approval::approve(&id)?);
@@ -2096,7 +2195,13 @@ fn run_command() -> Result<()> {
             if on_tool {
                 let _ = ljos_cli::take_guard_note();
             }
-            let fast = on_tool.then(|| ljos_cli::static_guard(&call.cue)).flatten();
+            let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
+                .then(|| ljos_cli::user_rules::guard_payload(&input))
+                .flatten();
+            let fast = on_tool
+                .then(|| ljos_cli::static_guard(&call.cue))
+                .flatten()
+                .or(posted);
             let (rules, preferences) = if on_tool && fast.is_none() {
                 ljos_cli::gate_read()
             } else {

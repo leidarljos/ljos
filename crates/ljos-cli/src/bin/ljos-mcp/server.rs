@@ -487,6 +487,41 @@ pub struct RuleArgs {
     pub verdict: String,
     /// The reason a stopped reader sees.
     pub why: String,
+    /// Write a user rule, shared by every seat and never reviewed, instead of a seat rule.
+    #[serde(default)]
+    pub user: bool,
+}
+
+/// A standing preference, or, with `user`, a user rule.
+#[derive(Deserialize, JsonSchema)]
+pub struct PreferArgs {
+    /// The preference, or the user rule, as it will be stored. Empty when `promote` names a lesson.
+    #[serde(default)]
+    pub text: String,
+    /// Prefer as this persona. Not used with `user`.
+    #[serde(rename = "as")]
+    pub as_persona: Option<String>,
+    /// Write a user rule in the user config. It is shared by every seat, it never decays, and it is not also stored as a seat preference. Requires `why`.
+    #[serde(default)]
+    pub user: bool,
+    /// Why this user rule stands. Required when `user` is true.
+    #[serde(default)]
+    pub why: Option<String>,
+    /// Promote this lesson id into a user rule. The lesson stays in the pack. Requires `user`.
+    #[serde(default)]
+    pub promote: Option<String>,
+    /// GitHub logins an outbound post must not mention. Used when `user` is true.
+    #[serde(default)]
+    pub deny_mention: Vec<String>,
+    /// Names an outbound post must not mention. Used when `user` is true.
+    #[serde(default)]
+    pub deny_name: Vec<String>,
+    /// GitHub logins an outbound post must not reply to. Used when `user` is true.
+    #[serde(default)]
+    pub deny_reply_to: Vec<String>,
+    /// Names an outbound post must not reply to. Used when `user` is true.
+    #[serde(default)]
+    pub deny_reply_name: Vec<String>,
 }
 
 /// An option name, or a JSON object of option to share.
@@ -1168,7 +1203,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a choice between two ways was settled and should hold from now on: one standing preference, stored as given. A lesson that is not a choice is ljos_remember.",
+        description = "Call this when a choice between two ways was settled and should hold from now on: one standing preference, stored as given. A lesson that is not a choice is ljos_remember. Pass user true, with why, to write a user rule instead: it is shared by every seat, it never decays, and the guard can enforce deny_mention and deny_reply_to. Pass promote with a lesson id to copy that lesson into a user rule. Without user, this stays a seat preference.",
         annotations(
             title = "Prefer",
             read_only_hint = false,
@@ -1179,8 +1214,32 @@ impl LjosServer {
     )]
     async fn ljos_prefer(
         &self,
-        Parameters(args): Parameters<ClaimArgs>,
+        Parameters(args): Parameters<PreferArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+        if args.user {
+            let why = args.why.unwrap_or_default();
+            let mention = ljos_cli::user_rules::People {
+                handles: args.deny_mention,
+                names: args.deny_name,
+            };
+            let reply = ljos_cli::user_rules::People {
+                handles: args.deny_reply_to,
+                names: args.deny_reply_name,
+            };
+            let rule = if let Some(id) = args.promote {
+                if !args.text.trim().is_empty() {
+                    return Err(refused(anyhow::anyhow!(
+                        "prefer: pass the lesson id or the words, not both"
+                    )));
+                }
+                ljos_cli::user_rules::promote_lesson(&id, &why, &mention, &reply)
+            } else {
+                ljos_cli::user_rules::write_preference(&args.text, &why, &mention, &reply)
+            };
+            return rule
+                .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
+                .map_err(refused);
+        }
         packset_write_as(
             "Prefer",
             &args.text,
@@ -1979,7 +2038,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work has shown that a kind of command must never run, or must be asked about first: writes a rule to the pack, a glob over the command line with a verdict. The memory hook and `ljos policy` enforce it at the point of action, and it travels in handovers like any memory.",
+        description = "Call this when the work has shown that a kind of command must never run, or must be asked about first: writes a rule to the pack, a glob over the command line with a verdict. The memory hook and `ljos policy` enforce it at the point of action, and it travels in handovers like any memory. Pass user true to write that law into the user config instead, shared by every seat and never reviewed.",
         annotations(
             title = "Write a rule",
             read_only_hint = false,
@@ -1992,13 +2051,17 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<RuleArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
-        write_rule(&Rule {
+        let rule = Rule {
             pattern: args.pattern,
             verdict: args.verdict,
             reason: args.why,
-        })
-        .map(object)
-        .map_err(refused)
+        };
+        if args.user {
+            return ljos_cli::user_rules::write_argv(&rule)
+                .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
+                .map_err(refused);
+        }
+        write_rule(&rule).map(object).map_err(refused)
     }
 
     #[tool(
