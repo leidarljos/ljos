@@ -142,7 +142,7 @@ pub const SERVER_INSTRUCTIONS: &str = "\
 Pass seat on every call: your own bot name. It is required when this server has no LJOS_SEAT.
 Before any repo work, call ljos_start with the repo or the issue and the task. It recalls and claims.
 Call ljos_note and ljos_remember freely while you work.
-Call ljos_guard_check before a destructive shell command.
+Call ljos_guard_check before a destructive shell command, a git commit, a git push, or a merge.
 Call ljos_finish with the lesson when the task is done. It releases the claim, syncs, and pushes the tracker.
 The server also claims on the first write and finishes on shutdown or when the session goes idle.";
 
@@ -1703,7 +1703,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this before a destructive shell command. Pass the command line. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny.",
+        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny. A commit, push, or merge the gates refuse is an error that names what makes the line pass.",
         annotations(
             title = "Check a command",
             read_only_hint = true,
@@ -3451,6 +3451,34 @@ mod tests {
         assert_eq!(card_named("ljos://cards/NOTES.md"), None);
         assert_eq!(card_named("ljos://cards/../USER.md"), None);
         assert_eq!(card_named("file:///etc/passwd"), None);
+    }
+
+    /// The guard tool and the hook share one verdict. A denial is a tool
+    /// error, the same way every other refusal is.
+    #[tokio::test]
+    async fn guard_check_allows_an_ordinary_command_and_refuses_a_bad_commit() {
+        let server = LjosServer::at(std::env::temp_dir());
+        let allow = server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "ls".into(),
+            }))
+            .await
+            .expect("allow");
+        assert_eq!(allow.0.verdict, "allow");
+        let command = "GIT_AUTHOR_NAME='Rohit Goswami' GIT_AUTHOR_EMAIL=rgoswami@ieee.org \
+             GIT_COMMITTER_NAME='Rohit Goswami' GIT_COMMITTER_EMAIL=rgoswami@ieee.org \
+             git commit -m \"Co-authored-by: Cursor <c@c>\"";
+        let err = match server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: command.into(),
+            }))
+            .await
+        {
+            Err(err) => err,
+            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+        };
+        let said = format!("{err:?}");
+        assert!(said.contains("Co-authored-by"), "{said}");
     }
 
     /// The protocol is a resource every harness can read, and it names the
