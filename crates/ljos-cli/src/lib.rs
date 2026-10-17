@@ -33,6 +33,7 @@ pub mod sync;
 pub mod tools;
 mod tracker_push;
 pub mod upgrade;
+pub mod user_rules;
 pub mod wake;
 
 /// Working-core files this seat will print. Nothing else, and never write.
@@ -275,7 +276,7 @@ pub fn session_start_for(session: Option<&str>) -> String {
             line.push_str(&format!(" This session's issue is {issue}."));
         }
     }
-    line
+    user_rules::prepend(line)
 }
 
 fn session_atoms(ms: u64) -> Result<Vec<Value>> {
@@ -5823,7 +5824,7 @@ fn shown_on_prompt(hit: &Hit) -> bool {
 #[must_use]
 pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let (text, ids) = hook_note_from_pack(call, limit);
-    (with_issue_recall(call, text), ids)
+    (user_rules::prepend(with_issue_recall(call, text)), ids)
 }
 
 /// `text`, then the recall of each tracker issue (at most two) a prompt
@@ -8196,20 +8197,23 @@ fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Strin
         && STEPS_OPENS_CONVERSATION.load(std::sync::atomic::Ordering::Relaxed)
     {
         let line = session_start_for(call.session.as_deref());
-        opened = if context.is_empty() {
+        let rest = user_rules::without_preface(context);
+        opened = if rest.is_empty() {
             line
         } else {
-            format!("{line}\n{context}")
+            format!("{line}\n{rest}")
         };
         opened.as_str()
     } else {
         context
     };
     let out = match (call.event.as_str(), verdict) {
-        ("PreToolUse", Some(r)) => serde_json::json!({
-            "decision": r.verdict,
-            "reason": format!("{} (seat rule `{}`)", r.reason, r.pattern),
-        }),
+        (event, Some(r)) if event == "PreToolUse" || user_rules::mcp_event_denies(event, r) => {
+            serde_json::json!({
+                "decision": r.verdict,
+                "reason": format!("{} (seat rule `{}`)", r.reason, r.pattern),
+            })
+        }
         ("PreToolUse", None) => serde_json::json!({"decision": "allow"}),
         ("Stop", _) | ("TurnEnd", _) => serde_json::json!({}),
         _ if context.is_empty() => serde_json::json!({}),
@@ -8397,7 +8401,7 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
     }
     let mut top = serde_json::Map::new();
     if let Some(r) = verdict {
-        if call.event == "PreToolUse" {
+        if call.event == "PreToolUse" || user_rules::mcp_event_denies(&call.event, r) {
             // DenyOnly runs the tool on an `ask`, so the seat denies and
             // names the command. CamelCase and Asks show the prompt.
             let (decision, reason) =
@@ -8505,7 +8509,17 @@ pub fn shell_exit(fail_on_deny: bool, text: &str) -> i32 {
 fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> String {
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
-        "beforeMCPExecution" | "beforeReadFile" => {
+        "beforeMCPExecution" => {
+            if let Some(r) = verdict.filter(|r| user_rules::mcp_event_denies(&call.event, r)) {
+                let reason = format!("{} (seat rule `{}`)", r.reason, r.pattern);
+                out.insert("permission".into(), Value::String("deny".into()));
+                out.insert("user_message".into(), Value::String(reason.clone()));
+                out.insert("agent_message".into(), Value::String(reason));
+            } else {
+                out.insert("permission".into(), Value::String("allow".into()));
+            }
+        }
+        "beforeReadFile" => {
             out.insert("permission".into(), Value::String("allow".into()));
         }
         "PreToolUse" => {
@@ -12095,7 +12109,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
          A lesson of your own goes in with `ljos remember --as {name} \"...\"`.\n",
         name = p.name,
     ));
-    Ok(out)
+    Ok(user_rules::prepend(out))
 }
 
 /// A panel for a runner with no MCP: one brief per persona written to
@@ -22775,6 +22789,9 @@ pub fn static_guard(line: &str) -> Option<Rule> {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {
+        return Some(rule);
+    }
+    if let Some(rule) = user_rules::guard_line(line) {
         return Some(rule);
     }
     let denies: Vec<Rule> = rules_cache_path()
@@ -37625,5 +37642,55 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(super::aider_read_entry("read: CONVENTIONS.md\n", e)
             .unwrap()
             .is_err());
+    }
+
+    /// A user rule written under one seat leads the brief of another seat.
+    #[test]
+    fn a_user_rule_leads_a_second_seats_brief() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("LJOS_HOLD", "rohit");
+            std::env::set_var("LJOS_SEAT", "claude");
+        }
+        user_rules::write_preference(
+            "never post or reply to Alan (ocaisa)",
+            "he asked not to be pinged",
+            &user_rules::People::default(),
+            &user_rules::People::default(),
+        )
+        .unwrap();
+        let script =
+            "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0 TODO Logo' ;;\nesac\nexit 0\n";
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (url, _seen) = serve_http(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-p","kind":"persona","name":"designer","anchor":0.5,"text":"Reads a mark.","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") || line.contains("/v1/search") {
+                (200, r#"{"atoms":[],"hits":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let text = with_fake_on_path(dir.path(), || brief("designer", "probe-l0g0").unwrap());
+        assert!(text.starts_with("User rules"), "{text}");
+        let rule_at = text.find("never post or reply to Alan").expect("rule");
+        let you = text.find("You are designer").expect("persona");
+        assert!(rule_at < you, "{text}");
+        assert_eq!(std::env::var("LJOS_SEAT").as_deref(), Ok("inky"));
     }
 }
