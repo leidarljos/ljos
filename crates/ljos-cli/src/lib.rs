@@ -4785,31 +4785,69 @@ pub fn clean_user_prompt(text: &str) -> String {
     }
 }
 
+/// The person's words on a hook payload. `beforeSubmitPrompt` carries
+/// `prompt`. agy names the transcript instead, and a later call in the
+/// same sitting still carries that path once the turn is on disk.
+pub(crate) fn prompt_of(v: &Value) -> String {
+    let direct = [
+        "prompt",
+        "user_prompt",
+        "userPrompt",
+        "userMessage",
+        "user_message",
+    ]
+    .iter()
+    .find_map(|key| v.get(*key).and_then(Value::as_str))
+    .or_else(|| v.pointer("/extra/user_message").and_then(Value::as_str))
+    .map(str::trim)
+    .filter(|text| !text.is_empty())
+    .map(clean_user_prompt);
+    if let Some(text) = direct.filter(|text| !text.is_empty()) {
+        return text;
+    }
+    v.get("transcriptPath")
+        .and_then(Value::as_str)
+        .or_else(|| v.get("transcript_path").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .and_then(|path| std::fs::read_to_string(expand(path)).ok())
+        .map(|text| last_user_text(&text))
+        .unwrap_or_default()
+}
+
 /// A call from the runner whose payload names no event: `event` is what
 /// its hooks file told the command, else what the payload's fields imply.
 /// A model call that opens a turn is the prompt; a later one, after tools
 /// ran, is where a tool result's note goes. Its own tool-result and
 /// model-result events carry nothing to say.
 fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
-    let event = event.map(str::to_string).unwrap_or_else(|| {
-        // PreToolUse and PostToolUse both carry `toolCall`. PostToolUse is
-        // the one with `error` (empty when the command exited 0). Without
-        // that, a commit the gate allowed is never cited.
-        if v.get("toolCall").is_some() {
-            if v.get("error").is_some() {
-                "PostToolUse"
+    let event = event
+        .map(|name| normalize_hook_event(name).to_string())
+        .unwrap_or_else(|| {
+            // PreToolUse and PostToolUse both carry `toolCall`. PostToolUse is
+            // the one with `error` (empty when the command exited 0). Without
+            // that, a commit the gate allowed is never cited.
+            if v.get("toolCall").is_some() {
+                if v.get("error").is_some() {
+                    "PostToolUse"
+                } else {
+                    "PreToolUse"
+                }
+            } else if v.get("executionNum").is_some() {
+                "Stop"
+            } else if v.get("invocationNum").is_some() {
+                "PreInvocation"
+            } else if v.get("prompt").is_some()
+                || v.get("hook_event_name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| normalize_hook_event(name) == "UserPromptSubmit")
+            {
+                "UserPromptSubmit"
             } else {
-                "PreToolUse"
+                "PostToolUse"
             }
-        } else if v.get("executionNum").is_some() {
-            "Stop"
-        } else if v.get("invocationNum").is_some() {
-            "PreInvocation"
-        } else {
-            "PostToolUse"
-        }
-        .to_string()
-    });
+            .to_string()
+        });
     let session = v["conversationId"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -4855,11 +4893,7 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
             // the first turn opens at 0 or 1. A later turn opens where the
             // transcript's last user text is one this conversation has not
             // seen. The path may start with `~/`.
-            let prompt = v["transcriptPath"]
-                .as_str()
-                .and_then(|p| std::fs::read_to_string(expand(p)).ok())
-                .map(|t| last_user_text(&t))
-                .unwrap_or_default();
+            let prompt = prompt_of(v);
             let fresh = session
                 .as_deref()
                 .is_some_and(|s| !prompt.is_empty() && turn_is_new(&runtime_dir(), s, &prompt));
@@ -4886,6 +4920,7 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
             };
             (name, cue)
         }
+        "UserPromptSubmit" => ("UserPromptSubmit", prompt_of(v)),
         _ => ("TurnEnd", String::new()),
     };
     HookCall {
