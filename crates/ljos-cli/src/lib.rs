@@ -5968,7 +5968,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
     // when it does not answer in time, the local path below runs.
-    let judged = hook_timed("judged_prompt", || judged_prompt(call, cue));
+    let (judged, early_pool) = hook_timed("judged_prompt", || judged_with_local(call, cue));
     let (correction, choice) = judged.as_ref().map_or((None, None), |(_, j)| {
         (Some(j.correction >= j.cue_at), Some(j.choice >= j.cue_at))
     });
@@ -6025,12 +6025,14 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     } else {
         // The judge did not answer. A skip, a timeout and a spent cap all
         // take this path.
-        let pool = hook_timed("pool_search", || {
-            with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-                search_with_signals(cue, RERANK_POOL)
+        let pool = early_pool.unwrap_or_else(|| {
+            hook_timed("pool_search", || {
+                with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+                    search_with_signals(cue, RERANK_POOL)
+                })
             })
-        })
-        .ok();
+            .ok()
+        });
         // A pack that sends the encoder's cosine has a judge of meaning:
         // it admits what the encoder ranked first at the confidence line
         // even when no word is shared, and a claim that names the
@@ -6159,6 +6161,49 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         out.push_str(&nudge);
     }
     (out, ids)
+}
+
+/// How long a prompt waits for Jev's judgment, search and network call
+/// together. Past it the local search, which ran beside the judgment,
+/// answers: a judge behind a slow or black-holed route must not hold a
+/// prompt up to the runner's cut-off.
+pub const JEV_HOOK_BUDGET_MS: u64 = 1500;
+
+/// What the pack's fused search found for a prompt, with the encoder's
+/// signal per hit. `None` when the search failed or ran out of budget.
+type Pool = Option<Vec<(Hit, DenseSignal)>>;
+
+/// Jev's judgment of the prompt, and the local search that answers when
+/// Jev does not. With Jev on, the judgment runs on its own thread while
+/// the local search runs here, and the judgment is waited for only until
+/// [`JEV_HOOK_BUDGET_MS`] from the start. The local search comes back as
+/// `Some` when it already ran, so the caller does not repeat it.
+fn judged_with_local(
+    call: &HookCall,
+    cue: &str,
+) -> (Option<(Vec<Hit>, jev::Judgment)>, Option<Pool>) {
+    if call.event != "UserPromptSubmit" || !jev::enabled() {
+        return (judged_prompt(call, cue), None);
+    }
+    let started = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let call = call.clone();
+        let cue = cue.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(judged_prompt(&call, &cue));
+        });
+    }
+    let local = hook_timed("pool_search", || {
+        with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+            search_with_signals(cue, RERANK_POOL)
+        })
+    })
+    .ok();
+    let left = std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS)
+        .saturating_sub(started.elapsed());
+    let judged = rx.recv_timeout(left).ok().flatten();
+    (judged, Some(local))
 }
 
 /// The prompt's candidates and Jev's judgment of them, when this machine
