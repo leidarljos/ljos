@@ -1443,13 +1443,10 @@ fn run_command() -> Result<()> {
                 run("vissue", &["deed", issue])?;
             } else {
                 let issue = issue.as_deref().context("deed: an issue is required")?;
-                for a in &add {
-                    ljos_cli::require_deed(a)?;
-                }
                 let mut argv = vec!["deed".to_string(), issue.to_string()];
                 for a in &add {
                     argv.push("--add".into());
-                    argv.push(a.clone());
+                    argv.push(ljos_cli::resolve_deed(a)?);
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 run("vissue", &refs)?;

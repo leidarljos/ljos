@@ -15031,13 +15031,58 @@ pub fn is_version_tag(tag: &str) -> bool {
 ///
 /// The store does not know the id, or `deedar` did not answer.
 pub fn require_deed(accession: &str) -> Result<()> {
-    let accession = accession.trim();
-    if accession.is_empty() {
+    resolve_deed(accession).map(|_| ())
+}
+
+/// The accession a citation names, out of what a caller pastes: the id
+/// itself, `accession=ID` or `id=ID` (the lines `deedar create` prints), a
+/// whole `deedar create` output, or `file=sha256:HEX` (the product line,
+/// which `deedar current` resolves to its deed once the prefix is gone).
+#[must_use]
+pub fn deed_token(raw: &str) -> String {
+    let raw = raw.trim();
+    for key in ["accession=", "id="] {
+        if let Some(rest) = raw
+            .lines()
+            .rev()
+            .find_map(|line| line.trim().strip_prefix(key))
+        {
+            return rest.split_whitespace().next().unwrap_or("").to_string();
+        }
+    }
+    let word = raw.split_whitespace().next().unwrap_or("");
+    for prefix in ["deed=", "file="] {
+        if let Some(rest) = word.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    word.to_string()
+}
+
+/// [`require_deed`] that hands back the deed's own id, so a tracker cite
+/// carries `deed-<kind>-<slug>` even when the caller named the deed by its
+/// content digest.
+///
+/// # Errors
+///
+/// The store does not know the id, or `deedar` did not answer.
+pub fn resolve_deed(accession: &str) -> Result<String> {
+    let token = deed_token(accession);
+    if token.is_empty() {
         bail!("deed: an accession is required");
     }
-    run_captured("deedar", &["current", accession])
-        .map_err(|e| anyhow::anyhow!("deed: {accession} is not in the deed store: {e:#}"))?;
-    Ok(())
+    let said = run_captured("deedar", &["current", &token]).map_err(|e| {
+        anyhow::anyhow!(
+            "deed: {token} is not in the deed store: {e:#} (cite the `accession=` line `deedar create` prints)"
+        )
+    })?;
+    let named = said
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("id="))
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|id| id.starts_with("deed-"));
+    Ok(named.map_or(token.clone(), str::to_string))
 }
 
 /// Drop `accession` from the citations on `ticket`.
@@ -31383,6 +31428,53 @@ mod tests {
         assert!(err.contains("not in the deed store"), "{err}");
         assert!(super::require_deed("known").is_ok());
         assert!(super::require_deed("  ").is_err());
+    }
+
+    /// A citation takes what `deedar create` prints: the accession line,
+    /// the id line, the whole output, or the product digest line.
+    #[test]
+    fn a_deed_citation_takes_what_create_prints() {
+        let hex = "ab".repeat(32);
+        let created = format!(
+            "id=deed-file-survey kind=file name=survey\npaths=sha256:{hex}\nfile=sha256:{hex}\naccession=deed-file-survey\n"
+        );
+        for raw in [
+            "deed-file-survey".to_string(),
+            "accession=deed-file-survey".to_string(),
+            "id=deed-file-survey kind=file name=survey".to_string(),
+            created,
+        ] {
+            assert_eq!(super::deed_token(&raw), "deed-file-survey", "{raw}");
+        }
+        assert_eq!(
+            super::deed_token(&format!("file=sha256:{hex}")),
+            format!("sha256:{hex}")
+        );
+        assert_eq!(super::deed_token("  "), "");
+    }
+
+    /// A digest names its deed; the cite carries the deed's own id.
+    #[test]
+    fn a_digest_citation_resolves_to_the_deed_id() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("deedar");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$2\" in\nsha256:*) echo 'id=deed-file-survey kind=file name=survey'; echo 'accession=deed-file-survey';;\ndeed-file-survey) echo 'id=deed-file-survey kind=file';;\n*) echo \"invalid deed id: $2\" >&2; exit 1;;\nesac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let _env = HoldEnv::set(&[("PATH", &format!("{}:{}", dir.path().display(), path))]);
+        let digest = format!("file=sha256:{}", "cd".repeat(32));
+        assert_eq!(super::resolve_deed(&digest).unwrap(), "deed-file-survey");
+        assert_eq!(
+            super::resolve_deed("accession=deed-file-survey").unwrap(),
+            "deed-file-survey"
+        );
+        assert!(super::resolve_deed("nonsense").is_err());
     }
 
     /// A refusal from the command check says what the command would do
