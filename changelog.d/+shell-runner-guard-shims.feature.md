@@ -1,1 +1,0 @@
-Shell runners with no pre-command hook (the Grok Bot box seats) get a command guard: `ljos onboard` writes rm, git and find shims that ask ljos-policyd first, and the seat env file puts them first on PATH.

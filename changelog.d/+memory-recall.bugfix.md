@@ -1,1 +1,0 @@
-A note and a finish lesson written through `ljos` or ljos-mcp are stored as agent-derived memories in the pack the box's `ljos memories list` reads, and a recall bumps the use count that list prints. The accept step used to relabel the atom user-declared, which the default list hides, and nothing incremented `recalled`.
