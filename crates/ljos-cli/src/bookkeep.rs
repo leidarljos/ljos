@@ -1275,9 +1275,11 @@ fn failure_text(raw: &Value, cue: &str) -> String {
 }
 
 /// One standing lesson, agent-derived, with the writer in the atom source.
-/// Two short sentences: the ticket and its commits, then a failure or an
-/// ask when the sitting had one. A pack that is off is an error here; the
-/// caller logs it and still closes the ticket.
+/// Two short sentences: the ticket and its commits, then the failing
+/// command and the guard's rule when the sitting had them. The full title,
+/// rule and command also ride in `source`, which the prose gate does not
+/// read. A pack that is off is an error here; the caller logs it and still
+/// closes the ticket.
 fn write_lesson(
     issue: &str,
     title: &str,
@@ -1286,9 +1288,27 @@ fn write_lesson(
     asks: &[String],
 ) -> Result<(), String> {
     let text = lesson_text(title, issue, shas, failures, asks);
-    super::packset_write_agent("Remember", &text, None, Some(false))
-        .map(|_| ())
-        .map_err(|e| noted_err(&e))
+    super::packset_write_agent_sourced(
+        "Remember",
+        &text,
+        Some(false),
+        title,
+        &join_notes(asks),
+        &join_notes(failures),
+    )
+    .map(|_| ())
+    .map_err(|e| noted_err(&e))
+}
+
+/// The sitting's notes, one per line, for an atom field the prose gate
+/// does not read.
+fn join_notes(notes: &[String]) -> String {
+    notes
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The error and its causes, so a refused `POST /v1/atoms` keeps the HTTP
@@ -1314,8 +1334,10 @@ fn noted_err(err: &anyhow::Error) -> String {
 
 /// At most two short sentences. The pack refuses a third sentence, a
 /// sentence of thirty words or more, and a readability grade past 14 once
-/// the text has twelve words. The title is what the next prompt is recalled
-/// by, so its short words stay and its long ones go until the gate accepts.
+/// the text has twelve words. The title keeps the words a later prompt can
+/// match: stopwords and filler go first, and a word is shortened only when
+/// the gate still refuses. The rule name and the failing command's verb
+/// stay whole. A title that is only filler still leaves a word.
 fn lesson_text(
     title: &str,
     issue: &str,
@@ -1330,33 +1352,205 @@ fn lesson_text(
         .map(|sha| sha.chars().take(7).collect::<String>())
         .filter(|sha| !sha.is_empty())
         .collect();
-    let second = match (failures.first(), asks.first()) {
-        (Some(_), Some(_)) => "A tool failed and the guard asked.",
-        (Some(_), None) => "A tool failed.",
-        (None, Some(_)) => "The guard asked.",
-        (None, None) => "",
-    };
-    let mut words: Vec<&str> = title
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .take(8)
-        .collect();
-    loop {
-        let text = lesson_sentence(&words, issue, &shas, second);
-        if words.is_empty() || lesson_prose_ok(&text) {
+    let verb = failures.first().map(|text| command_verb(text));
+    let rule = asks.iter().find_map(|ask| rule_name(ask));
+    let second = second_sentence(verb.as_deref(), rule.as_deref());
+    let mut words = title_words(title);
+    let mut shortening = true;
+    for _ in 0..256 {
+        let text = lesson_sentence(&words, issue, &shas, &second);
+        if lesson_prose_ok(&text) {
+            return text;
+        }
+        if shortening && shorten_longest(&mut words) {
+            continue;
+        }
+        shortening = false;
+        if words.len() <= 1 {
             return text;
         }
         let drop_at = words
             .iter()
             .enumerate()
-            .max_by_key(|(i, w)| (w.len(), *i))
+            .min_by_key(|(i, word)| (word.chars().count(), *i))
             .map(|(i, _)| i)
             .unwrap_or(0);
         words.remove(drop_at);
     }
+    lesson_sentence(&words, issue, &shas, &second)
 }
 
-fn lesson_sentence(words: &[&str], issue: &str, shas: &[String], second: &str) -> String {
+/// Runners whose next word is the command a failure should name.
+const COMMAND_RUNNERS: &[&str] = &[
+    "git", "cargo", "npm", "pnpm", "yarn", "bun", "npx", "pip", "uv", "go", "make", "python",
+    "python3", "node",
+];
+
+/// Words that describe a failure and are not the command that failed.
+fn status_word(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "exited" | "failed" | "failure" | "error" | "nonzero" | "non-zero"
+    )
+}
+
+/// The verb of a failing command: `git commit exited non-zero` is `commit`,
+/// and `cargo test` is `test`. An error that is not a command names its
+/// first distinctive word.
+fn command_verb(text: &str) -> String {
+    let words = super::shell_words(text);
+    if let Some(verb) = runner_subcommand(&words) {
+        return verb;
+    }
+    words
+        .into_iter()
+        .find(|word| !super::is_lesson_filler(word) && !status_word(word))
+        .map(|word| word.to_ascii_lowercase())
+        .unwrap_or_else(|| "tool".to_string())
+}
+
+/// The subcommand of `git`, `cargo`, `npm` and the other [`COMMAND_RUNNERS`].
+fn runner_subcommand(words: &[String]) -> Option<String> {
+    let mut i = 0usize;
+    if words
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("sudo"))
+    {
+        i += 1;
+    }
+    let bin = words.get(i)?.rsplit('/').next().unwrap_or("");
+    let bin_name = bin.to_ascii_lowercase();
+    if !COMMAND_RUNNERS.contains(&bin_name.as_str()) {
+        return None;
+    }
+    i += 1;
+    if bin_name == "git" {
+        while i < words.len() {
+            match words[i].as_str() {
+                "-C" | "-c" | "--git-dir" | "--work-tree" => i += 2,
+                flag if flag.starts_with("--git-dir=") || flag.starts_with("--work-tree=") => {
+                    i += 1;
+                }
+                flag if flag.starts_with('-') => i += 1,
+                other => return Some(other.to_ascii_lowercase()),
+            }
+        }
+        return Some(bin_name);
+    }
+    Some(
+        words
+            .iter()
+            .skip(i)
+            .find(|word| !word.starts_with('-'))
+            .map_or(bin_name, |word| word.to_ascii_lowercase()),
+    )
+}
+
+/// Words of an ask that the sentence already says, so the rule name is the
+/// rest: `the guard asked before a force push` names `force push`.
+const ASK_BOILER: &[&str] = &["guard", "asked", "about", "tool", "failed", "failure"];
+
+/// One rule token: letters, digits, hyphens, and not a filler word.
+fn rule_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && token.chars().any(|c| c.is_ascii_alphabetic())
+        && !super::is_lesson_filler(token)
+}
+
+/// The guard's rule, as `git-force-push` from `git-force-push: a force push…`.
+/// Without that token, the first distinctive words of the ask.
+fn rule_name(ask: &str) -> Option<String> {
+    let ask = ask.trim();
+    if ask.is_empty() {
+        return None;
+    }
+    if let Some((head, _)) = ask.split_once(':') {
+        let head = head.trim();
+        if rule_token(head) {
+            return Some(head.to_string());
+        }
+    }
+    for raw in ask.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if token.contains('-') && rule_token(token) {
+            return Some(token.to_string());
+        }
+    }
+    let named: Vec<String> = title_words(ask)
+        .into_iter()
+        .filter(|word| !ASK_BOILER.contains(&word.to_ascii_lowercase().as_str()))
+        .take(2)
+        .collect();
+    if named.is_empty() {
+        None
+    } else {
+        Some(named.join(" "))
+    }
+}
+
+/// `Commit failed and the guard asked about git-force-push.` The rule token
+/// and the verb are not shortened with the title.
+fn second_sentence(verb: Option<&str>, rule: Option<&str>) -> String {
+    match (verb, rule) {
+        (Some(verb), Some(rule)) => {
+            format!(
+                "{} failed and the guard asked about {rule}.",
+                capitalize_word(verb)
+            )
+        }
+        (Some(verb), None) => format!("{} failed.", capitalize_word(verb)),
+        (None, Some(rule)) => format!("The guard asked about {rule}."),
+        (None, None) => String::new(),
+    }
+}
+
+fn capitalize_word(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Distinctive words, in the order the prompt said them. When every word is
+/// filler, the first few raw tokens, so the title cannot vanish.
+fn title_words(title: &str) -> Vec<String> {
+    let words: Vec<String> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty() && !super::is_lesson_filler(word))
+        .map(str::to_string)
+        .collect();
+    if !words.is_empty() {
+        return words;
+    }
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(3)
+        .map(str::to_string)
+        .collect()
+}
+
+/// One character off the longest title word, and not below four characters.
+/// The rule name and the command verb are not in this list.
+fn shorten_longest(words: &mut [String]) -> bool {
+    let Some(at) = words
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| word.chars().count() > 4)
+        .max_by_key(|(i, word)| (word.chars().count(), *i))
+        .map(|(i, _)| i)
+    else {
+        return false;
+    };
+    words[at].pop();
+    true
+}
+
+fn lesson_sentence(words: &[String], issue: &str, shas: &[String], second: &str) -> String {
     let head = words.join(" ");
     let first = if shas.is_empty() {
         if head.is_empty() {
@@ -2678,6 +2872,8 @@ print(f"id={ident}")
         }
         assert!(text.contains("probe-0001"), "{text}");
         assert!(text.contains(&first[..7]), "{text}");
+        assert!(text.contains("git-force-push"), "{text}");
+        assert!(text.contains("Commit failed"), "{text}");
         assert_lesson(&text);
     }
 
@@ -2697,6 +2893,9 @@ print(f"id={ident}")
         assert_lesson(&text);
         assert!(text.contains("probe-0001"), "{text}");
         assert!(text.contains("abcdef0"), "{text}");
+        assert!(text.contains("Implement"), "{text}");
+        assert!(text.contains("seat"), "the title does not vanish: {text}");
+        assert!(text.contains("Writer failed"), "{text}");
         assert!(
             !text.contains(hard),
             "a title the gate would refuse is shortened: {text}"
@@ -2710,8 +2909,8 @@ print(f"id={ident}")
         );
         assert_lesson(&plain);
         assert!(
-            plain.contains("Add a readme line"),
-            "the subject stays so the next prompt can recall it: {plain}"
+            plain.contains("readme") && plain.contains("line"),
+            "the words the next prompt recalls stay: {plain}"
         );
 
         let _g = lock();
@@ -2787,6 +2986,157 @@ print(f"id={ident}")
             true,
             "{kept_book}"
         );
+    }
+
+    /// ljos-myow: the lesson is built from the words a later prompt can match.
+    /// Stopwords go first, the rule keeps its name, and the next session's
+    /// cold encoder still finds the lesson by those words.
+    #[test]
+    fn slugify_lesson_keeps_the_word_and_the_rule_for_the_next_session() {
+        let title = "In this git repo add a function slugify";
+        let ask = "git-force-push: a force push rewrites history";
+        let asked = lesson_text(title, "probe-0001", &[], &[], &[ask.into()]);
+        assert_lesson(&asked);
+        assert!(
+            asked.contains("The guard asked about git-force-push."),
+            "{asked}"
+        );
+        assert!(
+            asked.contains("function") && asked.contains("slugify"),
+            "{asked}"
+        );
+        assert!(
+            asked.split_whitespace().any(|word| word == "git"),
+            "{asked}"
+        );
+        for gone in ["this", "repo", "add"] {
+            assert!(
+                !asked
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|word| word.eq_ignore_ascii_case(gone)),
+                "{gone} is filler and stays out: {asked}"
+            );
+        }
+        let faded = lesson_text("In this repo", "probe-0001", &[], &[], &[ask.into()]);
+        assert_lesson(&faded);
+        assert!(
+            faded.contains("repo"),
+            "a filler title still leaves a word: {faded}"
+        );
+        assert!(!faded.starts_with("Work "), "{faded}");
+        let crowded = lesson_text(
+            "slugify cryptography reconciliation asynchronous attestation implementation verification",
+            "probe-0001",
+            &[],
+            &[],
+            &[ask.into()],
+        );
+        assert_lesson(&crowded);
+        assert!(
+            crowded.contains("slugify"),
+            "a longer neighbour is shortened before the recall word: {crowded}"
+        );
+
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let marker = dir.path().join("run/ljos/encoder-warming");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+        let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let pack = serve_pack({
+            let atoms = Arc::clone(&atoms);
+            move |req| {
+                let path = req.lines().next().unwrap_or("");
+                if path.contains("POST /v1/atoms") {
+                    let body = req
+                        .split_once("\r\n\r\n")
+                        .map(|(_, body)| body)
+                        .unwrap_or("");
+                    if let Ok(atom) = serde_json::from_str::<Value>(body) {
+                        atoms.lock().unwrap().push(atom);
+                    }
+                    return (
+                        200,
+                        r#"{"id":"atom-slugify","kind":"lesson","origin":"agent-derived"}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/status") {
+                    return (
+                        200,
+                        r#"{"embedder":{"available":true,"answering":null}}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/atoms") {
+                    let list = atoms.lock().unwrap().clone();
+                    return (200, serde_json::json!({"atoms": list}).to_string());
+                }
+                (200, "{}".into())
+            }
+        });
+        set_var("PACKSET_URL", &pack);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+        let session = "slugify-1";
+        prompt_and_edit(&repo, session, title);
+        let (failed, failed_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m slug"},
+                "tool_response": {"exit_code": 1}
+            }),
+        );
+        let _ = observe(&failed, &failed_call);
+        let (ask_raw, ask_call) = payload(
+            "PreToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}),
+        );
+        note_ask(&ask_raw, &ask_call, ask);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+        let stored = atoms.lock().unwrap().clone();
+        let lesson = stored.last().expect("the lesson was posted");
+        let prose = lesson["text"].as_str().unwrap_or("");
+        assert!(prose.contains("slugify"), "{prose}");
+        assert!(prose.contains("function"), "{prose}");
+        assert!(prose.contains("git-force-push"), "{prose}");
+        assert!(prose.contains("Commit failed"), "{prose}");
+        assert_eq!(lesson["source"]["title"], title);
+        assert!(
+            lesson["source"]["rule"]
+                .as_str()
+                .unwrap_or("")
+                .contains("git-force-push"),
+            "{lesson}"
+        );
+        assert!(
+            lesson["source"]["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("git commit exited non-zero"),
+            "{lesson}"
+        );
+        assert!(
+            lesson["entities"].to_string().contains("horizon:standing"),
+            "{lesson}"
+        );
+        let start = crate::session_start_for(Some("slugify-2"));
+        assert!(!start.contains("no memories here yet"), "{start}");
+        let (_raw, call) = payload(
+            "UserPromptSubmit",
+            "slugify-2",
+            &repo,
+            serde_json::json!({"prompt": "add a function slugify to the helper"}),
+        );
+        let (note, _) = crate::hook_note(&call, 4);
+        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("slugify"), "{note}");
+        assert!(note.contains("git-force-push"), "{note}");
     }
 
     /// ljos-6x14: agy sends no event name. Onboarding tells the after-command
