@@ -6176,7 +6176,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let seen = seen_ids(call.session.as_deref());
-    let hits = packset_search_opts(cue, 10, false).ok()?;
+    let hits = hook_timed("judge_search", || packset_search_opts(cue, 10, false)).ok()?;
     let candidates: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -6195,7 +6195,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
             kind: h.kind.clone(),
         })
         .collect();
-    let judged = jev::judge(cue, &texts, &claims)?;
+    let judged = hook_timed("jev_judge", || jev::judge(cue, &texts, &claims))?;
     Some((candidates, judged))
 }
 
