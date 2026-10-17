@@ -1961,10 +1961,7 @@ fn parse_git(inv: &Inv) -> Option<GitCmd> {
 fn git_of(inv: &Inv) -> Option<GitCmd> {
     let mut git = parse_git(inv)?;
     let mut seen = std::collections::HashSet::new();
-    loop {
-        let Some(value) = alias_of(&git) else {
-            break;
-        };
+    while let Some(value) = alias_of(&git) {
         if !seen.insert(git.sub.clone()) {
             break;
         }
