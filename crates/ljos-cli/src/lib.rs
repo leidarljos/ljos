@@ -3370,6 +3370,13 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   case $verdict in
     deny*)
       rule=$(printf '%s' "$verdict" | head -n 1 | cut -f 2)
+      # An empty reason, or the engine name standing in for one, is not a
+      # judgment. A burst of checks can print `deny\tphronesis` for a command
+      # that is allowed on its own. Run it.
+      case $rule in
+        ""|phronesis|phronesis:*|bind-failed)
+          exec "$real" "$@" ;;
+      esac
       case $rule in
         rm-rf-*|find-delete-*) hint="Leave it, or move it to the trash (trash-put or gio trash). Moving it under /tmp to delete it there is the same delete." ;;
         *) hint="This rewrites or discards history or work. Ask the person first; they can run it themselves." ;;
@@ -8861,11 +8868,73 @@ fn data_base() -> Option<PathBuf> {
 }
 
 /// `$XDG_CONFIG_HOME`, else `~/.config`.
+///
+/// Unit tests with no `XDG_CONFIG_HOME` use a directory under the build
+/// output, not the login's `~/.config`. A machine that has user rules must
+/// not change a hook or a guard test. The directory is created once and the
+/// environment is not written, so tests do not race on it.
 fn config_base() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    #[cfg(test)]
+    if let Some(path) = CONFIG_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Some(path);
+    }
+    resolve_config_base(
+        std::env::var_os("XDG_CONFIG_HOME")
+            .as_deref()
+            .map(Path::new),
+        std::env::var_os("HOME").as_deref().map(Path::new),
+    )
+}
+
+/// `xdg` when it is absolute, otherwise the login config, and in tests the
+/// isolated directory instead of `home`.
+fn resolve_config_base(xdg: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = xdg.filter(|path| path.is_absolute()) {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(test)]
+    {
+        let _ = home;
+        Some(isolated_config_home().to_path_buf())
+    }
+    #[cfg(not(test))]
+    {
+        home.map(|path| path.join(".config"))
+            .filter(|path| path.is_absolute())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONFIG_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `body` with [`config_base`] fixed to `home` on this thread.
+#[cfg(test)]
+pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
+    CONFIG_OVERRIDE.with(|slot| {
+        let prev = slot.replace(Some(home.to_path_buf()));
+        let out = body();
+        *slot.borrow_mut() = prev;
+        out
+    })
+}
+
+/// The config directory unit tests read when `XDG_CONFIG_HOME` is unset.
+#[cfg(test)]
+pub(crate) fn isolated_config_home() -> &'static Path {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target")
+            .join(format!("ljos-isolated-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
+        dir
+    })
+    .as_path()
 }
 
 fn named_env(key: &str) -> Option<String> {
@@ -22531,6 +22600,21 @@ fn policyd_token(line: &str) -> &str {
         .trim()
 }
 
+/// A deny that is the engine failing to judge, not a check that named the
+/// command. `ljos-policyd` prints `deny\tphronesis` when the decision text
+/// is empty: the token is the backend name, standing in for a missing
+/// reason. A `phronesis:` line is the seat failing to open (`seat could not
+/// open`, `no decision`). `bind-failed` is the same failure. Under a burst
+/// of checks those come back for commands the same binary allows alone.
+/// They are not a reason to refuse the command.
+fn policyd_unjudged(token: &str) -> bool {
+    let token = token.trim();
+    token.is_empty()
+        || token.eq_ignore_ascii_case("phronesis")
+        || token.to_ascii_lowercase().starts_with("phronesis:")
+        || token == "bind-failed"
+}
+
 /// A force-push ask is the person's question, on a runner that otherwise
 /// turns `ask` into `deny`. A seat rule that merely asks about some other
 /// command stays a deny there.
@@ -23015,10 +23099,9 @@ pub fn policyd_reason(token: &str) -> String {
              it with `uv run`"
         }
         "git-commit-identity" => {
-            "author and committer must both be Rohit Goswami <rgoswami@ieee.org>. Run \
-             `git config user.name \"Rohit Goswami\"` and `git config user.email \
-             \"rgoswami@ieee.org\"`, and remove any `--author` or `GIT_AUTHOR_*` / \
-             `GIT_COMMITTER_*` that names someone else. Then commit again"
+            "the author and committer do not match the identity in the gate config. \
+             Set `name` and `email` in `.ljos/gates.toml`, or in the user, repository, or \
+             seat `ljos.toml`, to the person who commits in this checkout. Then commit again"
         }
         "git-commit-message" => {
             "the commit message is not on the command line, so the gate cannot read it. Pass it \
@@ -23032,9 +23115,9 @@ pub fn policyd_reason(token: &str) -> String {
              commit again with `git commit -m TEXT`"
         }
         "git-commit-signoff" => {
-            "this repo's `.ljos/gates.toml` sets `signoff = true`. Add a final line \
-             `Signed-off-by: Rohit Goswami <rgoswami@ieee.org>` or pass `--signoff`, then commit \
-             again"
+            "this checkout's gate config sets `signoff = true`. Add a final line \
+             `Signed-off-by: NAME <email>` for the `name` and `email` in that config, or pass \
+             `--signoff`, then commit again"
         }
         "git-push-evidence" => {
             "no passing test evidence for this exact tip. Run `ljos evidence record -- <test \
@@ -23119,8 +23202,13 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     }
     let text = out.trim().to_string();
     // `check` prints `allow` and exits 0, or prints `deny` and exits 2.
+    // A deny whose token is only the engine name has no reason. That is an
+    // overloaded or half-open policyd, and the command is allowed.
     let first = text.split(['\t', ' ', '\n']).next().unwrap_or("");
     match (first, status.success()) {
+        ("deny", _) if policyd_unjudged(policyd_token(&text)) => {
+            unhealthy("ljos-policyd refused without a reason")
+        }
         ("deny", _) => text,
         ("allow", true) => text,
         _ => unhealthy("gave no verdict"),
@@ -24566,7 +24654,7 @@ mod tests {
         exe(&guard.join("rm"), super::GUARD_SHIM);
         exe(
             &fake.join("ljos-policyd"),
-            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; esac\necho allow\n",
+            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; esac\necho allow\n",
         );
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
@@ -24591,6 +24679,15 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         assert!(run(&format!("'{}'", file.display())).status.success());
         assert!(!file.exists());
+        let slug = dir.path().join("slug.py");
+        std::fs::write(&slug, "x").unwrap();
+        let empty = run(&format!("'{}'", slug.display()));
+        assert!(
+            empty.status.success(),
+            "a reasonless deny runs the command: {}",
+            String::from_utf8_lossy(&empty.stderr)
+        );
+        assert!(!slug.exists());
         assert!(super::seat_env_text("grokbot").contains("ljos/guard-bin"));
     }
 
@@ -31472,6 +31569,13 @@ mod tests {
         assert!(policyd_reason("git-reset-hard").contains("git stash"));
         assert_eq!(policyd_reason("a-token-from-later"), "a-token-from-later");
         assert_eq!(policyd_reason(" phronesis "), "phronesis");
+        let identity = policyd_reason("git-commit-identity");
+        assert!(identity.contains(".ljos/gates.toml"), "{identity}");
+        assert!(identity.contains("ljos.toml"), "{identity}");
+        assert!(!identity.contains("git config"), "{identity}");
+        assert!(!identity.contains("user.name"), "{identity}");
+        assert!(!identity.contains("GIT_AUTHOR"), "{identity}");
+        assert!(!identity.contains("GIT_COMMITTER"), "{identity}");
     }
 
     /// The hook's verdict carries those words, and the runner is asked.
@@ -33653,6 +33757,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             answer("denies", "printf 'deny\\tforce push\\n'; exit 2"),
             "deny\tforce push"
         );
+        let empty = answer("empty-reason", "printf 'deny\\tphronesis\\n'; exit 2");
+        assert!(
+            empty.starts_with("allow\t") && empty.contains("unhealthy"),
+            "{empty}"
+        );
+        assert_eq!(
+            answer("named", "printf 'deny\\tdecoded-pipe-shell\\n'; exit 2"),
+            "deny\tdecoded-pipe-shell"
+        );
         for (name, body) in [
             ("crashes", "kill -SEGV $$"),
             ("fails", "echo oops; exit 1"),
@@ -33867,6 +33980,104 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(rule.verdict, "deny");
         assert_eq!(rule.pattern, "rm-rf-outside-tmp");
         assert!(take_guard_note().is_none());
+    }
+
+    /// `ljos-policyd` prints `deny\tphronesis` when a decision has no reason
+    /// text. A burst of those must not refuse a command the check allows
+    /// on its own, and the hook must not be left with an empty reason.
+    #[test]
+    fn a_reasonless_policyd_denial_allows_a_harmless_command() {
+        let _g = env_guard();
+        let home = SeatDir::new("phronesis-empty");
+        let bin = fake_policyd(
+            home.path(),
+            "empty-reason",
+            "printf 'deny\\tphronesis\\n'; exit 2",
+        );
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+        ]);
+        let line = "git add slug.py test_slug.py";
+        let _ = take_guard_note();
+        assert!(tcb_verdict(line).is_none(), "one check is allowed");
+        let note = take_guard_note().expect("unhealthy note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(note.contains("refused without a reason"), "{note}");
+        assert!(
+            !note.contains("(seat rule"),
+            "a missing reason must not render as a seat refusal: {note}"
+        );
+        let mut joins = Vec::new();
+        for _ in 0..6 {
+            joins.push(std::thread::spawn(|| {
+                tcb_verdict("git add slug.py test_slug.py")
+            }));
+        }
+        for join in joins {
+            let rule = join.join().expect("check thread");
+            assert!(rule.is_none(), "{rule:?}");
+        }
+        let named = fake_policyd(
+            home.path(),
+            "named-reason",
+            "printf 'deny\\tdecoded-pipe-shell\\n'; exit 2",
+        );
+        let _named = HoldEnv::set(&[("POLICYD_BIN", named.to_str().unwrap())]);
+        let rule = tcb_verdict(line).expect("a named check still refuses");
+        assert_eq!(rule.verdict, "deny");
+        assert!(
+            rule.reason.contains("decoded-pipe-shell"),
+            "{}",
+            rule.reason
+        );
+        assert_ne!(rule.reason.trim(), "phronesis");
+        let opened = fake_policyd(
+            home.path(),
+            "seat-closed",
+            "printf 'deny\\tphronesis: seat could not open\\n'; exit 2",
+        );
+        let _opened = HoldEnv::set(&[("POLICYD_BIN", opened.to_str().unwrap())]);
+        assert!(
+            tcb_verdict(line).is_none(),
+            "a seat that did not open is not a refusal"
+        );
+    }
+
+    #[test]
+    fn guard_tests_do_not_read_user_rules_from_the_login_home() {
+        let home = Path::new("/home/someone");
+        let got = resolve_config_base(None, Some(home)).expect("isolated base");
+        assert_ne!(got, home.join(".config"));
+        assert_eq!(got, isolated_config_home());
+        let planted = SeatDir::new("login-rules");
+        let config = planted.path().join(".config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        std::fs::write(
+            config.join("ljos/user-rules.json"),
+            r#"{"rules":[{"id":"ur-status","text":"no status","author":"ada","reason":"leave status alone","pattern":"git status*","verdict":"deny","written_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}"#,
+        )
+        .unwrap();
+        with_config_home(&config, || {
+            let rule = user_rules::guard_line("git status").expect("the planted rule fires");
+            assert_eq!(rule.verdict, "deny");
+            assert!(
+                rule.reason.contains("leave status alone"),
+                "{}",
+                rule.reason
+            );
+        });
+        assert!(
+            user_rules::guard_line("git status").is_none(),
+            "the default config is not the login home"
+        );
+        let empty = SeatDir::new("empty-rules");
+        std::fs::create_dir_all(empty.path().join("ljos")).unwrap();
+        with_config_home(empty.path(), || {
+            assert!(user_rules::guard_line("git status").is_none());
+        });
     }
 
     #[test]

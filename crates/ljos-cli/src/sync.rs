@@ -823,12 +823,29 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     Ok(out)
 }
 
+/// Whether user-rule sync is off for `value` of `LJOS_USER_RULES_SYNC`.
+/// Unset is off in tests, so a hook test does not pull the login's tracker.
+/// Anywhere else, unset means on and `off` is the switch.
+fn user_rules_sync_off_value(value: Option<&str>) -> bool {
+    match value {
+        Some("off") => true,
+        Some(_) => false,
+        None => cfg!(test),
+    }
+}
+
+fn user_rules_sync_off() -> bool {
+    user_rules_sync_off_value(std::env::var("LJOS_USER_RULES_SYNC").ok().as_deref())
+}
+
 /// Tracker checkouts that carry user rules. A guessed working directory is
 /// not one: that is the tree the seat was started in, not the repository
 /// that travels between machines. `LJOS_USER_RULES_SYNC=off` names none.
+/// In tests the variable has to be set to something other than `off` before
+/// a tracker is read, so an unset shell does not sync the login's rules.
 #[must_use]
 pub fn user_rule_trackers() -> Vec<PathBuf> {
-    if std::env::var("LJOS_USER_RULES_SYNC").ok().as_deref() == Some("off") {
+    if user_rules_sync_off() {
         return Vec::new();
     }
     if let Some(one) = std::env::var("LJOS_USER_RULES_TRACKER")
@@ -1155,6 +1172,13 @@ mod tests {
     fn atom(id: &str, text: &str, entities: &[&str]) -> Value {
         serde_json::json!({"id": id, "text": text, "kind": "lesson",
             "entities": entities, "embedding": [0.1, 0.2]})
+    }
+
+    #[test]
+    fn an_unset_user_rules_sync_is_off_in_tests() {
+        assert!(user_rules_sync_off_value(None));
+        assert!(user_rules_sync_off_value(Some("off")));
+        assert!(!user_rules_sync_off_value(Some("on")));
     }
 
     #[test]

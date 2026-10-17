@@ -1,0 +1,16 @@
+# Identity for the commit gate. This is configuration, not a built-in person.
+# Copy it to one of these, later files overriding earlier ones:
+#
+#   ~/.config/ljos/ljos.toml                         the user, every seat
+#   ~/.config/ljos/seats/$LJOS_SEAT/ljos.toml        one seat on a shared box
+#   ljos.toml                                        this repository
+#   .ljos/gates.toml                                 this repository's gate file
+#
+# `name` and `email` may sit in an [identity] table, as here, or as keys of
+# .ljos/gates.toml. With none of these set, a commit is not checked for who
+# wrote it. A machine trailer is still refused. A plain push is allowed
+# unless the same file sets `test`.
+
+[identity]
+name = "Rohit Goswami"
+email = "rgoswami@ieee.org"

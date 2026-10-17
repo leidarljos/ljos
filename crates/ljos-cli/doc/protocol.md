@@ -463,10 +463,13 @@ under equal weights is a count; under calibrated rows it is not.
 - `ljos guard_check` is the commit, push, and merge gate, the same verdict
   the hook gives a shell line. `allow` lets it run. `deny` names the command
   that makes the line pass. A plain `git push` needs a passing
-  `ljos evidence record -- <test command>` for that exact tip. A merge needs
-  green CI on the head sha and every Cursor Bugbot thread resolved or
-  replied to. A commit must be authored and committed as
-  Rohit Goswami <rgoswami@ieee.org>.
+  `ljos evidence record -- <test command>` for that exact tip when the
+  checkout sets `test`. With no `test` command a plain push is allowed, and
+  a force push still asks. A merge needs green CI on the head sha and every
+  Cursor Bugbot thread resolved or replied to. A commit that carries a
+  machine trailer is refused. The author and committer are checked only
+  when `name` and `email` are set in `.ljos/gates.toml` or in the user,
+  repository, or seat `ljos.toml`.
 - `ljos hook` is the memory hook: a runner or a policy layer pipes the
   action about to happen (its hook JSON, or the plain argv) and gets back
   the memories that action activates, what two of the pack's scorers

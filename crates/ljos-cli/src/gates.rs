@@ -12,12 +12,17 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-const PERSON_NAME: &str = "Rohit Goswami";
-const PERSON_EMAIL: &str = "rgoswami@ieee.org";
-const SIGNOFF_LINE: &str = "Signed-off-by: Rohit Goswami <rgoswami@ieee.org>";
-
 thread_local! {
     static GH_BIN: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// User and seat config for this thread, instead of [`super::config_base`].
+    static LAYER_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    /// `LJOS_SEAT` for this thread, so a test can name a seat file without
+    /// changing the process environment.
+    static LAYER_SEAT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The commit, push, and merge gates alone. `None` means the line is not
@@ -33,8 +38,9 @@ pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
 
 /// The static guard (seat, user rules, these gates, a dangerous push) and
 /// then the pack's rules, the same composition the hook uses. `None` lets
-/// the line run. A plain push that already has test evidence for its tip
-/// is not held for approval; a force-push still is.
+/// the line run. A plain push is held for test evidence only when the
+/// checkout configures a `test` command and that tip has no passing record.
+/// A force-push still asks.
 #[must_use]
 pub fn guard_verdict(line: &str, cwd: Option<&Path>, rules: &[super::Rule]) -> Option<super::Rule> {
     let fast = super::static_guard_in(line, cwd);
@@ -156,17 +162,19 @@ struct GitCmd {
 }
 
 #[derive(Debug, Clone)]
+struct Person {
+    name: String,
+    email: String,
+}
+
+#[derive(Debug, Clone)]
 struct GateConfig {
     test: Option<String>,
     signoff: bool,
     protected: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GateFile {
-    test: Option<String>,
-    signoff: Option<bool>,
-    protected_branches: Option<Vec<String>>,
+    identity: Option<Person>,
+    /// The file that set [`GateConfig::identity`].
+    identity_from: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,7 +325,15 @@ fn on_commit(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule
         return Ok(());
     }
     let cfg = repo_config(&git.cwd, "git-commit-identity")?;
-    identity_ok(git, &inv.env, fields.author.as_deref())?;
+    if let Some(person) = &cfg.identity {
+        identity_ok(
+            git,
+            &inv.env,
+            fields.author.as_deref(),
+            person,
+            cfg.identity_from.as_deref(),
+        )?;
+    }
     if fields.hidden {
         return Err(hidden_deny());
     }
@@ -351,12 +367,22 @@ fn on_commit(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule
             ),
         ));
     }
-    if cfg.signoff && !fields.signoff && !has_signoff(&message) {
-        return Err(deny(
-            "commit-gate",
-            "git-commit-signoff",
-            "The message has no `Signed-off-by: Rohit Goswami <rgoswami@ieee.org>` line.",
-        ));
+    if cfg.signoff && !fields.signoff {
+        let Some(person) = &cfg.identity else {
+            return Err(deny(
+                "commit-gate",
+                "git-commit-signoff",
+                "Set `name` and `email` in the same file as `signoff`, then commit again.",
+            ));
+        };
+        let line = signoff_line(person);
+        if !has_signoff(&message, &line) {
+            return Err(deny(
+                "commit-gate",
+                "git-commit-signoff",
+                &format!("The message has no `{line}` line."),
+            ));
+        }
     }
     walk.fresh = true;
     Ok(())
@@ -448,9 +474,24 @@ fn on_push(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
             let sha = pending.sha.clone().unwrap_or_default();
             let spec = pr_branch(&git.cwd, &pending.src);
             review_pr(&git.cwd, &spec, None, Some(&sha), &action)?;
-            evidence_ok(&git.cwd, &sha, &cfg)?;
+            if cfg.test.is_some() {
+                evidence_ok(&git.cwd, &sha, &cfg)?;
+            }
             return Ok(());
         }
+    }
+    // Evidence is opt-in. A checkout with no `test` command has nothing to
+    // record, and a plain push runs. A force push still asks, later.
+    if cfg.test.is_none() {
+        if hits_protected(&dests, &cfg.protected) && !walk.fresh {
+            if let Some(head) = head_sha(&git.cwd) {
+                if second_parent(&git.cwd).is_some() {
+                    let action = format!("git push of merge commit {head}");
+                    review_sha(&git.cwd, &head, &action)?;
+                }
+            }
+        }
+        return Ok(());
     }
     let specs = refspecs(&git.cwd, &git.args);
     if specs.is_empty() && walk.fresh {
@@ -559,11 +600,7 @@ fn not_ff_deny(src: &str, branch: &str) -> super::Rule {
 
 fn evidence_ok(cwd: &Path, sha: &str, cfg: &GateConfig) -> Result<(), super::Rule> {
     let Some(test) = cfg.test.as_deref() else {
-        return Err(evidence_deny(
-            sha,
-            None,
-            "`.ljos/gates.toml` has no `test` command.",
-        ));
+        return Ok(());
     };
     let Some(path) = evidence_file(cwd, sha) else {
         return Err(evidence_deny(
@@ -678,34 +715,214 @@ fn repo_config(cwd: &Path, token: &str) -> Result<GateConfig, super::Rule> {
 }
 
 fn load_config(root: &Path) -> Result<GateConfig, String> {
-    let path = root.join(".ljos").join("gates.toml");
-    if !path.is_file() {
-        return Ok(GateConfig {
-            test: None,
-            signoff: false,
-            protected: default_protected(),
-        });
-    }
-    let text = std::fs::read_to_string(&path).map_err(|e| {
-        format!("`.ljos/gates.toml` cannot be read ({e}). Fix the file, then retry.")
-    })?;
-    let file: GateFile = toml::from_str(&text).map_err(|e| {
-        format!("`.ljos/gates.toml` does not parse ({e}). Fix the file, then retry.")
-    })?;
-    let protected = match file.protected_branches {
-        Some(names) => names
-            .into_iter()
-            .map(|s| branch_of(&s))
-            .filter(|s| !s.is_empty())
-            .collect(),
-        None => default_protected(),
+    let mut cfg = GateConfig {
+        test: None,
+        signoff: false,
+        protected: default_protected(),
+        identity: None,
+        identity_from: None,
     };
-    let test = file.test.map(|t| norm_cmd(&t)).filter(|t| !t.is_empty());
-    Ok(GateConfig {
-        test,
-        signoff: file.signoff.unwrap_or(false),
-        protected,
-    })
+    for path in config_layers(root) {
+        if path.is_file() {
+            apply_gate_file(&mut cfg, &path)?;
+        }
+    }
+    Ok(cfg)
+}
+
+/// User `ljos.toml`, then the seat's, then the repository's `ljos.toml`,
+/// then `LJOS_CONFIG`, then `.ljos/gates.toml`. A later file overrides the
+/// keys it sets. Identity is whatever the last of these files names. With
+/// none of them naming a person, there is no identity gate.
+fn config_layers(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(base) = user_config_base() {
+        paths.push(base.join("ljos").join("ljos.toml"));
+        if let Some(seat) = configured_seat() {
+            paths.push(base.join("ljos").join("seats").join(seat).join("ljos.toml"));
+        }
+    }
+    paths.push(root.join("ljos.toml"));
+    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
+        paths.push(PathBuf::from(path));
+    }
+    paths.push(root.join(".ljos").join("gates.toml"));
+    paths
+}
+
+fn user_config_base() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = LAYER_HOME.with(|slot| slot.borrow().clone()) {
+        return Some(path);
+    }
+    super::config_base()
+}
+
+fn configured_seat() -> Option<String> {
+    #[cfg(test)]
+    if let Some(name) = LAYER_SEAT.with(|slot| slot.borrow().clone()) {
+        return clean_seat(&name);
+    }
+    std::env::var("LJOS_SEAT")
+        .ok()
+        .and_then(|name| clean_seat(&name))
+}
+
+fn clean_seat(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "`{}` cannot be read ({e}). Fix the file, then retry.",
+            path.display()
+        )
+    })?;
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let value: toml::Value = toml::from_str(&text).map_err(|e| {
+        format!(
+            "`{}` does not parse ({e}). Fix the file, then retry.",
+            path.display()
+        )
+    })?;
+    let Some(root) = value.as_table() else {
+        return Err(format!(
+            "`{}` is not a table. Fix the file, then retry.",
+            path.display()
+        ));
+    };
+    let gates = root.get("gates").and_then(toml::Value::as_table);
+    let src = gates.unwrap_or(root);
+    if src.contains_key("test") {
+        let test = norm_cmd(&req_string(src, "test", path)?);
+        cfg.test = (!test.is_empty()).then_some(test);
+    }
+    if src.contains_key("signoff") {
+        cfg.signoff = req_bool(src, "signoff", path)?;
+    }
+    if src.contains_key("protected_branches") {
+        cfg.protected = req_strings(src, "protected_branches", path)?
+            .into_iter()
+            .map(|name| branch_of(&name))
+            .filter(|name| !name.is_empty())
+            .collect();
+    }
+    if let Some(identity) = root.get("identity").and_then(toml::Value::as_table) {
+        set_identity(cfg, identity, path)?;
+    } else if let Some(gates) = gates {
+        if gates.contains_key("name") || gates.contains_key("email") {
+            set_identity(cfg, gates, path)?;
+        }
+    } else if path.file_name().and_then(|name| name.to_str()) == Some("gates.toml")
+        && (src.contains_key("name") || src.contains_key("email"))
+    {
+        set_identity(cfg, src, path)?;
+    }
+    Ok(())
+}
+
+fn set_identity(
+    cfg: &mut GateConfig,
+    table: &toml::map::Map<String, toml::Value>,
+    path: &Path,
+) -> Result<(), String> {
+    let name = opt_string(table, "name", path)?;
+    let email = opt_string(table, "email", path)?;
+    match (name, email) {
+        (None, None) => Ok(()),
+        (Some(name), Some(email)) => {
+            let name = name.trim().to_string();
+            let email = email.trim().to_string();
+            if name.is_empty() || email.is_empty() {
+                return Err(identity_half(path));
+            }
+            cfg.identity = Some(Person { name, email });
+            cfg.identity_from = Some(path.to_path_buf());
+            Ok(())
+        }
+        _ => Err(identity_half(path)),
+    }
+}
+
+fn identity_half(path: &Path) -> String {
+    format!(
+        "`{}` sets an identity with only one of `name` and `email`. Set both, then retry.",
+        path.display()
+    )
+}
+
+fn req_string(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    path: &Path,
+) -> Result<String, String> {
+    match table.get(key) {
+        Some(toml::Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err(format!(
+            "`{}` key `{key}` must be a string. Fix the file, then retry.",
+            path.display()
+        )),
+        None => Err(format!(
+            "`{}` is missing `{key}`. Fix the file, then retry.",
+            path.display()
+        )),
+    }
+}
+
+fn opt_string(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    path: &Path,
+) -> Result<Option<String>, String> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(_) => req_string(table, key, path).map(Some),
+    }
+}
+
+fn req_bool(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    path: &Path,
+) -> Result<bool, String> {
+    match table.get(key) {
+        Some(toml::Value::Boolean(value)) => Ok(*value),
+        _ => Err(format!(
+            "`{}` key `{key}` must be true or false. Fix the file, then retry.",
+            path.display()
+        )),
+    }
+}
+
+fn req_strings(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+    path: &Path,
+) -> Result<Vec<String>, String> {
+    let Some(items) = table.get(key).and_then(toml::Value::as_array) else {
+        return Err(format!(
+            "`{}` key `{key}` must be a list of strings. Fix the file, then retry.",
+            path.display()
+        ));
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return Err(format!(
+                "`{}` key `{key}` must be a list of strings. Fix the file, then retry.",
+                path.display()
+            ));
+        };
+        out.push(text.to_string());
+    }
+    Ok(out)
 }
 
 fn is_protected(name: &str, protected: &[String]) -> bool {
@@ -785,6 +1002,8 @@ fn identity_ok(
     git: &GitCmd,
     env: &[(String, String)],
     author_flag: Option<&str>,
+    person: &Person,
+    from: Option<&Path>,
 ) -> Result<(), super::Rule> {
     let cfg = |key: &str| {
         git.config
@@ -808,16 +1027,21 @@ fn identity_ok(
             author_e = email;
         }
     }
-    let author_ok = same_person(&author_n, &author_e);
-    let committer_ok = same_person(&committer_n, &committer_e);
+    let author_ok = same_person(&author_n, &author_e, person);
+    let committer_ok = same_person(&committer_n, &committer_e, person);
     if author_ok && committer_ok {
         return Ok(());
     }
+    let where_from = from
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the gate config".to_string());
     Err(deny(
         "commit-gate",
         "git-commit-identity",
         &format!(
-            "Author is {} <{}>, committer is {} <{}>.",
+            "Configured identity is {} <{}> in {where_from}. Author is {} <{}>, committer is {} <{}>.",
+            person.name,
+            person.email,
             shown(&author_n),
             shown(&author_e),
             shown(&committer_n),
@@ -826,8 +1050,12 @@ fn identity_ok(
     ))
 }
 
-fn same_person(name: &str, email: &str) -> bool {
-    name.trim() == PERSON_NAME && email.trim().eq_ignore_ascii_case(PERSON_EMAIL)
+fn same_person(name: &str, email: &str, person: &Person) -> bool {
+    name.trim() == person.name && email.trim().eq_ignore_ascii_case(&person.email)
+}
+
+fn signoff_line(person: &Person) -> String {
+    format!("Signed-off-by: {} <{}>", person.name, person.email)
 }
 
 fn shown(value: &str) -> &str {
@@ -851,8 +1079,8 @@ fn parse_author(s: &str) -> (String, String) {
     }
 }
 
-fn has_signoff(message: &str) -> bool {
-    message.lines().any(|line| line.trim() == SIGNOFF_LINE)
+fn has_signoff(message: &str, line: &str) -> bool {
+    message.lines().any(|row| row.trim() == line)
 }
 
 fn ai_marker(message: &str) -> Option<&'static str> {
@@ -2032,15 +2260,18 @@ fn alias_of(git: &GitCmd) -> Option<String> {
 mod tests {
     use super::*;
 
+    const AUTHOR_NAME: &str = "Ada Lovelace";
+    const AUTHOR_EMAIL: &str = "ada@example.com";
+
     fn git(dir: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(args)
-            .env("GIT_AUTHOR_NAME", PERSON_NAME)
-            .env("GIT_AUTHOR_EMAIL", PERSON_EMAIL)
-            .env("GIT_COMMITTER_NAME", PERSON_NAME)
-            .env("GIT_COMMITTER_EMAIL", PERSON_EMAIL)
+            .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
+            .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
+            .env("GIT_COMMITTER_NAME", AUTHOR_NAME)
+            .env("GIT_COMMITTER_EMAIL", AUTHOR_EMAIL)
             .output()
             .unwrap();
         assert!(
@@ -2053,8 +2284,8 @@ mod tests {
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q", "-b", "main"]);
-        git(dir.path(), &["config", "user.name", PERSON_NAME]);
-        git(dir.path(), &["config", "user.email", PERSON_EMAIL]);
+        git(dir.path(), &["config", "user.name", AUTHOR_NAME]);
+        git(dir.path(), &["config", "user.email", AUTHOR_EMAIL]);
         git(dir.path(), &["config", "commit.gpgsign", "false"]);
         git(
             dir.path(),
@@ -2310,18 +2541,11 @@ esac
     fn commit_identity_trailers_signoff_and_wrappers_say_what_passes() {
         let dir = repo();
         let cwd = dir.path();
-        let wrong = guard_verdict(
-            "GIT_AUTHOR_NAME=Other GIT_AUTHOR_EMAIL=other@example.com git commit -m \"note the seat\"",
-            Some(cwd),
-            &[],
-        )
-        .unwrap();
+        let foreign = "GIT_AUTHOR_NAME=rig GIT_AUTHOR_EMAIL=rig@example.invalid GIT_COMMITTER_NAME=rig GIT_COMMITTER_EMAIL=rig@example.invalid git commit -m \"note the seat\"";
         assert!(
-            wrong.reason.contains("rgoswami@ieee.org"),
-            "{}",
-            wrong.reason
+            guard_verdict(foreign, Some(cwd), &[]).is_none(),
+            "no identity configured, so a foreign author is allowed"
         );
-        assert!(wrong.reason.contains("Author is Other"), "{}", wrong.reason);
         let generated =
             guard_verdict("git commit -m \"Generated with Cursor\"", Some(cwd), &[]).unwrap();
         assert!(
@@ -2371,16 +2595,36 @@ esac
             &[],
         );
         assert!(alias.is_none(), "{alias:?}");
-        gates(cwd, "signoff = true\n");
+        let line = format!("Signed-off-by: {AUTHOR_NAME} <{AUTHOR_EMAIL}>");
+        gates(
+            cwd,
+            &format!("name = \"{AUTHOR_NAME}\"\nemail = \"{AUTHOR_EMAIL}\"\nsignoff = true\n"),
+        );
         let unsigned = guard_verdict("git commit -m \"note the seat\"", Some(cwd), &[]).unwrap();
+        assert!(unsigned.reason.contains(&line), "{}", unsigned.reason);
         assert!(
-            unsigned.reason.contains(SIGNOFF_LINE),
+            !unsigned.reason.contains("git config"),
             "{}",
             unsigned.reason
         );
         assert!(guard_verdict("git commit -s -m \"note the seat\"", Some(cwd), &[]).is_none());
-        let signed = format!("git commit -m \"note the seat\n\n{SIGNOFF_LINE}\"");
+        let signed = format!("git commit -m \"note the seat\n\n{line}\"");
         assert!(guard_verdict(&signed, Some(cwd), &[]).is_none(), "{signed}");
+        let wrong = guard_verdict(foreign, Some(cwd), &[]).unwrap();
+        assert!(
+            wrong.reason.contains("rig@example.invalid"),
+            "{}",
+            wrong.reason
+        );
+        assert!(wrong.reason.contains("Author is rig"), "{}", wrong.reason);
+        assert!(
+            wrong.reason.contains(".ljos/gates.toml"),
+            "{}",
+            wrong.reason
+        );
+        assert!(!wrong.reason.contains("git config"), "{}", wrong.reason);
+        assert!(!wrong.reason.contains("user.name"), "{}", wrong.reason);
+        assert!(!wrong.reason.contains("GIT_AUTHOR"), "{}", wrong.reason);
     }
 
     #[test]
@@ -2538,5 +2782,128 @@ esac
         let red = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
         assert!(red.reason.contains("git-merge-unready"), "{}", red.reason);
         assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+    }
+
+    struct Layers;
+
+    impl Drop for Layers {
+        fn drop(&mut self) {
+            LAYER_HOME.with(|slot| *slot.borrow_mut() = None);
+            LAYER_SEAT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn layers(home: &Path, seat: Option<&str>) -> Layers {
+        LAYER_HOME.with(|slot| *slot.borrow_mut() = Some(home.to_path_buf()));
+        LAYER_SEAT.with(|slot| *slot.borrow_mut() = seat.map(str::to_string));
+        Layers
+    }
+
+    fn write_toml(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_plain_push_without_a_test_command_is_allowed_and_a_force_push_asks() {
+        let dir = repo();
+        seed(dir.path());
+        let plain = guard_verdict("git push origin main", Some(dir.path()), &[]);
+        assert!(plain.is_none(), "{plain:?}");
+        let forced = guard_verdict("git push --force origin main", Some(dir.path()), &[])
+            .expect("force still asks");
+        assert_eq!(forced.verdict, "ask");
+        assert_eq!(forced.pattern, "git-force-push");
+        assert!(
+            !forced.reason.contains("git-push-evidence"),
+            "{}",
+            forced.reason
+        );
+        gates(dir.path(), "signoff = false\n");
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a gates file with no test command does not ask for evidence"
+        );
+        gates(dir.path(), "test = \"true\"\n");
+        let refused = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
+        assert!(
+            refused.reason.contains("ljos evidence record -- true"),
+            "{}",
+            refused.reason
+        );
+    }
+
+    #[test]
+    fn identity_comes_from_config_layers_and_the_example_is_not_the_default() {
+        let dir = repo();
+        let cwd = dir.path();
+        let home = tempfile::tempdir().unwrap();
+        let _layers = layers(home.path(), Some("box"));
+        let foreign = "GIT_AUTHOR_NAME=rig GIT_AUTHOR_EMAIL=rig@example.invalid \
+                       GIT_COMMITTER_NAME=rig GIT_COMMITTER_EMAIL=rig@example.invalid \
+                       git commit -m \"note the seat\"";
+        assert!(
+            guard_verdict(foreign, Some(cwd), &[]).is_none(),
+            "an empty seat config is not an identity gate"
+        );
+        write_toml(
+            &home.path().join("ljos/ljos.toml"),
+            "[identity]\nname = \"User Person\"\nemail = \"user@example.com\"\n",
+        );
+        let user = guard_verdict(foreign, Some(cwd), &[]).unwrap();
+        assert!(user.reason.contains("user@example.com"), "{}", user.reason);
+        assert!(user.reason.contains("ljos.toml"), "{}", user.reason);
+        assert!(!user.reason.contains("git config"), "{}", user.reason);
+        write_toml(
+            &home.path().join("ljos/seats/box/ljos.toml"),
+            "[identity]\nname = \"Seat Person\"\nemail = \"seat@example.com\"\n",
+        );
+        let seat = guard_verdict(foreign, Some(cwd), &[]).unwrap();
+        assert!(seat.reason.contains("seat@example.com"), "{}", seat.reason);
+        write_toml(
+            &cwd.join("ljos.toml"),
+            "[identity]\nname = \"Repo Person\"\nemail = \"repo@example.com\"\n",
+        );
+        let repo_id = guard_verdict(foreign, Some(cwd), &[]).unwrap();
+        assert!(
+            repo_id.reason.contains("repo@example.com"),
+            "{}",
+            repo_id.reason
+        );
+        gates(
+            cwd,
+            "name = \"Gate Person\"\nemail = \"gate@example.com\"\n",
+        );
+        let gate = guard_verdict(foreign, Some(cwd), &[]).unwrap();
+        assert!(gate.reason.contains("gate@example.com"), "{}", gate.reason);
+        assert!(gate.reason.contains(".ljos/gates.toml"), "{}", gate.reason);
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/ljos.toml");
+        let text = std::fs::read_to_string(&example).unwrap();
+        assert!(text.contains("Rohit Goswami"), "{text}");
+        assert!(text.contains("rgoswami@ieee.org"), "{text}");
+        write_toml(&home.path().join("ljos/ljos.toml"), &text);
+        std::fs::remove_file(home.path().join("ljos/seats/box/ljos.toml")).unwrap();
+        std::fs::remove_file(cwd.join("ljos.toml")).unwrap();
+        std::fs::remove_file(cwd.join(".ljos/gates.toml")).unwrap();
+        let from_example = guard_verdict(foreign, Some(cwd), &[]).unwrap();
+        assert!(
+            from_example.reason.contains("rgoswami@ieee.org"),
+            "{}",
+            from_example.reason
+        );
+        assert!(
+            !from_example.reason.contains("git config"),
+            "{}",
+            from_example.reason
+        );
+        let rohit = "GIT_AUTHOR_NAME='Rohit Goswami' GIT_AUTHOR_EMAIL=rgoswami@ieee.org \
+                     GIT_COMMITTER_NAME='Rohit Goswami' GIT_COMMITTER_EMAIL=rgoswami@ieee.org \
+                     git commit -m \"note the seat\"";
+        assert!(
+            guard_verdict(rohit, Some(cwd), &[]).is_none(),
+            "the configured person may commit"
+        );
     }
 }

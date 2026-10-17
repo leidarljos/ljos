@@ -106,6 +106,20 @@ or a hook. ``--fail-on-deny`` exits 1 when the answer is a deny. Without
 the flag, ``ljos hook`` and ``ljos policy`` still exit 0, so a runner that
 reads the JSON sees no change. An ``ask`` still exits 0; the text says ``ask``.
 
+Commit identity on a box
+========================
+
+The commit gate checks the author only when a config file names one. No
+person is built into the program. On a shared box the file is
+``~/.config/ljos/ljos.toml`` for every seat, or
+``~/.config/ljos/seats/<LJOS_SEAT>/ljos.toml`` for one seat. A repository
+may set the same keys in ``ljos.toml`` or ``.ljos/gates.toml``, and a later
+file overrides the keys it sets. ``examples/ljos.toml`` is one such file.
+With none of these set, any author may commit. A machine trailer is still
+refused. A plain ``git push`` is allowed unless ``test`` is set in that
+config; a force push still asks. A denial names the config file. It does
+not ask for a change to git's identity.
+
 Write to another seat
 =====================
 

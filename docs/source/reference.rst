@@ -422,6 +422,32 @@ The remote is the one the command names, else the branch's upstream,
 else ``origin``, read in the directory a ``cd`` or ``git -C`` before the push
 names.
 
+Commit, push, and merge gates
+=============================
+
+The hook and ``ljos guard_check`` apply these in the checkout the command
+would run in. A missing file is skipped. A later file overrides the keys it
+sets.
+
+=============================================== ==================================================================================================================================
+File                                            Role
+=============================================== ==================================================================================================================================
+``~/.config/ljos/ljos.toml``                    the user, every seat on this machine
+``~/.config/ljos/seats/<LJOS_SEAT>/ljos.toml``  one seat, when ``LJOS_SEAT`` is set
+``ljos.toml``                                   this repository
+``$LJOS_CONFIG``                                an explicit file
+``.ljos/gates.toml``                            this repository's gate file
+=============================================== ==================================================================================================================================
+
+``name`` and ``email``, in an ``[identity]`` table or as keys of
+``.ljos/gates.toml``, are the only commit identity. With neither set, the
+author is not checked. ``examples/ljos.toml`` is a filled-in user file.
+``signoff = true`` requires a ``Signed-off-by`` line for that identity.
+``test`` is the command ``ljos evidence record`` runs; a push of a tip needs
+that record only when ``test`` is set. ``protected_branches`` defaults to
+``main`` and ``master``. A machine trailer is refused whether or not an
+identity is configured. A force push still asks.
+
 Sync files
 ==========
 

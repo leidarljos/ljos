@@ -1646,7 +1646,8 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/tracker.git");
         git_ok(&repo, &["remote", "add", "origin", &url]);
         unsafe {
-            std::env::remove_var("LJOS_USER_RULES_SYNC");
+            // Unset is off under `cargo test`, so this test asks for a sync.
+            std::env::set_var("LJOS_USER_RULES_SYNC", "on");
             std::env::set_var("LJOS_USER_RULES_TRACKER", &repo);
             std::env::set_var("LJOS_USER_RULES_SYNC_MS", "400");
         }
