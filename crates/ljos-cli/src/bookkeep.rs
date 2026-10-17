@@ -2393,6 +2393,24 @@ mod tests {
     }
 
     #[test]
+    fn a_bookkeep_test_does_not_read_the_login_user_rules() {
+        let home = Path::new("/home/someone");
+        let got = super::super::resolve_config_base(None, Some(home)).expect("isolated base");
+        assert_ne!(got, home.join(".config"));
+        assert!(!got.starts_with(home), "{got:?}");
+        let rules = super::super::user_rules::rules_path().expect("rules path");
+        if std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            let login = std::env::var_os("HOME").map(PathBuf::from);
+            if let Some(login) = login {
+                assert!(!rules.starts_with(&login), "{rules:?} is the login config");
+            }
+        }
+    }
+
+    #[test]
     fn a_temp_path_is_the_directory_not_a_prefix() {
         assert!(path_is_temp(Some(Path::new("/tmp/scratch"))));
         assert!(!path_is_temp(Some(Path::new("/tmpfoo"))));
