@@ -209,15 +209,17 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     if !BOOK_EVENTS.contains(&call.event.as_str()) {
         return String::new();
     }
-    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
     let session = session_key(call);
-    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let _held = super::hook_timed("book_lock", || {
+        super::CommitLock::acquire(&super::runtime_dir().join("book.lock"))
+    });
     // A runner killed before Stop leaves its claims open. The next session
     // finishes those whose pid is gone, and replaces a deed whose commit is
     // no longer in the checkout with the one that is.
     if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
-        finish_orphans(&session);
-        refresh_landed_deeds();
+        super::hook_timed("finish_orphans", || finish_orphans(&session));
+        super::hook_timed("refresh_landed_deeds", refresh_landed_deeds);
     }
     let path = book_path(&session);
     let mut book = load_book(&path);

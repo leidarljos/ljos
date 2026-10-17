@@ -7584,6 +7584,22 @@ pub fn subagent_stop_reason(
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
+/// Run one stage of a hook call. With `LJOS_HOOK_TIMING` set, the stage and
+/// its wall time go to stderr, one line each, so a slow hook names the stage
+/// that holds it.
+pub fn hook_timed<T>(stage: &str, f: impl FnOnce() -> T) -> T {
+    if std::env::var_os("LJOS_HOOK_TIMING").is_none() {
+        return f();
+    }
+    let started = std::time::Instant::now();
+    let out = f();
+    eprintln!(
+        "hook-timing {stage} {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    out
+}
+
 /// What a prompt hears while the pack's encoder loads. On a new machine the
 /// first load downloads the model, which takes longer than a hook may.
 pub const ENCODER_WARMING_NOTE: &str = "ljos memory is starting: the pack is \
