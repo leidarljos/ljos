@@ -21799,8 +21799,8 @@ pub fn parse_tracker_commit(message: &str) -> Option<TrackerAct> {
     })
 }
 
-/// A logbook attribution, `- Noted by saddle [ts]` or the note vissue
-/// rewrites that into. Not a `:Seat:` property.
+/// A logbook attribution, `- Noted by saddle [ts]` or the note
+/// vissue rewrites that into. Not a `:Seat:` property.
 #[must_use]
 pub fn parse_logbook_act(line: &str) -> Option<(String, String)> {
     let body = line.trim().strip_prefix('-')?.trim();
@@ -22066,7 +22066,11 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             .stdin(std::process::Stdio::null())
             .output()
     };
-    let file = path.to_string_lossy().to_string();
+    // Relative to the directory git runs in: an absolute path that reaches
+    // the checkout through a symlink is outside it to git.
+    let file = path
+        .file_name()
+        .map_or_else(|| path.to_string_lossy().to_string(), |n| n.to_string_lossy().to_string());
     match git(&["rev-parse", "--is-inside-work-tree"]) {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
@@ -22104,8 +22108,17 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         .map(|o| dir.join(String::from_utf8_lossy(&o.stdout).trim()))
         .unwrap_or_else(|| dir.join(".git"));
     let _held = CommitLock::acquire(&common.join("ljos-commit.lock"));
-    let mut committed = git(&["add", "--", &file])
-        .and_then(|_| git(&["commit", "-q", "--only", "-m", &message, "--", &file]));
+    // The add runs first and its failure stands on its own: a commit named
+    // for a file git never took in reports a pathspec error that hides why
+    // the add failed. An untracked ticket is added here, that file only.
+    let stage_and_commit = || {
+        let added = git(&["add", "--", &file])?;
+        if !added.status.success() {
+            return Ok(added);
+        }
+        git(&["commit", "-q", "--only", "-m", &message, "--", &file])
+    };
+    let mut committed = stage_and_commit();
     for wait_ms in [200_u64, 400, 800, 1600, 3200] {
         let busy = matches!(&committed, Ok(o) if !o.status.success()
             && String::from_utf8_lossy(&o.stderr).contains("index.lock"));
@@ -22113,8 +22126,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-        committed = git(&["add", "--", &file])
-            .and_then(|_| git(&["commit", "-q", "--only", "-m", &message, "--", &file]));
+        committed = stage_and_commit();
     }
     drop(_held);
     match committed {
