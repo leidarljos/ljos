@@ -1,1 +1,0 @@
-Validity windows: `ljos remember --valid-from DATE --valid-to DATE` records when a claim held in the world, beside the pack's own clock. `ljos search` shows what holds today, `--valid-at DATE` what held on another day, and `--valid-at any` every window.

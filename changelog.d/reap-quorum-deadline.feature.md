@@ -1,1 +1,0 @@
-`ljos file --quorum N --deadline RFC3339` records when a decision's ballots are due, and `ljos reap --apply` runs the quorum gate on every vote past its deadline: one short of its quorum lapses once, noted on the tracker.
