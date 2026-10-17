@@ -482,29 +482,32 @@ fn on_push(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
     }
     // Evidence is opt-in. A checkout with no `test` command has nothing to
     // record, and a plain push runs. A force push still asks, later.
+    // A merge is reviewed only when the commit this push publishes is a
+    // merge. The checkout's HEAD being a merge does not make a push of
+    // another branch one.
     if cfg.test.is_none() {
-        if hits_protected(&dests, &cfg.protected) && !walk.fresh {
-            if let Some(head) = head_sha(&git.cwd) {
-                if second_parent(&git.cwd).is_some() {
-                    let action = format!("git push of merge commit {head}");
-                    review_sha(&git.cwd, &head, &action)?;
-                }
-            }
-        }
+        review_pushed_merges(
+            &git.cwd,
+            &git.args,
+            current.as_deref(),
+            &dests,
+            &cfg.protected,
+            walk.fresh,
+        )?;
         return Ok(());
     }
     let specs = refspecs(&git.cwd, &git.args);
     if specs.is_empty() && walk.fresh {
         return Err(fresh_deny(cfg.test.as_deref()));
     }
-    if hits_protected(&dests, &cfg.protected) && !walk.fresh {
-        if let Some(head) = head_sha(&git.cwd) {
-            if second_parent(&git.cwd).is_some() {
-                let action = format!("git push of merge commit {head}");
-                review_sha(&git.cwd, &head, &action)?;
-            }
-        }
-    }
+    review_pushed_merges(
+        &git.cwd,
+        &git.args,
+        current.as_deref(),
+        &dests,
+        &cfg.protected,
+        walk.fresh,
+    )?;
     let shas = published_shas(
         &git.cwd,
         &git.args,
@@ -519,6 +522,54 @@ fn on_push(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
         evidence_ok(&git.cwd, sha, &cfg)?;
     }
     Ok(())
+}
+
+/// Review a protected push whose published commit is a merge. A ref that
+/// cannot be read is left to the evidence check, which names that ref.
+fn review_pushed_merges(
+    cwd: &Path,
+    args: &[String],
+    current: Option<&str>,
+    dests: &[String],
+    protected: &[String],
+    fresh: bool,
+) -> Result<(), super::Rule> {
+    if fresh || !hits_protected(dests, protected) {
+        return Ok(());
+    }
+    let Some(shas) = shas_quietly(cwd, args, current) else {
+        return Ok(());
+    };
+    for sha in shas {
+        if git_text(cwd, &["rev-parse", "--verify", &format!("{sha}^2")]).is_none() {
+            continue;
+        }
+        let action = format!("git push of merge commit {sha}");
+        review_sha(cwd, &sha, &action)?;
+    }
+    Ok(())
+}
+
+/// The commits a push would publish, or `None` when one of them cannot be
+/// read. An empty refspec is the current HEAD.
+fn shas_quietly(cwd: &Path, args: &[String], current: Option<&str>) -> Option<Vec<String>> {
+    let specs = refspecs(cwd, args);
+    if specs.is_empty() {
+        return head_sha(cwd).map(|sha| vec![sha]);
+    }
+    let mut out = Vec::new();
+    for spec in specs {
+        let Some(src) = src_of(&spec) else {
+            continue;
+        };
+        let sha = if pushing_current(&src, current) {
+            head_sha(cwd)?
+        } else {
+            rev(cwd, &src)?
+        };
+        out.push(sha);
+    }
+    Some(out)
 }
 
 fn published_shas(
@@ -957,6 +1008,7 @@ fn abbrev(cwd: &Path) -> Option<String> {
     (branch != "HEAD" && !branch.is_empty()).then_some(branch)
 }
 
+#[cfg(test)]
 fn second_parent(cwd: &Path) -> Option<String> {
     git_text(cwd, &["rev-parse", "--verify", "HEAD^2"])
 }
@@ -2782,6 +2834,35 @@ esac
         let red = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
         assert!(red.reason.contains("git-merge-unready"), "{}", red.reason);
         assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+    }
+
+    #[test]
+    fn a_push_of_another_branch_does_not_review_the_checkout_merge() {
+        let dir = repo();
+        seed(dir.path());
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.path().join("g.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "g.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "note the feature"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "--no-ff", "--no-edit", "feature"]);
+        git(dir.path(), &["branch", "-q", "merged"]);
+        git(dir.path(), &["reset", "-q", "--hard", "HEAD^1"]);
+        git(dir.path(), &["checkout", "-q", "merged"]);
+        assert!(second_parent(dir.path()).is_some());
+        gates(dir.path(), "test = \"true\"\n");
+        let refused = guard_verdict("git push --force origin main", Some(dir.path()), &[]).unwrap();
+        assert_eq!(refused.pattern, "push-gate");
+        assert!(
+            refused.reason.contains("git-push-evidence"),
+            "{}",
+            refused.reason
+        );
+        assert!(
+            !refused.reason.contains("git-merge-unready"),
+            "{}",
+            refused.reason
+        );
     }
 
     struct Layers;
