@@ -1,0 +1,1 @@
+A policyd denial of `pack-unavailable` means the pack did not load. The command is allowed and the guard says it is unhealthy, the same as an empty reason, the bare token `phronesis`, and `bind-failed`. A denial that carries the pack's reason text still refuses.

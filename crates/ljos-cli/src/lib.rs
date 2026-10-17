@@ -3370,11 +3370,12 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   case $verdict in
     deny*)
       rule=$(printf '%s' "$verdict" | head -n 1 | cut -f 2)
-      # An empty reason, the bare engine name, or a bind that did not
-      # take is a seat that is not ready. A `phronesis:` token names a
-      # rule and is a real denial. Run only the unready cases.
+      # An empty reason, the bare engine name, a bind that did not take,
+      # or a pack that did not load is a seat that is not ready. A
+      # `phronesis:` token, or a pack reason in words, is a real denial.
+      # Run only the unready cases.
       case "$rule" in
-        ""|phronesis|bind-failed)
+        ""|phronesis|bind-failed|pack-unavailable)
           exec "$real" "$@" ;;
       esac
       case "$rule" in
@@ -22603,13 +22604,17 @@ fn policyd_token(line: &str) -> &str {
 /// A deny that is the seat not being ready, not a check that named the
 /// command. `ljos-policyd` prints `deny\tphronesis` when the decision text
 /// is empty: the token is the backend name and nothing else. `bind-failed`
-/// is the seat failing to bind. A `phronesis:` token carries words (`seat
-/// could not open`, or a rule, if one is ever named that way) and stays a
-/// refusal. Under a burst of checks the bare token comes back for commands
-/// the same binary allows alone.
+/// is the seat failing to bind. `pack-unavailable` is the pack failing to
+/// load. A `phronesis:` token carries words (`seat could not open`, or a
+/// rule, if one is ever named that way) and stays a refusal, as does a
+/// pack denial that carries its reason text. Under a burst of checks the
+/// bare token comes back for commands the same binary allows alone.
 fn policyd_unjudged(token: &str) -> bool {
     let token = token.trim();
-    token.is_empty() || token.eq_ignore_ascii_case("phronesis") || token == "bind-failed"
+    token.is_empty()
+        || token.eq_ignore_ascii_case("phronesis")
+        || token == "bind-failed"
+        || token == "pack-unavailable"
 }
 
 /// A force-push ask is the person's question, on a runner that otherwise
@@ -24651,7 +24656,7 @@ mod tests {
         exe(&guard.join("rm"), super::GUARD_SHIM);
         exe(
             &fake.join("ljos-policyd"),
-            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; *bound*) printf 'deny\\tbind-failed\\n'; exit 2;; *ruled*) printf 'deny\\tphronesis: keep-the-tree\\n'; exit 2;; esac\necho allow\n",
+            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; *bound*) printf 'deny\\tbind-failed\\n'; exit 2;; *packed*) printf 'deny\\tpack-unavailable\\n'; exit 2;; *ruled*) printf 'deny\\tphronesis: keep-the-tree\\n'; exit 2;; *secret*) printf 'deny\\tsecret material in argv denied by the pack\\n'; exit 2;; esac\necho allow\n",
         );
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
@@ -24701,6 +24706,25 @@ mod tests {
         let err = String::from_utf8_lossy(&named.stderr);
         assert!(err.contains("denied (phronesis: keep-the-tree)"), "{err}");
         assert!(ruled.exists(), "a named phronesis denial does not run");
+        let packed = dir.path().join("packed.py");
+        std::fs::write(&packed, "x").unwrap();
+        let missing = run(&format!("'{}'", packed.display()));
+        assert!(
+            missing.status.success(),
+            "a pack that did not load runs the command: {}",
+            String::from_utf8_lossy(&missing.stderr)
+        );
+        assert!(!packed.exists());
+        let secret = dir.path().join("secret.py");
+        std::fs::write(&secret, "x").unwrap();
+        let kept = run(&format!("'{}'", secret.display()));
+        assert_eq!(kept.status.code(), Some(126));
+        let err = String::from_utf8_lossy(&kept.stderr);
+        assert!(
+            err.contains("denied (secret material in argv denied by the pack)"),
+            "{err}"
+        );
+        assert!(secret.exists(), "a pack denial with a reason does not run");
         assert!(super::seat_env_text("grokbot").contains("ljos/guard-bin"));
     }
 
@@ -34179,6 +34203,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(rule.verdict, "deny");
         assert_eq!(rule.reason, pack_text);
         assert_ne!(rule.reason, "phronesis");
+    }
+
+    /// `ljos-policyd` answers `pack-unavailable` when the pack cannot be
+    /// loaded (unpack-race `1a08c68`, `src/lib.rs`). That is the seat not
+    /// being ready. A real pack denial keeps its reason text.
+    #[test]
+    fn a_missing_pack_allows_and_a_pack_denial_keeps_its_words() {
+        assert!(policyd_unjudged("pack-unavailable"));
+        assert!(!policyd_unjudged(
+            "pack-unavailable: secret material in argv denied"
+        ));
+        let _g = env_guard();
+        let home = SeatDir::new("pack-unavailable");
+        let line = "git add slug.py test_slug.py";
+        let missing = fake_policyd(
+            home.path(),
+            "pack-unavailable",
+            "printf 'deny\\tpack-unavailable\\n'; exit 2",
+        );
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", missing.to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+        ]);
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict(line).is_none(),
+            "a missing pack is not a refusal"
+        );
+        let note = take_guard_note().expect("unhealthy note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(note.contains("refused without a reason"), "{note}");
+        let reason = "secret material in argv denied by the pack";
+        let named = fake_policyd(
+            home.path(),
+            "pack-reason",
+            &format!("printf 'deny\\t{reason}\\n'; exit 2"),
+        );
+        let _named = HoldEnv::set(&[("POLICYD_BIN", named.to_str().unwrap())]);
+        let rule = tcb_verdict(line).expect("a pack denial keeps its words");
+        assert_eq!(rule.verdict, "deny");
+        assert_eq!(rule.reason, reason);
+        assert_ne!(rule.reason, "pack-unavailable");
     }
 
     #[test]
