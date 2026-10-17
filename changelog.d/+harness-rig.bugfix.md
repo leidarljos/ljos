@@ -1,2 +1,0 @@
-`ljos recall` now shows what the seat remembers about the issue, searched on its id and title, under a `Memory` heading after the tracker's working set. It used to print only the tracker's part, so a seeded lesson never came back on recall in any harness.
-Codex and opencode now hear the session-start line. `ljos onboard --harness codex` registers `SessionStart` alongside `UserPromptSubmit` and `PreToolUse`, and the opencode plugin carries the start line on a session's first prompt. Found by the end-to-end harness rig, where both showed no `ljos is on` while Claude Code did.
