@@ -3370,12 +3370,23 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   case $verdict in
     deny*)
       rule=$(printf '%s' "$verdict" | head -n 1 | cut -f 2)
-      # An empty reason, the bare engine name, a bind that did not take,
-      # or a pack that did not load is a seat that is not ready. A
-      # `phronesis:` token, or a pack reason in words, is a real denial.
-      # Run only the unready cases.
-      case "$rule" in
-        ""|phronesis|bind-failed|pack-unavailable)
+      rule=$(printf '%s' "$rule" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      folded=$(printf '%s' "$rule" | tr '[:upper:]' '[:lower:]')
+      # The same seat-not-ready tokens as `policyd_unjudged`: empty, the
+      # bare engine name, a bind that did not take, and `pack-unavailable`
+      # with or without the pack's text. A `phronesis:` token, or a named
+      # pack code, is a real denial. The note is `unhealthy_note`.
+      case "$folded" in
+        ""|phronesis|bind-failed|pack-unavailable|pack-unavailable:*)
+          why="ljos-policyd refused without a reason"
+          case "$folded" in
+            pack-unavailable:*)
+              text=${rule#*:}
+              text=$(printf '%s' "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              [ -n "$text" ] && why="$why: $text"
+              ;;
+          esac
+          printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No seat rule would refuse it. Run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
       esac
       case "$rule" in
@@ -22601,20 +22612,51 @@ fn policyd_token(line: &str) -> &str {
         .trim()
 }
 
+/// The text after `pack-unavailable`, when this token is that failure.
+/// An empty string is the bare token. `None` is some other check.
+/// `ljos-policyd` writes `pack-unavailable: <text>` (`named_token`) when a
+/// pack fails at runtime or returns something bad and the pack left text.
+fn pack_unavailable_text(token: &str) -> Option<&str> {
+    let token = token.trim();
+    if token.eq_ignore_ascii_case("pack-unavailable") {
+        return Some("");
+    }
+    let (head, rest) = token.split_once(':')?;
+    head.trim()
+        .eq_ignore_ascii_case("pack-unavailable")
+        .then_some(rest.trim())
+}
+
 /// A deny that is the seat not being ready, not a check that named the
 /// command. `ljos-policyd` prints `deny\tphronesis` when the decision text
 /// is empty: the token is the backend name and nothing else. `bind-failed`
 /// is the seat failing to bind. `pack-unavailable` is the pack failing to
-/// load. A `phronesis:` token carries words (`seat could not open`, or a
-/// rule, if one is ever named that way) and stays a refusal, as does a
-/// pack denial that carries its reason text. Under a burst of checks the
-/// bare token comes back for commands the same binary allows alone.
+/// load, and `pack-unavailable: <text>` is that same failure with the
+/// pack's words. A `phronesis:` token carries words (`seat could not open`,
+/// or a rule, if one is ever named that way) and stays a refusal, as does
+/// a named pack code (`shell-secret-in-argv`, `path-outside-workspace`).
+/// Under a burst of checks the bare token comes back for commands the same
+/// binary allows alone. The match is trimmed and case-insensitive; the
+/// guard shim uses the same tokens.
 fn policyd_unjudged(token: &str) -> bool {
     let token = token.trim();
     token.is_empty()
         || token.eq_ignore_ascii_case("phronesis")
-        || token == "bind-failed"
-        || token == "pack-unavailable"
+        || token.eq_ignore_ascii_case("bind-failed")
+        || pack_unavailable_text(token).is_some()
+}
+
+/// The parenthetical of [`unhealthy_note`] for an unready token. `None`
+/// when the token is a real refusal. A pack that wrote text keeps those
+/// words after the usual sentence.
+fn unjudged_why(token: &str) -> Option<String> {
+    if !policyd_unjudged(token) {
+        return None;
+    }
+    match pack_unavailable_text(token).filter(|text| !text.is_empty()) {
+        Some(text) => Some(format!("ljos-policyd refused without a reason: {text}")),
+        None => Some("ljos-policyd refused without a reason".to_string()),
+    }
 }
 
 /// A force-push ask is the person's question, on a runner that otherwise
@@ -23052,7 +23094,13 @@ fn as_static_rule(rule: Rule) -> Rule {
 #[must_use]
 pub fn policyd_reason(token: &str) -> String {
     let token = token.trim();
-    let said = match token {
+    // A pack code may carry the pack's own words: `shell-secret-in-argv:
+    // token on the command line`. The hint is for the code. The words stay.
+    let (code, detail) = match token.split_once(':') {
+        Some((code, detail)) => (code.trim(), detail.trim()),
+        None => (token, ""),
+    };
+    let said = match code {
         "git-force-push" => {
             "a force push rewrites history that others may already have pulled. Push \
              without --force, use --force-with-lease to overwrite only your own last push, or \
@@ -23092,9 +23140,18 @@ pub fn policyd_reason(token: &str) -> String {
              really needs it"
         }
         "sudo" => "this runs as root. Ask the person to run it in their own terminal",
-        "secret-in-argv" => {
+        "secret-in-argv" | "shell-secret-in-argv" => {
             "a secret on the command line lands in shell history and the process list. Read it \
              from a file or an environment variable instead"
+        }
+        "python-missing-pep723" => {
+            "this Python file has no PEP 723 script block, so its dependencies are unnamed. \
+             Add a `# /// script` block, or run the file with the interpreter that already \
+             has them"
+        }
+        "path-outside-workspace" => {
+            "this path is outside the workspace. Keep the command inside the checkout, or ask \
+             the person to run it"
         }
         "python-dash-c" | "python-requires-uv" => {
             "this Python call is not allowed as written. Put the code in a script file and run \
@@ -23138,7 +23195,11 @@ pub fn policyd_reason(token: &str) -> String {
         }
         _ => return token.to_string(),
     };
-    format!("{token}: {said}")
+    if detail.is_empty() {
+        format!("{code}: {said}")
+    } else {
+        format!("{code}: {said} ({detail})")
+    }
 }
 
 /// One line from `ljos-policyd check -- argv`. None only when there is no
@@ -23208,10 +23269,10 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     // overloaded or half-open policyd, and the command is allowed.
     let first = text.split(['\t', ' ', '\n']).next().unwrap_or("");
     match (first, status.success()) {
-        ("deny", _) if policyd_unjudged(policyd_token(&text)) => {
-            unhealthy("ljos-policyd refused without a reason")
-        }
-        ("deny", _) => text,
+        ("deny", _) => match unjudged_why(policyd_token(&text)) {
+            Some(why) => unhealthy(&why),
+            None => text,
+        },
         ("allow", true) => text,
         _ => unhealthy("gave no verdict"),
     }
@@ -24656,7 +24717,7 @@ mod tests {
         exe(&guard.join("rm"), super::GUARD_SHIM);
         exe(
             &fake.join("ljos-policyd"),
-            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; *bound*) printf 'deny\\tbind-failed\\n'; exit 2;; *packed*) printf 'deny\\tpack-unavailable\\n'; exit 2;; *ruled*) printf 'deny\\tphronesis: keep-the-tree\\n'; exit 2;; *secret*) printf 'deny\\tsecret material in argv denied by the pack\\n'; exit 2;; esac\necho allow\n",
+            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; *mixed*) printf 'deny\\tPhronesis\\n'; exit 2;; *bound*) printf 'deny\\tbind-failed\\n'; exit 2;; *spaced*) printf 'deny\\t  Bind-Failed  \\n'; exit 2;; *packed*) printf 'deny\\tpack-unavailable\\n'; exit 2;; *folded*) printf 'deny\\t  PACK-UNAVAILABLE  \\n'; exit 2;; *blew*) printf 'deny\\tpack-unavailable: janet failed to load\\n'; exit 2;; *ruled*) printf 'deny\\tphronesis: keep-the-tree\\n'; exit 2;; *outside*) printf 'deny\\tpath-outside-workspace: /etc/passwd\\n'; exit 2;; *secret*) printf 'deny\\tsecret material in argv denied by the pack\\n'; exit 2;; esac\necho allow\n",
         );
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
@@ -24681,6 +24742,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         assert!(run(&format!("'{}'", file.display())).status.success());
         assert!(!file.exists());
+        let note = super::unhealthy_note("ljos-policyd refused without a reason");
         let slug = dir.path().join("slug.py");
         std::fs::write(&slug, "x").unwrap();
         let empty = run(&format!("'{}'", slug.display()));
@@ -24689,7 +24751,14 @@ mod tests {
             "a reasonless deny runs the command: {}",
             String::from_utf8_lossy(&empty.stderr)
         );
+        assert_eq!(String::from_utf8_lossy(&empty.stderr).trim(), note);
         assert!(!slug.exists());
+        let mixed = dir.path().join("mixed.py");
+        std::fs::write(&mixed, "x").unwrap();
+        let folded_name = run(&format!("'{}'", mixed.display()));
+        assert!(folded_name.status.success(), "Phronesis is the same token");
+        assert_eq!(String::from_utf8_lossy(&folded_name.stderr).trim(), note);
+        assert!(!mixed.exists());
         let bound = dir.path().join("bound.py");
         std::fs::write(&bound, "x").unwrap();
         let unbound = run(&format!("'{}'", bound.display()));
@@ -24698,7 +24767,14 @@ mod tests {
             "a seat that did not bind runs the command: {}",
             String::from_utf8_lossy(&unbound.stderr)
         );
+        assert_eq!(String::from_utf8_lossy(&unbound.stderr).trim(), note);
         assert!(!bound.exists());
+        let spaced = dir.path().join("spaced.py");
+        std::fs::write(&spaced, "x").unwrap();
+        let spaced_run = run(&format!("'{}'", spaced.display()));
+        assert!(spaced_run.status.success(), "Bind-Failed is the same token");
+        assert_eq!(String::from_utf8_lossy(&spaced_run.stderr).trim(), note);
+        assert!(!spaced.exists());
         let ruled = dir.path().join("ruled.py");
         std::fs::write(&ruled, "x").unwrap();
         let named = run(&format!("'{}'", ruled.display()));
@@ -24714,7 +24790,40 @@ mod tests {
             "a pack that did not load runs the command: {}",
             String::from_utf8_lossy(&missing.stderr)
         );
+        assert_eq!(String::from_utf8_lossy(&missing.stderr).trim(), note);
         assert!(!packed.exists());
+        let folded = dir.path().join("folded.py");
+        std::fs::write(&folded, "x").unwrap();
+        let folded_run = run(&format!("'{}'", folded.display()));
+        assert!(
+            folded_run.status.success(),
+            "PACK-UNAVAILABLE is the same token"
+        );
+        assert_eq!(String::from_utf8_lossy(&folded_run.stderr).trim(), note);
+        assert!(!folded.exists());
+        let blew = dir.path().join("blew.py");
+        std::fs::write(&blew, "x").unwrap();
+        let blew_run = run(&format!("'{}'", blew.display()));
+        assert!(
+            blew_run.status.success(),
+            "a pack failure with text still runs: {}",
+            String::from_utf8_lossy(&blew_run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&blew_run.stderr).trim(),
+            super::unhealthy_note("ljos-policyd refused without a reason: janet failed to load")
+        );
+        assert!(!blew.exists());
+        let outside = dir.path().join("outside.py");
+        std::fs::write(&outside, "x").unwrap();
+        let kept_path = run(&format!("'{}'", outside.display()));
+        assert_eq!(kept_path.status.code(), Some(126));
+        let err = String::from_utf8_lossy(&kept_path.stderr);
+        assert!(
+            err.contains("denied (path-outside-workspace: /etc/passwd)"),
+            "{err}"
+        );
+        assert!(outside.exists(), "a named pack code does not run");
         let secret = dir.path().join("secret.py");
         std::fs::write(&secret, "x").unwrap();
         let kept = run(&format!("'{}'", secret.display()));
@@ -31595,6 +31704,9 @@ mod tests {
             "chmod-setuid",
             "sudo",
             "secret-in-argv",
+            "shell-secret-in-argv",
+            "python-missing-pep723",
+            "path-outside-workspace",
             "python-dash-c",
             "python-requires-uv",
         ] {
@@ -31604,6 +31716,15 @@ mod tests {
         }
         assert!(policyd_reason("git-force-push").contains("--force-with-lease"));
         assert!(policyd_reason("git-reset-hard").contains("git stash"));
+        let secret = policyd_reason("shell-secret-in-argv: token on the command line");
+        assert!(secret.starts_with("shell-secret-in-argv: "), "{secret}");
+        assert!(secret.contains("shell history"), "{secret}");
+        assert!(secret.contains("token on the command line"), "{secret}");
+        let path = policyd_reason("path-outside-workspace: /etc/passwd");
+        assert!(path.contains("outside the workspace"), "{path}");
+        assert!(path.contains("/etc/passwd"), "{path}");
+        let python = policyd_reason("python-missing-pep723");
+        assert!(python.contains("PEP 723"), "{python}");
         assert_eq!(policyd_reason("a-token-from-later"), "a-token-from-later");
         assert_eq!(policyd_reason(" phronesis "), "phronesis");
         let identity = policyd_reason("git-commit-identity");
@@ -34205,15 +34326,23 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_ne!(rule.reason, "phronesis");
     }
 
-    /// `ljos-policyd` answers `pack-unavailable` when the pack cannot be
-    /// loaded (unpack-race `1a08c68`, `src/lib.rs`). That is the seat not
-    /// being ready. A real pack denial keeps its reason text.
+    /// `ljos-policyd` 2d193c6 `src/lib.rs` writes `pack-unavailable` when
+    /// the pack cannot be loaded (line 1128) and `pack-unavailable: <text>`
+    /// when a pack fails at runtime or returns something bad (`named_token`,
+    /// lines 1073-1079, used at line 1230). That text is the pack's words.
+    /// A named code (`token_for`, lines 1086-1087) still refuses.
     #[test]
     fn a_missing_pack_allows_and_a_pack_denial_keeps_its_words() {
         assert!(policyd_unjudged("pack-unavailable"));
-        assert!(!policyd_unjudged(
+        assert!(policyd_unjudged(
             "pack-unavailable: secret material in argv denied"
         ));
+        assert!(policyd_unjudged("  PACK-UNAVAILABLE: janet load failed  "));
+        assert!(!policyd_unjudged(
+            "shell-secret-in-argv: token on the command line"
+        ));
+        assert!(!policyd_unjudged("path-outside-workspace"));
+        assert!(!policyd_unjudged("python-missing-pep723: no script block"));
         let _g = env_guard();
         let home = SeatDir::new("pack-unavailable");
         let line = "git add slug.py test_slug.py";
@@ -34247,6 +34376,45 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(rule.verdict, "deny");
         assert_eq!(rule.reason, reason);
         assert_ne!(rule.reason, "pack-unavailable");
+        let blew = fake_policyd(
+            home.path(),
+            "pack-text",
+            "printf 'deny\\tpack-unavailable: janet load failed\\n'; exit 2",
+        );
+        let _blew = HoldEnv::set(&[("POLICYD_BIN", blew.to_str().unwrap())]);
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict(line).is_none(),
+            "a pack failure with text is not a refusal"
+        );
+        let note = take_guard_note().expect("the pack's text");
+        assert_eq!(
+            note,
+            super::unhealthy_note("ljos-policyd refused without a reason: janet load failed")
+        );
+        for (name, script, needle) in [
+            (
+                "shell-secret",
+                "printf 'deny\\tshell-secret-in-argv: token on the command line\\n'; exit 2",
+                "shell history",
+            ),
+            (
+                "outside-path",
+                "printf 'deny\\tpath-outside-workspace\\n'; exit 2",
+                "outside the workspace",
+            ),
+            (
+                "pep723",
+                "printf 'deny\\tpython-missing-pep723: no script block\\n'; exit 2",
+                "PEP 723",
+            ),
+        ] {
+            let bin = fake_policyd(home.path(), name, script);
+            let _bin = HoldEnv::set(&[("POLICYD_BIN", bin.to_str().unwrap())]);
+            let rule = tcb_verdict(line).expect(name);
+            assert_eq!(rule.verdict, "deny", "{name}");
+            assert!(rule.reason.contains(needle), "{name}: {}", rule.reason);
+        }
     }
 
     #[test]
