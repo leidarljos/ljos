@@ -27,6 +27,19 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+fn record_evidence(repo: &Path) {
+    std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+    std::fs::write(repo.join(".ljos/gates.toml"), "test = \"true\"\n").unwrap();
+    let sha = head(repo);
+    let dir = repo.join(".git/ljos-evidence");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{sha}.json")),
+        format!(r#"{{"command":"true","exit":0,"sha":"{sha}","ts":"2026-01-01T00:00:00Z"}}"#),
+    )
+    .unwrap();
+}
+
 fn head(dir: &Path) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -83,6 +96,19 @@ fn habitat() -> (Scratch, Habitat) {
         git(root, &["config", "user.name", "seat"]);
         git(root, &["config", "core.hooksPath", "/dev/null"]);
     }
+    git(&repo, &["config", "user.name", "Rohit Goswami"]);
+    git(&repo, &["config", "user.email", "rgoswami@ieee.org"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/widgets.git",
+        ],
+    );
+    git(&repo, &["branch", "-M", "main"]);
     std::fs::write(repo.join("README.md"), "seed\n").unwrap();
     git(&repo, &["add", "README.md"]);
     git(&repo, &["commit", "-q", "-m", "seed"]);
@@ -542,6 +568,7 @@ server.serve_forever()
         ),
         &[("PACKSET_URL", url.as_str())],
     );
+    record_evidence(&hab.repo);
     let asked = ljos(
         &hab,
         &claude(
@@ -598,6 +625,7 @@ server.serve_forever()
 #[test]
 fn a_force_push_asks_on_claude_codex_and_opencode() {
     let (_dir, hab) = habitat();
+    record_evidence(&hab.repo);
     let policyd = hab.bin.join("ljos-policyd");
     script(
         &hab.bin,
