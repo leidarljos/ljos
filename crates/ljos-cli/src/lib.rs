@@ -20,6 +20,7 @@ pub mod capture;
 pub mod command_prefs;
 pub mod converge;
 pub mod extract;
+pub mod gates;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -22573,6 +22574,21 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     if line.is_empty() {
         bail!("guard: pass the command to check");
     }
+    // Judge the line as written. Splitting it into argv and joining the
+    // words again drops the quotes a commit message needs.
+    if let Some(rule) = static_guard(line) {
+        let text = format!(
+            "{line}\n{}: {} (rule `{}`)\n",
+            rule.verdict, rule.reason, rule.pattern
+        );
+        if rule.verdict == "deny" {
+            bail!("{text}");
+        }
+        return Ok(GuardReport {
+            text,
+            verdict: rule.verdict,
+        });
+    }
     let argv = shell_words(line);
     if argv.is_empty() {
         bail!("guard: pass the command to check");
@@ -22664,11 +22680,17 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 /// times out or crashes does not refuse a line the fast check allowed.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
+    tcb_verdict_in(line, None)
+}
+
+/// [`tcb_verdict`] for a command whose working directory is `cwd`.
+#[must_use]
+pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
     if bookkeep::guard_suspended() {
         return None;
     }
-    if let Some(rule) = static_guard(line) {
+    if let Some(rule) = static_guard_in(line, cwd) {
         return Some(rule);
     }
     let mut answered = false;
@@ -22778,12 +22800,21 @@ pub fn unhealthy_note(why: &str) -> String {
     )
 }
 
-/// A force push, a seat deny rule, or an `rm -rf` outside a temp directory,
-/// judged in this process. `None` means the slow check may run: a timeout
-/// there allows the line. A temp home is not a seat, and this returns
-/// `None` there too.
+/// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
+/// or a commit, push, or merge the gates refuse, judged in this process.
+/// `None` means the slow check may run: a timeout there allows the line.
+/// A temp home is not a seat, and this returns `None` there too.
+///
+/// `cwd` is the directory the command would run in. Absent, the process
+/// directory. The gates read that checkout's `.ljos/gates.toml` and tip.
 #[must_use]
 pub fn static_guard(line: &str) -> Option<Rule> {
+    static_guard_in(line, None)
+}
+
+/// [`static_guard`] for a command whose working directory is `cwd`.
+#[must_use]
+pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let line = line.trim();
     if line.is_empty() || bookkeep::guard_suspended() {
         return None;
@@ -22805,6 +22836,9 @@ pub fn static_guard(line: &str) -> Option<Rule> {
         .collect();
     if let Some(rule) = verdict_for(&denies, line) {
         return Some(rule.clone());
+    }
+    if let Some(rule) = gates::command_gate(line, cwd) {
+        return Some(rule);
     }
     gate_push(None, line, None)
         .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
@@ -22979,6 +23013,43 @@ pub fn policyd_reason(token: &str) -> String {
         "python-dash-c" | "python-requires-uv" => {
             "this Python call is not allowed as written. Put the code in a script file and run \
              it with `uv run`"
+        }
+        "git-commit-identity" => {
+            "author and committer must both be Rohit Goswami <rgoswami@ieee.org>. Run \
+             `git config user.name \"Rohit Goswami\"` and `git config user.email \
+             \"rgoswami@ieee.org\"`, and remove any `--author` or `GIT_AUTHOR_*` / \
+             `GIT_COMMITTER_*` that names someone else. Then commit again"
+        }
+        "git-commit-message" => {
+            "the commit message is not on the command line, so the gate cannot read it. Pass it \
+             with `git commit -m TEXT` or `git commit -F FILE`. The message must not contain \
+             Co-authored-by, CURSOR_AGENT, \"Generated with\", \"Open in Cursor\", or any other \
+             AI trailer"
+        }
+        "git-commit-trailer" => {
+            "the message contains an AI trailer the commit gate refuses. Remove Co-authored-by, \
+             CURSOR_AGENT, \"Generated with\", \"Open in Cursor\", and any other AI trailer, then \
+             commit again with `git commit -m TEXT`"
+        }
+        "git-commit-signoff" => {
+            "this repo's `.ljos/gates.toml` sets `signoff = true`. Add a final line \
+             `Signed-off-by: Rohit Goswami <rgoswami@ieee.org>` or pass `--signoff`, then commit \
+             again"
+        }
+        "git-push-evidence" => {
+            "no passing test evidence for this exact tip. Run `ljos evidence record -- <test \
+             command>` (the `test` line in `.ljos/gates.toml`), then push that same commit. A \
+             plain push with that record needs no approval"
+        }
+        "git-merge-unready" => {
+            "a merge waits until CI is green on the head sha and every Cursor Bugbot thread is \
+             resolved or has a reply. Sign in with `gh auth login` if the checks cannot be read, \
+             fix the red checks, reply on or resolve each open Bugbot thread, then run the merge \
+             again"
+        }
+        "git-remote-hidden" => {
+            "this runs git on another machine, so the gate cannot read the tip, the identity, or \
+             CI. Run the git command in the local checkout"
         }
         _ => return token.to_string(),
     };
@@ -31422,7 +31493,16 @@ mod tests {
             ("HOME", home.path().to_str().unwrap()),
         ]);
         assert!(tcb_verdict("git status").is_none());
-        let rule = tcb_verdict("git push --force origin main").expect("the check asks");
+        let missing = tcb_verdict("git push --force origin main").expect("no evidence");
+        assert_eq!(missing.verdict, "deny");
+        assert!(
+            missing.reason.contains("git-push-evidence"),
+            "{}",
+            missing.reason
+        );
+        let repo = evidenced_push_repo();
+        let rule =
+            static_guard_in("git push --force origin main", Some(repo.path())).expect("asks");
         assert_eq!(rule.verdict, "ask");
         assert_eq!(rule.pattern, "git-force-push");
         assert!(
@@ -31456,9 +31536,10 @@ mod tests {
         );
     }
 
-    /// `ljos_guard_check` reports this verdict. An ask is not a deny.
+    /// `ljos_guard_check` refuses a force push that has no test evidence.
+    /// The refusal is an error. `git status` stays allowed.
     #[test]
-    fn a_force_push_guard_check_verdict_is_ask() {
+    fn a_force_push_without_evidence_is_a_guard_error() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
@@ -31474,28 +31555,21 @@ mod tests {
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
         ]);
-        let report = guard_report("git push --force origin main").expect("the check asks");
-        assert_eq!(report.verdict, "ask");
-        assert!(report.text.contains("ask:"), "{}", report.text);
-        assert!(
-            report.text.contains("git-force-push") || report.text.contains("dangerous push"),
-            "{}",
-            report.text
-        );
-        assert!(
-            !report.text.lines().any(|line| {
-                let head = line.trim().split([':', '\t']).next().unwrap_or("");
-                head == "deny"
-            }),
-            "{}",
-            report.text
-        );
+        let err = guard_report("git push --force origin main")
+            .expect_err("missing evidence is a denial")
+            .to_string();
+        assert!(err.contains("git-push-evidence"), "{err}");
         let err = guard_command("git push --force origin main")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("ask"), "{err}");
+        assert!(err.contains("git-push-evidence"), "{err}");
         let allowed = guard_report("git status").expect("status is allowed");
         assert_eq!(allowed.verdict, "allow");
+        let repo = evidenced_push_repo();
+        let asked =
+            static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
+        assert_eq!(asked.verdict, "ask");
+        assert!(asked.reason.contains("git-force-push"), "{}", asked.reason);
     }
 
     fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {
@@ -33630,6 +33704,62 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
     }
 
+    /// A checkout whose tip already has a passing `true` evidence record.
+    fn evidenced_push_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Rohit Goswami")
+                .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
+                .env("GIT_COMMITTER_NAME", "Rohit Goswami")
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Rohit Goswami"]);
+        git(&["config", "user.email", "rgoswami@ieee.org"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/widgets.git",
+        ]);
+        std::fs::write(dir.path().join("f.txt"), "one\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        std::fs::create_dir_all(dir.path().join(".ljos")).unwrap();
+        std::fs::write(dir.path().join(".ljos/gates.toml"), "test = \"true\"\n").unwrap();
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let sha = sha.trim();
+        let ev = dir.path().join(".git/ljos-evidence");
+        std::fs::create_dir_all(&ev).unwrap();
+        std::fs::write(
+            ev.join(format!("{sha}.json")),
+            format!(r#"{{"command":"true","exit":0,"sha":"{sha}","ts":"2026-01-01T00:00:00Z"}}"#),
+        )
+        .unwrap();
+        dir
+    }
+
     #[test]
     fn a_static_check_judges_the_dangerous_lines_without_waiting() {
         let _g = env_guard();
@@ -33650,7 +33780,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("LJOS_OFF", "0"),
         ]);
         let started = std::time::Instant::now();
-        let push = static_guard("git push --force origin main").expect("ask");
+        let push = static_guard("git push --force origin main").expect("deny");
         let rm = static_guard("rm -rf /home/u/proj").expect("deny");
         let both = static_guard("rm -rf /tmp/a /etc").expect("deny");
         let find = static_guard("find /home/u/proj -name x -delete").expect("deny");
@@ -33658,7 +33788,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(static_guard("rm -rf /tmp/a /tmp/b").is_none());
         assert!(static_guard("git status").is_none());
         assert!(static_guard("find /tmp/scratch -name x -delete").is_none());
-        let asked = tcb_verdict("git push --force origin main").expect("ask");
+        let asked = tcb_verdict("git push --force origin main").expect("deny");
         let denied = tcb_verdict("rm -rf /home/u/proj").expect("deny");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
@@ -33666,15 +33796,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             started.elapsed()
         );
         assert!(!marker.exists(), "the slow policyd ran");
-        assert_eq!(push.verdict, "ask");
-        assert_eq!(push.pattern, "git-force-push");
+        assert_eq!(push.verdict, "deny");
+        assert_eq!(push.pattern, "push-gate");
+        assert!(push.reason.contains("git-push-evidence"), "{}", push.reason);
+        assert_eq!(asked.verdict, "deny");
+        assert_eq!(asked.pattern, "push-gate");
+        let repo = evidenced_push_repo();
+        let forced =
+            static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
+        assert_eq!(forced.verdict, "ask", "{}", forced.reason);
+        assert_eq!(forced.pattern, "git-force-push");
         assert!(
-            push.reason.contains("--force-with-lease"),
+            forced.reason.contains("--force-with-lease"),
             "{}",
-            push.reason
+            forced.reason
         );
-        assert_eq!(asked.verdict, "ask");
-        assert_eq!(asked.pattern, "git-force-push");
+        assert!(static_guard_in("git push origin main", Some(repo.path())).is_none());
         assert_eq!(rm.pattern, "rm-rf-outside-tmp");
         assert_eq!(rm.verdict, "deny");
         assert_eq!(both.pattern, "rm-rf-outside-tmp");

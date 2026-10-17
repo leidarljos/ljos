@@ -443,7 +443,10 @@ fn tool_command(normalized: &str) -> String {
 /// hook still has to run.
 fn early_answer(normalized: &str, event: &str) -> Option<String> {
     let line = tool_command(normalized);
-    let rule = crate::static_guard(&line)?;
+    let cwd = serde_json::from_str::<Value>(normalized.trim())
+        .ok()
+        .and_then(|v| v["cwd"].as_str().map(std::path::PathBuf::from));
+    let rule = crate::static_guard_in(&line, cwd.as_deref())?;
     let event = if event.is_empty() {
         "PreToolUse"
     } else {
@@ -1288,7 +1291,8 @@ mod tests {
         }
         let force = json!({"tool_input": {"command": "git push --force origin main"}}).to_string();
         let started = std::time::Instant::now();
-        let asked = early_answer(&force, "PreToolUse").expect("a force push asks");
+        let refused =
+            early_answer(&force, "PreToolUse").expect("a push without evidence is refused");
         let plain = json!({"tool_input": {"command": "git status"}}).to_string();
         assert!(
             early_answer(&plain, "").is_none(),
@@ -1301,11 +1305,11 @@ mod tests {
             "the static check waited on the guard"
         );
         assert_eq!(
-            read_answer(&asked).decision.as_deref(),
-            Some("ask"),
-            "{asked}"
+            read_answer(&refused).decision.as_deref(),
+            Some("deny"),
+            "{refused}"
         );
-        assert!(asked.contains("git-force-push"), "{asked}");
+        assert!(refused.contains("git-push-evidence"), "{refused}");
         assert_eq!(
             read_answer(&denied).decision.as_deref(),
             Some("deny"),

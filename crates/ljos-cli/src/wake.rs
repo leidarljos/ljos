@@ -89,7 +89,8 @@ fn save(table: &BTreeMap<String, Wake>) -> Result<()> {
 }
 
 /// The guard's verdict on a wake command: the seat's own guard, the
-/// trusted computing base, then the pack's rules and the ask pack.
+/// trusted computing base (the static check, which includes the commit,
+/// push, and merge gates), then the pack's rules and the ask pack.
 /// `None` lets it run.
 #[must_use]
 pub fn judge(command: &str) -> Option<super::Rule> {
