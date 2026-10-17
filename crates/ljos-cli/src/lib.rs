@@ -9929,7 +9929,9 @@ pub fn packset_write_agent(
 /// [`packset_write_agent`] for a sitting's lesson. `text` is the gated
 /// prose. The full title, the guard's rule and the failing command ride in
 /// `source`, which the prose gate does not read, so shortening a sentence
-/// does not throw them away.
+/// does not throw them away. `issue`, when the sitting has one, is a field
+/// of the record: the pack treats it as identity, so a lesson for another
+/// issue stays open beside this one.
 ///
 /// # Errors
 ///
@@ -9941,16 +9943,49 @@ pub(crate) fn packset_write_agent_sourced(
     title: &str,
     rule: &str,
     command: &str,
+    issue: &str,
 ) -> Result<Value> {
     let client = pack()?;
-    let workspace = client.workspace();
+    let atom = agent_sourced_atom(
+        label,
+        text,
+        &client.workspace(),
+        transient,
+        title,
+        rule,
+        command,
+        issue,
+    )?;
+    with_writer(|| {
+        admit::write_agent(&client, atom.clone())
+            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })
+}
+
+/// The atom [`packset_write_agent_sourced`] posts. Split out so a test can
+/// read the record without a pack.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A sitting's lesson keeps its prose, source fields and issue as separate arguments"
+)]
+fn agent_sourced_atom(
+    label: &str,
+    text: &str,
+    workspace: &str,
+    transient: Option<bool>,
+    title: &str,
+    rule: &str,
+    command: &str,
+    issue: &str,
+) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
-    let mut atom = atom_body(kind, trimmed, &workspace);
+    let mut atom = atom_body(kind, trimmed, workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
+    stamp_issue(&mut atom, issue);
     if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
         for (key, value) in [("title", title), ("rule", rule), ("command", command)] {
             let value = value.trim();
@@ -9959,10 +9994,7 @@ pub(crate) fn packset_write_agent_sourced(
             }
         }
     }
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    Ok(atom)
 }
 
 /// A progress note, as an agent memory the default list shows. The tracker
@@ -9982,6 +10014,7 @@ pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
     let mut atom = atom_body("note", trimmed, &workspace);
     stamp_horizon(&mut atom, "note", trimmed, Some(true));
     add_entities(&mut atom, [format!("issue:{}", issue.trim())]);
+    stamp_issue(&mut atom, issue);
     with_writer(|| admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed"))
 }
 
@@ -10006,6 +10039,17 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
         admit::write_agent(&client, atom.clone())
             .with_context(|| format!("{label}: POST /v1/atoms failed"))
     })
+}
+
+/// The issue this memory belongs to. The pack reads `issue` as identity:
+/// two records that read alike stay both live when their issues differ,
+/// and a later record on the same issue still replaces the earlier one.
+/// An empty id is not an issue, so the field is left off.
+pub(crate) fn stamp_issue(atom: &mut Value, issue: &str) {
+    let issue = issue.trim();
+    if !issue.is_empty() {
+        atom["issue"] = Value::String(issue.to_string());
+    }
 }
 
 /// `horizon:standing` or `horizon:transient` on a claim as it is written.
@@ -10058,9 +10102,9 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 }
 
 /// [`packset_write`] for a lesson learned on an issue: it carries an
-/// `issue:ID` entity naming where it was learned, and a `scope:NAME`
-/// entity when one is given, so the claim travels with that scope's log
-/// rather than the machine's default.
+/// `issue:ID` entity naming where it was learned, the same id in the
+/// `issue` field, and a `scope:NAME` entity when one is given, so the
+/// claim travels with that scope's log rather than the machine's default.
 ///
 /// # Errors
 ///
@@ -10084,6 +10128,7 @@ pub fn packset_write_scoped(
         tags.push(format!("scope:{scope}"));
     }
     add_entities(&mut atom, tags);
+    stamp_issue(&mut atom, issue);
     stamp_horizon(&mut atom, kind, trimmed, None);
     with_writer(|| {
         client
@@ -21591,6 +21636,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             tags.push(format!("scope:{scope}"));
         }
         add_entities(&mut atom, tags);
+        stamp_issue(&mut atom, issue);
         // Standing at once; the review comes afterwards.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
         if lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal()) {
@@ -24243,6 +24289,7 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
     let campaign = read_campaign(state)?;
     let client = pack()?;
     let workspace = client.workspace();
+    let issue_id = issue.map(str::trim).filter(|id| !id.is_empty());
     let mut out = Vec::new();
     for f in &campaign.findings {
         if !all && superseded_by_retry(f) {
@@ -24264,6 +24311,9 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         let lesson = finding_lesson(&campaign, f);
         let mut atom = atom_body("lesson", &lesson, &workspace);
         add_entities(&mut atom, finding_entities(&campaign, f));
+        if let Some(id) = issue_id {
+            stamp_issue(&mut atom, id);
+        }
         // Standing at once, like a finish lesson; reviewed afterwards.
         stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
         let result = match admit::write_agent(&client, atom) {
@@ -24284,7 +24334,7 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
             result,
         });
     }
-    if let Some(issue) = issue.map(str::trim).filter(|i| !i.is_empty()) {
+    if let Some(issue) = issue_id {
         let name = format!(
             "{} {} campaign state on {}, {} after {} attempts",
             campaign.package, campaign.version, campaign.target, campaign.status, campaign.attempts
@@ -32051,6 +32101,65 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         // Never harvest a transcript: the text is the claim, not a prefix parse.
         let raw = atom_body("lesson", "Remember: pin the review set", "ws");
         assert_eq!(raw["text"], "Remember: pin the review set");
+    }
+
+    #[test]
+    fn lessons_for_two_issues_both_stay_open() {
+        // The two lessons a real pair of sittings wrote. Ten of the sixteen
+        // words are shared, past the pack's rewrite threshold.
+        let first = "git function slugify slug lowercases (work-1jvz) closed. Import slug; slug.slugify(\"hello world\") failed.";
+        let second = "git function kebab case slug reuses (work-fyv7) closed. Import slug; slug.slugify('hello world') failed.";
+        let lesson = |text: &str, issue: &str| {
+            agent_sourced_atom("Remember", text, "ws", Some(false), "", "", "", issue).unwrap()
+        };
+        let a = lesson(first, "work-1jvz");
+        let b = lesson(second, "work-fyv7");
+        assert_eq!(a["issue"], "work-1jvz");
+        assert_eq!(b["issue"], "work-fyv7");
+        assert_eq!(a["text"], first);
+        assert_eq!(b["text"], second);
+        let a = a.as_object().unwrap();
+        let b = b.as_object().unwrap();
+        let shape = packset_core::record::Shape::of;
+        assert!(
+            !packset_core::record::replaces_shaped(b, &shape(b), a, &shape(a)),
+            "a later issue's lesson closed the earlier one"
+        );
+        assert!(!packset_core::record::replaces_shaped(
+            a,
+            &shape(a),
+            b,
+            &shape(b)
+        ));
+        // The texts alone are one claim. The issue field is what keeps them apart.
+        let mut bare_a = a.clone();
+        let mut bare_b = b.clone();
+        bare_a.remove("issue");
+        bare_b.remove("issue");
+        assert!(
+            packset_core::record::replaces_shaped(
+                &bare_b,
+                &shape(&bare_b),
+                &bare_a,
+                &shape(&bare_a)
+            ),
+            "these two texts are in the rewrite band"
+        );
+        let revised = "git function slugify slug lowercases (work-1jvz) closed. Import slug; slug.slugify(\"hello world\") failed again.";
+        let next = lesson(revised, "work-1jvz");
+        let next = next.as_object().unwrap();
+        assert!(
+            packset_core::record::replaces_shaped(next, &shape(next), a, &shape(a)),
+            "a revision of the same issue's lesson still replaces it"
+        );
+        assert!(!packset_core::record::replaces_shaped(
+            next,
+            &shape(next),
+            b,
+            &shape(b)
+        ));
+        let unclaimed = lesson(first, "  ");
+        assert!(unclaimed.get("issue").is_none());
     }
 
     #[test]
