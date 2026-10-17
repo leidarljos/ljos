@@ -609,6 +609,9 @@ fn hook_output_at(
     let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") else {
         return hook_output_ruled(call, context, verdict);
     };
+    // A runner that shows a prompt keeps the ask. Codex and Cursor
+    // `preToolUse` do not: an ask is a failed hook there and the tool
+    // runs, so the grant below is rendered as a deny.
     if call.event != "PreToolUse" || call.shape.asks() {
         return hook_output_ruled(call, context, verdict);
     }
