@@ -127,6 +127,10 @@ struct RepoBook {
     /// ran. A deed is cited only when HEAD has moved past it.
     #[serde(default)]
     start_sha: Option<String>,
+    /// The prompt this sitting is working from. agy sends no title of its
+    /// own; the words come from the prompt payload.
+    #[serde(default)]
+    title: Option<String>,
 }
 
 /// Whether the guard and the pack daemon should stay out of this process.
@@ -224,7 +228,16 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
             book.prompt = prompt.chars().take(4000).collect();
         }
     }
+    // agy's first model call often runs before the transcript has the
+    // turn. A later payload still names that file, or carries `prompt`.
+    if book.prompt.trim().is_empty() {
+        let prompt = collapse(&super::prompt_of(&value));
+        if !prompt.is_empty() {
+            book.prompt = prompt.chars().take(4000).collect();
+        }
+    }
     let repo = repo_key(&mut book, &value);
+    remember_title(&mut book, &repo);
     let commit = is_git_commit(&call.cue);
     // A clean PostToolUse is the commit that just ran. Record the starting
     // HEAD on every other call, including the ask that stopped the command,
@@ -1097,7 +1110,12 @@ fn refresh_landed_deeds() {
             let Some(issue) = row.issue.clone() else {
                 continue;
             };
-            let title = title_from(&book.prompt, &repo);
+            let heard = if !book.prompt.trim().is_empty() {
+                book.prompt.clone()
+            } else {
+                row.title.clone().unwrap_or_default()
+            };
+            let title = title_from(&heard, &repo);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
@@ -1228,7 +1246,12 @@ fn finish_open(book: &mut Book) {
         // A claim closes with a lesson. So does a sitting that only failed
         // or was asked: the next session otherwise has nothing to recall.
         if !row.lesson && (issue.is_some() || notes) {
-            let title = title_from(&book.prompt, &repo);
+            let heard = if !book.prompt.trim().is_empty() {
+                book.prompt.clone()
+            } else {
+                row.title.clone().unwrap_or_default()
+            };
+            let title = title_from(&heard, &repo);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
@@ -1648,6 +1671,16 @@ fn lesson_sentence(words: &[String], issue: &str, shas: &[String], second: &str)
 /// and the next session then has nothing to recall.
 fn lesson_prose_ok(text: &str) -> bool {
     packset_core::prose_refuse(text, packset_core::ProseRole::Atom).is_ok()
+}
+
+/// Keep the prompt on the repository row. The lesson and a later session
+/// read it from there. An empty prompt leaves a title that was already stored.
+fn remember_title(book: &mut Book, repo: &str) {
+    let prompt: String = collapse(&book.prompt).chars().take(4000).collect();
+    if prompt.is_empty() || repo.is_empty() {
+        return;
+    }
+    book.repos.entry(repo.to_string()).or_default().title = Some(prompt);
 }
 
 fn title_from(prompt: &str, repo: &str) -> String {
@@ -3397,6 +3430,130 @@ print(f"id={ident}")
             serde_json::json!({"prompt": "repair the slugify helper"}),
         );
         let (note, _) = crate::hook_note(&call, 4);
+        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("slugify"), "{note}");
+    }
+
+    /// A timed-out agy sitting never gets Stop. Its prompt arrives on the
+    /// payload after the first model call, and the lesson keeps those words
+    /// so the next prompt can recall them.
+    #[test]
+    fn a_timed_out_agy_prompt_is_recalled() {
+        let _g = lock();
+        let asked = serde_json::json!({
+            "conversationId": "agy-prompt-event",
+            "prompt": "Fix the slugify helper",
+        });
+        let asked_call = crate::hook_call_as(&asked.to_string(), Some("beforeSubmitPrompt"));
+        assert_eq!(asked_call.event, "UserPromptSubmit");
+        assert!(asked_call.cue.contains("slugify"), "{}", asked_call.cue);
+
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let marker = dir.path().join("run/ljos/encoder-warming");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+        let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let pack = serve_pack({
+            let atoms = Arc::clone(&atoms);
+            move |req| {
+                let path = req.lines().next().unwrap_or("");
+                if path.contains("POST /v1/atoms") {
+                    let body = req
+                        .split_once("\r\n\r\n")
+                        .map(|(_, body)| body)
+                        .unwrap_or("");
+                    if let Ok(atom) = serde_json::from_str::<Value>(body) {
+                        atoms.lock().unwrap().push(atom);
+                    }
+                    return (
+                        200,
+                        r#"{"id":"atom-agy","kind":"lesson","origin":"agent-derived"}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/status") {
+                    return (
+                        200,
+                        r#"{"embedder":{"available":true,"answering":null}}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/atoms") {
+                    let list = atoms.lock().unwrap().clone();
+                    return (200, serde_json::json!({"atoms": list}).to_string());
+                }
+                (200, "{}".into())
+            }
+        });
+        set_var("PACKSET_URL", &pack);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+
+        let session = "agy-timeout";
+        let cwd = repo.to_str().unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"PLANNER_RESPONSE\",\"text\":\"working\"}\n",
+        )
+        .unwrap();
+        let early = serde_json::json!({
+            "invocationNum": 0,
+            "conversationId": session,
+            "cwd": cwd,
+            "workspacePaths": [cwd],
+            "transcriptPath": transcript,
+        });
+        let early_text = early.to_string();
+        let early_call = crate::hook_call(&early_text);
+        assert_eq!(early_call.event, "UserPromptSubmit");
+        assert!(early_call.cue.is_empty(), "{}", early_call.cue);
+        let _ = observe(&early_text, &early_call);
+
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"USER_INPUT\",\"userInput\":{\"items\":[{\"text\":\"Fix the slugify helper\"}]}}\n",
+        )
+        .unwrap();
+        let edit = serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "workspacePaths": [cwd],
+            "transcriptPath": transcript,
+            "toolCall": {"name": "write_to_file", "args": {"TargetFile": "README.md", "CodeContent": "x"}},
+        });
+        let edit_text = edit.to_string();
+        let edit_call = crate::hook_call(&edit_text);
+        assert_eq!(edit_call.event, "PreToolUse");
+        let _ = observe(&edit_text, &edit_call);
+        set_owner(dir.path(), session, dead_pid());
+
+        let (next, next_call) = payload(
+            "UserPromptSubmit",
+            "agy-next",
+            &repo,
+            serde_json::json!({"prompt": "repair the slugify helper"}),
+        );
+        let _ = observe(&next, &next_call);
+
+        let book = book_json(dir.path(), session);
+        let row = book["repos"].as_object().unwrap().values().next().unwrap();
+        assert!(
+            row["title"].as_str().unwrap_or("").contains("slugify"),
+            "{book}"
+        );
+        assert_eq!(row["lesson"], true, "{book}");
+        assert_eq!(row["finished"], true, "{book}");
+        let stored = atoms.lock().unwrap().clone();
+        let lesson = stored
+            .last()
+            .and_then(|atom| atom["text"].as_str())
+            .unwrap_or("");
+        assert!(lesson.contains("slugify"), "{lesson}");
+        assert_lesson(lesson);
+
+        let start = crate::session_start_for(Some("agy-next"));
+        assert!(!start.contains("no memories here yet"), "{start}");
+        let (note, _) = crate::hook_note(&next_call, 4);
         assert!(note.contains("What this seat already knows"), "{note}");
         assert!(note.contains("slugify"), "{note}");
     }
