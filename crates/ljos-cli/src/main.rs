@@ -806,7 +806,7 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         limit: usize,
         /// The event, for a runner whose payload does not name it
-        /// (`PreToolUse`, `PreInvocation`, `Stop`).
+        /// (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
         #[arg(long)]
         event: Option<String>,
         /// Read stdin as the person's prompt, including when it is plain text.

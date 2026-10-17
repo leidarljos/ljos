@@ -4186,6 +4186,7 @@ pub fn named_hook_spec(command: &str) -> Value {
     let run = |event: &str, timeout: u64| serde_json::json!({"type": "command", "command": format!("{command} --event {event}"), "timeout": timeout});
     serde_json::json!({
         "PreToolUse": [{"matcher": "*", "hooks": [run("PreToolUse", 10)]}],
+        "PostToolUse": [{"matcher": "*", "hooks": [run("PostToolUse", 15)]}],
         "PreInvocation": [run("PreInvocation", 15)],
         "Stop": [run("Stop", 15)],
     })
@@ -4259,16 +4260,18 @@ fn named_hook_installed(file: &Path, name: &str) -> bool {
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .is_some_and(|root| {
-            ["PreToolUse", "PreInvocation", "Stop"].iter().all(|e| {
-                root[name][*e].as_array().into_iter().flatten().any(|g| {
-                    is_seat_event_hook(g)
-                        || g["hooks"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(is_seat_event_hook)
+            ["PreToolUse", "PostToolUse", "PreInvocation", "Stop"]
+                .iter()
+                .all(|e| {
+                    root[name][*e].as_array().into_iter().flatten().any(|g| {
+                        is_seat_event_hook(g)
+                            || g["hooks"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(is_seat_event_hook)
+                    })
                 })
-            })
         })
 }
 
@@ -4789,8 +4792,15 @@ pub fn clean_user_prompt(text: &str) -> String {
 /// model-result events carry nothing to say.
 fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
     let event = event.map(str::to_string).unwrap_or_else(|| {
+        // PreToolUse and PostToolUse both carry `toolCall`. PostToolUse is
+        // the one with `error` (empty when the command exited 0). Without
+        // that, a commit the gate allowed is never cited.
         if v.get("toolCall").is_some() {
-            "PreToolUse"
+            if v.get("error").is_some() {
+                "PostToolUse"
+            } else {
+                "PreToolUse"
+            }
         } else if v.get("executionNum").is_some() {
             "Stop"
         } else if v.get("invocationNum").is_some() {
@@ -30247,6 +30257,14 @@ mod tests {
             after.contains("exit_code"),
             "a command's exit reaches the deed hook"
         );
+        assert!(
+            after.contains("commands.get"),
+            "the after hook keeps the command the before hook saw"
+        );
+        assert!(
+            after.contains("A zero exit still cites the commit"),
+            "stderr on a clean commit is not a failed commit"
+        );
         assert!(!text.contains("lets the work go on"));
     }
 
@@ -30265,6 +30283,7 @@ mod tests {
         );
         for hook in [
             "ctx.tool.hook(\"execute.before\"",
+            "ctx.tool.hook(\"execute.after\"",
             "ctx.session.hook(\"prompt\"",
             "ctx.session.hook(\"context\"",
             "ctx.shell.hook(\"create.before\"",
@@ -30281,6 +30300,14 @@ mod tests {
             "a failed gate refuses"
         );
         assert!(text.contains("cwd"), "the payload names the directory");
+        assert!(
+            text.contains("commands.get"),
+            "the after hook keeps the command the before hook saw"
+        );
+        assert!(
+            text.contains("A zero exit still cites it"),
+            "stderr on a clean commit is not a failed commit"
+        );
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
         let found = super::detect_runners(&all.harness, home.path(), &|_| false);
@@ -34565,6 +34592,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .as_str()
             .unwrap()
             .ends_with(" hook --event PreToolUse"));
+        assert!(doc["ljos"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with(" hook --event PostToolUse"));
         assert!(named_hook_step(&file, "ljos", false)
             .detail
             .contains("carries"));
