@@ -33490,6 +33490,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn an_agent_cannot_type_an_approval_into_a_pane() {
+        // A temp home suspends the guard. Hold the seat so a test that
+        // points HOME at one cannot make this check look idle.
+        let _g = env_guard();
         let id = "0123456789abcdef0123456789abcdef";
         assert!(seat_guard(&format!("tmux send-keys -t seat 'approve {id}' Enter")).is_some());
         assert!(seat_guard(&format!("herdr agent send codex approve {id}")).is_some());
