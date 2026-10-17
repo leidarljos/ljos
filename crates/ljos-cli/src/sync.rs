@@ -288,6 +288,37 @@ fn age_missing_line() -> String {
     "sync: age is not installed, so the log was not sealed; install age to sync it\n".into()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `Some` forces whether this thread treats `age` as installed.
+    /// `None` asks the real `PATH`. Hiding `age` stays on this thread so
+    /// a test does not empty `PATH` for every other test in the process.
+    static AGE_ON_PATH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether `age` can be run. A test may force the answer on its own thread.
+fn age_on_path() -> bool {
+    #[cfg(test)]
+    if let Some(present) = AGE_ON_PATH.with(|cell| cell.get()) {
+        return present;
+    }
+    crate::on_path("age")
+}
+
+/// Hide `age` on this thread until the guard drops. `PATH` stays as it is.
+#[cfg(test)]
+#[must_use]
+fn hide_age() -> impl Drop {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            AGE_ON_PATH.with(|cell| cell.set(None));
+        }
+    }
+    AGE_ON_PATH.with(|cell| cell.set(Some(false)));
+    Guard
+}
+
 fn age_missing(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -322,7 +353,7 @@ pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
             scope.name
         ));
     }
-    if !crate::on_path("age") {
+    if !age_on_path() {
         return Ok(age_missing_line());
     }
     if let Err(err) = seal(
@@ -1247,19 +1278,7 @@ mod tests {
     /// Finish's sync used to print an os error when `age` was not installed.
     #[test]
     fn a_missing_age_skips_the_seal_without_an_os_error() {
-        let _g = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(path) => unsafe { std::env::set_var("PATH", path) },
-                    None => unsafe { std::env::remove_var("PATH") },
-                }
-            }
-        }
-        let _path = Restore(std::env::var_os("PATH"));
-        let empty = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PATH", empty.path()) };
+        let _hide = hide_age();
         let root = tempfile::tempdir().unwrap();
         let scope: Scope =
             toml::from_str("name = \"surf\"\nrecipients = [\"age1test\"]\n").unwrap();
