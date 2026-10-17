@@ -1853,9 +1853,11 @@ fn tool_use_id(raw: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-/// `exit_code` for `tool_use_id` in the Codex transcript. The read is the
-/// tail of the file and gives up at [`TRANSCRIPT_DEADLINE`], so a stuck
-/// transcript cannot hold the hook.
+/// `exit_code` for `tool_use_id` in the Codex transcript. Codex 0.163 puts
+/// the code on a `CommandExecution` item whose `id` is the call, and only
+/// as text (`Process exited with code N`) on the `function_call_output`
+/// with that `call_id`. The read is the tail of the file and gives up at
+/// [`TRANSCRIPT_DEADLINE`], so a stuck transcript cannot hold the hook.
 fn transcript_exit(raw: &Value) -> Option<i64> {
     let path = raw
         .get("transcript_path")
@@ -1902,35 +1904,45 @@ fn read_tail_file(path: &Path, max_bytes: u64) -> Option<String> {
     Some(text)
 }
 
-/// The last `exit_code` on a line that names `call_id`. A begin event has
-/// the id and no code; the end event later on the file is the one that counts.
-fn exit_for_call(text: &str, call_id: &str) -> Option<i64> {
-    let mut found = None;
-    for line in text.lines() {
-        if let Some(code) = line_exit(line, call_id) {
-            found = Some(code);
-        }
-    }
-    found
+/// A code read from the transcript. The command item wins. The sentence in
+/// the function output is only used when that item is absent.
+struct TranscriptExit {
+    item: Option<i64>,
+    spoken: Option<i64>,
 }
 
-fn line_exit(line: &str, call_id: &str) -> Option<i64> {
+impl TranscriptExit {
+    fn code(self) -> Option<i64> {
+        self.item.or(self.spoken)
+    }
+}
+
+/// The exit code for `call_id`. A later `CommandExecution` for the same id
+/// replaces an earlier one. `Process exited with code N` does not replace
+/// a code the item already named.
+fn exit_for_call(text: &str, call_id: &str) -> Option<i64> {
+    let mut found = TranscriptExit {
+        item: None,
+        spoken: None,
+    };
+    for line in text.lines() {
+        note_line_exit(line, call_id, &mut found);
+    }
+    found.code()
+}
+
+fn note_line_exit(line: &str, call_id: &str, found: &mut TranscriptExit) {
     if !line.contains(call_id) {
-        return None;
+        return;
     }
     if let Ok(value) = serde_json::from_str::<Value>(line) {
-        return exit_in_value(&value, call_id);
+        walk_exit(&value, call_id, found);
+    } else {
+        exit_in_text(line, call_id, found);
     }
-    exit_in_text(line, call_id)
 }
 
-fn exit_in_value(value: &Value, call_id: &str) -> Option<i64> {
-    let mut found = None;
-    walk_exit(value, call_id, &mut found);
-    found
-}
-
-fn walk_exit(value: &Value, call_id: &str, found: &mut Option<i64>) {
+fn walk_exit(value: &Value, call_id: &str, found: &mut TranscriptExit) {
     match value {
         Value::Array(items) => {
             for item in items {
@@ -1938,15 +1950,11 @@ fn walk_exit(value: &Value, call_id: &str, found: &mut Option<i64>) {
             }
         }
         Value::Object(map) => {
-            let matched = map
-                .get("call_id")
-                .or_else(|| map.get("callId"))
-                .and_then(Value::as_str)
-                == Some(call_id);
-            if matched {
-                if let Some(code) = exit_field(value) {
-                    *found = Some(code);
-                }
+            if let Some(code) = command_execution_code(map, call_id) {
+                found.item = Some(code);
+            }
+            if let Some(code) = function_output_code(map, call_id) {
+                found.spoken = Some(code);
             }
             for child in map.values() {
                 walk_exit(child, call_id, found);
@@ -1956,10 +1964,48 @@ fn walk_exit(value: &Value, call_id: &str, found: &mut Option<i64>) {
     }
 }
 
-fn exit_field(value: &Value) -> Option<i64> {
+/// `item.type == CommandExecution` and `item.id` is the hook's `tool_use_id`.
+fn command_execution_code(map: &serde_json::Map<String, Value>, call_id: &str) -> Option<i64> {
+    if map.get("type").and_then(Value::as_str) != Some("CommandExecution") {
+        return None;
+    }
+    if map.get("id").and_then(Value::as_str) != Some(call_id) {
+        return None;
+    }
     ["exit_code", "exitCode"]
         .iter()
-        .find_map(|key| value.get(*key).and_then(exit_number))
+        .find_map(|key| map.get(*key).and_then(exit_number))
+}
+
+/// The matching `function_call_output`. The code is the first
+/// `Process exited with code N` in its `output`, which is the harness
+/// header rather than a line the command printed later.
+fn function_output_code(map: &serde_json::Map<String, Value>, call_id: &str) -> Option<i64> {
+    if map.get("type").and_then(Value::as_str) != Some("function_call_output") {
+        return None;
+    }
+    let matched = map
+        .get("call_id")
+        .or_else(|| map.get("callId"))
+        .and_then(Value::as_str)
+        == Some(call_id);
+    if !matched {
+        return None;
+    }
+    map.get("output")
+        .and_then(Value::as_str)
+        .and_then(process_exit_code)
+}
+
+fn process_exit_code(text: &str) -> Option<i64> {
+    let marker = "Process exited with code ";
+    let rest = text.get(text.find(marker)? + marker.len()..)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
 }
 
 fn exit_number(slot: &Value) -> Option<i64> {
@@ -1969,41 +2015,50 @@ fn exit_number(slot: &Value) -> Option<i64> {
     slot.as_str().and_then(|text| text.trim().parse().ok())
 }
 
-/// A tail that starts in the middle of a line is not valid JSON. The id and
-/// the code are still named as text.
-fn exit_in_text(line: &str, call_id: &str) -> Option<i64> {
-    let mut found = None;
+/// A tail that starts in the middle of a line is not valid JSON. The item
+/// still names `CommandExecution`, its `id`, and `exit_code`. A cut-off
+/// function output still says `Process exited with code N` after `call_id`.
+fn exit_in_text(line: &str, call_id: &str, found: &mut TranscriptExit) {
     let mut from = 0;
-    while from < line.len() {
-        let Some(at) = find_call_id(&line[from..], call_id) else {
-            break;
-        };
-        let start = from + at;
-        let after_key = start + "\"call_id\"".len();
-        if after_key > line.len() {
-            break;
-        }
-        let end = line[after_key..]
-            .find("\"call_id\"")
-            .map(|rel| after_key + rel)
+    while let Some(rel) = line[from..].find("CommandExecution") {
+        let start = from + rel;
+        let rest = start + "CommandExecution".len();
+        let end = line[rest..]
+            .find("CommandExecution")
+            .map(|rel| rest + rel)
             .unwrap_or(line.len());
-        if let Some(code) = exit_code_in(&line[start..end]) {
-            found = Some(code);
+        let window = &line[start..end];
+        if find_key(window, "\"id\"", call_id).is_some() {
+            if let Some(code) = exit_code_in(window) {
+                found.item = Some(code);
+            }
         }
-        from = after_key;
+        from = rest;
     }
-    found
+    let mut from = 0;
+    while let Some(start) = find_key(&line[from..], "\"call_id\"", call_id) {
+        let start = from + start;
+        let after = start + "\"call_id\"".len();
+        let end = line[after..]
+            .find("\"call_id\"")
+            .map(|rel| after + rel)
+            .unwrap_or(line.len());
+        if let Some(code) = process_exit_code(&line[start..end]) {
+            found.spoken = Some(code);
+        }
+        from = after;
+    }
 }
 
-fn find_call_id(text: &str, call_id: &str) -> Option<usize> {
+fn find_key(text: &str, key: &str, want: &str) -> Option<usize> {
     let mut from = 0;
     while from < text.len() {
-        let Some(rel) = text[from..].find("\"call_id\"") else {
+        let Some(rel) = text[from..].find(key) else {
             break;
         };
         let at = from + rel;
-        let after = at + "\"call_id\"".len();
-        if json_string_is(text.get(after..).unwrap_or(""), call_id) {
+        let after = at + key.len();
+        if json_string_is(text.get(after..).unwrap_or(""), want) {
             return Some(at);
         }
         from = after;
@@ -3704,23 +3759,97 @@ print(f"id={ident}")
         assert!(note.contains("slugify"), "{note}");
     }
 
-    /// Codex 0.163 sends the shell output as a string and the exit code only
-    /// in the transcript, under the same call id as `tool_use_id`.
+    /// Codex 0.163 names the call as `CommandExecution.id`. The matching
+    /// `function_call_output` only spells the code in its text, and that
+    /// sentence does not replace a code the item already named.
     #[test]
     fn a_codex_transcript_exit_matches_the_call_id() {
-        let id = "exec_command_n38zthdamfmc";
+        let id = "exec_command_058e85yevw32";
+        let other = "exec_command_q3kpac3wpztr";
         let text = format!(
-            "{}\n{}\n{}\n{}",
-            codex_event("exec_command_other", Some(0)),
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            codex_event(other, None),
+            codex_event(other, Some(127)),
+            function_output_line(other, 127),
             codex_event(id, None),
-            codex_event(id, Some(127)),
-            r#"{"payload":{"call_id":"exec_command_n38zthdamfmc","exit_code":"5"}}"#
+            codex_event(id, Some(1)),
+            function_output_line(id, 1),
         );
-        assert_eq!(exit_for_call(&text, id), Some(5));
-        assert_eq!(exit_for_call(&text, "exec_command_other"), Some(0));
+        assert_eq!(exit_for_call(&text, id), Some(1));
+        assert_eq!(exit_for_call(&text, other), Some(127));
         assert_eq!(exit_for_call(&text, "exec_command_missing"), None);
-        let torn = r#"{"payload":{"call_id":"exec_command_n38zthdamfmc","stdout":"...","exit_code":127,"stderr":""#;
-        assert_eq!(exit_for_call(torn, id), Some(127));
+        let item_wins = format!(
+            "{}\n{}",
+            codex_event(id, Some(1)),
+            function_output_line(id, 127),
+        );
+        assert_eq!(exit_for_call(&item_wins, id), Some(1));
+        assert_eq!(exit_for_call(&function_output_line(id, 1), id), Some(1));
+        let torn_item = codex_event(id, Some(1));
+        let torn_item = &torn_item[..torn_item.len() - 1];
+        assert_eq!(exit_for_call(torn_item, id), Some(1));
+        let torn_output = function_output_line(id, 255);
+        let phrase = "Process exited with code 255";
+        let end = torn_output.find(phrase).unwrap() + phrase.len();
+        assert_eq!(exit_for_call(&torn_output[..end], id), Some(255));
+    }
+
+    /// A Codex 0.163 PostToolUse whose `tool_response` is text books the
+    /// failure from the transcript the hook was given.
+    #[test]
+    fn a_real_codex_post_books_the_exit_failure() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let session = "01a14bc1-59ae-7d43-9a16-bc94c6a0ef56";
+        let id = "exec_command_058e85yevw32";
+        let other = "exec_command_q3kpac3wpztr";
+        let transcript = dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n",
+                codex_event(other, None),
+                codex_event(other, Some(127)),
+                function_output_line(other, 127),
+                codex_event(id, Some(1)),
+                function_output_line(id, 1),
+            ),
+        )
+        .unwrap();
+        let command = "/usr/bin/python3 -c 'import slug; slug.kebab_case(\"Hello World\")'";
+        let raw = serde_json::json!({
+            "session_id": session,
+            "turn_id": "01a14bc1-59d4-7390-a148-c38ad5e58020",
+            "transcript_path": transcript,
+            "cwd": repo,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": "ModuleNotFoundError: No module named 'slug'\n",
+            "tool_use_id": id,
+        });
+        let text = serde_json::to_string(&raw).unwrap();
+        let call = crate::hook_call(&text);
+        assert_eq!(call.event, "PostToolUse");
+        assert!(call.cue.contains("python3"), "{}", call.cue);
+        let _ = observe(&text, &call);
+        let book = book_json(dir.path(), session);
+        let row = book["repos"].as_object().unwrap().values().next().unwrap();
+        let failures = row["failures"].as_array().unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|note| note.as_str().unwrap_or("").contains("python3")),
+            "{book}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|note| note.as_str().unwrap_or("").contains("slug")),
+            "{book}"
+        );
     }
 
     /// A string `tool_response` plus a transcript exit of 127 is a failure,
@@ -4336,22 +4465,54 @@ print(f"id={ident}")
         unsafe { std::env::set_var(key, value) };
     }
 
+    /// A Codex 0.163 transcript line, trimmed to the fields the exit lookup
+    /// reads. `Some` is the completed `CommandExecution` item (`id`, not
+    /// `call_id`). `None` is the `function_call`, which names the id and
+    /// carries no code.
     fn codex_event(call_id: &str, exit_code: Option<i64>) -> String {
-        let mut payload = serde_json::json!({
-            "type": if exit_code.is_some() {
-                "exec_command_end"
-            } else {
-                "exec_command_begin"
-            },
-            "call_id": call_id,
-        });
-        if let Some(code) = exit_code {
-            payload["exit_code"] = serde_json::json!(code);
+        match exit_code {
+            Some(code) => serde_json::json!({
+                "timestamp": "2026-10-17T21:25:30.203Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "id": call_id,
+                        "command": ["/bin/bash", "-lc", "true"],
+                        "status": if code == 0 { "completed" } else { "failed" },
+                        "exit_code": code,
+                    }
+                }
+            })
+            .to_string(),
+            None => serde_json::json!({
+                "timestamp": "2026-10-17T21:25:30.129Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": call_id,
+                    "arguments": "{}",
+                }
+            })
+            .to_string(),
         }
+    }
+
+    /// The `function_call_output` whose `call_id` matches. The code is only
+    /// the harness sentence, as Codex 0.163 writes it.
+    fn function_output_line(call_id: &str, code: i64) -> String {
         serde_json::json!({
-            "timestamp": "2026-10-17T00:00:00Z",
-            "type": "event_msg",
-            "payload": payload,
+            "timestamp": "2026-10-17T21:25:30.218Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": format!(
+                    "Chunk ID: 13ab48\nWall time: 0.0000 seconds\nProcess exited with code {code}\nOriginal token count: 46\nOutput:\nModuleNotFoundError: No module named 'slug'\n"
+                ),
+            }
         })
         .to_string()
     }
