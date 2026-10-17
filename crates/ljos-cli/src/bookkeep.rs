@@ -106,6 +106,13 @@ struct RepoBook {
     /// second commit is a second deed, and the same sha is not cited twice.
     #[serde(default)]
     deeds: Vec<String>,
+    /// Cited shas found in HEAD by a sweep. A sweep asks git once for a
+    /// sha, not on every prompt.
+    #[serde(default)]
+    landed: Vec<String>,
+    /// The HEAD those shas were found in.
+    #[serde(default)]
+    landed_head: Option<String>,
     /// Short notes from tool failures, for the lesson written at Stop.
     #[serde(default)]
     failures: Vec<String>,
@@ -218,8 +225,9 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     // finishes those whose pid is gone, and replaces a deed whose commit is
     // no longer in the checkout with the one that is.
     if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
-        super::hook_timed("finish_orphans", || finish_orphans(&session));
-        super::hook_timed("refresh_landed_deeds", refresh_landed_deeds);
+        let deadline = std::time::Instant::now() + SWEEP_BUDGET;
+        super::hook_timed("finish_orphans", || finish_orphans(&session, deadline));
+        super::hook_timed("refresh_landed_deeds", || refresh_landed_deeds(deadline));
     }
     let path = book_path(&session);
     let mut book = load_book(&path);
@@ -1068,15 +1076,23 @@ fn hook_owner() -> u32 {
     // SAFETY: getppid only reads the parent pid.
     unsafe { libc::getppid() as u32 }
 }
+/// How long the sweeps over past sittings may take in one hook call. They
+/// walk every book the seat has kept, and the landed check runs git once per
+/// cited commit, so the walk grows with the seat's history. Books the walk
+/// does not reach are the next call's, most recently written first.
+const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Finish every other sitting whose runner has exited. A sitting that
 /// never claimed still counts when a tool failed or the guard asked and
 /// the lesson has not been written.
-fn finish_orphans(current: &str) {
+fn finish_orphans(current: &str, deadline: std::time::Instant) {
     let keep = book_path(current);
     for path in book_files() {
         if path == keep {
             continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
         }
         let mut book = load_book(&path);
         let open = book.repos.values().any(sitting_open);
@@ -1090,15 +1106,23 @@ fn finish_orphans(current: &str) {
 
 /// Replace a cited commit that is not in HEAD with the commit that is, and
 /// write the lesson again when it already named the one that did not land.
-fn refresh_landed_deeds() {
+fn refresh_landed_deeds(deadline: std::time::Instant) {
+    let mut heads = Heads::new();
     for path in book_files() {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         let mut book = load_book(&path);
         let repos: Vec<String> = book.repos.keys().cloned().collect();
         let mut changed = false;
+        let mut cached = false;
         for repo in repos {
-            changed |= reconcile_deeds(&mut book, &repo);
+            changed |= reconcile_deeds(&mut book, &repo, deadline, &mut heads, &mut cached);
         }
         if !changed {
+            if cached {
+                store_book(&path, &book);
+            }
             continue;
         }
         let repos: Vec<String> = book.repos.keys().cloned().collect();
@@ -1134,6 +1158,8 @@ fn refresh_landed_deeds() {
     }
 }
 
+/// The books, most recently written first: a sitting that ended a moment ago
+/// is the one a sweep is likely to find work in.
 fn book_files() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(super::runtime_dir()) else {
         return Vec::new();
@@ -1143,31 +1169,68 @@ fn book_files() -> Vec<PathBuf> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("book-") && name.ends_with(".json") {
-            out.push(entry.path());
+            let written = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            out.push((written, entry.path()));
         }
     }
-    out
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, path)| path).collect()
 }
+
+/// HEAD of each checkout, asked once per sweep: the books of a seat share a
+/// few checkouts, and a row's cached answer stands while its HEAD does.
+type Heads = std::collections::HashMap<String, Option<String>>;
 
 /// Drop deed shas that are not ancestors of HEAD, then cite HEAD when the
 /// sitting had cited one that never landed. `false` when nothing changed,
-/// or when git could not say.
-fn reconcile_deeds(book: &mut Book, repo: &str) -> bool {
+/// or when git could not say. The shas found in HEAD are remembered with
+/// the HEAD they were found in, so a later sweep asks git again only when
+/// HEAD has moved (an amend, a rebase); `cached` says a row grew.
+fn reconcile_deeds(
+    book: &mut Book,
+    repo: &str,
+    deadline: std::time::Instant,
+    heads: &mut Heads,
+    cached: &mut bool,
+) -> bool {
     let Some(row) = book.repos.get(repo) else {
         return false;
     };
     if row.deeds.is_empty() || row.issue.is_none() {
         return false;
     }
+    let head = heads
+        .entry(repo.to_string())
+        .or_insert_with(|| head_sha(repo).ok())
+        .clone();
+    let same_head = head.is_some() && row.landed_head == head;
     let mut kept = Vec::new();
     for sha in &row.deeds {
+        if same_head && row.landed.contains(sha) {
+            kept.push(sha.clone());
+            continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         match sha_landed(repo, sha) {
             Some(true) => kept.push(sha.clone()),
             Some(false) => {}
             None => return false,
         }
     }
-    if kept.len() == row.deeds.len() {
+    let all_landed = kept.len() == row.deeds.len();
+    if head.is_some() && !(same_head && all_landed) {
+        if let Some(row) = book.repos.get_mut(repo) {
+            row.landed.clone_from(&kept);
+            row.landed_head = head;
+        }
+        *cached = true;
+    }
+    if all_landed {
         return false;
     }
     if let Some(row) = book.repos.get_mut(repo) {
@@ -1238,7 +1301,9 @@ fn head_sha(repo: &str) -> Result<String, String> {
 fn finish_open(book: &mut Book) {
     let repos: Vec<String> = book.repos.keys().cloned().collect();
     for repo in repos {
-        let _ = reconcile_deeds(book, &repo);
+        let mut cached = false;
+        let in_a_minute = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let _ = reconcile_deeds(book, &repo, in_a_minute, &mut Heads::new(), &mut cached);
         let Some(row) = book.repos.get(&repo) else {
             continue;
         };
@@ -3774,6 +3839,63 @@ print(f"id={ident}")
         assert!(!lesson.contains(&abandoned[..7]), "{lesson}");
         let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
         assert!(org.contains(&format!("deed-file-commit-{landed}")), "{org}");
+    }
+
+    /// A prompt answers inside the sweep budget however many past sittings
+    /// the seat keeps, and the sweeps still reach every book: a sha found in
+    /// HEAD is remembered, so a later pass does not ask git again.
+    #[test]
+    fn a_prompt_does_not_wait_on_the_seats_history() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let head = head_sha_of(&repo);
+        let repo_key = repo.display().to_string();
+        let sittings = 300;
+        for n in 0..sittings {
+            let mut book = Book::default();
+            book.repos.insert(
+                repo_key.clone(),
+                RepoBook {
+                    issue: Some("probe-aaaa".into()),
+                    deeds: vec![head.clone()],
+                    finished: true,
+                    lesson: true,
+                    ..RepoBook::default()
+                },
+            );
+            let path = book_path(&format!("old-{n}"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            store_book(&path, &book);
+        }
+        let landed = || {
+            (0..sittings)
+                .filter(|n| {
+                    let book = load_book(&book_path(&format!("old-{n}")));
+                    book.repos.values().all(|row| !row.landed.is_empty())
+                })
+                .count()
+        };
+        assert_eq!(landed(), 0);
+        let mut passes = 0;
+        while landed() < sittings && passes < 60 {
+            let (raw, call) = payload(
+                "UserPromptSubmit",
+                "now",
+                &repo,
+                serde_json::json!({"prompt": "summarize the failing build"}),
+            );
+            let started = std::time::Instant::now();
+            let _ = observe(&raw, &call);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_millis(2500),
+                "pass {passes} took {took:?}"
+            );
+            passes += 1;
+        }
+        assert_eq!(landed(), sittings, "the sweep reached every book");
     }
 
     fn saved_env() -> Restore {
