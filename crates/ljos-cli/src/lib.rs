@@ -3370,14 +3370,14 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   case $verdict in
     deny*)
       rule=$(printf '%s' "$verdict" | head -n 1 | cut -f 2)
-      # An empty reason, or the engine name standing in for one, is not a
-      # judgment. A burst of checks can print `deny\tphronesis` for a command
-      # that is allowed on its own. Run it.
-      case $rule in
-        ""|phronesis|phronesis:*|bind-failed)
+      # An empty reason, the bare engine name, or a bind that did not
+      # take is a seat that is not ready. A `phronesis:` token names a
+      # rule and is a real denial. Run only the unready cases.
+      case "$rule" in
+        ""|phronesis|bind-failed)
           exec "$real" "$@" ;;
       esac
-      case $rule in
+      case "$rule" in
         rm-rf-*|find-delete-*) hint="Leave it, or move it to the trash (trash-put or gio trash). Moving it under /tmp to delete it there is the same delete." ;;
         *) hint="This rewrites or discards history or work. Ask the person first; they can run it themselves." ;;
       esac
@@ -22600,19 +22600,16 @@ fn policyd_token(line: &str) -> &str {
         .trim()
 }
 
-/// A deny that is the engine failing to judge, not a check that named the
+/// A deny that is the seat not being ready, not a check that named the
 /// command. `ljos-policyd` prints `deny\tphronesis` when the decision text
-/// is empty: the token is the backend name, standing in for a missing
-/// reason. A `phronesis:` line is the seat failing to open (`seat could not
-/// open`, `no decision`). `bind-failed` is the same failure. Under a burst
-/// of checks those come back for commands the same binary allows alone.
-/// They are not a reason to refuse the command.
+/// is empty: the token is the backend name and nothing else. `bind-failed`
+/// is the seat failing to bind. A `phronesis:` token carries words (`seat
+/// could not open`, or a rule, if one is ever named that way) and stays a
+/// refusal. Under a burst of checks the bare token comes back for commands
+/// the same binary allows alone.
 fn policyd_unjudged(token: &str) -> bool {
     let token = token.trim();
-    token.is_empty()
-        || token.eq_ignore_ascii_case("phronesis")
-        || token.to_ascii_lowercase().starts_with("phronesis:")
-        || token == "bind-failed"
+    token.is_empty() || token.eq_ignore_ascii_case("phronesis") || token == "bind-failed"
 }
 
 /// A force-push ask is the person's question, on a runner that otherwise
@@ -24654,7 +24651,7 @@ mod tests {
         exe(&guard.join("rm"), super::GUARD_SHIM);
         exe(
             &fake.join("ljos-policyd"),
-            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; esac\necho allow\n",
+            "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; *bound*) printf 'deny\\tbind-failed\\n'; exit 2;; *ruled*) printf 'deny\\tphronesis: keep-the-tree\\n'; exit 2;; esac\necho allow\n",
         );
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
@@ -24688,6 +24685,22 @@ mod tests {
             String::from_utf8_lossy(&empty.stderr)
         );
         assert!(!slug.exists());
+        let bound = dir.path().join("bound.py");
+        std::fs::write(&bound, "x").unwrap();
+        let unbound = run(&format!("'{}'", bound.display()));
+        assert!(
+            unbound.status.success(),
+            "a seat that did not bind runs the command: {}",
+            String::from_utf8_lossy(&unbound.stderr)
+        );
+        assert!(!bound.exists());
+        let ruled = dir.path().join("ruled.py");
+        std::fs::write(&ruled, "x").unwrap();
+        let named = run(&format!("'{}'", ruled.display()));
+        assert_eq!(named.status.code(), Some(126));
+        let err = String::from_utf8_lossy(&named.stderr);
+        assert!(err.contains("denied (phronesis: keep-the-tree)"), "{err}");
+        assert!(ruled.exists(), "a named phronesis denial does not run");
         assert!(super::seat_env_text("grokbot").contains("ljos/guard-bin"));
     }
 
@@ -33762,9 +33775,21 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             empty.starts_with("allow\t") && empty.contains("unhealthy"),
             "{empty}"
         );
+        let unbound = answer("bind-failed", "printf 'deny\\tbind-failed\\n'; exit 2");
+        assert!(
+            unbound.starts_with("allow\t") && unbound.contains("unhealthy"),
+            "{unbound}"
+        );
         assert_eq!(
             answer("named", "printf 'deny\\tdecoded-pipe-shell\\n'; exit 2"),
             "deny\tdecoded-pipe-shell"
+        );
+        assert_eq!(
+            answer(
+                "named-phronesis",
+                "printf 'deny\\tphronesis: seat could not open\\n'; exit 2",
+            ),
+            "deny\tphronesis: seat could not open"
         );
         for (name, body) in [
             ("crashes", "kill -SEGV $$"),
@@ -34034,16 +34059,126 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             rule.reason
         );
         assert_ne!(rule.reason.trim(), "phronesis");
-        let opened = fake_policyd(
+        let unbound = fake_policyd(
             home.path(),
-            "seat-closed",
-            "printf 'deny\\tphronesis: seat could not open\\n'; exit 2",
+            "bind-failed",
+            "printf 'deny\\tbind-failed\\n'; exit 2",
         );
-        let _opened = HoldEnv::set(&[("POLICYD_BIN", opened.to_str().unwrap())]);
+        let _unbound = HoldEnv::set(&[("POLICYD_BIN", unbound.to_str().unwrap())]);
         assert!(
             tcb_verdict(line).is_none(),
-            "a seat that did not open is not a refusal"
+            "a seat that did not bind is not a refusal"
         );
+    }
+
+    /// Tokens copied from ljos-policyd `src/lib.rs` at cc3f495. `verdict`
+    /// prints `deny\t` plus the token (lines 48-49). Empty decision text
+    /// is the bare token `phronesis` (lines 1066-1067). A real deny keeps
+    /// the pack's reason text (lines 1068-1069, `Cow::Owned(text)`). Bind
+    /// failure is `bind-failed` (line 1004). A `phronesis:` string is a
+    /// named refusal (lines 976, 1011, 1125, 1129, 1133) and stays one.
+    #[test]
+    fn a_named_phronesis_token_stays_a_refusal() {
+        const SRC: &str = r#"
+        let fail = || refused("phronesis: seat could not open");
+            return Err(refused("bind-failed"));
+        let fail = || refused("phronesis: no decision");
+        let token = if decision == Decision::Allow {
+            Cow::Borrowed("allow")
+        } else if text.is_empty() {
+            Cow::Borrowed("phronesis")
+        } else {
+            Cow::Owned(text)
+        };
+        return refused("phronesis: no worker thread");
+        return refused("phronesis: worker thread gone");
+        .unwrap_or_else(|_| refused("phronesis: no decision"))
+        "#;
+        let quoted = |needle: &str| -> Vec<&str> {
+            let mut out = Vec::new();
+            let mut rest = SRC;
+            let mark = format!("{needle}(\"");
+            while let Some(at) = rest.find(&mark) {
+                let after = &rest[at + mark.len()..];
+                let end = after.find('"').expect("closing quote");
+                out.push(&after[..end]);
+                rest = &after[end + 1..];
+            }
+            out
+        };
+        let refused = quoted("refused");
+        let borrowed = quoted("Cow::Borrowed");
+        assert!(
+            SRC.contains("Cow::Owned(text)"),
+            "a real deny keeps the pack's reason text"
+        );
+        assert_eq!(
+            borrowed,
+            ["allow", "phronesis"],
+            "empty decision text is the bare token, not a rule"
+        );
+        assert_eq!(
+            refused,
+            [
+                "phronesis: seat could not open",
+                "bind-failed",
+                "phronesis: no decision",
+                "phronesis: no worker thread",
+                "phronesis: worker thread gone",
+                "phronesis: no decision",
+            ]
+        );
+        let unready = ["", "phronesis", "PHRONESIS", "bind-failed"];
+        for token in unready {
+            assert!(
+                policyd_unjudged(token),
+                "{token} is a seat that is not ready"
+            );
+        }
+        for token in refused
+            .iter()
+            .filter(|token| token.starts_with("phronesis:"))
+        {
+            assert!(
+                !policyd_unjudged(token),
+                "{token} carries words and stays a refusal"
+            );
+        }
+        assert!(!policyd_unjudged("phronesis:"));
+        let _g = env_guard();
+        let home = SeatDir::new("phronesis-named");
+        let line = "git add slug.py test_slug.py";
+        let _env = HoldEnv::set(&[
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+        ]);
+        for token in refused
+            .iter()
+            .filter(|token| token.starts_with("phronesis:"))
+        {
+            let name = token.replace([':', ' '], "-");
+            let bin = fake_policyd(
+                home.path(),
+                &name,
+                &format!("printf 'deny\\t{token}\\n'; exit 2"),
+            );
+            let _bin = HoldEnv::set(&[("POLICYD_BIN", bin.to_str().unwrap())]);
+            let rule = tcb_verdict(line).expect(token);
+            assert_eq!(rule.verdict, "deny");
+            assert_eq!(rule.reason, *token, "{}", rule.reason);
+        }
+        let pack_text = "the pack refused this command";
+        let bin = fake_policyd(
+            home.path(),
+            "pack-text",
+            &format!("printf 'deny\\t{pack_text}\\n'; exit 2"),
+        );
+        let _bin = HoldEnv::set(&[("POLICYD_BIN", bin.to_str().unwrap())]);
+        let rule = tcb_verdict(line).expect("a real deny keeps its text");
+        assert_eq!(rule.verdict, "deny");
+        assert_eq!(rule.reason, pack_text);
+        assert_ne!(rule.reason, "phronesis");
     }
 
     #[test]
