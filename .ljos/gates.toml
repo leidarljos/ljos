@@ -1,0 +1,4 @@
+# What the commit, push, and merge gates read. A push is refused until
+# `ljos evidence record -- <test>` exits 0 for that exact tip.
+test = "cargo test --workspace"
+protected_branches = ["main", "master"]

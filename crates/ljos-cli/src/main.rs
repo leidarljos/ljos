@@ -358,7 +358,13 @@ enum Cmd {
     },
     /// Whether a deed's bytes are intact and its sources are too. `at=` is
     /// the produced time in ISO 8601 with this machine's offset.
-    Evidence { accession: String },
+    /// `record -- COMMAND` runs the repo's test command and stores a passing
+    /// record for the current tip, which `git push` requires.
+    Evidence {
+        /// A deed accession, or `record` followed by the test command.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
+        args: Vec<String>,
+    },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
     /// Cite a deed on an issue, drop one, or list what it cites. Citing a deed names it; the bytes stay in deedar.
@@ -1415,9 +1421,21 @@ fn run_command() -> Result<()> {
             hits.truncate(limit as usize);
             print!("{}", format_hits(&hits, explain));
         }
-        Cmd::Evidence { accession } => {
-            let said = run_captured("deedar", &["evidence", &accession])?;
-            print!("{}", ljos_cli::evidence_here(&said.stdout));
+        Cmd::Evidence { args } => {
+            if args.first().map(String::as_str) == Some("record") {
+                let mut cmd = args[1..].to_vec();
+                if cmd.first().map(String::as_str) == Some("--") {
+                    cmd.remove(0);
+                }
+                println!("{}", ljos_cli::gates::record_evidence(&cmd)?);
+            } else if args.len() == 1 {
+                let said = run_captured("deedar", &["evidence", &args[0]])?;
+                print!("{}", ljos_cli::evidence_here(&said.stdout));
+            } else {
+                bail!(
+                    "evidence: pass one deed accession, or `ljos evidence record -- <test command>`"
+                );
+            }
         }
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
@@ -2231,11 +2249,15 @@ fn run_command() -> Result<()> {
             if on_tool {
                 let _ = ljos_cli::take_guard_note();
             }
+            let cwd = ljos_cli::hook_directory(input.trim());
             let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
                 .then(|| ljos_cli::user_rules::guard_payload(&input))
                 .flatten();
+            // The static guard includes the commit, push, and merge gates,
+            // in the directory the tool would run in.
+            let dir = cwd.as_ref().ok().map(std::path::PathBuf::as_path);
             let fast = on_tool
-                .then(|| ljos_cli::static_guard(&call.cue))
+                .then(|| ljos_cli::static_guard_in(&call.cue, dir))
                 .flatten()
                 .or(posted);
             let (rules, preferences) = if on_tool && fast.is_none() {
@@ -2249,7 +2271,7 @@ fn run_command() -> Result<()> {
             let tcb_rule = if let Some(rule) = fast {
                 Some(rule)
             } else if on_tool && !argv.is_empty() {
-                ljos_cli::tcb_verdict(&call.cue)
+                ljos_cli::tcb_verdict_in(&call.cue, dir)
             } else if on_tool {
                 ljos_cli::seat_guard(&call.cue)
             } else {
@@ -2257,7 +2279,6 @@ fn run_command() -> Result<()> {
             };
             // An ordinary branch push is allowed. Force, a +refspec, a
             // remote-branch delete and a tag push ask by default.
-            let cwd = ljos_cli::hook_directory(input.trim());
             let gated = if let Err(error) = &cwd {
                 Some(ljos_cli::Rule {
                     pattern: "tool working directory".into(),
