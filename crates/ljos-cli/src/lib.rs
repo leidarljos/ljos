@@ -5826,8 +5826,9 @@ fn shown_on_prompt(hit: &Hit) -> bool {
 /// marking here would burn the note before the model read it.
 #[must_use]
 pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
-    let (text, ids) = hook_note_from_pack(call, limit);
-    (user_rules::prepend(with_issue_recall(call, text)), ids)
+    let (text, ids) = hook_timed("pack_note", || hook_note_from_pack(call, limit));
+    let text = hook_timed("issue_recall", || with_issue_recall(call, text));
+    (hook_timed("user_rules", || user_rules::prepend(text)), ids)
 }
 
 /// `text`, then the recall of each tracker issue (at most two) a prompt
@@ -5936,7 +5937,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // The nudges answer what the prompt says, not what the pack holds, so
     // a prompt the pack knows nothing about still gets them. Their keys
     // travel with the note and are marked seen when a runner delivers it.
-    let (mut nudge, due_key) = due_nudge(call);
+    let (mut nudge, due_key) = hook_timed("due_nudge", || due_nudge(call));
     let mut pending = Vec::new();
     if let Some(key) = due_key {
         pending.push(key);
@@ -5945,7 +5946,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // deadline and the answer is lost. A lexical pass over the atoms
     // already on disk still answers this prompt. With nothing to show,
     // the prompt hears that memory is starting, once a session.
-    if encoder_warming() {
+    if hook_timed("encoder_warming", encoder_warming) {
         if let Some((text, mut ids)) = lexical_recall(call, cue, limit) {
             ids.extend(pending);
             let out = if nudge.is_empty() {
@@ -5967,7 +5968,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
     // when it does not answer in time, the local path below runs.
-    let judged = judged_prompt(call, cue);
+    let judged = hook_timed("judged_prompt", || judged_prompt(call, cue));
     let (correction, choice) = judged.as_ref().map_or((None, None), |(_, j)| {
         (Some(j.correction >= j.cue_at), Some(j.choice >= j.cue_at))
     });
@@ -6024,8 +6025,10 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     } else {
         // The judge did not answer. A skip, a timeout and a spent cap all
         // take this path.
-        let pool = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-            search_with_signals(cue, RERANK_POOL)
+        let pool = hook_timed("pool_search", || {
+            with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+                search_with_signals(cue, RERANK_POOL)
+            })
         })
         .ok();
         // A pack that sends the encoder's cosine has a judge of meaning:
@@ -6087,7 +6090,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // writer that is still fetching its cross-encoder on the first
             // prompt then costs the budget, not the whole hook deadline.
             let reranked = if rerank {
-                search_within(cue, 10, HOOK_RERANK_BUDGET_MS)
+                hook_timed("rerank", || search_within(cue, 10, HOOK_RERANK_BUDGET_MS))
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
