@@ -264,6 +264,9 @@ pub fn session_start_line() -> String {
 /// not have to invent one.
 #[must_use]
 pub fn session_start_for(session: Option<&str>) -> String {
+    // Other machines' rules arrive before the preface is built. A tracker
+    // that does not answer leaves the local file, and the hook does not wait.
+    user_rules::sync_for_hook();
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();

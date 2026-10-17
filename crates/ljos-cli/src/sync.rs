@@ -792,6 +792,331 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     Ok(out)
 }
 
+/// Tracker checkouts that carry user rules. A guessed working directory is
+/// not one: that is the tree the seat was started in, not the repository
+/// that travels between machines. `LJOS_USER_RULES_SYNC=off` names none.
+#[must_use]
+pub fn user_rule_trackers() -> Vec<PathBuf> {
+    if std::env::var("LJOS_USER_RULES_SYNC").ok().as_deref() == Some("off") {
+        return Vec::new();
+    }
+    if let Some(one) = std::env::var("LJOS_USER_RULES_TRACKER")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+    {
+        return vec![expand(one.trim())];
+    }
+    let listed = local().repos;
+    if !listed.is_empty() {
+        return listed.iter().map(|path| expand(path)).collect();
+    }
+    if let Some(root) = std::env::var_os("ISSUE_ROOT")
+        .or_else(|| std::env::var_os("VISSUE_ROOT"))
+        .filter(|root| !root.is_empty())
+    {
+        return vec![PathBuf::from(root)];
+    }
+    if let Some(root) = seat_tracker() {
+        return vec![root];
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("vissue.toml").is_file() {
+            return vec![cwd];
+        }
+    }
+    Vec::new()
+}
+
+fn seat_tracker() -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Seat {
+        root: Option<String>,
+    }
+    let path = std::env::var_os("VISSUE_CONFIG")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(config_dir().parent()?.join("vissue").join("config.toml")))?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let root = toml::from_str::<Seat>(&text).ok()?.root?;
+    let path = expand(root.trim());
+    path.is_dir().then_some(path)
+}
+
+fn machine_name(host: &str) -> String {
+    let clean: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let clean = clean.trim_matches('.').to_string();
+    if clean.is_empty() {
+        "host".into()
+    } else {
+        clean
+    }
+}
+
+fn looks_like_git(root: &Path) -> bool {
+    let git = root.join(".git");
+    git.is_dir() || git.is_file()
+}
+
+fn repo_rows(root: &Path) -> Vec<crate::user_rules::UserRule> {
+    let dir = root.join(".ljos").join("user-rules");
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = read
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    paths.sort();
+    let mut rows = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(parsed) = crate::user_rules::parse_rules(&text) {
+            rows.extend(parsed);
+        }
+    }
+    rows
+}
+
+fn git_within(
+    root: &Path,
+    args: &[&str],
+    deadline: std::time::Instant,
+) -> Result<std::process::Output> {
+    use std::os::unix::process::CommandExt;
+    let budget = deadline.saturating_duration_since(std::time::Instant::now());
+    if budget.is_zero() {
+        bail!(
+            "sync: user rules: no time left for git {}",
+            args.first().copied().unwrap_or("")
+        );
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: the closure runs in the forked child before exec. setpgid
+    // makes that child a group leader so a timed-out fetch can be killed
+    // with the helpers it started. The child has no other threads.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "sync: user rules: git {}",
+            args.first().copied().unwrap_or("")
+        )
+    })?;
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(budget) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(err)) => Err(err).context("sync: user rules: git"),
+        Err(_) => {
+            // SAFETY: signal 9 to the child's process group, whose id is
+            // the child's pid after setpgid, and to the child itself.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+            bail!(
+                "sync: user rules: the tracker did not answer within {} ms",
+                budget.as_millis()
+            )
+        }
+    }
+}
+
+fn git_succeeded(out: &std::process::Output) -> bool {
+    out.status.success()
+}
+
+fn one_line(out: &std::process::Output) -> String {
+    let text = String::from_utf8_lossy(&out.stderr);
+    let text = if text.trim().is_empty() {
+        String::from_utf8_lossy(&out.stdout)
+    } else {
+        text
+    };
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn integrate_remote(root: &Path, deadline: std::time::Instant) -> Result<()> {
+    let fetched = git_within(root, &["fetch", "-q", "--all"], deadline)?;
+    if !git_succeeded(&fetched) {
+        bail!("sync: user rules: fetch failed: {}", one_line(&fetched));
+    }
+    let Some(up) = crate::tracker_upstream(root) else {
+        return Ok(());
+    };
+    let forward = git_within(root, &["merge", "-q", "--ff-only", &up], deadline)?;
+    if git_succeeded(&forward) {
+        return Ok(());
+    }
+    let merged = git_within(root, &["merge", "-q", "--no-edit", &up], deadline)?;
+    if git_succeeded(&merged) {
+        return Ok(());
+    }
+    let _ = git_within(
+        root,
+        &["merge", "--abort"],
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    );
+    bail!(
+        "sync: user rules: could not merge {up}: {}",
+        one_line(&merged)
+    )
+}
+
+fn commit_host(root: &Path, rel: &str, host: &str, deadline: std::time::Instant) -> Result<bool> {
+    let common = git(root, &["rev-parse", "--git-common-dir"])
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            let rel_git = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let path = PathBuf::from(&rel_git);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .unwrap_or_else(|| root.join(".git"));
+    let held = crate::CommitLock::acquire(&common.join("ljos-commit.lock"));
+    let added = git_within(root, &["add", "--", rel], deadline)?;
+    if !git_succeeded(&added) {
+        bail!(
+            "sync: user rules: could not stage {rel}: {}",
+            one_line(&added)
+        );
+    }
+    let staged = git_within(root, &["diff", "--cached", "--quiet", "--", rel], deadline)?;
+    if git_succeeded(&staged) {
+        drop(held);
+        return Ok(false);
+    }
+    let message = format!("chore(sync): {host} user rules");
+    let committed = git_within(
+        root,
+        &["commit", "-q", "--only", "-m", &message, "--", rel],
+        deadline,
+    )?;
+    drop(held);
+    if git_succeeded(&committed) {
+        Ok(true)
+    } else {
+        bail!("sync: user rules: commit refused: {}", one_line(&committed))
+    }
+}
+
+fn push_host(root: &Path, deadline: std::time::Instant) -> Result<()> {
+    let upstream = git(root, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .ok()
+        .is_some_and(|out| out.status.success());
+    let args: &[&str] = if upstream {
+        &["push", "-q"]
+    } else {
+        &["push", "-q", "-u", "origin", "HEAD"]
+    };
+    let pushed = git_within(root, args, deadline)?;
+    if git_succeeded(&pushed) {
+        return Ok(());
+    }
+    let said = format!(
+        "{}\n{}",
+        one_line(&pushed),
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    if !crate::tracker_push::rejected(&said) {
+        bail!("sync: user rules: push refused: {}", one_line(&pushed));
+    }
+    integrate_remote(root, deadline)?;
+    let again = git_within(root, args, deadline)?;
+    if git_succeeded(&again) {
+        Ok(())
+    } else {
+        bail!("sync: user rules: push refused: {}", one_line(&again))
+    }
+}
+
+/// Fetch the tracker's user-rule files, merge them with the local file by
+/// id, and push this machine's file. `budget` bounds every git call. A
+/// fetch that does not return leaves the local file as it was.
+///
+/// # Errors
+///
+/// The checkout is not git, the fetch did not answer, or the local file
+/// cannot be written.
+pub fn exchange_user_rules(root: &Path, host: &str, budget: std::time::Duration) -> Result<String> {
+    if !root.is_dir() {
+        bail!("sync: user rules: {} is not a directory", root.display());
+    }
+    if !looks_like_git(root) {
+        bail!("sync: user rules: {} is not a git checkout", root.display());
+    }
+    let deadline = std::time::Instant::now() + budget;
+    let remote = git(root, &["remote"])
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty());
+    if remote {
+        integrate_remote(root, deadline)?;
+    } else {
+        let local_empty = crate::user_rules::read_all().is_ok_and(|rows| rows.is_empty());
+        if local_empty && repo_rows(root).is_empty() {
+            return Ok(String::new());
+        }
+    }
+    let mut rows = repo_rows(root);
+    rows.extend(crate::user_rules::read_all()?);
+    let merged = crate::user_rules::merge_rows(rows);
+    crate::user_rules::replace_stored(&merged)?;
+    let name = machine_name(host);
+    let rel = format!(".ljos/user-rules/{name}.json");
+    let path = root.join(&rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, crate::user_rules::render_rules(&merged)?)?;
+    let committed = commit_host(root, &rel, &name, deadline)?;
+    let mut out = String::new();
+    if remote {
+        out.push_str("sync: user rules: fetched\n");
+    }
+    if committed || (remote && commits_to_push(root)) {
+        push_host(root, deadline)?;
+        out.push_str("sync: user rules: pushed\n");
+    }
+    let live = merged.iter().filter(|rule| !rule.deleted).count();
+    out.push_str(&format!("sync: user rules: {live} on this machine\n"));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -265,6 +265,12 @@ enum Cmd {
         /// Deny a reply aimed at this person. Repeatable. Used with `--user`.
         #[arg(long = "deny-reply-name", value_name = "NAME")]
         deny_reply_name: Vec<String>,
+        /// Remove this user rule. The row stays as a tombstone so a sync does not bring it back. Pass `--user`.
+        #[arg(long, value_name = "ID")]
+        forget: Option<String>,
+        /// Pull and push user rules through the tracker repository. Pass `--user`.
+        #[arg(long)]
+        sync: bool,
     },
     /// Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer.
     Memories {
@@ -1204,8 +1210,28 @@ fn run_command() -> Result<()> {
             deny_name,
             deny_reply_to,
             deny_reply_name,
+            forget,
+            sync,
         } => {
             if user {
+                if sync {
+                    if !text.is_empty()
+                        || promote.is_some()
+                        || forget.is_some()
+                        || why.is_some()
+                        || !deny.is_empty()
+                        || !ask.is_empty()
+                        || as_persona.is_some()
+                        || !deny_mention.is_empty()
+                        || !deny_name.is_empty()
+                        || !deny_reply_to.is_empty()
+                        || !deny_reply_name.is_empty()
+                    {
+                        bail!("prefer: --sync pulls and pushes user rules, and takes none of the other flags");
+                    }
+                    print!("{}", ljos_cli::user_rules::sync_now()?);
+                    return Ok(());
+                }
                 if !deny.is_empty() || !ask.is_empty() {
                     bail!(
                         "prefer: a user rule takes no --deny or --ask. \
@@ -1214,6 +1240,14 @@ fn run_command() -> Result<()> {
                 }
                 if as_persona.is_some() {
                     bail!("prefer: a user rule is this user's, not one persona's. Drop --as");
+                }
+                if let Some(id) = forget {
+                    if !text.is_empty() || promote.is_some() {
+                        bail!("prefer: --forget takes the id, not the words or --promote");
+                    }
+                    let rule = ljos_cli::user_rules::forget(&id)?;
+                    println!("{}", ljos_cli::user_rules::ack(&rule));
+                    return Ok(());
                 }
                 let why = why.as_deref().unwrap_or("");
                 let mention = ljos_cli::user_rules::People {
@@ -1237,13 +1271,15 @@ fn run_command() -> Result<()> {
             }
             if why.is_some()
                 || promote.is_some()
+                || forget.is_some()
+                || sync
                 || !deny_mention.is_empty()
                 || !deny_name.is_empty()
                 || !deny_reply_to.is_empty()
                 || !deny_reply_name.is_empty()
             {
                 bail!(
-                    "prefer: --why, --promote and the mention flags write a user rule. Pass --user"
+                    "prefer: --why, --promote, --forget, --sync and the mention flags write a user rule. Pass --user"
                 );
             }
             let text = join(&text);
