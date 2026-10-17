@@ -242,11 +242,21 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     // A clean PostToolUse is the commit that just ran. Record the starting
     // HEAD on every other call, including the ask that stopped the command,
     // so the after hook cannot cite the commit the sitting began on.
-    let ran = call.event == "PostToolUse" && commit && tool_exit_ok(&value);
+    // Codex puts the command's output in `tool_response` as text and the
+    // exit code only in the transcript. An exit that cannot be read is not
+    // a success, so a failed commit does not cite the sitting's HEAD.
+    let exit = if call.event == "PostToolUse" {
+        command_exit(&value)
+    } else {
+        CommandExit::Absent
+    };
+    let ran = call.event == "PostToolUse" && commit && command_succeeded(exit, &value);
     if !ran {
         note_start(&mut book, &repo);
     }
-    if call.event == "PostToolUseFailure" {
+    if call.event == "PostToolUseFailure"
+        || (call.event == "PostToolUse" && command_failed(exit) && !commit)
+    {
         note_failure(&mut book, &repo, &failure_text(&value, &call.cue));
     }
     if matches!(call.event.as_str(), "PreToolUse" | "PostToolUse") {
@@ -1765,12 +1775,30 @@ fn recall_line(issue: &str) -> String {
     }
 }
 
-/// A post-tool result whose command finished cleanly. A missing exit on
-/// PostToolUse is success. A non-zero exit, or a guard refusal (`deny` or
-/// `ask`), is not, so a commit the guard stopped does not cite the previous
-/// HEAD. An explicit zero wins over an error string: some runners put the
-/// command's stderr there even when git exited 0.
-fn tool_exit_ok(raw: &Value) -> bool {
+/// How a PostToolUse names the command's exit. Codex 0.163 sends the
+/// output as a string and records `exit_code` in the transcript, under the
+/// same `call_id` as the hook's `tool_use_id`.
+#[derive(Clone, Copy)]
+enum CommandExit {
+    /// A code from the payload or the transcript.
+    Code(i64),
+    /// The output was text, and neither the payload nor the transcript
+    /// named a code. That is not a success.
+    Unknown,
+    /// This runner does not hide the code. A missing one stays a success
+    /// unless the payload already refused the call.
+    Absent,
+}
+
+/// A post-tool result whose command finished cleanly. A missing exit on a
+/// runner that reports one in the payload is success. Codex's plain-text
+/// output is not: the code is read from the transcript, and a code that
+/// still cannot be determined does not cite a deed. A non-zero exit, or a
+/// guard refusal (`deny` or `ask`), is not a success, so a commit the guard
+/// stopped does not cite the previous HEAD. An explicit zero wins over an
+/// error string: some runners put the command's stderr there even when git
+/// exited 0.
+fn command_succeeded(exit: CommandExit, raw: &Value) -> bool {
     if raw
         .pointer("/tool_response/interrupted")
         .and_then(Value::as_bool)
@@ -1781,10 +1809,252 @@ fn tool_exit_ok(raw: &Value) -> bool {
     if permission_block(raw) {
         return false;
     }
-    if let Some(code) = explicit_exit(raw) {
-        return code == 0;
+    match exit {
+        CommandExit::Code(code) => code == 0,
+        CommandExit::Unknown => false,
+        CommandExit::Absent => !refusal_signal(raw),
     }
-    !refusal_signal(raw)
+}
+
+/// A code the transcript or the payload named, and it was not zero.
+fn command_failed(exit: CommandExit) -> bool {
+    matches!(exit, CommandExit::Code(code) if code != 0)
+}
+
+/// The exit code for this call. The payload wins. Otherwise the Codex
+/// transcript at `transcript_path` is read, time-bounded, and matched on
+/// `tool_use_id`. A text `tool_response` with no code is [`CommandExit::Unknown`].
+fn command_exit(raw: &Value) -> CommandExit {
+    if let Some(code) = explicit_exit(raw) {
+        return CommandExit::Code(code);
+    }
+    if let Some(code) = transcript_exit(raw) {
+        return CommandExit::Code(code);
+    }
+    if response_is_text(raw) {
+        return CommandExit::Unknown;
+    }
+    CommandExit::Absent
+}
+
+/// Codex sends the shell output as a string. Other runners send an object,
+/// or omit the field, and a missing code there is still success.
+fn response_is_text(raw: &Value) -> bool {
+    raw.get("tool_response")
+        .or_else(|| raw.get("toolResponse"))
+        .is_some_and(Value::is_string)
+}
+
+fn tool_use_id(raw: &Value) -> Option<&str> {
+    ["tool_use_id", "toolUseId", "tool_call_id", "toolCallId"]
+        .iter()
+        .find_map(|key| raw.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// `exit_code` for `tool_use_id` in the Codex transcript. The read is the
+/// tail of the file and gives up at [`TRANSCRIPT_DEADLINE`], so a stuck
+/// transcript cannot hold the hook.
+fn transcript_exit(raw: &Value) -> Option<i64> {
+    let path = raw
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .or_else(|| raw.get("transcriptPath").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    let call_id = tool_use_id(raw)?;
+    let text = read_transcript_tail(&super::expand(path))?;
+    exit_for_call(&text, call_id)
+}
+
+/// How long a transcript read may take. The same budget as one habitat
+/// command: a hook that waits longer is treated as a refusal by the runner.
+const TRANSCRIPT_DEADLINE: Duration = COMMAND_DEADLINE;
+
+/// Bytes read from the end of a transcript. The call that just finished is
+/// the last one, and a command's output can be long.
+const TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
+
+fn read_transcript_tail(path: &Path) -> Option<String> {
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_tail_file(&path, TRANSCRIPT_TAIL_BYTES));
+    });
+    rx.recv_timeout(TRANSCRIPT_DEADLINE).ok().flatten()
+}
+
+fn read_tail_file(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.take(max_bytes).read_to_end(&mut buf).ok()?;
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 {
+        if let Some(pos) = text.find('\n') {
+            text.drain(..=pos);
+        }
+    }
+    Some(text)
+}
+
+/// The last `exit_code` on a line that names `call_id`. A begin event has
+/// the id and no code; the end event later on the file is the one that counts.
+fn exit_for_call(text: &str, call_id: &str) -> Option<i64> {
+    let mut found = None;
+    for line in text.lines() {
+        if let Some(code) = line_exit(line, call_id) {
+            found = Some(code);
+        }
+    }
+    found
+}
+
+fn line_exit(line: &str, call_id: &str) -> Option<i64> {
+    if !line.contains(call_id) {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(line) {
+        return exit_in_value(&value, call_id);
+    }
+    exit_in_text(line, call_id)
+}
+
+fn exit_in_value(value: &Value, call_id: &str) -> Option<i64> {
+    let mut found = None;
+    walk_exit(value, call_id, &mut found);
+    found
+}
+
+fn walk_exit(value: &Value, call_id: &str, found: &mut Option<i64>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                walk_exit(item, call_id, found);
+            }
+        }
+        Value::Object(map) => {
+            let matched = map
+                .get("call_id")
+                .or_else(|| map.get("callId"))
+                .and_then(Value::as_str)
+                == Some(call_id);
+            if matched {
+                if let Some(code) = exit_field(value) {
+                    *found = Some(code);
+                }
+            }
+            for child in map.values() {
+                walk_exit(child, call_id, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn exit_field(value: &Value) -> Option<i64> {
+    ["exit_code", "exitCode"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(exit_number))
+}
+
+fn exit_number(slot: &Value) -> Option<i64> {
+    if let Some(code) = slot.as_i64() {
+        return Some(code);
+    }
+    slot.as_str().and_then(|text| text.trim().parse().ok())
+}
+
+/// A tail that starts in the middle of a line is not valid JSON. The id and
+/// the code are still named as text.
+fn exit_in_text(line: &str, call_id: &str) -> Option<i64> {
+    let mut found = None;
+    let mut from = 0;
+    while from < line.len() {
+        let Some(at) = find_call_id(&line[from..], call_id) else {
+            break;
+        };
+        let start = from + at;
+        let after_key = start + "\"call_id\"".len();
+        if after_key > line.len() {
+            break;
+        }
+        let end = line[after_key..]
+            .find("\"call_id\"")
+            .map(|rel| after_key + rel)
+            .unwrap_or(line.len());
+        if let Some(code) = exit_code_in(&line[start..end]) {
+            found = Some(code);
+        }
+        from = after_key;
+    }
+    found
+}
+
+fn find_call_id(text: &str, call_id: &str) -> Option<usize> {
+    let mut from = 0;
+    while from < text.len() {
+        let Some(rel) = text[from..].find("\"call_id\"") else {
+            break;
+        };
+        let at = from + rel;
+        let after = at + "\"call_id\"".len();
+        if json_string_is(text.get(after..).unwrap_or(""), call_id) {
+            return Some(at);
+        }
+        from = after;
+    }
+    None
+}
+
+fn json_string_is(text: &str, want: &str) -> bool {
+    let rest = text.trim_start();
+    let Some(rest) = rest.strip_prefix(':') else {
+        return false;
+    };
+    let Some(rest) = rest.trim_start().strip_prefix('"') else {
+        return false;
+    };
+    rest.strip_prefix(want)
+        .is_some_and(|rest| rest.starts_with('"'))
+}
+
+fn exit_code_in(text: &str) -> Option<i64> {
+    for key in ["\"exit_code\"", "\"exitCode\""] {
+        let Some(at) = text.find(key) else {
+            continue;
+        };
+        let rest = text[at + key.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        if let Some(code) = parse_exit_token(rest.trim_start()) {
+            return Some(code);
+        }
+    }
+    None
+}
+
+fn parse_exit_token(rest: &str) -> Option<i64> {
+    let digits = |text: &str| -> Option<i64> {
+        let num: String = text
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '-')
+            .collect();
+        if num.is_empty() {
+            None
+        } else {
+            num.parse().ok()
+        }
+    };
+    if let Some(rest) = rest.strip_prefix('"') {
+        return digits(rest);
+    }
+    digits(rest)
 }
 
 fn explicit_exit(raw: &Value) -> Option<i64> {
@@ -3434,6 +3704,277 @@ print(f"id={ident}")
         assert!(note.contains("slugify"), "{note}");
     }
 
+    /// Codex 0.163 sends the shell output as a string and the exit code only
+    /// in the transcript, under the same call id as `tool_use_id`.
+    #[test]
+    fn a_codex_transcript_exit_matches_the_call_id() {
+        let id = "exec_command_n38zthdamfmc";
+        let text = format!(
+            "{}\n{}\n{}\n{}",
+            codex_event("exec_command_other", Some(0)),
+            codex_event(id, None),
+            codex_event(id, Some(127)),
+            r#"{"payload":{"call_id":"exec_command_n38zthdamfmc","exit_code":"5"}}"#
+        );
+        assert_eq!(exit_for_call(&text, id), Some(5));
+        assert_eq!(exit_for_call(&text, "exec_command_other"), Some(0));
+        assert_eq!(exit_for_call(&text, "exec_command_missing"), None);
+        let torn = r#"{"payload":{"call_id":"exec_command_n38zthdamfmc","stdout":"...","exit_code":127,"stderr":""#;
+        assert_eq!(exit_for_call(torn, id), Some(127));
+    }
+
+    /// A string `tool_response` plus a transcript exit of 127 is a failure,
+    /// and the lesson keeps it.
+    #[test]
+    fn a_codex_string_response_with_exit_127_is_a_lesson_failure() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let atoms = arm_lessons(dir.path());
+        let session = "codex-exit-127";
+        let id = "exec_command_n38zthdamfmc";
+        let transcript = dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n{}\n",
+                codex_event("exec_command_other", Some(0)),
+                codex_event(id, None),
+                codex_event(id, Some(127)),
+            ),
+        )
+        .unwrap();
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Fix the slugify helper"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        let (failed, failed_call) = codex_post(
+            session,
+            &repo,
+            id,
+            "python slugify",
+            "/bin/bash: line 1: python: command not found\r\n",
+            &transcript,
+        );
+        let _ = observe(&failed, &failed_call);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+
+        let book = book_json(dir.path(), session);
+        let row = book["repos"].as_object().unwrap().values().next().unwrap();
+        let failures = row["failures"].as_array().unwrap();
+        assert!(
+            failures
+                .iter()
+                .any(|note| note.as_str().unwrap_or("").contains("python")),
+            "{book}"
+        );
+        let stored = atoms.lock().unwrap().clone();
+        let lesson = stored.last().expect("the lesson was posted");
+        let prose = lesson["text"].as_str().unwrap_or("");
+        assert!(prose.contains("slugify"), "{prose}");
+        assert!(prose.contains("failed"), "{prose}");
+        assert!(
+            lesson["source"]["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("python"),
+            "{lesson}"
+        );
+        assert_lesson(prose);
+    }
+
+    /// Commands that only fail, on a sitting that never claimed, still leave
+    /// a lesson. Codex reports those failures as PostToolUse with a string body.
+    #[test]
+    fn an_unclaimed_codex_session_with_failures_writes_a_lesson() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let atoms = arm_lessons(dir.path());
+        let session = "codex-failures-only";
+        let transcript = dir.path().join("rollout.jsonl");
+        let first = "exec_command_n38zthdamfmc";
+        let second = "exec_command_modmissing";
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                codex_event(first, Some(127)),
+                codex_event(second, Some(1)),
+            ),
+        )
+        .unwrap();
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Fix the slugify helper"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        let (failed, failed_call) = codex_post(
+            session,
+            &repo,
+            first,
+            "python slugify",
+            "/bin/bash: line 1: python: command not found\r\n",
+            &transcript,
+        );
+        let _ = observe(&failed, &failed_call);
+        let (again, again_call) = codex_post(
+            session,
+            &repo,
+            second,
+            "python -m slugify",
+            "ModuleNotFoundError: No module named 'slugify'\r\n",
+            &transcript,
+        );
+        let _ = observe(&again, &again_call);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+
+        let vissue = std::fs::read_to_string(tracker.join("vissue.log")).unwrap_or_default();
+        assert!(!vissue.contains("create"), "{vissue}");
+        let stored = atoms.lock().unwrap().clone();
+        assert_eq!(stored.len(), 1, "{stored:?}");
+        let prose = stored[0]["text"].as_str().unwrap_or("");
+        assert!(prose.contains("slugify"), "{prose}");
+        assert!(prose.contains("failed"), "{prose}");
+        assert!(!prose.contains("closed"), "{prose}");
+        assert_lesson(prose);
+        let book = book_json(dir.path(), session);
+        let row = book["repos"].as_object().unwrap().values().next().unwrap();
+        assert!(row["issue"].is_null(), "{book}");
+        assert_eq!(row["lesson"], true, "{book}");
+        assert!(row["failures"].as_array().unwrap().len() >= 2, "{book}");
+
+        let start = crate::session_start_for(Some("codex-failures-next"));
+        assert!(!start.contains("no memories here yet"), "{start}");
+        let (_raw, call) = payload(
+            "UserPromptSubmit",
+            "codex-failures-next",
+            &repo,
+            serde_json::json!({"prompt": "repair the slugify helper"}),
+        );
+        let (note, _) = crate::hook_note(&call, 4);
+        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("slugify"), "{note}");
+    }
+
+    /// A git commit whose payload has no exit field is not a success. The
+    /// sitting's current HEAD is not a deed, including when this post is the
+    /// first time the sitting saw the repository. A later commit whose
+    /// transcript says 0, and whose HEAD moved, is cited.
+    #[test]
+    fn a_failed_codex_commit_with_no_exit_field_cites_no_deed() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let session = "codex-commit";
+        let seed = head_sha_of(&repo);
+        let transcript = dir.path().join("rollout.jsonl");
+        // Another call exited 0. This commit's id is not in the file, and
+        // the payload has no exit field, so the code stays unknown.
+        std::fs::write(
+            &transcript,
+            format!("{}\n", codex_event("exec_command_other", Some(0))),
+        )
+        .unwrap();
+        let (failed, failed_call) = codex_post(
+            session,
+            &repo,
+            "exec_command_n38zthdamfmc",
+            "git commit -m nope",
+            "error: nothing to commit\r\n",
+            &transcript,
+        );
+        assert_eq!(failed_call.event, "PostToolUse");
+        assert!(is_git_commit(&failed_call.cue), "{}", failed_call.cue);
+        assert!(explicit_exit(&serde_json::from_str(&failed).unwrap()).is_none());
+        let _ = observe(&failed, &failed_call);
+        assert_eq!(head_sha_of(&repo), seed);
+        let deeds = std::fs::read_to_string(tracker.join("deedar.log")).unwrap_or_default();
+        assert!(deeds.is_empty(), "{deeds}");
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(!org.contains("cited"), "{org}");
+        assert!(
+            !dir.path()
+                .join(format!("run/ljos/deed-{seed}.txt"))
+                .exists(),
+            "the sitting's HEAD was cited"
+        );
+        let book = book_json(dir.path(), session);
+        assert!(deeds_of(&book).is_empty(), "{book}");
+
+        let sha = commit_file(&repo, "README.md", "hello from codex\n");
+        assert_ne!(sha, seed);
+        std::fs::write(
+            &transcript,
+            format!("{}\n", codex_event("exec_command_ok", Some(0))),
+        )
+        .unwrap();
+        let (post, post_call) = codex_post(
+            session,
+            &repo,
+            "exec_command_ok",
+            "git commit -m land",
+            "1 file changed\r\n",
+            &transcript,
+        );
+        let _ = observe(&post, &post_call);
+        let book = book_json(dir.path(), session);
+        assert_eq!(deeds_of(&book), vec![sha], "{book}");
+    }
+
+    /// A transcript that does not answer inside the hook budget is not exit 0.
+    #[test]
+    fn a_stuck_codex_transcript_is_not_a_clean_commit() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let session = "codex-stuck";
+        let seed = head_sha_of(&repo);
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Commit the readme"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        let fifo = dir.path().join("stuck.jsonl");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo takes a NUL-terminated path and a mode. The path
+        // lives until the call returns, and the mode is a plain permission.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo");
+        let (failed, failed_call) = codex_post(
+            session,
+            &repo,
+            "exec_command_n38zthdamfmc",
+            "git commit -m nope",
+            "error: nothing to commit\r\n",
+            &fifo,
+        );
+        let started = std::time::Instant::now();
+        let _ = observe(&failed, &failed_call);
+        assert!(
+            started.elapsed() < TRANSCRIPT_DEADLINE + Duration::from_secs(2),
+            "the transcript read held the hook for {:?}",
+            started.elapsed()
+        );
+        assert!(deeds_of(&book_json(dir.path(), session)).is_empty());
+        assert_eq!(head_sha_of(&repo), seed);
+        let deeds = std::fs::read_to_string(tracker.join("deedar.log")).unwrap_or_default();
+        assert!(deeds.is_empty(), "{deeds}");
+    }
+
     /// A timed-out agy sitting never gets Stop. Its prompt arrives on the
     /// payload after the first model call, and the lesson keeps those words
     /// so the next prompt can recall them.
@@ -3793,6 +4334,89 @@ print(f"id={ident}")
 
     fn set_var(key: &str, value: &str) {
         unsafe { std::env::set_var(key, value) };
+    }
+
+    fn codex_event(call_id: &str, exit_code: Option<i64>) -> String {
+        let mut payload = serde_json::json!({
+            "type": if exit_code.is_some() {
+                "exec_command_end"
+            } else {
+                "exec_command_begin"
+            },
+            "call_id": call_id,
+        });
+        if let Some(code) = exit_code {
+            payload["exit_code"] = serde_json::json!(code);
+        }
+        serde_json::json!({
+            "timestamp": "2026-10-17T00:00:00Z",
+            "type": "event_msg",
+            "payload": payload,
+        })
+        .to_string()
+    }
+
+    fn codex_post(
+        session: &str,
+        repo: &Path,
+        tool_use_id: &str,
+        command: &str,
+        response: &str,
+        transcript: &Path,
+    ) -> (String, crate::HookCall) {
+        payload(
+            "PostToolUse",
+            session,
+            repo,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_use_id": tool_use_id,
+                "tool_input": {"command": command},
+                "tool_response": response,
+                "transcript_path": transcript,
+            }),
+        )
+    }
+
+    fn arm_lessons(dir: &Path) -> Arc<Mutex<Vec<Value>>> {
+        let marker = dir.join("run/ljos/encoder-warming");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+        let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let pack = serve_lessons(Arc::clone(&atoms));
+        set_var("PACKSET_URL", &pack);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+        atoms
+    }
+
+    fn serve_lessons(atoms: Arc<Mutex<Vec<Value>>>) -> String {
+        serve_pack(move |req| {
+            let path = req.lines().next().unwrap_or("");
+            if path.contains("POST /v1/atoms") {
+                let body = req
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body)
+                    .unwrap_or("");
+                if let Ok(atom) = serde_json::from_str::<Value>(body) {
+                    atoms.lock().unwrap().push(atom);
+                }
+                return (
+                    200,
+                    r#"{"id":"atom-codex","kind":"lesson","origin":"agent-derived"}"#.into(),
+                );
+            }
+            if path.contains("GET /v1/status") {
+                return (
+                    200,
+                    r#"{"embedder":{"available":true,"answering":null}}"#.into(),
+                );
+            }
+            if path.contains("GET /v1/atoms") {
+                let list = atoms.lock().unwrap().clone();
+                return (200, serde_json::json!({"atoms": list}).to_string());
+            }
+            (200, "{}".into())
+        })
     }
 
     fn head_sha_of(repo: &Path) -> String {
