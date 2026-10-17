@@ -1368,8 +1368,9 @@ fn failure_text(raw: &Value, cue: &str) -> String {
 /// Two short sentences: the ticket and its commits, then the failing
 /// command and the guard's rule when the sitting had them. The full title,
 /// rule and command also ride in `source`, which the prose gate does not
-/// read. A pack that is off is an error here; the caller logs it and still
-/// closes the ticket.
+/// read. The issue id rides in the `issue` field, so a later lesson for
+/// another issue does not close this one. A pack that is off is an error
+/// here; the caller logs it and still closes the ticket.
 fn write_lesson(
     issue: &str,
     title: &str,
@@ -1385,6 +1386,7 @@ fn write_lesson(
         title,
         &join_notes(asks),
         &join_notes(failures),
+        issue,
     )
     .map(|_| ())
     .map_err(|e| noted_err(&e))
