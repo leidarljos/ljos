@@ -5498,6 +5498,17 @@ const RULE_WORDS: &[&str] = &[
     "sure", "first",
 ];
 
+/// A word a sitting's lesson drops before it shortens anything the next
+/// prompt can match. Too short for [`prompt_words`], or a stop word, or a
+/// word that sits in standing rules of every kind.
+pub(crate) fn is_lesson_filler(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    word.len() < 3
+        || CUE_STOP.contains(&word.as_str())
+        || CUE_STOP_SHORT.contains(&word.as_str())
+        || RULE_WORDS.contains(&word.as_str())
+}
+
 /// Names that mean one tool or one thing. A prompt that says `golang`
 /// or `virtualenv` names what a rule about Go files or `uv` names.
 /// Each group is matched as one word.
@@ -9785,6 +9796,45 @@ pub fn packset_write_agent(
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
+    }
+    with_writer(|| {
+        admit::write_agent(&client, atom.clone())
+            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+    })
+}
+
+/// [`packset_write_agent`] for a sitting's lesson. `text` is the gated
+/// prose. The full title, the guard's rule and the failing command ride in
+/// `source`, which the prose gate does not read, so shortening a sentence
+/// does not throw them away.
+///
+/// # Errors
+///
+/// An empty text, an unknown label, or the pack refusing the claim.
+pub(crate) fn packset_write_agent_sourced(
+    label: &str,
+    text: &str,
+    transient: Option<bool>,
+    title: &str,
+    rule: &str,
+    command: &str,
+) -> Result<Value> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("{label}: empty text is not a claim");
+    }
+    let kind = atom_kind(label)?;
+    let mut atom = atom_body(kind, trimmed, &workspace);
+    stamp_horizon(&mut atom, kind, trimmed, transient);
+    if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
+        for (key, value) in [("title", title), ("rule", rule), ("command", command)] {
+            let value = value.trim();
+            if !value.is_empty() {
+                source.insert(key.to_string(), Value::String(value.to_string()));
+            }
+        }
     }
     with_writer(|| {
         admit::write_agent(&client, atom.clone())
