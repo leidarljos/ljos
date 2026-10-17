@@ -6167,7 +6167,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
 /// together. Past it the local search, which ran beside the judgment,
 /// answers: a judge behind a slow or black-holed route must not hold a
 /// prompt up to the runner's cut-off.
-pub const JEV_HOOK_BUDGET_MS: u64 = 1500;
+pub const JEV_HOOK_BUDGET_MS: u64 = 700;
 
 /// What the pack's fused search found for a prompt, with the encoder's
 /// signal per hit. `None` when the search failed or ran out of budget.
@@ -8199,7 +8199,7 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
     let Ok(client) = pack() else {
         return (String::new(), None);
     };
-    let Ok(atoms) = atoms_lean(&client, &client.workspace()) else {
+    let Ok(atoms) = atoms_lean_shared(&client, &client.workspace()) else {
         return (String::new(), None);
     };
     let now = now_utc();
@@ -9610,6 +9610,30 @@ pub fn atoms_timeout() -> std::time::Duration {
     } else {
         std::time::Duration::from_secs(30)
     }
+}
+
+/// [`atoms_lean`] for the reads one prompt makes side by side (the due line
+/// and the mail): the second takes the listing the first fetched when it is
+/// under two seconds old, so the prompt pays for the listing once.
+///
+/// # Errors
+///
+/// The pack not answering, or an answer that is not atoms.
+pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+    type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
+    static LAST: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
+    let key = format!("{}|{workspace}", client.base());
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, held, atoms)) = last.as_ref() {
+        if *held == key && at.elapsed() < std::time::Duration::from_secs(2) {
+            return Ok(atoms.clone());
+        }
+    }
+    let atoms = atoms_lean(client, workspace)?;
+    *last = Some((std::time::Instant::now(), key, atoms.clone()));
+    Ok(atoms)
 }
 
 /// The pack's live atoms without their dense vectors. Every reader here
@@ -35828,6 +35852,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             took < std::time::Duration::from_millis(HOOK_DEADLINE_MS - 2000),
             "the prompt waited {took:?} on a rerank"
+        );
+    }
+
+    /// A judge that never answers (a route that does not complete a
+    /// connect, a command that hangs) costs the prompt its judgment and
+    /// nothing else: the local search answers inside the budget.
+    #[test]
+    fn a_judge_that_never_answers_leaves_the_prompt_its_memory() {
+        let _env = env_guard();
+        let url = serve_slow_rerank();
+        let _held = PackUrl::set(&url);
+        let cfg = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cfg.path().join("ljos")).unwrap();
+        std::fs::write(
+            cfg.path().join("ljos/jev.toml"),
+            "enabled = true\nbackend = \"command\"\nbudget_ms = 20000\nmin_words = 1\nmin_candidates = 1\n\
+             command = [\"sh\", \"-c\", \"cat >/dev/null; sleep 20\"]\n",
+        )
+        .unwrap();
+        let _cfg = HoldEnv::set(&[
+            ("XDG_CONFIG_HOME", cfg.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+        ]);
+        assert!(jev::enabled(), "the judge is on for this test");
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "how should I tag the release?".into(),
+            session: None,
+            shape: HookShape::default(),
+        };
+        let started = std::time::Instant::now();
+        let (note, _) = hook_note(&call, 5);
+        let took = started.elapsed();
+        assert!(note.contains("Tag a release"), "{note:?}");
+        assert!(
+            took < std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS + 1000),
+            "the prompt waited {took:?} on a judge"
         );
     }
 
