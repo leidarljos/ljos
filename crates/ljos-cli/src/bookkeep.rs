@@ -123,6 +123,10 @@ struct RepoBook {
     claim_failed: bool,
     #[serde(default)]
     recall: String,
+    /// HEAD the first time this sitting saw the repository, before a commit
+    /// ran. A deed is cited only when HEAD has moved past it.
+    #[serde(default)]
+    start_sha: Option<String>,
 }
 
 /// Whether the guard and the pack daemon should stay out of this process.
@@ -221,11 +225,18 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         }
     }
     let repo = repo_key(&mut book, &value);
+    let commit = is_git_commit(&call.cue);
+    // A clean PostToolUse is the commit that just ran. Record the starting
+    // HEAD on every other call, including the ask that stopped the command,
+    // so the after hook cannot cite the commit the sitting began on.
+    let ran = call.event == "PostToolUse" && commit && tool_exit_ok(&value);
+    if !ran {
+        note_start(&mut book, &repo);
+    }
     if call.event == "PostToolUseFailure" {
         note_failure(&mut book, &repo, &failure_text(&value, &call.cue));
     }
     if matches!(call.event.as_str(), "PreToolUse" | "PostToolUse") {
-        let commit = is_git_commit(&call.cue);
         // A write tool claims even for a new file. A shell redirect claims
         // when it writes a file this repository already tracks. A commit
         // claims too, so a sitting that only commits still has a ticket.
@@ -233,9 +244,9 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
             let _ = ensure_claim(&mut book, &repo);
         }
         // The commit has not happened on the way in. Cite it on the way
-        // out, and only when it exited 0, so a failed commit leaves no deed
-        // and the sha is the one git just wrote.
-        if call.event == "PostToolUse" && commit && tool_exit_ok(&value) {
+        // out, and only when it exited 0 and HEAD moved, so a failed commit
+        // or one the guard only asked about leaves no deed.
+        if ran {
             let _ = ensure_deed(&mut book, &repo);
         } else if call.event == "PostToolUse" && commit {
             note_failure(&mut book, &repo, "git commit exited non-zero");
@@ -961,6 +972,18 @@ fn ensure_deed(book: &mut Book, repo: &str) -> Result<(), String> {
             return Ok(());
         }
     };
+    // The guard asked, nothing ran, and the after hook still looks like a
+    // clean exit. HEAD is the commit the sitting started on. Cite only a
+    // commit that moved past that. No baseline means this post is the first
+    // time the sitting saw the repository, so the sha is the one git wrote.
+    let unchanged = book
+        .repos
+        .get(repo)
+        .and_then(|row| row.start_sha.as_deref())
+        .is_some_and(|start| start == sha);
+    if unchanged {
+        return Ok(());
+    }
     let row = book.repos.entry(repo.to_string()).or_default();
     if row.deeds.iter().any(|seen| seen == &sha) {
         return Ok(());
@@ -1031,7 +1054,9 @@ fn hook_owner() -> u32 {
     unsafe { libc::getppid() as u32 }
 }
 
-/// Finish every other sitting whose runner has exited.
+/// Finish every other sitting whose runner has exited. A sitting that
+/// never claimed still counts when a tool failed or the guard asked and
+/// the lesson has not been written.
 fn finish_orphans(current: &str) {
     let keep = book_path(current);
     for path in book_files() {
@@ -1039,10 +1064,7 @@ fn finish_orphans(current: &str) {
             continue;
         }
         let mut book = load_book(&path);
-        let open = book
-            .repos
-            .values()
-            .any(|row| row.issue.is_some() && !row.finished);
+        let open = book.repos.values().any(sitting_open);
         if !open || book.owner_pid == 0 || super::pid_alive(book.owner_pid) {
             continue;
         }
@@ -1156,6 +1178,33 @@ fn sha_landed(repo: &str, sha: &str) -> Option<bool> {
     }
 }
 
+/// Remember HEAD the first time this sitting sees the repository.
+fn note_start(book: &mut Book, repo: &str) {
+    if repo.is_empty() {
+        return;
+    }
+    if book
+        .repos
+        .get(repo)
+        .and_then(|row| row.start_sha.as_deref())
+        .is_some()
+    {
+        return;
+    }
+    let Ok(sha) = head_sha(repo) else {
+        return;
+    };
+    book.repos.entry(repo.to_string()).or_default().start_sha = Some(sha);
+}
+
+/// A claim still open, or failures and asks with no lesson yet. A sitting
+/// that never claimed still has a lesson to write when a tool failed or
+/// the guard asked.
+fn sitting_open(row: &RepoBook) -> bool {
+    let notes = !row.failures.is_empty() || !row.asks.is_empty();
+    (row.issue.is_some() && !row.finished) || (notes && !row.lesson)
+}
+
 fn head_sha(repo: &str) -> Result<String, String> {
     let said =
         run_timed("git", &["-C", repo, "rev-parse", "HEAD"], &[]).map_err(|e| e.to_string())?;
@@ -1173,16 +1222,18 @@ fn finish_open(book: &mut Book) {
         let Some(row) = book.repos.get(&repo) else {
             continue;
         };
-        let Some(issue) = row.issue.clone() else {
-            continue;
-        };
+        let issue = row.issue.clone();
+        let notes = !row.failures.is_empty() || !row.asks.is_empty();
         let finished = row.finished;
-        if !row.lesson {
+        // A claim closes with a lesson. So does a sitting that only failed
+        // or was asked: the next session otherwise has nothing to recall.
+        if !row.lesson && (issue.is_some() || notes) {
             let title = title_from(&book.prompt, &repo);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
-            match write_lesson(&issue, &title, &deeds, &failures, &asks) {
+            let label = issue.clone().unwrap_or_default();
+            match write_lesson(&label, &title, &deeds, &failures, &asks) {
                 Ok(()) => {
                     if let Some(row) = book.repos.get_mut(&repo) {
                         row.lesson = true;
@@ -1191,6 +1242,9 @@ fn finish_open(book: &mut Book) {
                 Err(e) => log_line(&format!("lesson: {e}")),
             }
         }
+        let Some(issue) = issue else {
+            continue;
+        };
         if finished {
             continue;
         }
@@ -1237,6 +1291,9 @@ pub fn note_ask(raw: &str, call: &super::HookCall, reason: &str) {
     let path = book_path(&session_key(call));
     let mut book = load_book(&path);
     let repo = repo_key(&mut book, &value);
+    // The ask is the call that did not run. Remember HEAD now, because the
+    // after hook is a later process and must not cite this commit.
+    note_start(&mut book, &repo);
     let row = book.repos.entry(repo).or_default();
     let short: String = reason.chars().take(160).collect();
     if row.asks.len() < 4 && !row.asks.iter().any(|seen| seen == &short) {
@@ -1552,7 +1609,22 @@ fn shorten_longest(words: &mut [String]) -> bool {
 
 fn lesson_sentence(words: &[String], issue: &str, shas: &[String], second: &str) -> String {
     let head = words.join(" ");
-    let first = if shas.is_empty() {
+    let issue = issue.trim();
+    let first = if issue.is_empty() {
+        // No ticket was filed. The lesson is the prompt and what went wrong,
+        // not a close of work that was never claimed.
+        if shas.is_empty() {
+            if head.is_empty() {
+                String::new()
+            } else {
+                format!("{head}.")
+            }
+        } else if head.is_empty() {
+            format!("Committed {}.", shas.join(" "))
+        } else {
+            format!("{head} committed {}.", shas.join(" "))
+        }
+    } else if shas.is_empty() {
         if head.is_empty() {
             format!("Work {issue} closed.")
         } else {
@@ -1565,6 +1637,8 @@ fn lesson_sentence(words: &[String], issue: &str, shas: &[String], second: &str)
     };
     if second.is_empty() {
         first
+    } else if first.is_empty() {
+        second.to_string()
     } else {
         format!("{first} {second}")
     }
@@ -2286,6 +2360,9 @@ print(f"id={ident}")
             deedar_before.is_empty(),
             "the pre-hook does not cite a commit that has not run\n{deedar_before}"
         );
+        // The commit runs between the hooks and moves HEAD past the sha this
+        // sitting started on. The post cites that new sha.
+        commit_file(&repo, "README.md", "hello from the session\n");
         // The same commit on the way out cites the sha once.
         let (post_raw, post_call) = payload(
             "PostToolUse",
@@ -2927,7 +3004,7 @@ print(f"id={ident}")
         set_var("PACKSET_TIMEOUT_MS", "2000");
         let session = "myow-refused";
         prompt_and_edit(&repo, session, hard);
-        let sha = commit_file(&repo, "README.md", "hello from the lesson\n");
+        commit_file(&repo, "README.md", "hello from the lesson\n");
         let (post, post_call) = payload(
             "PostToolUse",
             session,
@@ -2961,6 +3038,7 @@ print(f"id={ident}")
         set_var("PACKSET_URL", &kept);
         let session = "myow-kept";
         prompt_and_edit(&repo, session, hard);
+        let sha = commit_file(&repo, "NOTES.md", "hello from the kept lesson\n");
         let (post, post_call) = payload(
             "PostToolUse",
             session,
@@ -3137,6 +3215,190 @@ print(f"id={ident}")
         assert!(note.contains("What this seat already knows"), "{note}");
         assert!(note.contains("slugify"), "{note}");
         assert!(note.contains("git-force-push"), "{note}");
+    }
+
+    /// A commit the guard only asked about never ran. The after hook still
+    /// looks like a clean PostToolUse, and HEAD is the commit the sitting
+    /// started on. That sha is not a deed. A later commit that moves HEAD is.
+    #[test]
+    fn an_unrun_commit_is_not_a_deed() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let session = "unrun-commit";
+        prompt_and_edit(&repo, session, "Add a readme line");
+        let seed = head_sha_of(&repo);
+        let command = "git add README.md\ngit commit -m land\ngit push --force origin main";
+        let (ask_raw, ask_call) = payload(
+            "PreToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}}),
+        );
+        note_ask(
+            &ask_raw,
+            &ask_call,
+            "git-force-push: a force push rewrites history",
+        );
+        let cwd = repo.to_str().unwrap();
+        let asked = serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "toolCall": {"args": {"CommandLine": command}},
+            "error": "",
+        });
+        let asked_text = asked.to_string();
+        let asked_call = crate::hook_call(&asked_text);
+        assert_eq!(asked_call.event, "PostToolUse");
+        assert!(is_git_commit(&asked_call.cue), "{}", asked_call.cue);
+        let _ = observe(&asked_text, &asked_call);
+        assert_eq!(head_sha_of(&repo), seed);
+        let deeds = std::fs::read_to_string(tracker.join("deedar.log")).unwrap_or_default();
+        assert!(deeds.is_empty(), "{deeds}");
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(!org.contains("cited"), "{org}");
+        assert!(
+            !dir.path()
+                .join(format!("run/ljos/deed-{seed}.txt"))
+                .exists(),
+            "the starting commit was cited"
+        );
+        let sha = commit_file(&repo, "README.md", "hello from the commit that ran\n");
+        assert_ne!(sha, seed);
+        let (post, post_call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git commit -m land"}, "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&post, &post_call);
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+        assert!(!org.contains(&format!("deed-file-commit-{seed}")), "{org}");
+        let book = book_json(dir.path(), session);
+        assert_eq!(deeds_of(&book), vec![sha], "{book}");
+    }
+
+    /// Failed commands and a guard ask are a lesson even when the sitting
+    /// never claimed. The next session can recall it.
+    #[test]
+    fn a_sitting_without_a_claim_still_writes_a_lesson() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let marker = dir.path().join("run/ljos/encoder-warming");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+        let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let pack = serve_pack({
+            let atoms = Arc::clone(&atoms);
+            move |req| {
+                let path = req.lines().next().unwrap_or("");
+                if path.contains("POST /v1/atoms") {
+                    let body = req
+                        .split_once("\r\n\r\n")
+                        .map(|(_, body)| body)
+                        .unwrap_or("");
+                    if let Ok(atom) = serde_json::from_str::<Value>(body) {
+                        atoms.lock().unwrap().push(atom);
+                    }
+                    return (
+                        200,
+                        r#"{"id":"atom-fail","kind":"lesson","origin":"agent-derived"}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/status") {
+                    return (
+                        200,
+                        r#"{"embedder":{"available":true,"answering":null}}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/atoms") {
+                    let list = atoms.lock().unwrap().clone();
+                    return (200, serde_json::json!({"atoms": list}).to_string());
+                }
+                (200, "{}".into())
+            }
+        });
+        set_var("PACKSET_URL", &pack);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+
+        let session = "failures-only";
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Fix the slugify helper"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        for _ in 0..11 {
+            let (failed, failed_call) = payload(
+                "PostToolUseFailure",
+                session,
+                &repo,
+                serde_json::json!({
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "cargo test"},
+                    "tool_response": {"error": "slugify helper failed"}
+                }),
+            );
+            let _ = observe(&failed, &failed_call);
+        }
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+
+        let asked = "asks-only";
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            asked,
+            &repo,
+            serde_json::json!({"prompt": "Check the release script"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        let (ask_raw, ask_call) = payload(
+            "PreToolUse",
+            asked,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}),
+        );
+        note_ask(
+            &ask_raw,
+            &ask_call,
+            "git-force-push: a force push rewrites history",
+        );
+        let (stop, stop_call) = payload("Stop", asked, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+
+        let vissue = std::fs::read_to_string(tracker.join("vissue.log")).unwrap_or_default();
+        assert!(!vissue.contains("create"), "{vissue}");
+        let stored = atoms.lock().unwrap().clone();
+        assert_eq!(stored.len(), 2, "{stored:?}");
+        let failed = stored[0]["text"].as_str().unwrap_or("");
+        assert!(failed.contains("slugify"), "{failed}");
+        assert!(!failed.contains("closed"), "{failed}");
+        assert_lesson(failed);
+        let guard = stored[1]["text"].as_str().unwrap_or("");
+        assert!(guard.contains("git-force-push"), "{guard}");
+        assert!(!guard.contains("closed"), "{guard}");
+        assert_lesson(guard);
+        let book = book_json(dir.path(), session);
+        let row = book["repos"].as_object().unwrap().values().next().unwrap();
+        assert!(row["issue"].is_null(), "{book}");
+        assert_eq!(row["lesson"], true, "{book}");
+
+        let start = crate::session_start_for(Some("failures-next"));
+        assert!(!start.contains("no memories here yet"), "{start}");
+        let (_raw, call) = payload(
+            "UserPromptSubmit",
+            "failures-next",
+            &repo,
+            serde_json::json!({"prompt": "repair the slugify helper"}),
+        );
+        let (note, _) = crate::hook_note(&call, 4);
+        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("slugify"), "{note}");
     }
 
     /// ljos-6x14: agy sends no event name. Onboarding tells the after-command
