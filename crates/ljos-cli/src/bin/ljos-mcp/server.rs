@@ -522,6 +522,12 @@ pub struct PreferArgs {
     /// Names an outbound post must not reply to. Used when `user` is true.
     #[serde(default)]
     pub deny_reply_name: Vec<String>,
+    /// Remove this user rule. The row stays as a tombstone. Requires `user`.
+    #[serde(default)]
+    pub forget: Option<String>,
+    /// Pull and push user rules through the tracker repository. Requires `user`.
+    #[serde(default)]
+    pub sync: bool,
 }
 
 /// An option name, or a JSON object of option to share.
@@ -1203,7 +1209,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a choice between two ways was settled and should hold from now on: one standing preference, stored as given. A lesson that is not a choice is ljos_remember. Pass user true, with why, to write a user rule instead: it is shared by every seat, it never decays, and the guard can enforce deny_mention and deny_reply_to. Pass promote with a lesson id to copy that lesson into a user rule. Without user, this stays a seat preference.",
+        description = "Call this when a choice between two ways was settled and should hold from now on: one standing preference, stored as given. A lesson that is not a choice is ljos_remember. Pass user true, with why, to write a user rule instead: it is shared by every seat, it syncs through the tracker repository, it never decays, and the guard can enforce deny_mention and deny_reply_to. Pass promote with a lesson id to copy that lesson into a user rule. Pass forget with a user-rule id to tombstone it. Pass sync true to pull and push user rules. Without user, this stays a seat preference.",
         annotations(
             title = "Prefer",
             read_only_hint = false,
@@ -1216,7 +1222,36 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PreferArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+        if !args.user && (args.sync || args.forget.is_some() || args.promote.is_some()) {
+            return Err(refused(anyhow::anyhow!(
+                "prefer: sync, forget and promote write a user rule. Pass user true"
+            )));
+        }
         if args.user {
+            if args.sync {
+                if args.forget.is_some()
+                    || args.promote.is_some()
+                    || !args.text.trim().is_empty()
+                    || args.why.is_some()
+                {
+                    return Err(refused(anyhow::anyhow!(
+                        "prefer: sync pulls and pushes user rules, and takes none of the other fields"
+                    )));
+                }
+                return ljos_cli::user_rules::sync_now()
+                    .map(|report| object(serde_json::json!({"report": report})))
+                    .map_err(refused);
+            }
+            if let Some(id) = args.forget {
+                if args.promote.is_some() || !args.text.trim().is_empty() {
+                    return Err(refused(anyhow::anyhow!(
+                        "prefer: forget takes the id, not the words or a lesson"
+                    )));
+                }
+                return ljos_cli::user_rules::forget(&id)
+                    .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
+                    .map_err(refused);
+            }
             let why = args.why.unwrap_or_default();
             let mention = ljos_cli::user_rules::People {
                 handles: args.deny_mention,

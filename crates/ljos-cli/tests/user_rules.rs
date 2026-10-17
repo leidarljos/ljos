@@ -93,6 +93,7 @@ impl Home {
             .env("PACKSET_URL", "off")
             .env("LJOS_HOLD", "rohit")
             .env("LJOS_ASK_PACK", "off")
+            .env("LJOS_USER_RULES_SYNC", "off")
             .env_remove("POLICYD_BIN")
             .env_remove("POLICYD_REQUIRED")
             .env_remove("LJOS_SEAT")
@@ -216,7 +217,7 @@ fn prefer_user_is_read_by_a_second_seat_and_promote_copies_a_fixture_lesson() {
         raw.contains("Alan asked that this hold for every seat"),
         "{raw}"
     );
-    assert!(!raw.contains("due_at"), "{raw}");
+    assert!(!raw.contains("\"due_at\""), "{raw}");
     let lines = seen.lock().unwrap().clone();
     assert!(
         lines.iter().any(|line| line.contains("GET /v1/atoms")),

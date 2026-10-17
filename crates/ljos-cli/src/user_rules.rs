@@ -1,7 +1,10 @@
-//! Standing rules shared by every seat of this user.
+//! Standing rules shared by every seat of this user, and by every machine
+//! that shares the tracker repository.
 //!
-//! `ljos prefer --user` and `ljos rule --user` write them. They live in the
-//! user config, not the pack, so the review clock never sees them.
+//! `ljos prefer --user` and `ljos rule --user` write them. The copy the
+//! hooks read is the user config, not the pack, so the review clock never
+//! sees them. The tracker carries one file per machine, and a sync merges
+//! those files by id.
 
 use std::path::PathBuf;
 
@@ -43,6 +46,14 @@ pub struct UserRule {
     #[serde(default, skip_serializing_if = "people_empty")]
     pub deny_reply_to: People,
     pub written_at: String,
+    /// When this row last changed. A merge keeps the newer stamp, and with
+    /// it that row's author and reason.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub updated_at: String,
+    /// A deletion. The row stays so an older copy of the same id does not
+    /// come back on the next sync.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
     /// The lesson id a promote copied, when this row came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -54,6 +65,10 @@ pub struct UserRule {
 
 fn people_empty(p: &People) -> bool {
     p.handles.is_empty() && p.names.is_empty()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -68,12 +83,25 @@ pub fn rules_path() -> Option<PathBuf> {
     Some(super::config_base()?.join("ljos").join("user-rules.json"))
 }
 
-/// The rows on disk. An absent file is an empty list.
+/// The rows on disk that are still in force. An absent file is an empty
+/// list. Tombstones are left out.
 ///
 /// # Errors
 ///
 /// The file is not readable, or it is not the JSON this module writes.
 pub fn load() -> Result<Vec<UserRule>> {
+    Ok(read_all()?
+        .into_iter()
+        .filter(|rule| !rule.deleted)
+        .collect())
+}
+
+/// Every row on disk, tombstones included.
+///
+/// # Errors
+///
+/// The file is not readable, or it is not the JSON this module writes.
+pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     let Some(path) = rules_path() else {
         return Ok(Vec::new());
     };
@@ -82,12 +110,32 @@ pub fn load() -> Result<Vec<UserRule>> {
     }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("user rules: read {} failed", path.display()))?;
+    parse_rules(&text)
+        .with_context(|| format!("user rules: {} is not a user-rules file", path.display()))
+}
+
+/// Parse one user-rules document. An empty body is an empty list.
+///
+/// # Errors
+///
+/// The text is not the JSON this module writes.
+pub(crate) fn parse_rules(text: &str) -> Result<Vec<UserRule>> {
     if text.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let file: File = serde_json::from_str(&text)
-        .with_context(|| format!("user rules: {} is not a user-rules file", path.display()))?;
+    let file: File = serde_json::from_str(text)?;
     Ok(file.rules)
+}
+
+/// The document this module writes, tombstones included.
+///
+/// # Errors
+///
+/// The rows cannot be encoded.
+pub(crate) fn render_rules(rules: &[UserRule]) -> Result<String> {
+    let rules: Vec<UserRule> = rules.iter().cloned().map(dated).collect();
+    let body = serde_json::to_string_pretty(&File { rules })?;
+    Ok(format!("{body}\n"))
 }
 
 fn store(rules: &[UserRule]) -> Result<()> {
@@ -96,21 +144,25 @@ fn store(rules: &[UserRule]) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("user rules: create {} failed", parent.display()))?;
     }
-    let body = serde_json::to_string_pretty(&File {
-        rules: rules.to_vec(),
-    })?;
+    let body = render_rules(rules)?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, format!("{body}\n"))
+    std::fs::write(&tmp, &body)
         .with_context(|| format!("user rules: write {} failed", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("user rules: rename into {} failed", path.display()))?;
     Ok(())
 }
 
+/// Replace the local file. Used by a sync, which must not start another sync.
+pub(crate) fn replace_stored(rules: &[UserRule]) -> Result<()> {
+    store(rules)
+}
+
 fn append(rule: UserRule) -> Result<UserRule> {
-    let mut rules = load()?;
+    let mut rules = read_all()?;
     rules.push(rule.clone());
     store(&rules)?;
+    sync_after_write();
     Ok(rule)
 }
 
@@ -139,7 +191,7 @@ pub fn review_due(now: &str) -> usize {
 ///
 /// The file cannot be read or rewritten.
 pub fn sweep(now: &str) -> Result<usize> {
-    let rules = load()?;
+    let rules = read_all()?;
     let kept: Vec<UserRule> = rules
         .iter()
         .filter(|rule| !is_due(rule, now))
@@ -153,19 +205,71 @@ pub fn sweep(now: &str) -> Result<usize> {
 }
 
 fn new_id(text: &str) -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut raw = [0u8; 16];
+    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = file.read_exact(&mut raw);
+    }
     let tick = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let mut hash = n ^ tick;
-    for byte in text.bytes() {
-        hash = hash
-            .wrapping_mul(0x100_0000_01b3)
-            .wrapping_add(u64::from(byte));
+    for (i, byte) in raw.iter_mut().enumerate().take(8) {
+        *byte ^= (tick >> (i * 8)) as u8;
     }
-    format!("ur-{hash:08x}")
+    for (i, byte) in text.bytes().enumerate() {
+        raw[i % raw.len()] ^= byte.wrapping_add(i as u8);
+    }
+    let mut hex = String::with_capacity(32);
+    for byte in raw {
+        hex.push(b"0123456789abcdef"[(byte >> 4) as usize] as char);
+        hex.push(b"0123456789abcdef"[(byte & 0x0f) as usize] as char);
+    }
+    format!("ur-{hex}")
+}
+
+fn stamp(rule: &UserRule) -> &str {
+    let at = rule.updated_at.trim();
+    if at.is_empty() {
+        rule.written_at.trim()
+    } else {
+        at
+    }
+}
+
+fn dated(mut rule: UserRule) -> UserRule {
+    if rule.updated_at.trim().is_empty() {
+        rule.updated_at = rule.written_at.clone();
+    }
+    rule
+}
+
+/// Merge rows by id. The newer `updated_at` wins, and that row's author
+/// and reason come with it. A tombstone beats an older edit of the same
+/// id, and it also beats a live row that carries the same stamp.
+#[must_use]
+pub fn merge_rows(rows: impl IntoIterator<Item = UserRule>) -> Vec<UserRule> {
+    let mut best: std::collections::BTreeMap<String, UserRule> = std::collections::BTreeMap::new();
+    for rule in rows {
+        let id = rule.id.trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let rule = dated(rule);
+        if best.get(&id).is_some_and(|have| beats(have, &rule)) {
+            continue;
+        }
+        best.insert(id, rule);
+    }
+    best.into_values().collect()
+}
+
+fn beats(have: &UserRule, incoming: &UserRule) -> bool {
+    match stamp(have).cmp(stamp(incoming)) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => have.deleted && !incoming.deleted,
+    }
 }
 
 fn normalize_handle(raw: &str) -> Result<String> {
@@ -213,6 +317,7 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
     if reason.is_empty() {
         bail!("prefer: a user rule needs a reason, so say why with --why");
     }
+    let now = super::now_utc();
     Ok(UserRule {
         id: new_id(text),
         text: text.to_string(),
@@ -222,7 +327,9 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
         verdict: None,
         deny_mention: People::default(),
         deny_reply_to: People::default(),
-        written_at: super::now_utc(),
+        written_at: now.clone(),
+        updated_at: now,
+        deleted: false,
         from,
         due_at: None,
     })
@@ -292,6 +399,33 @@ pub fn promote_atom(
     append(rule)
 }
 
+/// Tombstone `id`. The author and the reason stay, so a later sync can say
+/// who removed it and why the rule stood. The lesson, if this row was
+/// promoted, is not touched.
+///
+/// # Errors
+///
+/// No such row, or the file cannot be written.
+pub fn forget(id: &str) -> Result<UserRule> {
+    let id = id.trim();
+    if id.is_empty() {
+        bail!("prefer: a user rule id is required");
+    }
+    let mut rules = read_all()?;
+    let Some(rule) = rules.iter_mut().find(|rule| rule.id == id) else {
+        bail!("prefer: no user rule {id}");
+    };
+    if !rule.deleted {
+        rule.deleted = true;
+        rule.updated_at = super::now_utc();
+        let written = rule.clone();
+        store(&rules)?;
+        sync_after_write();
+        return Ok(written);
+    }
+    Ok(rule.clone())
+}
+
 /// Read lesson `id` from this seat's pack and copy it into a user rule.
 /// The lesson stays in the pack.
 ///
@@ -318,10 +452,68 @@ pub fn promote_lesson(
     promote_atom(&atom, reason, deny_mention, deny_reply_to)
 }
 
+fn sync_budget_ms(default: u64) -> u64 {
+    std::env::var("LJOS_USER_RULES_SYNC_MS")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|ms: &u64| *ms > 0)
+        .unwrap_or(default)
+}
+
+fn sync_after_write() {
+    let budget = std::time::Duration::from_millis(sync_budget_ms(4_000));
+    let host = super::sync::host();
+    for root in super::sync::user_rule_trackers() {
+        let _ = super::sync::exchange_user_rules(&root, &host, budget);
+    }
+}
+
+/// Pull and push before a hook builds its line. A tracker that does not
+/// answer is ignored, and the local file is what the hook shows.
+pub fn sync_for_hook() {
+    let budget = std::time::Duration::from_millis(sync_budget_ms(1_500));
+    let host = super::sync::host();
+    for root in super::sync::user_rule_trackers() {
+        let _ = super::sync::exchange_user_rules(&root, &host, budget);
+    }
+}
+
+/// One pull and push, as `ljos prefer --user --sync` runs it.
+///
+/// # Errors
+///
+/// Sync is switched off, no tracker is configured, or the tracker did not
+/// answer inside the budget.
+pub fn sync_now() -> Result<String> {
+    if std::env::var("LJOS_USER_RULES_SYNC").ok().as_deref() == Some("off") {
+        bail!("prefer: user-rule sync is off");
+    }
+    let roots = super::sync::user_rule_trackers();
+    if roots.is_empty() {
+        bail!(
+            "prefer: no tracker repository to sync user rules through. Set VISSUE_ROOT, or repos in ~/.config/ljos/sync.toml"
+        );
+    }
+    let budget = std::time::Duration::from_millis(sync_budget_ms(8_000));
+    let host = super::sync::host();
+    let mut out = String::new();
+    for root in roots {
+        out.push_str(&super::sync::exchange_user_rules(&root, &host, budget)?);
+    }
+    if out.is_empty() {
+        out.push_str("sync: user rules: none\n");
+    }
+    Ok(out)
+}
+
 /// The rule as one line a person reads after writing it.
 #[must_use]
 pub fn ack(rule: &UserRule) -> String {
-    format!("user rule {}\t{}", rule.id, rule.text)
+    if rule.deleted {
+        format!("user rule {}\tremoved\t{}", rule.id, rule.text)
+    } else {
+        format!("user rule {}\t{}", rule.id, rule.text)
+    }
 }
 
 /// The rule as the object an MCP tool returns.
@@ -912,6 +1104,7 @@ mod tests {
             std::env::set_var("LJOS_SEAT", "claude");
             std::env::set_var("PACKSET_URL", "off");
             std::env::set_var("PACKSET_WORKSPACE", "seat-a");
+            std::env::set_var("LJOS_USER_RULES_SYNC", "off");
         }
         (lock, dir)
     }
@@ -1003,7 +1196,7 @@ mod tests {
         assert_eq!(kept[0].text, written.text);
         assert!(kept[0].due_at.is_none());
         let raw = std::fs::read_to_string(rules_path().unwrap()).unwrap();
-        assert!(!raw.contains("due_at"), "{raw}");
+        assert!(!raw.contains("\"due_at\""), "{raw}");
         let mut file: File = serde_json::from_str(&raw).unwrap();
         file.rules.push(UserRule {
             id: "ur-expired".into(),
@@ -1015,6 +1208,8 @@ mod tests {
             deny_mention: People::default(),
             deny_reply_to: People::default(),
             written_at: "2020-01-01T00:00:00Z".into(),
+            updated_at: "2020-01-01T00:00:00Z".into(),
+            deleted: false,
             from: None,
             due_at: Some("2020-01-02T00:00:00Z".into()),
         });
@@ -1139,7 +1334,7 @@ mod tests {
         assert!(rule.due_at.is_none());
         assert_eq!(rule.deny_mention.handles, ["ocaisa"]);
         let raw = std::fs::read_to_string(rules_path().unwrap()).unwrap();
-        assert!(!raw.contains("due_at"), "{raw}");
+        assert!(!raw.contains("\"due_at\""), "{raw}");
         let preference = serde_json::json!({"id": "pref-1", "kind": "preference", "text": "no"});
         let err = promote_atom(
             &preference,
@@ -1169,5 +1364,300 @@ mod tests {
         assert_eq!(denied.verdict, "deny");
         assert_eq!(denied.pattern, "gh pr comment*");
         assert!(super::super::static_guard("gh issue list").is_none());
+    }
+
+    fn git_ok(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}{}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    fn prepare_clone(dir: &std::path::Path) {
+        git_ok(dir, &["config", "user.email", "seat@example.invalid"]);
+        git_ok(dir, &["config", "user.name", "seat"]);
+        git_ok(dir, &["config", "commit.gpgsign", "false"]);
+        git_ok(dir, &["config", "core.hooksPath", "/dev/null"]);
+    }
+
+    struct Homes {
+        _lock: super::super::EnvLock,
+        _root: tempfile::TempDir,
+        a: std::path::PathBuf,
+        b: std::path::PathBuf,
+        cfg_a: std::path::PathBuf,
+        cfg_b: std::path::PathBuf,
+    }
+
+    impl Homes {
+        fn new() -> Self {
+            let lock = super::super::test_env_lock();
+            let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/user-rule-homes");
+            std::fs::create_dir_all(&base).unwrap();
+            let root = tempfile::TempDir::new_in(&base).unwrap();
+            let seed = root.path().join("seed");
+            std::fs::create_dir_all(&seed).unwrap();
+            git_ok(&seed, &["init", "-q", "-b", "main"]);
+            prepare_clone(&seed);
+            git_ok(&seed, &["commit", "--allow-empty", "-q", "-m", "init"]);
+            let bare = root.path().join("bare.git");
+            let laptop = root.path().join("laptop");
+            let shared = root.path().join("shared");
+            git_ok(
+                root.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    "-q",
+                    seed.to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
+            );
+            git_ok(
+                root.path(),
+                &[
+                    "clone",
+                    "-q",
+                    bare.to_str().unwrap(),
+                    laptop.to_str().unwrap(),
+                ],
+            );
+            git_ok(
+                root.path(),
+                &[
+                    "clone",
+                    "-q",
+                    bare.to_str().unwrap(),
+                    shared.to_str().unwrap(),
+                ],
+            );
+            prepare_clone(&laptop);
+            prepare_clone(&shared);
+            let cfg_a = root.path().join("cfg-a");
+            let cfg_b = root.path().join("cfg-b");
+            unsafe {
+                std::env::set_var("LJOS_USER_RULES_SYNC", "off");
+                std::env::set_var("LJOS_HOLD", "rohit");
+                std::env::set_var("PACKSET_URL", "off");
+                std::env::set_var("HOME", root.path());
+                std::env::remove_var("LJOS_USER_RULES_TRACKER");
+            }
+            Self {
+                _lock: lock,
+                _root: root,
+                a: laptop,
+                b: shared,
+                cfg_a,
+                cfg_b,
+            }
+        }
+
+        fn home(&self, cfg: &std::path::Path) {
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", cfg) };
+        }
+    }
+
+    fn exchange(tracker: &std::path::Path, host: &str) {
+        let said = super::super::sync::exchange_user_rules(
+            tracker,
+            host,
+            std::time::Duration::from_secs(8),
+        )
+        .unwrap_or_else(|err| panic!("sync {host}: {err:#}"));
+        assert!(!said.contains("did not answer"), "{said}");
+    }
+
+    fn rewrite(id: &str, text: &str, author: &str, reason: &str, at: &str, deleted: bool) {
+        let mut rows = read_all().unwrap();
+        let rule = rows.iter_mut().find(|rule| rule.id == id).unwrap();
+        rule.text = text.to_string();
+        rule.author = author.to_string();
+        rule.reason = reason.to_string();
+        rule.updated_at = at.to_string();
+        rule.deleted = deleted;
+        store(&rows).unwrap();
+    }
+
+    #[test]
+    fn two_homes_with_different_rules_converge() {
+        let homes = Homes::new();
+        homes.home(&homes.cfg_a);
+        let alan = write_preference(
+            "never post or reply to Alan (ocaisa)",
+            "he asked not to be pinged",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        exchange(&homes.a, "laptop");
+        homes.home(&homes.cfg_b);
+        exchange(&homes.b, "shared");
+        let got = load().unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].id, alan.id);
+        assert_eq!(got[0].author, "rohit");
+        assert_eq!(got[0].reason, "he asked not to be pinged");
+        let credit = write_preference(
+            "EasyBuild pull requests name eb-stack and gpt-oss-120b",
+            "the credit line is part of the work",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        assert_eq!(credit.id, load().unwrap()[1].id);
+        exchange(&homes.b, "shared");
+        homes.home(&homes.cfg_a);
+        exchange(&homes.a, "laptop");
+        let got = load().unwrap();
+        assert!(got.iter().any(|rule| rule.id == alan.id), "{got:?}");
+        assert!(got.iter().any(|rule| rule.id == credit.id), "{got:?}");
+        homes.home(&homes.cfg_b);
+        let got = load().unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().any(|rule| rule.id == alan.id));
+        assert!(got.iter().any(|rule| rule.id == credit.id));
+    }
+
+    #[test]
+    fn a_newer_edit_wins_and_a_tombstone_beats_an_older_edit() {
+        let homes = Homes::new();
+        homes.home(&homes.cfg_a);
+        let rule = write_preference(
+            "the standing line",
+            "first reason",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        let id = rule.id.clone();
+        exchange(&homes.a, "laptop");
+        homes.home(&homes.cfg_b);
+        exchange(&homes.b, "shared");
+
+        rewrite(
+            &id,
+            "older edit",
+            "ada",
+            "because older",
+            "2099-01-01T00:00:01.000Z",
+            false,
+        );
+        exchange(&homes.b, "shared");
+        homes.home(&homes.cfg_a);
+        rewrite(
+            &id,
+            "newest edit",
+            "rohit",
+            "because newest",
+            "2099-01-01T00:00:09.000Z",
+            false,
+        );
+        exchange(&homes.a, "laptop");
+        homes.home(&homes.cfg_b);
+        exchange(&homes.b, "shared");
+        let got = load().unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].id, id);
+        assert_eq!(got[0].text, "newest edit");
+        assert_eq!(got[0].author, "rohit");
+        assert_eq!(got[0].reason, "because newest");
+        homes.home(&homes.cfg_a);
+        let got = load().unwrap();
+        assert_eq!(got[0].text, "newest edit");
+        assert_eq!(got[0].author, "rohit");
+        assert_eq!(got[0].reason, "because newest");
+
+        let removed = forget(&id).unwrap();
+        assert!(removed.deleted);
+        assert_eq!(removed.author, "rohit");
+        assert_eq!(removed.reason, "because newest");
+        rewrite(
+            &id,
+            "newest edit",
+            "rohit",
+            "because newest",
+            "2099-01-02T00:00:00.000Z",
+            true,
+        );
+        exchange(&homes.a, "laptop");
+        homes.home(&homes.cfg_b);
+        exchange(&homes.b, "shared");
+        assert!(load().unwrap().is_empty(), "{:?}", load().unwrap());
+        let tomb = read_all().unwrap();
+        assert_eq!(tomb.len(), 1);
+        assert!(tomb[0].deleted);
+        assert_eq!(tomb[0].author, "rohit");
+        assert_eq!(tomb[0].reason, "because newest");
+        assert!(!preface().contains("newest edit"));
+        rewrite(
+            &id,
+            "older edit",
+            "ada",
+            "because older",
+            "2099-01-01T00:00:01.000Z",
+            false,
+        );
+        exchange(&homes.b, "shared");
+        assert!(
+            load().unwrap().is_empty(),
+            "a tombstone keeps the older edit out"
+        );
+        let tomb = read_all().unwrap();
+        assert!(tomb[0].deleted);
+        assert_eq!(tomb[0].updated_at, "2099-01-02T00:00:00.000Z");
+    }
+
+    #[test]
+    fn the_hook_shows_local_rules_when_the_tracker_does_not_answer() {
+        let (_lock, dir) = isolated();
+        write_preference(
+            "never post or reply to Alan (ocaisa)",
+            "he asked not to be pinged",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        let repo = dir.path().join("tracker");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q", "-b", "main"]);
+        prepare_clone(&repo);
+        git_ok(&repo, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        git_ok(&repo, &["config", "http.lowSpeedLimit", "1"]);
+        git_ok(&repo, &["config", "http.lowSpeedTime", "1"]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 64];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+        });
+        let url = format!("http://127.0.0.1:{port}/tracker.git");
+        git_ok(&repo, &["remote", "add", "origin", &url]);
+        unsafe {
+            std::env::remove_var("LJOS_USER_RULES_SYNC");
+            std::env::set_var("LJOS_USER_RULES_TRACKER", &repo);
+            std::env::set_var("LJOS_USER_RULES_SYNC_MS", "400");
+        }
+        let started = std::time::Instant::now();
+        let line = super::super::session_start_for(Some("seat-two"));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "{elapsed:?}\n{line}"
+        );
+        assert!(line.starts_with("User rules"), "{line}");
+        assert!(line.contains("never post or reply to Alan"), "{line}");
     }
 }
