@@ -199,7 +199,7 @@ root = pathlib.Path(os.environ["VISSUE_ROOT"])
 log = root / "vissue.log"
 args = sys.argv[1:]
 with log.open("a") as fh:
-    fh.write(" ".join(args) + "\n")
+    fh.write(" ".join(args) + " VISSUE_AGENT=" + os.environ.get("VISSUE_AGENT", "") + "\n")
 cmd, rest = args[0], args[1:]
 
 def files():
@@ -265,7 +265,9 @@ else:
 import os, pathlib, sys
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
 args = sys.argv[1:]
-(root / "deedar.log").open("a").write(" ".join(args) + "\n")
+(root / "deedar.log").open("a").write(
+    " ".join(args) + " VISSUE_AGENT=" + os.environ.get("VISSUE_AGENT", "") + "\n"
+)
 ident = None
 i = 0
 while i < len(args):
@@ -666,4 +668,281 @@ fn ljos_seat_reads_seats_toml_and_never_prints_a_raw_id() {
 
 fn shellish(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn exec_daemon(dir: &Path) -> PathBuf {
+    let src = dir.join("exec-daemon.c");
+    let bin = dir.join("exec-daemon");
+    fs::write(
+        &src,
+        "#include <unistd.h>\n\
+         int main(int argc, char **argv) {\n\
+         \tif (argc < 2) return 127;\n\
+         \texecvp(argv[1], argv + 1);\n\
+         \treturn 127;\n\
+         }\n",
+    )
+    .unwrap();
+    let out = Command::new("cc")
+        .args(["-O2", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    bin
+}
+
+fn env_without_seat(hab: &Hab) -> Vec<(String, String)> {
+    hab.base_env()
+        .into_iter()
+        .filter(|(key, _)| key != "LJOS_SEAT")
+        .collect()
+}
+
+fn under_exec_daemon(hab: &Hab, extra: &[(&str, &str)]) -> Output {
+    let daemon = exec_daemon(&hab.bin);
+    let mut cmd = Command::new(&daemon);
+    cmd.arg(env!("CARGO_BIN_EXE_ljos"))
+        .args(["hook", "--git-commit"])
+        .current_dir(&hab.repo)
+        .env_clear()
+        .envs(env_without_seat(hab));
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    cmd.output().unwrap()
+}
+
+/// The parent is `exec-daemon`. The claim, the deed and the tracker record
+/// use the seat from `seats.toml`, then the `grokbot-<id8>` fallback, never
+/// the process tree.
+#[test]
+fn a_git_hook_under_exec_daemon_books_the_seat() {
+    let hab = Hab::new("repo");
+    let id = "bc-1234abcd-rest";
+    let dir = hab.config.join("ljos");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("seats.toml"), format!("{id:?} = \"rgoswami\"\n")).unwrap();
+    let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", id)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let vlog = vissue_log(&hab.tracker);
+    let dlog = fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
+    assert!(
+        vlog.contains("VISSUE_AGENT=rgoswami"),
+        "the claim was not the seat:\n{vlog}\n{err}"
+    );
+    assert!(
+        dlog.contains("--agent rgoswami"),
+        "the deed was not the seat:\n{dlog}"
+    );
+    assert!(
+        org.contains("by rgoswami"),
+        "the record was not the seat:\n{org}"
+    );
+    for (what, text) in [("claim", &vlog), ("deed", &dlog), ("record", &org)] {
+        assert!(
+            !text.contains("exec-daemon"),
+            "the {what} used the process tree:\n{text}"
+        );
+    }
+
+    let hab = Hab::new("repo");
+    let unknown = "zzzzzzzz-hello";
+    let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", unknown)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let vlog = vissue_log(&hab.tracker);
+    let dlog = fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
+    assert!(
+        vlog.contains("VISSUE_AGENT=grokbot-zzzzzzzz"),
+        "an unmapped conversation did not fall back to grokbot-<id8>:\n{vlog}"
+    );
+    assert!(
+        dlog.contains("--agent grokbot-zzzzzzzz"),
+        "the deed did not use the fallback:\n{dlog}"
+    );
+    assert!(!vlog.contains("exec-daemon"), "{vlog}");
+    assert!(!dlog.contains("exec-daemon"), "{dlog}");
+}
+
+/// No `LJOS_SEAT` and no conversation id: the process tree is not a seat,
+/// so the hook books nothing.
+#[test]
+fn a_git_hook_without_a_resolved_seat_does_not_book() {
+    let hab = Hab::new("repo");
+    let out = under_exec_daemon(&hab, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(vissue_log(&hab.tracker), "");
+    assert_eq!(
+        fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default(),
+        ""
+    );
+}
+
+/// promo's notes name the ljos URL. The commit's remote is that repository,
+/// and the claim is filed on `ljos`, not on promo.
+#[test]
+fn a_commit_ignores_a_decoy_project_note() {
+    let mut hab = Hab::new("workspace");
+    hab.project = None;
+    fs::create_dir_all(hab.tracker.join("Software/ljos")).unwrap();
+    fs::create_dir_all(hab.tracker.join("Software/promo")).unwrap();
+    fs::write(
+        hab.tracker.join("Software/ljos/issues.org"),
+        "* TODO ljos\n",
+    )
+    .unwrap();
+    fs::write(
+        hab.tracker.join("Software/promo/issues.org"),
+        "The notes mention https://github.com/leidarljos/ljos as the tool this promo is about.\n* TODO promo\n",
+    )
+    .unwrap();
+    git_bare(
+        &hab.repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:leidarljos/ljos.git",
+        ],
+    );
+    install(&hab);
+    commit_file(&hab, "landed.txt", "land in ljos");
+    let ljos = fs::read_to_string(hab.tracker.join("Software/ljos/issues.org")).unwrap_or_default();
+    let promo = fs::read_to_string(hab.tracker.join("Software/promo/issues.org")).unwrap();
+    assert!(
+        ljos.contains("STARTED"),
+        "the claim missed ljos:\n{ljos}\npromo:\n{promo}"
+    );
+    assert!(
+        !promo.contains("STARTED"),
+        "promo took the claim because its notes name the url:\n{promo}"
+    );
+}
+
+fn write_hook(path: &Path, body: &str) {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn git_status(hab: &Hab, args: &[&str]) -> Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(&hab.repo)
+        .args(args)
+        .current_dir(&hab.repo)
+        .env_clear()
+        .envs(hab.base_env())
+        .output()
+        .unwrap()
+}
+
+/// A repository `pre-commit` that exits 1 still blocks the commit. `commit-msg`
+/// and `pre-push` still run, with the push's stdin.
+#[test]
+fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let stub = fs::read_to_string(hab.share.join("ljos/git-hooks/pre-commit")).unwrap();
+    assert!(stub.contains("exec "), "{stub}");
+    assert!(hab.share.join("ljos/git-hooks/pre-push").is_file());
+    assert!(hab.share.join("ljos/git-hooks/commit-msg").is_file());
+
+    let marker = hab.root.join("hook-marker");
+    let hooks = hab.repo.join(".git/hooks");
+    write_hook(&hooks.join("pre-commit"), "exit 1\n");
+    write_hook(
+        &hooks.join("commit-msg"),
+        &format!("printf 'commit-msg\\n' >> {}\n", shellish(&marker)),
+    );
+    write_hook(
+        &hooks.join("pre-push"),
+        &format!(
+            "printf 'pre-push %s %s\\n' \"$1\" \"$2\" >> {m}\ncat >> {m}\n",
+            m = shellish(&marker)
+        ),
+    );
+
+    fs::write(hab.repo.join("blocked.txt"), "x\n").unwrap();
+    hab.git(&hab.repo, &["add", "blocked.txt"]);
+    let blocked = git_status(&hab, &["commit", "-q", "-m", "blocked"]);
+    assert!(
+        !blocked.status.success(),
+        "pre-commit did not block: {}",
+        String::from_utf8_lossy(&blocked.stderr)
+    );
+    assert_eq!(vissue_log(&hab.tracker), "");
+
+    write_hook(&hooks.join("pre-commit"), "exit 0\n");
+    let committed = git_status(&hab, &["commit", "-q", "-m", "allowed"]);
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let text = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(text.contains("commit-msg"), "{text}");
+
+    let bare = hab.root.join("bare.git");
+    fs::create_dir_all(&bare).unwrap();
+    git_bare(&bare, &["init", "--bare", "-q"]);
+    hab.git(
+        &hab.repo,
+        &["remote", "add", "origin", bare.to_str().unwrap()],
+    );
+    let pushed = git_status(&hab, &["push", "-q", "origin", "HEAD"]);
+    assert!(
+        pushed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    let text = fs::read_to_string(&marker).unwrap();
+    assert!(text.contains("pre-push origin "), "{text}");
+    assert!(text.contains("refs/heads/"), "{text}");
+}
+
+/// A path listed in `[git_hooks] skip` is not booked, and reinstall leaves
+/// that file alone.
+#[test]
+fn a_skip_list_books_nothing_and_reinstall_keeps_the_config() {
+    let hab = Hab::new("repo");
+    let cfg = hab.config.join("ljos");
+    fs::create_dir_all(&cfg).unwrap();
+    let path = cfg.join("ljos.toml");
+    let repo = hab.repo.canonicalize().unwrap();
+    let text = format!("[git_hooks]\nskip = [{:?}]\n", repo.display().to_string());
+    fs::write(&path, &text).unwrap();
+    install(&hab);
+    commit_file(&hab, "skipped.txt", "do not book");
+    assert_eq!(vissue_log(&hab.tracker), "");
+    assert_eq!(
+        fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default(),
+        ""
+    );
+    let before = fs::read(&path).unwrap();
+    install(&hab);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "reinstall rewrote ljos.toml"
+    );
+    commit_file(&hab, "skipped-again.txt", "still do not book");
+    assert_eq!(vissue_log(&hab.tracker), "");
 }

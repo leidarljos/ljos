@@ -1,9 +1,27 @@
 //! Global git hooks that book a commit when the runner has no prompt hook.
 //!
-//! `post-commit` and `post-rewrite` call `ljos hook --git-commit`. The
-//! commit is never failed. A tracker checkout, a claimdag or deedar store,
-//! the middle of a rebase or merge, and a Claude Code, Codex, or opencode
-//! session are left to their own hooks. An amend and a rebase book once.
+//! `install` writes a chaining stub for every standard git hook. The stub
+//! execs the repository's `.git/hooks/<name>` or, when that file is absent,
+//! the `core.hooksPath` that was set before install, with the same arguments
+//! and stdin. `post-commit` and `post-rewrite` also call `ljos hook
+//! --git-commit`. Booking never fails the hook.
+//!
+//! `pre-commit install` follows `core.hooksPath` and would replace these
+//! stubs. Install the framework into the repository, then let the stub chain
+//! to it:
+//!
+//! ```text
+//! dir=$(git rev-parse --git-dir)
+//! git config --local core.hooksPath "$dir/hooks"
+//! pre-commit install
+//! git config --local --unset core.hooksPath
+//! ```
+//!
+//! A commit is booked only when a seat resolves from `LJOS_SEAT`, then
+//! `seats.toml` through `CURSOR_CONVERSATION_ID`, then `grokbot-<id8>`.
+//! The process tree is not a seat. Paths in `[git_hooks] skip` of `ljos.toml`,
+//! plus `/tmp`, `/var/tmp`, `/dev/shm`, the tracker, `CLAIMDAG_DIR` and the
+//! deedar store, are not booked. An amend and a rebase book once.
 
 use std::cell::Cell;
 use std::fs;
@@ -12,7 +30,42 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-const HOOK_NAMES: [&str; 2] = ["post-commit", "post-rewrite"];
+/// Every hook git looks up by name. A global `core.hooksPath` hides the
+/// repository's copy of each of these, so the stub has to exist for each.
+const HOOK_NAMES: &[&str] = &[
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
+    "pre-commit",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "pre-push",
+    "pre-receive",
+    "update",
+    "proc-receive",
+    "post-receive",
+    "post-update",
+    "reference-transaction",
+    "push-to-checkout",
+    "pre-auto-gc",
+    "post-rewrite",
+    "sendemail-validate",
+    "fsmonitor-watchman",
+    "p4-changelist",
+    "p4-prepare-changelist",
+    "p4-post-changelist",
+    "p4-pre-submit",
+    "post-index-change",
+];
+
+fn books_commit(name: &str) -> bool {
+    matches!(name, "post-commit" | "post-rewrite")
+}
 
 /// `install`, `uninstall`, or `status`.
 ///
@@ -146,19 +199,38 @@ fn data_home() -> PathBuf {
 
 fn hook_body(bin: &Path, name: &str) -> String {
     let bin = shell_quote(&bin.display().to_string());
+    let book = if books_commit(name) {
+        format!(
+            "\t\tif [ -z \"${{LJOS_GIT_HOOK:-}}\" ]; then\n\
+             \t\t\tline=$({bin} hook --git-commit --git-hook {name} 2>/dev/null || true)\n\
+             \t\t\tif [ -n \"$line\" ]; then\n\
+             \t\t\t\tprintf '%s\\n' \"$line\" >&2\n\
+             \t\t\tfi\n\
+             \t\tfi\n"
+        )
+    } else {
+        String::new()
+    };
     format!(
         "#!/bin/sh\n\
-         # ljos books this commit. A failure here must not fail the commit.\n\
+         # ljos chains to this repository's .git/hooks/{name}, or to the\n\
+         # core.hooksPath that was set before `ljos git-hooks install`.\n\
+         # post-commit and post-rewrite also book the commit. Booking cannot\n\
+         # fail the hook. The repository hook's exit status is kept.\n\
+         #\n\
+         # pre-commit install follows core.hooksPath and would replace this\n\
+         # file. Install the framework into the repository, then re-run\n\
+         # `ljos git-hooks install` if a stub was overwritten:\n\
+         #   dir=$(git rev-parse --git-dir)\n\
+         #   git config --local core.hooksPath \"$dir/hooks\"\n\
+         #   pre-commit install\n\
+         #   git config --local --unset core.hooksPath\n\
          case \",1,true,TRUE,yes,YES,on,ON,\" in\n\
-         \t*,\"${{LJOS_OFF}}\",*) exit 0 ;;\n\
+         \t*,\"${{LJOS_OFF}}\",*) ;;\n\
+         \t*)\n\
+         {book}\
+         \t\t;;\n\
          esac\n\
-         if [ -n \"${{LJOS_GIT_HOOK:-}}\" ]; then\n\
-         \texit 0\n\
-         fi\n\
-         line=$({bin} hook --git-commit --git-hook {name} 2>/dev/null || true)\n\
-         if [ -n \"$line\" ]; then\n\
-         \tprintf '%s\\n' \"$line\" >&2\n\
-         fi\n\
          git_dir=$(git rev-parse --git-dir 2>/dev/null || true)\n\
          if [ -n \"$git_dir\" ]; then\n\
          \tcase \"$git_dir\" in\n\
@@ -167,7 +239,16 @@ fn hook_body(bin: &Path, name: &str) -> String {
          \tesac\n\
          \trepo_hook=\"$git_dir/hooks/{name}\"\n\
          \tif [ -x \"$repo_hook\" ] && [ \"$repo_hook\" != \"$0\" ]; then\n\
-         \t\t\"$repo_hook\" \"$@\" || true\n\
+         \t\texec \"$repo_hook\" \"$@\"\n\
+         \tfi\n\
+         fi\n\
+         here=$(dirname \"$0\")\n\
+         here=$(CDPATH= cd -- \"$here\" && pwd) || exit 0\n\
+         prev=$(sed -n '1s/[[:space:]]*$//p' \"$here/previous-hooks-path\" 2>/dev/null || true)\n\
+         if [ -n \"$prev\" ] && [ \"$prev\" != \"$here\" ]; then\n\
+         \tprev_hook=\"$prev/{name}\"\n\
+         \tif [ -x \"$prev_hook\" ] && [ \"$prev_hook\" != \"$0\" ]; then\n\
+         \t\texec \"$prev_hook\" \"$@\"\n\
          \tfi\n\
          fi\n\
          exit 0\n"
@@ -213,6 +294,12 @@ fn book_commit(hook: &str) -> Result<()> {
     if already_booked(&repo, &head) {
         return Ok(());
     }
+    // The process tree is not a seat. Without LJOS_SEAT, seats.toml, or the
+    // grokbot-<id8> fallback, the commit stays unbooked.
+    let Some(seat) = crate::git_hook_seat() else {
+        return Ok(());
+    };
+    let _actor = crate::HookActor::enter(&seat);
     let subject = git_line(&["log", "-1", "--format=%s"]).unwrap_or_default();
     // A hook exports GIT_DIR. Later `git -C` on the tracker must not follow
     // it, and a nested commit must not re-enter this hook. Both ride on the
@@ -283,14 +370,99 @@ fn mid_rewrite() -> bool {
 }
 
 fn skip_repo(repo: &Path) -> bool {
-    for key in ["VISSUE_ROOT", "ISSUE_ROOT"] {
-        if let Some(root) = std::env::var_os(key).filter(|value| !value.is_empty()) {
-            if same_dir(repo, Path::new(&root)) {
-                return true;
-            }
+    if is_store(repo) {
+        return true;
+    }
+    skip_roots().iter().any(|root| covered(repo, root))
+}
+
+/// Paths a commit under which is not booked. The defaults always apply.
+/// `[git_hooks] skip` in `ljos.toml` adds box-specific paths, and a
+/// reinstall rewrites the hook scripts without touching that file.
+fn skip_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/dev/shm"),
+    ];
+    for key in ["VISSUE_ROOT", "ISSUE_ROOT", "CLAIMDAG_DIR"] {
+        if let Some(path) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            roots.push(PathBuf::from(path));
         }
     }
-    is_store(repo)
+    roots.extend(store_dirs());
+    for path in config_files() {
+        roots.extend(configured_skips(&path));
+    }
+    roots.retain(|path| useful_root(path));
+    roots
+}
+
+fn useful_root(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let text = text.trim();
+    !text.is_empty() && text != "/" && text != "."
+}
+
+fn config_files() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        });
+    if let Some(base) = base {
+        out.push(base.join("ljos").join("ljos.toml"));
+        if let Some(seat) = std::env::var("LJOS_SEAT")
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains(".."))
+        {
+            out.push(base.join("ljos").join("seats").join(seat).join("ljos.toml"));
+        }
+    }
+    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|value| !value.is_empty()) {
+        out.push(PathBuf::from(path));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd.join("ljos.toml"));
+    }
+    out
+}
+
+fn configured_skips(path: &Path) -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(list) = value
+        .get("git_hooks")
+        .and_then(|table| table.get("skip"))
+        .and_then(toml::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn covered(repo: &Path, root: &Path) -> bool {
+    let repo = canonical_or(repo);
+    let root = canonical_or(root);
+    repo == root || repo.starts_with(&root)
+}
+
+fn canonical_or(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn is_store(repo: &Path) -> bool {

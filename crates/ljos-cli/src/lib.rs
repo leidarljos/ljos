@@ -2637,9 +2637,10 @@ pub fn log_recall_in(dir: &Path, verb: &str, what: &str) {
 }
 
 /// The name this seat remembers, votes and earns trust under.
+/// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn seat_name() -> String {
-    whoami().seat
+    hook_actor().unwrap_or_else(|| whoami().seat)
 }
 
 /// Whether a conversation under a runner may accept a proposal: only one
@@ -2651,9 +2652,10 @@ pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> boo
 }
 
 /// The name this conversation's claims are held under.
+/// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn holder_name() -> String {
-    whoami().holder
+    hook_actor().unwrap_or_else(|| whoami().holder)
 }
 
 /// Resolve an `--assignee` / MCP field for a claim. Empty, a pronoun
@@ -2716,6 +2718,54 @@ pub fn format_seat_row() -> String {
 #[must_use]
 pub fn seat_for_agent(id: &str) -> String {
     mapped_seat(&seats_file(), id).unwrap_or_else(|| fallback_seat(id))
+}
+
+thread_local! {
+    static HOOK_ACTOR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While this guard is alive, [`holder_name`] and [`seat_name`] are `seat`.
+/// The process environment is not changed. Dropping it restores the
+/// previous name, so a git hook can pass the resolved seat into the claim,
+/// the deed and the tracker record without consulting the process tree.
+pub(crate) struct HookActor {
+    previous: Option<String>,
+}
+
+impl HookActor {
+    pub(crate) fn enter(seat: &str) -> Self {
+        let previous = HOOK_ACTOR.with(|slot| slot.replace(Some(seat.to_string())));
+        Self { previous }
+    }
+}
+
+impl Drop for HookActor {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        HOOK_ACTOR.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+pub(crate) fn hook_actor() -> Option<String> {
+    HOOK_ACTOR.with(|slot| slot.borrow().clone())
+}
+
+/// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
+/// `CURSOR_CONVERSATION_ID`, then `grokbot-` plus the first eight characters
+/// of that id. Nothing here reads the process tree. `None` means the hook
+/// does not book.
+#[must_use]
+pub fn git_hook_seat() -> Option<String> {
+    if let Some(name) = named_var("LJOS_SEAT") {
+        let slug = seat_slug(&name);
+        if slug != "runner" && !omitted_actor_name(&slug) {
+            return Some(name);
+        }
+    }
+    grokbot_seat_name().filter(|name| {
+        let slug = seat_slug(name);
+        slug != "runner" && !omitted_actor_name(&slug)
+    })
 }
 
 /// `ljos seat` when this process carries `CURSOR_CONVERSATION_ID`: the

@@ -857,11 +857,13 @@ impl Drop for ShutdownFinish {
 /// once per tool call keeps the claim and the idle clock. A hook, and an
 /// MCP process with no seat yet, stay on the session id.
 fn sitting_key() -> String {
-    if let Some(name) = std::env::var("LJOS_SEAT")
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|raw| !raw.is_empty())
-    {
+    let named = super::hook_actor().or_else(|| {
+        std::env::var("LJOS_SEAT")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|raw| !raw.is_empty())
+    });
+    if let Some(name) = named {
         let slug = super::seat_slug(&name);
         if slug != "runner" && !super::omitted_actor_name(&slug) {
             return format!("seat:{slug}");
@@ -1078,11 +1080,15 @@ fn ensure_claim(book: &mut Book, repo: &str) -> Result<(), String> {
 }
 
 fn file_and_claim(project: &str, title: &str) -> Result<String, String> {
-    let said = run_timed("vissue", &["create", "-p", project, title, "-q"], &[])
-        .map_err(|e| e.to_string())?;
+    let assignee = super::resolve_assignee(None);
+    let said = run_timed(
+        "vissue",
+        &["create", "-p", project, title, "-q"],
+        &[("VISSUE_AGENT", assignee.as_str())],
+    )
+    .map_err(|e| e.to_string())?;
     let issue = parse_issue_id(&said.stdout)
         .ok_or_else(|| format!("vissue create printed no issue id: {}", said.stdout.trim()))?;
-    let assignee = super::resolve_assignee(None);
     if which::which("claimdag").is_ok() {
         if let Err(e) = super::claim(&issue, &assignee) {
             log_line(&format!("claim graph: {e:#}"));
@@ -1266,12 +1272,17 @@ fn cite_deed(issue: &str, sha: &str) -> Result<(), String> {
             "--agent",
             &seat,
         ],
-        &[],
+        &[("VISSUE_AGENT", seat.as_str())],
     )
     .map_err(|e| e.to_string())?;
     let accession = parse_deed(&said.stdout)
         .ok_or_else(|| format!("deedar printed no accession: {}", said.stdout.trim()))?;
-    run_timed("vissue", &["deed", issue, "--add", &accession], &[]).map_err(|e| e.to_string())?;
+    run_timed(
+        "vissue",
+        &["deed", issue, "--add", &accession],
+        &[("VISSUE_AGENT", seat.as_str())],
+    )
+    .map_err(|e| e.to_string())?;
     let line = super::persist_tracker(issue, "cited a deed");
     if line.contains("could not") || line.contains("refused") {
         return Err(line.trim().to_string());
@@ -2005,6 +2016,9 @@ fn match_remote_project(repo: &str, tracker: &Path) -> Option<String> {
         if project_records_remote(dir, &want) {
             return Some(name.clone());
         }
+        if tracker_project_remote(tracker, name).is_some_and(|url| normalize_remote(&url) == want) {
+            return Some(name.clone());
+        }
     }
     let slug = remote_slug(&want);
     projects
@@ -2028,28 +2042,26 @@ fn git_remote_url(repo: &str) -> Option<String> {
 
 fn normalize_remote(raw: &str) -> String {
     let mut raw = raw.trim().trim_end_matches('/').to_string();
-    if raw.ends_with(".git") {
-        raw.truncate(raw.len() - 4);
+    if let Some(stripped) = raw.strip_suffix(".git") {
+        raw = stripped.to_string();
     }
-    if let Some(rest) = raw
-        .strip_prefix("ssh://")
-        .or_else(|| raw.strip_prefix("git://"))
-    {
-        raw = rest.to_string();
-    }
-    if let Some(rest) = raw
-        .strip_prefix("https://")
-        .or_else(|| raw.strip_prefix("http://"))
-    {
-        return rest.trim_start_matches("git@").to_ascii_lowercase();
-    }
-    if let Some(rest) = raw.strip_prefix("git@") {
-        if let Some((host, path)) = rest.split_once(':') {
-            if !host.contains('/') {
-                return format!("{host}/{}", path.trim_start_matches('/')).to_ascii_lowercase();
-            }
+    for prefix in ["ssh://", "git://", "https://", "http://"] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            raw = rest.to_string();
+            break;
         }
-        return rest.to_ascii_lowercase();
+    }
+    // userinfo@host, including a token a credential helper wrote in front
+    // of the host. The host and the path are the remote.
+    if let Some((user, host)) = raw.split_once('@') {
+        if !user.contains('/') {
+            raw = host.to_string();
+        }
+    }
+    if let Some((host, path)) = raw.split_once(':') {
+        if !host.contains('/') {
+            raw = format!("{host}/{}", path.trim_start_matches('/'));
+        }
     }
     raw.to_ascii_lowercase()
 }
@@ -2063,30 +2075,94 @@ fn remote_slug(normalized: &str) -> String {
 }
 
 fn project_records_remote(dir: &Path, want: &str) -> bool {
-    for name in ["issues.org", "remote.url", "repo.url"] {
+    recorded_remotes(dir)
+        .iter()
+        .any(|url| normalize_remote(url) == want)
+}
+
+/// Remotes this project recorded on purpose. A `#+REMOTE:` header, a
+/// one-url line in `remote.url` or `repo.url`, or a `remote` field in
+/// `project.toml`. A URL in a note is not a record.
+fn recorded_remotes(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(dir.join("issues.org")) {
+        for line in text.lines() {
+            if let Some(url) = header_remote(line) {
+                out.push(url);
+            }
+        }
+    }
+    for name in ["remote.url", "repo.url"] {
         let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
             continue;
         };
-        if text_mentions_remote(&text, want) {
-            return true;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.contains(char::is_whitespace) {
+                continue;
+            }
+            out.push(line.to_string());
         }
     }
-    false
+    out.extend(toml_remotes(&dir.join("project.toml")));
+    out
 }
 
-fn text_mentions_remote(text: &str, want: &str) -> bool {
-    if want.is_empty() {
-        return false;
+/// `#+REMOTE: url` in an org file. The rest of the file is notes.
+fn header_remote(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("#+")?;
+    let (key, value) = rest.split_once(':')?;
+    if !key.eq_ignore_ascii_case("REMOTE") {
+        return None;
     }
-    text.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| {
-            matches!(
-                c,
-                ',' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | ':'
-            )
-        });
-        !token.is_empty() && normalize_remote(token) == want
-    })
+    let value = value.trim().trim_matches('"').trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn toml_remotes(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    push_remote(&mut out, &value);
+    if let Some(project) = value.get("project") {
+        push_remote(&mut out, project);
+    }
+    out
+}
+
+fn push_remote(out: &mut Vec<String>, value: &toml::Value) {
+    let Some(url) = value.get("remote").and_then(toml::Value::as_str) else {
+        return;
+    };
+    let url = url.trim();
+    if !url.is_empty() {
+        out.push(url.to_string());
+    }
+}
+
+/// `remote` under `[projects.<name>]` in the tracker's `vissue.toml`.
+fn tracker_project_remote(tracker: &Path, project: &str) -> Option<String> {
+    let text = std::fs::read_to_string(tracker.join("vissue.toml")).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    let url = value
+        .get("projects")?
+        .get(project)?
+        .get("remote")?
+        .as_str()?
+        .trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
 }
 
 fn projects_in(root: &Path) -> Vec<(String, PathBuf)> {
@@ -3406,6 +3482,57 @@ mod tests {
             project_for_at(bare.to_str().unwrap(), None, Some(&tracker)),
             "bare",
             "no remote and more than one project uses the basename"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A URL in a project's notes is not its remote. promo's board mentions
+    /// the ljos repository; the commit still files on the slug, or on the
+    /// project whose metadata records that remote.
+    #[test]
+    fn a_decoy_note_does_not_take_the_project() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-decoy-remote");
+        let _ = std::fs::remove_dir_all(&root);
+        let tracker = root.join("tracker");
+        let repo = root.join("workspace");
+        std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
+        std::fs::create_dir_all(tracker.join("Software/promo")).unwrap();
+        std::fs::write(tracker.join("Software/ljos/issues.org"), "* TODO ljos\n").unwrap();
+        std::fs::write(
+            tracker.join("Software/promo/issues.org"),
+            "The notes mention https://github.com/leidarljos/ljos as the tool.\n* TODO promo\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:leidarljos/ljos.git",
+            ],
+        );
+        assert_eq!(
+            project_for_at(repo.to_str().unwrap(), None, Some(&tracker)),
+            "ljos",
+            "a note that names the url took the project"
+        );
+
+        let atlas = tracker.join("Software/atlas");
+        std::fs::create_dir_all(&atlas).unwrap();
+        std::fs::write(atlas.join("issues.org"), "* TODO atlas\n").unwrap();
+        std::fs::write(
+            atlas.join("project.toml"),
+            "remote = \"ssh://git@github.com/leidarljos/ljos.git\"\n",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(tracker.join("Software/ljos")).unwrap();
+        assert_eq!(
+            project_for_at(repo.to_str().unwrap(), None, Some(&tracker)),
+            "atlas",
+            "the recorded remote lost to a note"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

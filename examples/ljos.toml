@@ -14,3 +14,9 @@
 [identity]
 name = "Rohit Goswami"
 email = "rgoswami@ieee.org"
+
+# Commits under these paths are not booked. /tmp, /var/tmp, /dev/shm, the
+# tracker, CLAIMDAG_DIR and the deedar store are always skipped. A reinstall
+# rewrites the hook scripts and leaves this file alone.
+# [git_hooks]
+# skip = ["/srv/mirrors"]
