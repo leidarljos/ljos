@@ -2399,9 +2399,6 @@ fn run_command() -> Result<()> {
                 // and a fresh one hears that ljos is on, where the runner
                 // takes SessionStart context.
                 "SessionStart" => {
-                    // A new session starts the encoder loading, so the first
-                    // prompt does not wait on it.
-                    let _ = ljos_cli::encoder_warming();
                     let compacted = serde_json::from_str::<serde_json::Value>(input.trim())
                         .ok()
                         .and_then(|v| {
@@ -2410,7 +2407,7 @@ fn run_command() -> Result<()> {
                                 .map(|s| s == "compact")
                         })
                         .unwrap_or(false);
-                    if compacted && call.shape != ljos_cli::HookShape::CamelCase {
+                    let ctx = if compacted && call.shape != ljos_cli::HookShape::CamelCase {
                         if ljos_cli::peek_hook_context(call.session.as_deref()).is_empty() {
                             let _ = ljos_cli::rearm_after_compaction(call.session.as_deref());
                         }
@@ -2425,7 +2422,12 @@ fn run_command() -> Result<()> {
                         ljos_cli::session_start_for(call.session.as_deref())
                     } else {
                         String::new()
-                    }
+                    };
+                    // After the preface is read. The model load is its own
+                    // process and does not hold this line, and it does not
+                    // occupy the pack until the atoms for the line are in.
+                    let _ = ljos_cli::encoder_warming();
+                    ctx
                 }
                 // A turn ending is not a session ending, and has nothing
                 // to say either.

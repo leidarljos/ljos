@@ -261,9 +261,9 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     }
     if matches!(call.event.as_str(), "PreToolUse" | "PostToolUse") {
         // A write tool claims even for a new file. A shell redirect claims
-        // when it writes a file this repository already tracks. A commit
-        // claims too, so a sitting that only commits still has a ticket.
-        if is_edit(&value, &call.cue) || commit || writes_tracked(&repo, &call.cue) {
+        // when it writes a file inside this work tree, tracked or not.
+        // A commit claims too, so a sitting that only commits still has a ticket.
+        if is_edit(&value, &call.cue) || commit || writes_worktree(&repo, &call.cue) {
             let _ = ensure_claim(&mut book, &repo);
         }
         // The commit has not happened on the way in. Cite it on the way
@@ -2218,30 +2218,54 @@ fn glued_redirect(word: &str) -> Option<String> {
     redirect_path(body)
 }
 
-fn writes_tracked(repo: &str, line: &str) -> bool {
+/// Whether `line` redirects into a file inside `repo`. A new file is not
+/// tracked yet; `git ls-files` used to wait for a later git command before
+/// the sitting had a claim. A path outside the checkout, a home path, or
+/// a glob is not this work tree.
+fn writes_worktree(repo: &str, line: &str) -> bool {
+    let repo = Path::new(repo);
+    if repo.as_os_str().is_empty() {
+        return false;
+    }
     redirect_targets(line)
         .into_iter()
-        .any(|target| file_is_tracked(repo, &target))
+        .any(|target| path_in_worktree(repo, &target))
 }
 
-fn file_is_tracked(repo: &str, target: &str) -> bool {
-    let path = Path::new(target);
-    let relative = if path.is_absolute() {
-        path.strip_prefix(repo)
-            .ok()
-            .map(|p| p.display().to_string())
-    } else {
-        Some(target.trim_start_matches("./").to_string())
-    };
-    let Some(relative) = relative.filter(|p| !p.is_empty()) else {
+fn path_in_worktree(repo: &Path, target: &str) -> bool {
+    if target.is_empty()
+        || target.starts_with('~')
+        || target.contains('$')
+        || target.contains('*')
+        || target.starts_with('&')
+    {
         return false;
+    }
+    let target = Path::new(target);
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        repo.join(target)
     };
-    run_timed(
-        "git",
-        &["-C", repo, "ls-files", "--error-unmatch", "--", &relative],
-        &[],
-    )
-    .is_ok()
+    let repo = lexical_norm(repo);
+    let joined = lexical_norm(&joined);
+    joined.starts_with(&repo) && joined != repo
+}
+
+/// `..` and `.` collapsed, without asking the filesystem. A missing file
+/// is still inside the work tree when its path says so.
+fn lexical_norm(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn is_edit(raw: &Value, cue: &str) -> bool {
@@ -2674,6 +2698,249 @@ print(f"id={ident}")
         let text = raw.to_string();
         let call = crate::hook_call(&text);
         (text, call)
+    }
+
+    fn creates(tracker: &Path) -> usize {
+        let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap_or_default();
+        log.matches("\ncreate").count() + usize::from(log.starts_with("create"))
+    }
+
+    /// A redirect into this checkout claims on the call that writes it, for
+    /// every harness shell shape, including a file git does not track yet.
+    /// A redirect outside the checkout does not.
+    fn assert_redirect_claims(repo: &Path, tracker: &Path) {
+        let cwd = repo.display().to_string();
+        let repo_s = cwd.clone();
+        let claim = |session: &str, raw: Value, file: &str, want: bool| {
+            let text = raw.to_string();
+            let call = crate::hook_call(&text);
+            assert!(
+                matches!(call.event.as_str(), "PreToolUse" | "PostToolUse"),
+                "{session}: {}",
+                call.event
+            );
+            assert!(
+                call.cue.contains(file),
+                "{session} dropped the redirect: {}",
+                call.cue
+            );
+            assert_eq!(
+                writes_worktree(&repo_s, &call.cue),
+                want,
+                "{session} worktree {}",
+                call.cue
+            );
+            let before = creates(tracker);
+            let _ = observe(&text, &call);
+            assert_eq!(
+                creates(tracker) > before,
+                want,
+                "{session} claim {before} -> {}",
+                creates(tracker)
+            );
+        };
+        claim(
+            "claude-pre",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "redir-claude-pre",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi > kebab_claude.py"}
+            }),
+            "kebab_claude.py",
+            true,
+        );
+        claim(
+            "opencode-post",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "redir-opencode-post",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "cat > fresh_opencode.txt"},
+                "tool_response": {"exit_code": 0}
+            }),
+            "fresh_opencode.txt",
+            true,
+        );
+        claim(
+            "codex-pre",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "redir-codex-pre",
+                "turn_id": "t-redir-pre",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi > kebab_codex.py"}
+            }),
+            "kebab_codex.py",
+            true,
+        );
+        claim(
+            "codex-post",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "redir-codex-post",
+                "turn_id": "t-redir-post",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "cat > fresh_codex.txt"},
+                "tool_response": {"exit_code": 0}
+            }),
+            "fresh_codex.txt",
+            true,
+        );
+        claim(
+            "agy-pre",
+            serde_json::json!({
+                "conversationId": "redir-agy-pre",
+                "cwd": cwd,
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi > kebab_agy.py"}}
+            }),
+            "kebab_agy.py",
+            true,
+        );
+        claim(
+            "agy-post",
+            serde_json::json!({
+                "conversationId": "redir-agy-post",
+                "cwd": cwd,
+                "error": "",
+                "toolCall": {"name": "run_command", "args": {"CommandLine": "cat > fresh_agy.txt"}}
+            }),
+            "fresh_agy.txt",
+            true,
+        );
+        claim(
+            "cursor-shell",
+            serde_json::json!({
+                "cursor_version": "3.2.0",
+                "conversation_id": "redir-cursor-shell",
+                "hook_event_name": "beforeShellExecution",
+                "command": "echo hi > kebab_cursor.py",
+                "cwd": cwd
+            }),
+            "kebab_cursor.py",
+            true,
+        );
+        claim(
+            "cursor-post",
+            serde_json::json!({
+                "cursor_version": "3.2.0",
+                "conversation_id": "redir-cursor-post",
+                "hook_event_name": "postToolUse",
+                "cwd": cwd,
+                "tool_name": "Shell",
+                "tool_input": {"command": "cat > fresh_cursor.txt"}
+            }),
+            "fresh_cursor.txt",
+            true,
+        );
+        claim(
+            "grok-pre",
+            serde_json::json!({
+                "hookEventName": "preToolUse",
+                "sessionId": "redir-grok-pre",
+                "cwd": cwd,
+                "toolName": "run_terminal_command",
+                "toolInput": {"command": "echo hi > kebab_grok.py"}
+            }),
+            "kebab_grok.py",
+            true,
+        );
+        claim(
+            "grok-post",
+            serde_json::json!({
+                "hookEventName": "postToolUse",
+                "sessionId": "redir-grok-post",
+                "cwd": cwd,
+                "toolInput": {"command": "cat > fresh_grok.txt"}
+            }),
+            "fresh_grok.txt",
+            true,
+        );
+        claim(
+            "gemini-pre",
+            serde_json::json!({
+                "hook_event_name": "pre_tool_call",
+                "session_id": "redir-gem-pre",
+                "cwd": cwd,
+                "tool_name": "terminal",
+                "tool_input": {"command": "echo hi>kebab_gem.py"}
+            }),
+            "kebab_gem.py",
+            true,
+        );
+        claim(
+            "gemini-post",
+            serde_json::json!({
+                "hook_event_name": "post_tool_call",
+                "session_id": "redir-gem-post",
+                "cwd": cwd,
+                "tool_name": "terminal",
+                "tool_input": {"command": "echo more >> fresh_gem.txt"}
+            }),
+            "fresh_gem.txt",
+            true,
+        );
+        claim(
+            "outside-tmp",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "redir-outside-tmp",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi > /tmp/ljos-not-in-the-worktree.txt"}
+            }),
+            "/tmp/ljos-not-in-the-worktree.txt",
+            false,
+        );
+        claim(
+            "outside-parent",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "redir-outside-parent",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi > ../outside.txt"}
+            }),
+            "../outside.txt",
+            false,
+        );
+        claim(
+            "outside-home",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "redir-outside-home",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi > \"$HOME/.bashrc\""}
+            }),
+            "$HOME/.bashrc",
+            false,
+        );
+        claim(
+            "outside-tilde",
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "redir-outside-tilde",
+                "cwd": cwd,
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hi > ~/notes.txt"}
+            }),
+            "~/notes.txt",
+            false,
+        );
+    }
+
+    #[test]
+    fn a_shell_redirect_into_the_work_tree_claims_on_that_call() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        assert_redirect_claims(&repo, &tracker);
     }
 
     #[test]
@@ -3570,6 +3837,88 @@ print(f"id={ident}")
         assert!(note.contains("What this seat already knows"), "{note}");
         assert!(note.contains("slugify"), "{note}");
         assert!(note.contains("git-force-push"), "{note}");
+    }
+
+    /// A lesson is already stored and the encoder has never answered. No
+    /// warm-up marker stands yet. The first prompt of the next session
+    /// ranks that lesson from the atoms and recalls it; the warming note
+    /// is what a prompt with nothing to recall hears. The marker is
+    /// written after the atoms are read, so the load does not sit in
+    /// front of the listing.
+    #[test]
+    fn the_first_prompt_recalls_a_lesson_while_the_encoder_is_cold() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let marker = dir.path().join("run/ljos/encoder-warming");
+        assert!(!marker.exists(), "a fresh home has not started warming");
+        let atoms = Arc::new(Mutex::new(vec![
+            serde_json::json!({
+                "id": "atom-kebab",
+                "kind": "lesson",
+                "text": "The helper keeps kebab case.",
+                "entities": ["horizon:standing"],
+                "ts": "2026-10-17T00:00:00Z",
+                "origin": "agent-derived",
+                "source": {"title": "keep kebab case in the helper"}
+            }),
+            serde_json::json!({
+                "id": "atom-deploy",
+                "kind": "lesson",
+                "text": "The deploy script restarts the service.",
+                "entities": ["horizon:standing"],
+                "ts": "2026-10-17T00:00:01Z",
+                "origin": "agent-derived"
+            }),
+        ]));
+        let pack = serve_pack({
+            let atoms = Arc::clone(&atoms);
+            move |req| {
+                let path = req.lines().next().unwrap_or("");
+                if path.contains("GET /v1/status") {
+                    return (
+                        200,
+                        r#"{"embedder":{"available":true,"answering":null}}"#.into(),
+                    );
+                }
+                if path.contains("GET /v1/atoms") {
+                    let list = atoms.lock().unwrap().clone();
+                    return (200, serde_json::json!({"atoms": list}).to_string());
+                }
+                (200, "{}".into())
+            }
+        });
+        set_var("PACKSET_URL", &pack);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+        let (_raw, call) = payload(
+            "UserPromptSubmit",
+            "cold-session-2",
+            &repo,
+            serde_json::json!({"prompt": "Please update test_kebab.py and run pytest."}),
+        );
+        let (note, _) = crate::hook_note(&call, 4);
+        assert!(
+            note.contains("What this seat already knows"),
+            "the first prompt recalled nothing: {note}"
+        );
+        assert!(note.contains("kebab"), "{note}");
+        assert!(
+            !note.contains(crate::ENCODER_WARMING_NOTE),
+            "the warming note hid the lesson: {note}"
+        );
+        assert!(marker.exists(), "warming starts after the atoms are read");
+        let (_raw, other) = payload(
+            "UserPromptSubmit",
+            "cold-unrelated",
+            &repo,
+            serde_json::json!({"prompt": "Deploy the payments service tonight."}),
+        );
+        let (other_note, _) = crate::hook_note(&other, 4);
+        assert!(
+            !other_note.contains("kebab"),
+            "an unrelated prompt was handed the lesson: {other_note}"
+        );
     }
 
     /// A session that only met a force-push ask writes a sentence about that

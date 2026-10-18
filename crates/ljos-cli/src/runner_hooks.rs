@@ -441,17 +441,29 @@ fn tool_command(normalized: &str) -> String {
 /// The fast in-process verdict, in the shape the inner hook prints, when
 /// the command is one the static check refuses. `None` means the slow
 /// hook still has to run.
+/// A runner's pre-tool event, as the seat names it. Gemini's `BeforeTool`
+/// and Windsurf's `pre_run_command` are that gate. Rendering the verdict
+/// under the raw name prints no decision, and Gemini reads a JSON object
+/// with no `decision` as an allow.
+fn seat_tool_event(event: &str) -> &str {
+    match event {
+        "" | "BeforeTool" | "pre_run_command" => "PreToolUse",
+        other => other,
+    }
+}
+
 fn early_answer(normalized: &str, event: &str) -> Option<String> {
     let line = tool_command(normalized);
-    let cwd = serde_json::from_str::<Value>(normalized.trim())
-        .ok()
+    let parsed = serde_json::from_str::<Value>(normalized.trim()).ok();
+    let cwd = parsed
+        .as_ref()
         .and_then(|v| v["cwd"].as_str().map(std::path::PathBuf::from));
     let rule = crate::static_guard_in(&line, cwd.as_deref())?;
-    let event = if event.is_empty() {
-        "PreToolUse"
-    } else {
-        event
-    };
+    let named = parsed
+        .as_ref()
+        .and_then(|v| v["hook_event_name"].as_str())
+        .filter(|name| !name.is_empty());
+    let event = seat_tool_event(named.unwrap_or(event));
     let call = crate::HookCall {
         event: event.to_string(),
         cue: line,
@@ -1318,6 +1330,26 @@ mod tests {
             "{denied}"
         );
         assert!(denied.contains("rm-rf-outside-tmp"), "{denied}");
+        // Gemini names the gate BeforeTool. A verdict rendered under that
+        // name used to omit the decision, and Gemini allows an object
+        // that has none.
+        let before = early_answer(&force, "BeforeTool").expect("BeforeTool is still a gate");
+        assert_eq!(
+            read_answer(&before).decision.as_deref(),
+            Some("deny"),
+            "{before}"
+        );
+        let (out, _, code) = answer("gemini", "BeforeTool", &before);
+        assert_eq!(code, 0);
+        assert!(out.contains("\"deny\""), "{out}");
+        assert!(!out.contains("\"ask\""), "{out}");
+        let wind =
+            early_answer(&force, "pre_run_command").expect("pre_run_command is still a gate");
+        assert_eq!(
+            read_answer(&wind).decision.as_deref(),
+            Some("deny"),
+            "{wind}"
+        );
         drop(saved);
         let _ = std::fs::remove_dir_all(&dir);
     }
