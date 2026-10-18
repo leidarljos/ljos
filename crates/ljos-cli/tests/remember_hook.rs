@@ -25,7 +25,7 @@ impl Drop for Daemon {
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = ljos_cli::process_env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
@@ -46,7 +46,7 @@ impl Home {
     /// One `ljos` run with only this home's environment.
     fn ljos(&self, args: &[&str], stdin: Option<&str>) -> Output {
         let home = self.dir.path();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
         run(cmd, stdin)
@@ -131,7 +131,7 @@ fn seat() -> (Home, Daemon, String) {
 
     let pack_home = home.dir.path().join(".local/share/packset");
     std::fs::create_dir_all(&pack_home).expect("pack home");
-    let mut daemon = Command::new(&packsetd);
+    let mut daemon = ljos_cli::process_env::command(&packsetd);
     daemon.args([
         "--port",
         &home.port.to_string(),
@@ -178,7 +178,7 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
         "prompt": prompt,
     })
     .to_string();
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = ljos_cli::process_env::command("/bin/sh");
     cmd.args(["-c", hook]);
     home.env(&mut cmd, home.dir.path());
     let said = run(cmd, Some(&payload));

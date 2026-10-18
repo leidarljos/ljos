@@ -1,12 +1,10 @@
 //! `ljos onboard` with no runner prints the MCP entry to paste, and that
 //! output has to parse as JSON as it stands.
 
-use std::process::Command;
-
 #[test]
 fn the_bare_onboard_prints_json_alone() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let out = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("onboard")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

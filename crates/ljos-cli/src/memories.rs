@@ -27,7 +27,7 @@ pub const REVIEW_KINDS: &[&str] = &["lesson", "preference", "rule", "fact", "not
 /// the agent set it, else the opening of the person's latest prompt.
 #[must_use]
 pub fn write_reason() -> Option<String> {
-    std::env::var("LJOS_MEMORY_WHY")
+    crate::process_env::var("LJOS_MEMORY_WHY")
         .ok()
         .map(|w| crate::capture::excerpt_of(&w))
         .filter(|w| !w.is_empty())
@@ -138,9 +138,11 @@ pub struct Review {
 /// The file the verdicts are kept in.
 #[must_use]
 pub fn reviews_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::process_env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state"))
+        })
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos/memory-reviews.jsonl")
 }
@@ -1095,8 +1097,8 @@ mod tests {
     fn keep_records_a_verdict_and_an_ambiguous_id_is_refused() {
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let old = crate::process_env::var_os("XDG_STATE_HOME");
+        crate::process_env::set_var("XDG_STATE_HOME", dir.path());
         let all = sample();
         assert!(keep("a1", &all).unwrap().starts_with("kept a1aaaaaa"));
         let r = reviews();
@@ -1109,8 +1111,8 @@ mod tests {
         });
         assert!(resolve("a1", &twin).is_err());
         match old {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
+            Some(v) => crate::process_env::set_var("XDG_STATE_HOME", v),
+            None => crate::process_env::remove_var("XDG_STATE_HOME"),
         }
     }
 
@@ -1203,7 +1205,7 @@ mod tests {
     fn a_recall_bumps_the_count_the_list_shows() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::process_env::set_var("XDG_STATE_HOME", dir.path());
         let atoms = vec![atom(
             "a1aaaaaaaaaaaaaa",
             "pin the fuse",
@@ -1221,6 +1223,6 @@ mod tests {
             "{}",
             describe(&after[0])
         );
-        std::env::remove_var("XDG_STATE_HOME");
+        crate::process_env::remove_var("XDG_STATE_HOME");
     }
 }

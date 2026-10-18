@@ -1510,11 +1510,12 @@ fn run_command() -> Result<()> {
             }
             let filed_title = title.clone();
             argv.push(title);
-            let out =
-                std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
-                    .args(&argv)
-                    .stdin(std::process::Stdio::null())
-                    .output()?;
+            let out = ljos_cli::process_env::command(
+                ljos_cli::process_env::which("vissue").context("vissue not on PATH")?,
+            )
+            .args(&argv)
+            .stdin(std::process::Stdio::null())
+            .output()?;
             let text = String::from_utf8_lossy(&out.stdout);
             if !out.status.success() {
                 anyhow::bail!(
@@ -2008,7 +2009,7 @@ fn run_command() -> Result<()> {
         } => {
             ljos_cli::ballot_seat("predict")?;
             let who = as_persona
-                .or_else(|| std::env::var("VISSUE_AGENT").ok())
+                .or_else(|| ljos_cli::process_env::var("VISSUE_AGENT").ok())
                 .unwrap_or_else(whoami_tracker);
             let body = write_prediction(&issue, &who, &expect)?;
             println!("{}", serde_json::to_string_pretty(&body)?);
@@ -2098,7 +2099,7 @@ fn run_command() -> Result<()> {
             // A runner the seat asked for a judgment hears nothing from the
             // seat, so the judgment cannot open sittings or judge again;
             // the law on its tool calls still holds.
-            if std::env::var_os("LJOS_JUDGE").is_some() && call.event != "PreToolUse" {
+            if ljos_cli::process_env::var_os("LJOS_JUDGE").is_some() && call.event != "PreToolUse" {
                 print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
                 return Ok(());
             }
@@ -2138,7 +2139,7 @@ fn run_command() -> Result<()> {
             // A hook answers within the runner's timeout: lookups that walk
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
-            unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+            ljos_cli::process_env::set_var("LJOS_IN_HOOK", "1");
             ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());

@@ -2,7 +2,7 @@
 //! one JSON document a caller can parse whole.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -36,9 +36,9 @@ fn consensus(dir: &Path, home: &Path, args: &[&str]) -> Output {
     let path = format!(
         "{}:{}",
         dir.display(),
-        std::env::var("PATH").unwrap_or_default()
+        ljos_cli::process_env::var("PATH").unwrap_or_default()
     );
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("consensus")
         .args(args)
         .env_clear()

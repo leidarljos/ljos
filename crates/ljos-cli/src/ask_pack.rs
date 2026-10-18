@@ -167,14 +167,14 @@ pub fn ask_pack_classes(setting: Option<&str>) -> Vec<&'static str> {
 /// rule, or none.
 #[must_use]
 pub fn ask_pack_verdict(line: &str) -> Option<Rule> {
-    ask_pack_verdict_with(line, std::env::var(ASK_PACK_ENV).ok().as_deref())
+    ask_pack_verdict_with(line, crate::process_env::var(ASK_PACK_ENV).ok().as_deref())
 }
 
 /// The ask the pack would give the line with every class on, when the
 /// setting in `LJOS_ASK_PACK` turned that class off, with the setting.
 #[must_use]
 pub fn ask_pack_switched_off(line: &str) -> Option<(Rule, String)> {
-    let setting = std::env::var(ASK_PACK_ENV).ok()?;
+    let setting = crate::process_env::var(ASK_PACK_ENV).ok()?;
     if ask_pack_verdict_with(line, Some(&setting)).is_some() {
         return None;
     }

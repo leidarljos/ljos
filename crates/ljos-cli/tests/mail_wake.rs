@@ -24,7 +24,7 @@ impl Drop for Daemon {
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = ljos_cli::process_env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
@@ -44,7 +44,7 @@ struct Home {
 impl Home {
     /// One `ljos` run as `seat`, with only this home's environment.
     fn ljos(&self, seat: &str, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd);
         cmd.env("LJOS_SEAT", seat);
@@ -127,7 +127,7 @@ fn home() -> (Home, Daemon) {
     };
     let pack_home = home.dir.path().join(".local/share/packset");
     std::fs::create_dir_all(&pack_home).expect("pack home");
-    let mut daemon = Command::new(&packsetd);
+    let mut daemon = ljos_cli::process_env::command(&packsetd);
     daemon.args([
         "--port",
         &home.port.to_string(),

@@ -366,7 +366,7 @@ fn same_conversation(stored: &str, given: &str) -> bool {
 }
 
 fn stamped_session_ids() -> Vec<String> {
-    std::env::vars()
+    crate::process_env::vars()
         .filter(|(key, value)| {
             (key.ends_with("_SESSION_ID")
                 || key.ends_with("_THREAD_ID")

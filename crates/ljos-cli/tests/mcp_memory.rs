@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -99,7 +99,7 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let url = serve(Arc::new(Mutex::new(Vec::new())));
     let text = "Pin the review set before a release.";
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+    let mut child = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_STATE_HOME", &state)
@@ -144,7 +144,7 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     );
 
     let list = || {
-        let got = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let got = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
             .args(["memories", "list"])
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -168,7 +168,7 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     );
     assert!(shown.contains("recalled 0x"), "{shown}");
 
-    let searched = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let searched = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "review set"])
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

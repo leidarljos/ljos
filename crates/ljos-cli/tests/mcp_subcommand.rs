@@ -3,12 +3,12 @@
 //! and memory tools.
 
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[test]
 fn ljos_mcp_serves_and_lists_the_guard_first() {
     let home = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("mcp")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

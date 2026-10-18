@@ -25,7 +25,7 @@ pub struct HudLaunch {
 
 /// Locate `ljos-hud`. Missing means exit 127.
 pub fn resolve_hud_bin() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var(HUD_BIN_ENV) {
+    if let Ok(raw) = crate::process_env::var(HUD_BIN_ENV) {
         let t = raw.trim();
         if !t.is_empty() {
             return Some(PathBuf::from(t));
@@ -39,7 +39,7 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
             }
         }
     }
-    let path = std::env::var_os("PATH")?;
+    let path = crate::process_env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("ljos-hud");
         if candidate.is_file() {
@@ -69,7 +69,7 @@ pub fn run(opts: HudLaunch) -> i32 {
         eprintln!("{}", missing_bin_message());
         return 127;
     };
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = crate::process_env::command(&bin);
     if opts.foreground {
         cmd.arg("--foreground");
     }
@@ -113,7 +113,7 @@ mod tests {
     }
 
     fn missing_hud() -> PathBuf {
-        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("private runtime dir"))
+        PathBuf::from(crate::process_env::var_os("XDG_RUNTIME_DIR").expect("private runtime dir"))
             .join("ljos-hud-missing")
     }
 
@@ -122,9 +122,8 @@ mod tests {
         let _env = hud_env();
         let missing = missing_hud();
         #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(HUD_BIN_ENV, &missing);
-        }
+        crate::process_env::set_var(HUD_BIN_ENV, &missing);
+
         let code = run(HudLaunch {
             foreground: true,
             ..HudLaunch::default()
@@ -138,9 +137,8 @@ mod tests {
         let _env = hud_env();
         let missing = missing_hud();
         #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(HUD_BIN_ENV, &missing);
-        }
+        crate::process_env::set_var(HUD_BIN_ENV, &missing);
+
         let code = run(HudLaunch {
             hide: true,
             ..HudLaunch::default()
@@ -165,9 +163,8 @@ mod tests {
         let _env = hud_env();
         let path = missing_hud();
         #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(HUD_BIN_ENV, path.to_str().unwrap());
-        }
+        crate::process_env::set_var(HUD_BIN_ENV, path.to_str().unwrap());
+
         assert_eq!(resolve_hud_bin(), Some(path));
     }
 }

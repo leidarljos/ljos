@@ -4,7 +4,6 @@
 //! session id and a board filtered by seat missed the claim.
 
 use std::path::Path;
-use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -39,10 +38,10 @@ fn the_seat_named_on_the_command_line_holds_the_claim() {
     let path = format!(
         "{}:{}",
         dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
+        ljos_cli::process_env::var("PATH").unwrap_or_default()
     );
     let ljos = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &path)

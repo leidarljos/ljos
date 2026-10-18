@@ -85,10 +85,12 @@ fn declared_tools() -> Vec<Tool> {
 /// and keeps its session.
 #[must_use]
 pub fn home(name: &str) -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::process_env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state"))
+        })
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("personas")
@@ -187,7 +189,7 @@ enum Pane {
 fn pane_state(name: &str, home: &Path, declared: &[Tool]) -> Pane {
     let Some((tool_name, pane)) = read_record(home) else {
         // A window opened before panes kept a record.
-        let legacy = std::process::Command::new("tmux")
+        let legacy = crate::process_env::command("tmux")
             .args(["list-windows", "-t", PERSONA_SESSION, "-F", "#W"])
             .stderr(std::process::Stdio::null())
             .output()
@@ -287,7 +289,7 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
     let argv = argv_for(started.exists())?;
     let again = argv_for(true)?;
     std::fs::write(&script, pane_script(name, &argv, &again, &home))?;
-    let only = std::env::var("LJOS_PANE_TOOL")
+    let only = crate::process_env::var("LJOS_PANE_TOOL")
         .ok()
         .filter(|v| !v.is_empty());
     let here = tools::available(&declared, only.as_deref());
@@ -323,8 +325,8 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
 /// needs the socket, so it fails when no server is running.
 #[must_use]
 pub fn herdr_up() -> bool {
-    which::which("herdr").is_ok()
-        && std::process::Command::new("herdr")
+    crate::process_env::which("herdr").is_ok()
+        && crate::process_env::command("herdr")
             .args(["workspace", "list"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -345,7 +347,7 @@ pub fn herdr_agent_status(name: &str) -> Option<String> {
     if !herdr_up() {
         return None;
     }
-    let out = std::process::Command::new("herdr")
+    let out = crate::process_env::command("herdr")
         .args(["agent", "get", &herdr_name(name)])
         .stderr(std::process::Stdio::null())
         .output()
@@ -503,7 +505,7 @@ mod tests {
         let script = pane_script("p", &fail, &fail, dir.path())
             .replace("exec \"${SHELL:-/bin/sh}\" -i\n", "");
         let script = script.replace("sleep 1\n", "");
-        let out = std::process::Command::new("sh")
+        let out = crate::process_env::command("sh")
             .arg("-c")
             .arg(&script)
             .output()
@@ -520,7 +522,7 @@ mod tests {
         ];
         let script =
             pane_script("p", &ok, &fail, dir.path()).replace("exec \"${SHELL:-/bin/sh}\" -i\n", "");
-        std::process::Command::new("sh")
+        crate::process_env::command("sh")
             .arg("-c")
             .arg(&script)
             .status()

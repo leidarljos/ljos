@@ -118,7 +118,7 @@ pub fn tool_set(spec: Option<&str>) -> Option<Vec<String>> {
 
 /// The set this server was started with.
 fn env_tool_set() -> Option<Vec<String>> {
-    tool_set(std::env::var("LJOS_MCP_TOOLS").ok().as_deref())
+    tool_set(ljos_cli::process_env::var("LJOS_MCP_TOOLS").ok().as_deref())
 }
 
 fn listed(set: Option<&[String]>, name: &str) -> bool {
@@ -258,10 +258,8 @@ fn seat_argument(
 /// Habitat children and the blocking book read the process environment.
 /// One stdio server sits one bot, so this call's seat is that process's seat.
 fn bind_seat_env(seat: &str) {
-    unsafe {
-        std::env::set_var("LJOS_SEAT", seat);
-        std::env::set_var("VISSUE_AGENT", seat);
-    }
+    ljos_cli::process_env::set_var("LJOS_SEAT", seat);
+    ljos_cli::process_env::set_var("VISSUE_AGENT", seat);
 }
 
 const SEAT_PROPERTY: &str =
@@ -1050,9 +1048,10 @@ fn habitat_as(bin: &str, args: &[&str], identity: Option<&str>) -> Result<Json<S
     let Some(who) = identity_or_seat(identity) else {
         return habitat(bin, args);
     };
-    use std::process::{Command, Stdio};
-    let path = which::which(bin).map_err(|_| refused(anyhow::anyhow!("{bin} not on PATH")))?;
-    let mut cmd = Command::new(path);
+    use std::process::Stdio;
+    let path = ljos_cli::process_env::which(bin)
+        .map_err(|_| refused(anyhow::anyhow!("{bin} not on PATH")))?;
+    let mut cmd = ljos_cli::process_env::command(path);
     cmd.env("VISSUE_AGENT", who);
     ljos_cli::bind_connection_env(&mut cmd);
     let out = cmd
@@ -1148,7 +1147,7 @@ impl LjosServer {
     /// the same default the command line has.
     #[must_use]
     pub fn from_env() -> Self {
-        let cards_dir = std::env::var_os("LJOS_CARDS_DIR")
+        let cards_dir = ljos_cli::process_env::var_os("LJOS_CARDS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         Self { cards_dir }
@@ -2830,7 +2829,7 @@ pub const FORWARDED: &str = "LJOS_MCP_FORWARDED";
 /// replaced on disk since it started. A runner keeps its server for the
 /// whole conversation, so without this an install reached no running agent.
 fn replaced_binary() -> Option<PathBuf> {
-    if std::env::var_os(FORWARDED).is_some() {
+    if ljos_cli::process_env::var_os(FORWARDED).is_some() {
         return None;
     }
     let exe = std::fs::read_link("/proc/self/exe").ok()?;
@@ -2961,7 +2960,7 @@ impl ServerHandler for LjosServer {
         // A forwarded call comes from a stale server that listed the tool
         // under its own set, so the fresh one answers it.
         let set = env_tool_set();
-        if std::env::var_os(FORWARDED).is_none()
+        if ljos_cli::process_env::var_os(FORWARDED).is_none()
             && !listed(set.as_deref(), &request.name)
             && Self::tool_router().get(&request.name).is_some()
         {

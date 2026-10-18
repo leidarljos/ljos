@@ -2,11 +2,9 @@
 //! Force, a `+refspec`, deleting a remote branch, and pushing tags ask.
 //! A plain branch push stays allowed.
 
-use std::process::Command;
-
 fn policy(line: &str) -> std::process::Output {
     let home = tempfile::tempdir().unwrap();
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("policy")
         .arg(line)
         .env("HOME", home.path())

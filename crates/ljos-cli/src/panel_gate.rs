@@ -13,7 +13,7 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::ballot_sig;
 
@@ -566,7 +566,7 @@ pub fn tally_report(issue: &str) -> Result<String> {
 }
 
 fn reads_path() -> Option<PathBuf> {
-    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
+    let root = crate::process_env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
     Some(PathBuf::from(root).join(READS_FILE))
 }
 
@@ -729,7 +729,7 @@ fn harness_name(passed: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            std::env::var("LJOS_PANEL_HARNESS")
+            crate::process_env::var("LJOS_PANEL_HARNESS")
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -740,7 +740,7 @@ fn harness_name(passed: Option<&str>) -> String {
 /// What one spawned member runs. `LJOS_MEMBER_BIN` is the test stand-in.
 #[must_use]
 pub fn member_argv(harness: &str, prompt: &str) -> Vec<String> {
-    if let Some(bin) = std::env::var("LJOS_MEMBER_BIN")
+    if let Some(bin) = crate::process_env::var("LJOS_MEMBER_BIN")
         .ok()
         .filter(|s| !s.trim().is_empty())
     {
@@ -782,7 +782,7 @@ fn issue_brief(issue: &str) -> String {
 }
 
 fn persona_names(issue: &str) -> Vec<String> {
-    if let Ok(raw) = std::env::var("LJOS_PANEL_PERSONAS") {
+    if let Ok(raw) = crate::process_env::var("LJOS_PANEL_PERSONAS") {
         let names: Vec<String> = raw
             .split(',')
             .map(str::trim)
@@ -885,7 +885,7 @@ fn run_job(job: &Job) -> String {
     if job.argv.is_empty() {
         return format!("{} did not start: no argv\n", job.role);
     }
-    let mut cmd = Command::new(&job.argv[0]);
+    let mut cmd = crate::process_env::command(&job.argv[0]);
     cmd.args(&job.argv[1..])
         .env("LJOS_HARNESS_SESSION", &job.session)
         .env("LJOS_SESSION_ID", &job.session)
@@ -920,7 +920,7 @@ pub fn panel_run(
     designers: usize,
     dry_run: bool,
 ) -> Result<String> {
-    if std::env::var_os("LJOS_PANEL_CHILD").is_some() {
+    if crate::process_env::var_os("LJOS_PANEL_CHILD").is_some() {
         return Ok(format!(
             "panel run: {issue} is already inside a panel member; nothing spawned\n"
         ));
@@ -939,11 +939,16 @@ pub fn panel_run(
         return Ok(out);
     }
     let at_once = crate::panel_concurrency().max(1);
+    let holder = crate::process_env::current_holder();
+    let overlay = crate::process_env::overlay_snapshot();
     for chunk in jobs.chunks(at_once) {
         let mut handles = Vec::new();
         for job in chunk {
             let job = job.clone();
-            handles.push(std::thread::spawn(move || run_job(&job)));
+            let overlay = overlay.clone();
+            handles.push(std::thread::spawn(move || {
+                crate::process_env::bind_helper(holder, overlay, || run_job(&job))
+            }));
         }
         for handle in handles {
             match handle.join() {
@@ -997,16 +1002,16 @@ mod tests {
         assert!(session_cast_refusal("demo-ind1", "sess-bob-0001", "bob", &notes).is_none());
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("VISSUE_ROOT", dir.path());
-        std::env::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
-        std::env::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
+        crate::process_env::set_var("VISSUE_ROOT", dir.path());
+        crate::process_env::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
+        crate::process_env::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
         let first = claim_session_ballot("probe-seat-1", "saddle").unwrap();
         let second = claim_session_ballot("probe-seat-1", "other").unwrap_err();
         assert!(second.to_string().contains("already cast"), "{second:#}");
         first.keep();
-        std::env::remove_var("VISSUE_ROOT");
-        std::env::remove_var("LJOS_HARNESS_SESSION");
-        std::env::remove_var("LJOS_PROCESS_NONCE");
+        crate::process_env::remove_var("VISSUE_ROOT");
+        crate::process_env::remove_var("LJOS_HARNESS_SESSION");
+        crate::process_env::remove_var("LJOS_PROCESS_NONCE");
     }
 
     #[test]

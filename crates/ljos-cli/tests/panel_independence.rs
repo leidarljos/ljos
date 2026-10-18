@@ -3,7 +3,7 @@
 //! own session.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 const BLIND: &str = "\
 design demo-a is not blind: session sess-designer-0001 read demo-b before filing it";
@@ -167,9 +167,9 @@ printf '%s' "$2" > "$d/$id.prompt"
         let path = format!(
             "{}:{}",
             self.bin.display(),
-            std::env::var("PATH").unwrap_or_default()
+            ljos_cli::process_env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(&self.bin)
             .env_clear()
@@ -505,7 +505,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         "{said}"
     );
 
-    let nested = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let nested = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .args([
             "panel",
             "run",
@@ -521,7 +521,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
             format!(
                 "{}:{}",
                 world.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
+                ljos_cli::process_env::var("PATH").unwrap_or_default()
             ),
         )
         .env("HOME", &world.home)
@@ -541,7 +541,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         "{said}"
     );
 
-    let spawned = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let spawned = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .args(["panel", "run", "demo-brief", "--designers", "3"])
         .current_dir(&world.bin)
         .env_clear()
@@ -550,7 +550,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
             format!(
                 "{}:{}",
                 world.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
+                ljos_cli::process_env::var("PATH").unwrap_or_default()
             ),
         )
         .env("HOME", &world.home)

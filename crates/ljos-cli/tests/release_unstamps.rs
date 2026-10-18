@@ -4,7 +4,6 @@
 //! sitting as still held (Software-5lck).
 
 use std::path::Path;
-use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -56,10 +55,10 @@ fn release_and_complete_drop_the_tracker_claim_and_keep_the_state() {
     let path = format!(
         "{}:{}",
         dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
+        ljos_cli::process_env::var("PATH").unwrap_or_default()
     );
     let ljos = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &path)

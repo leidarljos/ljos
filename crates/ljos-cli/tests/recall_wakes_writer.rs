@@ -61,7 +61,7 @@ fn seat() -> (SeatHome, PathBuf, u16) {
 }
 
 fn ljos(home: &SeatHome, port: u16) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.env_clear()
         .current_dir(home.path())
         .env("HOME", home.path())

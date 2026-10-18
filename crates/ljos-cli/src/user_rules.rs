@@ -453,7 +453,7 @@ pub fn promote_lesson(
 }
 
 fn sync_budget_ms(default: u64) -> u64 {
-    std::env::var("LJOS_USER_RULES_SYNC_MS")
+    crate::process_env::var("LJOS_USER_RULES_SYNC_MS")
         .ok()
         .and_then(|value| value.trim().parse().ok())
         .filter(|ms: &u64| *ms > 0)
@@ -485,7 +485,11 @@ pub fn sync_for_hook() {
 /// Sync is switched off, no tracker is configured, or the tracker did not
 /// answer inside the budget.
 pub fn sync_now() -> Result<String> {
-    if std::env::var("LJOS_USER_RULES_SYNC").ok().as_deref() == Some("off") {
+    if crate::process_env::var("LJOS_USER_RULES_SYNC")
+        .ok()
+        .as_deref()
+        == Some("off")
+    {
         bail!("prefer: user-rule sync is off");
     }
     let roots = super::sync::user_rule_trackers();
@@ -1097,15 +1101,14 @@ mod tests {
             .join("../../target/user-rule-homes");
         std::fs::create_dir_all(&root).unwrap();
         let dir = tempfile::TempDir::new_in(&root).unwrap();
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("LJOS_HOLD", "rohit");
-            std::env::set_var("LJOS_SEAT", "claude");
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("PACKSET_WORKSPACE", "seat-a");
-            std::env::set_var("LJOS_USER_RULES_SYNC", "off");
-        }
+        crate::process_env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+        crate::process_env::set_var("HOME", dir.path());
+        crate::process_env::set_var("LJOS_HOLD", "rohit");
+        crate::process_env::set_var("LJOS_SEAT", "claude");
+        crate::process_env::set_var("PACKSET_URL", "off");
+        crate::process_env::set_var("PACKSET_WORKSPACE", "seat-a");
+        crate::process_env::set_var("LJOS_USER_RULES_SYNC", "off");
+
         (lock, dir)
     }
 
@@ -1131,10 +1134,9 @@ mod tests {
         let written = alan();
         assert_eq!(written.author, "rohit");
         assert!(written.due_at.is_none());
-        unsafe {
-            std::env::set_var("LJOS_SEAT", "codex");
-            std::env::set_var("PACKSET_WORKSPACE", "seat-b");
-        }
+        crate::process_env::set_var("LJOS_SEAT", "codex");
+        crate::process_env::set_var("PACKSET_WORKSPACE", "seat-b");
+
         let path = rules_path().unwrap();
         assert!(path.starts_with(dir.path().join("config")));
         assert!(!path.to_string_lossy().contains("codex"));
@@ -1177,9 +1179,8 @@ mod tests {
         let agy_out = super::super::hook_output(&agy, &agy_note);
         assert!(agy_out.contains("injectSteps"), "{agy_out}");
         assert!(agy_out.contains("never post or reply to Alan"), "{agy_out}");
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("other"));
-        }
+        crate::process_env::set_var("XDG_CONFIG_HOME", dir.path().join("other"));
+
         assert!(preface().is_empty(), "a second config home has no rules");
     }
 
@@ -1367,7 +1368,7 @@ mod tests {
     }
 
     fn git_ok(dir: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = crate::process_env::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1445,13 +1446,12 @@ mod tests {
             prepare_clone(&shared);
             let cfg_a = root.path().join("cfg-a");
             let cfg_b = root.path().join("cfg-b");
-            unsafe {
-                std::env::set_var("LJOS_USER_RULES_SYNC", "off");
-                std::env::set_var("LJOS_HOLD", "rohit");
-                std::env::set_var("PACKSET_URL", "off");
-                std::env::set_var("HOME", root.path());
-                std::env::remove_var("LJOS_USER_RULES_TRACKER");
-            }
+            crate::process_env::set_var("LJOS_USER_RULES_SYNC", "off");
+            crate::process_env::set_var("LJOS_HOLD", "rohit");
+            crate::process_env::set_var("PACKSET_URL", "off");
+            crate::process_env::set_var("HOME", root.path());
+            crate::process_env::remove_var("LJOS_USER_RULES_TRACKER");
+
             Self {
                 _lock: lock,
                 _root: root,
@@ -1463,7 +1463,7 @@ mod tests {
         }
 
         fn home(&self, cfg: &std::path::Path) {
-            unsafe { std::env::set_var("XDG_CONFIG_HOME", cfg) };
+            crate::process_env::set_var("XDG_CONFIG_HOME", cfg);
         }
     }
 
@@ -1645,11 +1645,10 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/tracker.git");
         git_ok(&repo, &["remote", "add", "origin", &url]);
-        unsafe {
-            std::env::remove_var("LJOS_USER_RULES_SYNC");
-            std::env::set_var("LJOS_USER_RULES_TRACKER", &repo);
-            std::env::set_var("LJOS_USER_RULES_SYNC_MS", "400");
-        }
+        crate::process_env::remove_var("LJOS_USER_RULES_SYNC");
+        crate::process_env::set_var("LJOS_USER_RULES_TRACKER", &repo);
+        crate::process_env::set_var("LJOS_USER_RULES_SYNC_MS", "400");
+
         let started = std::time::Instant::now();
         let line = super::super::session_start_for(Some("seat-two"));
         let elapsed = started.elapsed();

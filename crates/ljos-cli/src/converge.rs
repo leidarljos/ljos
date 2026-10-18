@@ -323,21 +323,21 @@ fn budget_paths() -> Vec<PathBuf> {
     }
     paths.push(PathBuf::from("vissue.toml"));
     paths.push(PathBuf::from("ljos.toml"));
-    if let Some(path) = std::env::var_os("VISSUE_CONFIG").filter(|p| !p.is_empty()) {
+    if let Some(path) = crate::process_env::var_os("VISSUE_CONFIG").filter(|p| !p.is_empty()) {
         paths.push(PathBuf::from(path));
     }
-    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|p| !p.is_empty()) {
+    if let Some(path) = crate::process_env::var_os("LJOS_CONFIG").filter(|p| !p.is_empty()) {
         paths.push(PathBuf::from(path));
     }
     paths
 }
 
 fn config_base() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
+    crate::process_env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| {
-            std::env::var_os("HOME")
+            crate::process_env::var_os("HOME")
                 .map(|h| PathBuf::from(h).join(".config"))
                 .filter(|p| p.is_absolute())
         })

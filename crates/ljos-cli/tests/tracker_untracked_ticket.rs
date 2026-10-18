@@ -3,10 +3,9 @@
 //! a sibling untracked file stays out of the commit.
 
 use std::path::Path;
-use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_cli::process_env::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -43,7 +42,7 @@ fn an_untracked_ticket_is_added_and_committed_alone() {
     std::fs::write(&sibling, TICKET.replace("nnnn", "oooo")).unwrap();
     assert!(git(dir, &["ls-files"]).is_empty());
 
-    std::env::set_var("LJOS_TRACKER_GIT", "commit");
+    ljos_cli::process_env::set_var("LJOS_TRACKER_GIT", "commit");
     let said = ljos_cli::persist_tracker_file(&ticket, "proj-nnnn", "noted");
 
     assert!(said.contains("committed"), "{said}");
@@ -73,7 +72,7 @@ fn a_ticket_reached_through_a_symlinked_checkout_is_committed() {
     let ticket = link.join("issues/proj-pppp.org");
     std::fs::write(&ticket, TICKET.replace("nnnn", "pppp")).unwrap();
 
-    std::env::set_var("LJOS_TRACKER_GIT", "commit");
+    ljos_cli::process_env::set_var("LJOS_TRACKER_GIT", "commit");
     let said = ljos_cli::persist_tracker_file(&ticket, "proj-pppp", "noted");
 
     assert!(said.contains("committed"), "{said}");

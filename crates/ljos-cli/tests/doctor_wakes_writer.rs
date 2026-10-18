@@ -2,7 +2,6 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// A seat home outside the temp roots. A temp HOME is a sandbox and the
 /// daemon stays out of those, so this proof cannot live in one.
@@ -53,7 +52,7 @@ fn doctor_runs_packset_ensure_when_no_writer_answers() {
         .expect("addr")
         .port();
     let path = format!("{}:/usr/bin:/bin", bin.display());
-    let _ = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let _ = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
         .env("HOME", home.path())

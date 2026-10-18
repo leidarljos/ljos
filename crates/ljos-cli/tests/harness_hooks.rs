@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 fn script(dir: &Path, name: &str, body: &str) {
@@ -14,7 +14,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = ljos_cli::process_env::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -28,7 +28,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn head(dir: &Path) -> String {
-    let out = Command::new("git")
+    let out = ljos_cli::process_env::command("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "HEAD"])
@@ -188,7 +188,7 @@ print(f"id={ident}")
 
 fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::Output {
     let path = format!("{}:/usr/bin:/bin", hab.bin.display());
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
         .env("PATH", path)
@@ -476,7 +476,7 @@ server.serve_forever()
 "#,
     )
     .unwrap();
-    let mut pack_proc = Command::new("python3")
+    let mut pack_proc = ljos_cli::process_env::command("python3")
         .arg(&pack)
         .env("ATOM_STORE", &store)
         .stdout(Stdio::piped())
@@ -705,7 +705,7 @@ else:
     std::fs::write(state.join("hide-notes"), "1").unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let vote = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &path)

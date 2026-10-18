@@ -33,7 +33,7 @@ pub enum CaptureMode {
 /// The mode `LJOS_CAPTURE` names. Unset or unknown is [`CaptureMode::Save`].
 #[must_use]
 pub fn capture_mode() -> CaptureMode {
-    match std::env::var("LJOS_CAPTURE")
+    match crate::process_env::var("LJOS_CAPTURE")
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
@@ -263,7 +263,7 @@ pub fn stated_preference(prompt: &str) -> Option<Stated> {
 /// sets it, and its prompts are then nobody's stated choice.
 #[must_use]
 pub fn unattended() -> bool {
-    std::env::var("LJOS_UNATTENDED").is_ok_and(|v| {
+    crate::process_env::var("LJOS_UNATTENDED").is_ok_and(|v| {
         matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn a_subagent_brief_or_unattended_run_is_not_the_person() {
         let _g = crate::tests::env_guard();
-        unsafe { std::env::remove_var("LJOS_UNATTENDED") };
+        crate::process_env::remove_var("LJOS_UNATTENDED");
         let root = "019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
         let other = "019a1b2c-3d4e-7f80-9a1b-ffffffffffff";
         let codex = |extra: &str, thread: &str| {
@@ -690,11 +690,11 @@ mod tests {
         let claude_sub =
             claude_main.replace(r#""agent_type""#, r#""agent_id":"sub-1","agent_type""#);
         assert_eq!(not_the_person(&claude_sub), Some("a subagent's brief"));
-        unsafe { std::env::set_var("LJOS_UNATTENDED", "1") };
+        crate::process_env::set_var("LJOS_UNATTENDED", "1");
         assert_eq!(not_the_person(claude_main), Some("LJOS_UNATTENDED is set"));
-        unsafe { std::env::set_var("LJOS_UNATTENDED", "0") };
+        crate::process_env::set_var("LJOS_UNATTENDED", "0");
         assert_eq!(not_the_person(claude_main), None);
-        unsafe { std::env::remove_var("LJOS_UNATTENDED") };
+        crate::process_env::remove_var("LJOS_UNATTENDED");
     }
 
     #[test]
@@ -759,7 +759,7 @@ mod tests {
     #[test]
     fn the_mode_reads_ljos_capture() {
         let _g = crate::tests::env_guard();
-        let prev = std::env::var_os("LJOS_CAPTURE");
+        let prev = crate::process_env::var_os("LJOS_CAPTURE");
         for (v, want) in [
             ("", CaptureMode::Save),
             ("save", CaptureMode::Save),
@@ -767,12 +767,12 @@ mod tests {
             ("off", CaptureMode::Off),
             ("bogus", CaptureMode::Save),
         ] {
-            unsafe { std::env::set_var("LJOS_CAPTURE", v) };
+            crate::process_env::set_var("LJOS_CAPTURE", v);
             assert_eq!(capture_mode(), want, "{v}");
         }
         match prev {
-            Some(v) => unsafe { std::env::set_var("LJOS_CAPTURE", v) },
-            None => unsafe { std::env::remove_var("LJOS_CAPTURE") },
+            Some(v) => crate::process_env::set_var("LJOS_CAPTURE", v),
+            None => crate::process_env::remove_var("LJOS_CAPTURE"),
         }
     }
 

@@ -83,7 +83,7 @@ impl Home {
     }
 
     fn ljos(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.env("HOME", self.root.path())
             .env("XDG_CONFIG_HOME", self.root.path().join(".config"))
             .env("XDG_DATA_HOME", self.root.path().join(".local/share"))

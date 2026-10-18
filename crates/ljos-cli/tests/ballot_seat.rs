@@ -3,7 +3,6 @@
 //! and nothing said so (Software-o9bu).
 
 use std::path::Path;
-use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -31,10 +30,10 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
     let path = format!(
         "{}:{}",
         dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
+        ljos_cli::process_env::var("PATH").unwrap_or_default()
     );
     let ljos = |seat: Option<&str>, args: &[&str]| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = ljos_cli::process_env::command(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
             .env("PATH", &path)
