@@ -1461,13 +1461,10 @@ fn run_command() -> Result<()> {
                 run("vissue", &["deed", issue])?;
             } else {
                 let issue = issue.as_deref().context("deed: an issue is required")?;
-                for a in &add {
-                    ljos_cli::require_deed(a)?;
-                }
                 let mut argv = vec!["deed".to_string(), issue.to_string()];
                 for a in &add {
                     argv.push("--add".into());
-                    argv.push(a.clone());
+                    argv.push(ljos_cli::resolve_deed(a)?);
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 run("vissue", &refs)?;
@@ -2161,7 +2158,7 @@ fn run_command() -> Result<()> {
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
             ljos_cli::process_env::set_var("LJOS_IN_HOOK", "1");
-            ljos_cli::arm_gate(&input, event.as_deref());
+            ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());
             // A subagent about to stop is held once while its parent holds
@@ -2442,10 +2439,12 @@ fn run_command() -> Result<()> {
                         && ljos_cli::capture::not_the_person(&input).is_none();
                     let granted = person
                         .then(|| {
-                            ljos_cli::approval::approve_from_prompt(
-                                &call.cue,
-                                call.session.as_deref(),
-                            )
+                            ljos_cli::hook_timed("approve", || {
+                                ljos_cli::approval::approve_from_prompt(
+                                    &call.cue,
+                                    call.session.as_deref(),
+                                )
+                            })
                         })
                         .flatten();
                     // A standing choice the person states is saved in their
@@ -2454,14 +2453,15 @@ fn run_command() -> Result<()> {
                     // again as a proposal.
                     let captured = if person {
                         ljos_cli::capture::note_latest_prompt(&call.cue);
-                        ljos_cli::capture::capture_stated(&call)
+                        ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {
                         None
                     };
                     if person {
-                        ljos_cli::store_correction(&call);
+                        ljos_cli::hook_timed("correction", || ljos_cli::store_correction(&call));
                     }
-                    let (mut ctx, mut ids) = hook_note(&call, limit);
+                    let (mut ctx, mut ids) =
+                        ljos_cli::hook_timed("hook_note", || hook_note(&call, limit));
                     if let Some((line, keys)) = captured {
                         ctx = if ctx.is_empty() {
                             line
@@ -2503,7 +2503,8 @@ fn run_command() -> Result<()> {
                         };
                     }
                     if call.event == "UserPromptSubmit" {
-                        let (mail, mail_ids) = ljos_cli::mail::prompt_note();
+                        let (mail, mail_ids) =
+                            ljos_cli::hook_timed("mail", ljos_cli::mail::prompt_note);
                         if !mail.is_empty() {
                             ctx = if ctx.is_empty() {
                                 mail
@@ -2531,7 +2532,9 @@ fn run_command() -> Result<()> {
                 && call.event == "Stop"
                 && !ljos_cli::stop_is_idle(&input);
             if verdict.is_none() && !agy_mid_loop {
-                let (extra, ids) = ljos_cli::bookkeep::observe(&input, &call);
+                let (extra, ids) = ljos_cli::hook_timed("bookkeep", || {
+                    ljos_cli::bookkeep::observe(&input, &call)
+                });
                 if !extra.is_empty() {
                     context = if context.is_empty() {
                         extra

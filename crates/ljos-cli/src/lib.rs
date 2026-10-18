@@ -5890,8 +5890,9 @@ fn shown_on_prompt(hit: &Hit) -> bool {
 /// marking here would burn the note before the model read it.
 #[must_use]
 pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
-    let (text, ids) = hook_note_from_pack(call, limit);
-    (user_rules::prepend(with_issue_recall(call, text)), ids)
+    let (text, ids) = hook_timed("pack_note", || hook_note_from_pack(call, limit));
+    let text = hook_timed("issue_recall", || with_issue_recall(call, text));
+    (hook_timed("user_rules", || user_rules::prepend(text)), ids)
 }
 
 /// `text`, then the recall of each tracker issue (at most two) a prompt
@@ -6109,7 +6110,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // The nudges answer what the prompt says, not what the pack holds, so
     // a prompt the pack knows nothing about still gets them. Their keys
     // travel with the note and are marked seen when a runner delivers it.
-    let (mut nudge, due_key) = due_nudge(call);
+    let (mut nudge, due_key) = hook_timed("due_nudge", || due_nudge(call));
     let mut pending = Vec::new();
     if let Some(key) = due_key {
         pending.push(key);
@@ -6120,7 +6121,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // until the model answers, and the listing behind it would time out.
     // With nothing to show, the prompt hears that memory is starting,
     // once a session.
-    if encoder_is_cold() {
+    if hook_timed("encoder_warming", encoder_is_cold) {
         let recalled = lexical_recall(call, cue, limit);
         start_encoder_warm();
         if let Some((text, mut ids)) = recalled {
@@ -6144,7 +6145,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
     // when it does not answer in time, the local path below runs.
-    let judged = judged_prompt(call, cue);
+    let (judged, early_pool) = hook_timed("judged_prompt", || judged_with_local(call, cue));
     let (correction, choice) = judged.as_ref().map_or((None, None), |(_, j)| {
         (Some(j.correction >= j.cue_at), Some(j.choice >= j.cue_at))
     });
@@ -6201,10 +6202,14 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     } else {
         // The judge did not answer. A skip, a timeout and a spent cap all
         // take this path.
-        let pool = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-            search_with_signals(cue, RERANK_POOL)
-        })
-        .ok();
+        let pool = early_pool.unwrap_or_else(|| {
+            hook_timed("pool_search", || {
+                with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+                    search_with_signals(cue, RERANK_POOL)
+                })
+            })
+            .ok()
+        });
         // A pack that sends the encoder's cosine has a judge of meaning:
         // it admits what the encoder ranked first at the confidence line
         // even when no word is shared, and a claim that names the
@@ -6264,7 +6269,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // writer that is still fetching its cross-encoder on the first
             // prompt then costs the budget, not the whole hook deadline.
             let reranked = if rerank {
-                search_within(cue, 10, HOOK_RERANK_BUDGET_MS)
+                hook_timed("rerank", || search_within(cue, 10, HOOK_RERANK_BUDGET_MS))
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
@@ -6335,6 +6340,49 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     (out, ids)
 }
 
+/// How long a prompt waits for Jev's judgment, search and network call
+/// together. Past it the local search, which ran beside the judgment,
+/// answers: a judge behind a slow or black-holed route must not hold a
+/// prompt up to the runner's cut-off.
+pub const JEV_HOOK_BUDGET_MS: u64 = 700;
+
+/// What the pack's fused search found for a prompt, with the encoder's
+/// signal per hit. `None` when the search failed or ran out of budget.
+type Pool = Option<Vec<(Hit, DenseSignal)>>;
+
+/// Jev's judgment of the prompt, and the local search that answers when
+/// Jev does not. With Jev on, the judgment runs on its own thread while
+/// the local search runs here, and the judgment is waited for only until
+/// [`JEV_HOOK_BUDGET_MS`] from the start. The local search comes back as
+/// `Some` when it already ran, so the caller does not repeat it.
+fn judged_with_local(
+    call: &HookCall,
+    cue: &str,
+) -> (Option<(Vec<Hit>, jev::Judgment)>, Option<Pool>) {
+    if call.event != "UserPromptSubmit" || !jev::enabled() {
+        return (judged_prompt(call, cue), None);
+    }
+    let started = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let call = call.clone();
+        let cue = cue.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(judged_prompt(&call, &cue));
+        });
+    }
+    let local = hook_timed("pool_search", || {
+        with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
+            search_with_signals(cue, RERANK_POOL)
+        })
+    })
+    .ok();
+    let left = std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS)
+        .saturating_sub(started.elapsed());
+    let judged = rx.recv_timeout(left).ok().flatten();
+    (judged, Some(local))
+}
+
 /// The prompt's candidates and Jev's judgment of them, when this machine
 /// turned Jev on and the prompt is worth a call: enough words to judge,
 /// at least `min_candidates` claims to choose between after the local
@@ -6350,7 +6398,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let seen = seen_ids(call.session.as_deref());
-    let hits = packset_search_opts(cue, 10, false).ok()?;
+    let hits = hook_timed("judge_search", || packset_search_opts(cue, 10, false)).ok()?;
     let candidates: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -6369,7 +6417,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
             kind: h.kind.clone(),
         })
         .collect();
-    let judged = jev::judge(cue, &texts, &claims)?;
+    let judged = hook_timed("jev_judge", || jev::judge(cue, &texts, &claims))?;
     Some((candidates, judged))
 }
 
@@ -7767,6 +7815,22 @@ pub fn subagent_stop_reason(
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
+/// Run one stage of a hook call. With `LJOS_HOOK_TIMING` set, the stage and
+/// its wall time go to stderr, one line each, so a slow hook names the stage
+/// that holds it.
+pub fn hook_timed<T>(stage: &str, f: impl FnOnce() -> T) -> T {
+    if std::env::var_os("LJOS_HOOK_TIMING").is_none() {
+        return f();
+    }
+    let started = std::time::Instant::now();
+    let out = f();
+    eprintln!(
+        "hook-timing {stage} {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    out
+}
+
 /// What a prompt hears while the pack's encoder loads. On a new machine the
 /// first load downloads the model, which takes longer than a hook may.
 pub const ENCODER_WARMING_NOTE: &str = "ljos memory is starting: the pack is \
@@ -8022,10 +8086,11 @@ fn hook_marker_fresh(key: &str, window: std::time::Duration) -> bool {
     }
 }
 
-/// How long the prompt hook waits for the reranked search. Runners cut a
-/// hook off at 10 to 20 s, and a loaded host has made the rerank alone take
-/// longer than that.
-pub const HOOK_RERANK_BUDGET_MS: u64 = 2500;
+/// How long the prompt hook waits for each stage of the reranked search:
+/// the fused pool, then the cross-encoder. Past a stage's budget the fused
+/// pool answers, so a loaded host or a cross-encoder still being fetched
+/// costs a prompt about a second, not the runner's cut-off.
+pub const HOOK_RERANK_BUDGET_MS: u64 = 1000;
 
 /// How many fused hits packset's cross-encoder reorders (its
 /// `RERANK_DEPTH`). Its first stage returns this many when asked to
@@ -8323,7 +8388,7 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
     let Ok(client) = pack() else {
         return (String::new(), None);
     };
-    let Ok(atoms) = atoms_lean(&client, &client.workspace()) else {
+    let Ok(atoms) = atoms_lean_shared(&client, &client.workspace()) else {
         return (String::new(), None);
     };
     let now = now_utc();
@@ -9823,6 +9888,30 @@ pub fn atoms_timeout() -> std::time::Duration {
     } else {
         std::time::Duration::from_secs(30)
     }
+}
+
+/// [`atoms_lean`] for the reads one prompt makes side by side (the due line
+/// and the mail): the second takes the listing the first fetched when it is
+/// under two seconds old, so the prompt pays for the listing once.
+///
+/// # Errors
+///
+/// The pack not answering, or an answer that is not atoms.
+pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+    type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
+    static LAST: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
+    let key = format!("{}|{workspace}", client.base());
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, held, atoms)) = last.as_ref() {
+        if *held == key && at.elapsed() < std::time::Duration::from_secs(2) {
+            return Ok(atoms.clone());
+        }
+    }
+    let atoms = atoms_lean(client, workspace)?;
+    *last = Some((std::time::Instant::now(), key, atoms.clone()));
+    Ok(atoms)
 }
 
 /// The pack's live atoms without their dense vectors. Every reader here
@@ -15519,13 +15608,58 @@ pub fn is_version_tag(tag: &str) -> bool {
 ///
 /// The store does not know the id, or `deedar` did not answer.
 pub fn require_deed(accession: &str) -> Result<()> {
-    let accession = accession.trim();
-    if accession.is_empty() {
+    resolve_deed(accession).map(|_| ())
+}
+
+/// The accession a citation names, out of what a caller pastes: the id
+/// itself, `accession=ID` or `id=ID` (the lines `deedar create` prints), a
+/// whole `deedar create` output, or `file=sha256:HEX` (the product line,
+/// which `deedar current` resolves to its deed once the prefix is gone).
+#[must_use]
+pub fn deed_token(raw: &str) -> String {
+    let raw = raw.trim();
+    for key in ["accession=", "id="] {
+        if let Some(rest) = raw
+            .lines()
+            .rev()
+            .find_map(|line| line.trim().strip_prefix(key))
+        {
+            return rest.split_whitespace().next().unwrap_or("").to_string();
+        }
+    }
+    let word = raw.split_whitespace().next().unwrap_or("");
+    for prefix in ["deed=", "file="] {
+        if let Some(rest) = word.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    word.to_string()
+}
+
+/// [`require_deed`] that hands back the deed's own id, so a tracker cite
+/// carries `deed-<kind>-<slug>` even when the caller named the deed by its
+/// content digest.
+///
+/// # Errors
+///
+/// The store does not know the id, or `deedar` did not answer.
+pub fn resolve_deed(accession: &str) -> Result<String> {
+    let token = deed_token(accession);
+    if token.is_empty() {
         bail!("deed: an accession is required");
     }
-    run_captured("deedar", &["current", accession])
-        .map_err(|e| anyhow::anyhow!("deed: {accession} is not in the deed store: {e:#}"))?;
-    Ok(())
+    let said = run_captured("deedar", &["current", &token]).map_err(|e| {
+        anyhow::anyhow!(
+            "deed: {token} is not in the deed store: {e:#} (cite the `accession=` line `deedar create` prints)"
+        )
+    })?;
+    let named = said
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("id="))
+        .and_then(|rest| rest.split_whitespace().next())
+        .filter(|id| id.starts_with("deed-"));
+    Ok(named.map_or(token.clone(), str::to_string))
 }
 
 /// Drop `accession` from the citations on `ticket`.
@@ -22329,8 +22463,8 @@ pub fn parse_tracker_commit(message: &str) -> Option<TrackerAct> {
     })
 }
 
-/// A logbook attribution, `- Noted by saddle [ts]` or the note vissue
-/// rewrites that into. Not a `:Seat:` property.
+/// A logbook attribution, `- Noted by saddle [ts]` or the note
+/// vissue rewrites that into. Not a `:Seat:` property.
 #[must_use]
 pub fn parse_logbook_act(line: &str) -> Option<(String, String)> {
     let body = line.trim().strip_prefix('-')?.trim();
@@ -22596,7 +22730,11 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             .stdin(std::process::Stdio::null())
             .output()
     };
-    let file = path.to_string_lossy().to_string();
+    // Relative to the directory git runs in: an absolute path that reaches
+    // the checkout through a symlink is outside it to git.
+    let file = path
+        .file_name()
+        .map_or_else(|| path.to_string_lossy().to_string(), |n| n.to_string_lossy().to_string());
     match git(&["rev-parse", "--is-inside-work-tree"]) {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
@@ -22634,8 +22772,17 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         .map(|o| dir.join(String::from_utf8_lossy(&o.stdout).trim()))
         .unwrap_or_else(|| dir.join(".git"));
     let _held = CommitLock::acquire(&common.join("ljos-commit.lock"));
-    let mut committed = git(&["add", "--", &file])
-        .and_then(|_| git(&["commit", "-q", "--only", "-m", &message, "--", &file]));
+    // The add runs first and its failure stands on its own: a commit named
+    // for a file git never took in reports a pathspec error that hides why
+    // the add failed. An untracked ticket is added here, that file only.
+    let stage_and_commit = || {
+        let added = git(&["add", "--", &file])?;
+        if !added.status.success() {
+            return Ok(added);
+        }
+        git(&["commit", "-q", "--only", "-m", &message, "--", &file])
+    };
+    let mut committed = stage_and_commit();
     for wait_ms in [200_u64, 400, 800, 1600, 3200] {
         let busy = matches!(&committed, Ok(o) if !o.status.success()
             && String::from_utf8_lossy(&o.stderr).contains("index.lock"));
@@ -22643,8 +22790,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-        committed = git(&["add", "--", &file])
-            .and_then(|_| git(&["commit", "-q", "--only", "-m", &message, "--", &file]));
+        committed = stage_and_commit();
     }
     drop(_held);
     match committed {
@@ -32110,6 +32256,53 @@ mod tests {
         assert!(super::require_deed("  ").is_err());
     }
 
+    /// A citation takes what `deedar create` prints: the accession line,
+    /// the id line, the whole output, or the product digest line.
+    #[test]
+    fn a_deed_citation_takes_what_create_prints() {
+        let hex = "ab".repeat(32);
+        let created = format!(
+            "id=deed-file-survey kind=file name=survey\npaths=sha256:{hex}\nfile=sha256:{hex}\naccession=deed-file-survey\n"
+        );
+        for raw in [
+            "deed-file-survey".to_string(),
+            "accession=deed-file-survey".to_string(),
+            "id=deed-file-survey kind=file name=survey".to_string(),
+            created,
+        ] {
+            assert_eq!(super::deed_token(&raw), "deed-file-survey", "{raw}");
+        }
+        assert_eq!(
+            super::deed_token(&format!("file=sha256:{hex}")),
+            format!("sha256:{hex}")
+        );
+        assert_eq!(super::deed_token("  "), "");
+    }
+
+    /// A digest names its deed; the cite carries the deed's own id.
+    #[test]
+    fn a_digest_citation_resolves_to_the_deed_id() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("deedar");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$2\" in\nsha256:*) echo 'id=deed-file-survey kind=file name=survey'; echo 'accession=deed-file-survey';;\ndeed-file-survey) echo 'id=deed-file-survey kind=file';;\n*) echo \"invalid deed id: $2\" >&2; exit 1;;\nesac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let _env = HoldEnv::set(&[("PATH", &format!("{}:{}", dir.path().display(), path))]);
+        let digest = format!("file=sha256:{}", "cd".repeat(32));
+        assert_eq!(super::resolve_deed(&digest).unwrap(), "deed-file-survey");
+        assert_eq!(
+            super::resolve_deed("accession=deed-file-survey").unwrap(),
+            "deed-file-survey"
+        );
+        assert!(super::resolve_deed("nonsense").is_err());
+    }
+
     /// A refusal from the command check says what the command would do
     /// and what to run instead, and keeps the check's token first.
     #[test]
@@ -37182,6 +37375,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             took < std::time::Duration::from_millis(HOOK_DEADLINE_MS - 2000),
             "the prompt waited {took:?} on a rerank"
+        );
+    }
+
+    /// A judge that never answers (a route that does not complete a
+    /// connect, a command that hangs) costs the prompt its judgment and
+    /// nothing else: the local search answers inside the budget.
+    #[test]
+    fn a_judge_that_never_answers_leaves_the_prompt_its_memory() {
+        let _env = env_guard();
+        let url = serve_slow_rerank();
+        let _held = PackUrl::set(&url);
+        let cfg = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cfg.path().join("ljos")).unwrap();
+        std::fs::write(
+            cfg.path().join("ljos/jev.toml"),
+            "enabled = true\nbackend = \"command\"\nbudget_ms = 20000\nmin_words = 1\nmin_candidates = 1\n\
+             command = [\"sh\", \"-c\", \"cat >/dev/null; sleep 20\"]\n",
+        )
+        .unwrap();
+        let _cfg = HoldEnv::set(&[
+            ("XDG_CONFIG_HOME", cfg.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+        ]);
+        assert!(jev::enabled(), "the judge is on for this test");
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "how should I tag the release?".into(),
+            session: None,
+            shape: HookShape::default(),
+        };
+        let started = std::time::Instant::now();
+        let (note, _) = hook_note(&call, 5);
+        let took = started.elapsed();
+        assert!(note.contains("Tag a release"), "{note:?}");
+        assert!(
+            took < std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS + HOOK_RERANK_BUDGET_MS + 1000),
+            "the prompt waited {took:?} on a judge"
         );
     }
 

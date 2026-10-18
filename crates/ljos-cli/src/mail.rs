@@ -545,7 +545,7 @@ pub fn known_seats(atoms: &[Value]) -> BTreeSet<String> {
 
 /// Refuse a seat the pack has never heard from. Mail waits under the name
 /// it was sent to, so a message to `ljos` sat unread while the seat that
-/// meant to read it was `ljos-bot` (Software-mwy5).
+/// meant to read it was `ljos-bot` (ticket-mwy5).
 ///
 /// # Errors
 ///
@@ -714,7 +714,7 @@ fn load(verb: &str) -> Result<Vec<Value>> {
 fn load_quiet() -> Option<Vec<Value>> {
     let client = super::pack().ok()?;
     let workspace = client.workspace();
-    super::atoms_lean(&client, &workspace).ok()
+    super::atoms_lean_shared(&client, &workspace).ok()
 }
 
 fn post(atom: &Value, verb: &str) -> Result<Value> {
@@ -1387,9 +1387,9 @@ mod tests {
     #[test]
     fn a_stop_carries_unread_interrupt_mail_only() {
         let plain = outgoing("plain", "grok", &["claude"], "when you can");
-        let mut hot = outgoing("hot", "grok", &["claude"], "take Software-d9n6 now");
+        let mut hot = outgoing("hot", "grok", &["claude"], "take ticket-d9n6 now");
         hot.interrupt = true;
-        hot.issue = Some("Software-d9n6".into());
+        hot.issue = Some("ticket-d9n6".into());
         let atoms = [
             atom(&plain, "2026-10-11T00:00:00Z"),
             atom(&hot, "2026-10-11T00:00:01Z"),
@@ -1397,7 +1397,7 @@ mod tests {
         let (text, ids) = stop_lines(&atoms, "claude");
         assert!(text.starts_with(STOP_MAIL_HEAD), "{text}");
         assert!(
-            text.contains("! hot from grok on Software-d9n6: take Software-d9n6 now"),
+            text.contains("! hot from grok on ticket-d9n6: take ticket-d9n6 now"),
             "{text}"
         );
         assert!(!text.contains("when you can"), "{text}");
