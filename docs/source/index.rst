@@ -1,9 +1,6 @@
 :description: One seat over five habitats and argv law. It owns none of them. A seat is one agent, or one person, working a tracker. Five habitats answer five questions for it. Cards are what the human froze.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-ljos
-====
-
 .. raw:: html
 
    <div class="vi-hero">
@@ -50,7 +47,7 @@ MCP tool can sit in the seat.
    :width: 100.0%
 
 Install
--------
+=======
 
 .. code:: console
 
@@ -76,7 +73,7 @@ registers the server with an agent runner and installs the sitting protocol
 as its skill; ``ljos protocol`` prints that protocol for any other.
 
 First minute
-------------
+============
 
 .. code:: console
 

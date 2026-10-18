@@ -1,11 +1,8 @@
 :description: ljos keeps nothing of its own. Each kind of fact lives in one store, and ljos calls that store's command line to read or write it.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-Explanation
-===========
-
 What each store keeps
----------------------
+=====================
 
 .. image:: _static/seat.svg
    :width: 100.0%
@@ -37,7 +34,7 @@ tracker cites it on an issue and the pack cites it in a memory; the deed
 store answers for it.
 
 How a shell command is judged
------------------------------
+=============================
 
 Before an agent's shell command runs, the runner's hook hands it to
 ``ljos hook``, which asks five layers, in the order below. No later layer can allow
@@ -97,7 +94,7 @@ hook is asked.
 without running it.
 
 The contracts
--------------
+=============
 
 -  Citing a deed names it; the bytes stay in deedar.
 -  A finish closes the sitting. The ticket closes only with ``ljos finish ISSUE --close``, when the work is accepted. The claim graph is
@@ -112,7 +109,7 @@ The contracts
    never an empty answer.
 
 Memory that grows, is reviewed, decays, and is retracted
---------------------------------------------------------
+========================================================
 
 .. image:: _static/memory.svg
    :width: 100.0%
@@ -135,7 +132,7 @@ claim first 0.947 of the time; lexical scoring scores at chance and a
 recency half-life at 0.270 (the packset site carries the table).
 
 When the seat speaks
---------------------
+====================
 
 The hook speaks at a prompt, a failed tool and a stop, and fires its
 memories before a compaction. A prompt gets what it activates, three
@@ -167,7 +164,7 @@ and never touched the seat. A turn asked for a decision that cast no
 ballot is held too. It also audits the turn when Jev is on.
 
 Islands
--------
+=======
 
 .. image:: _static/island.svg
    :width: 100.0%
@@ -209,7 +206,7 @@ seat prints beside the hits at a sitting, for orientation, and what fires
 together after use; never the order the hits come in.
 
 Time as data
-------------
+============
 
 Every record in the seat is dated: an atom carries the writer's clock and,
 when it was retired, the window it was live in; a deed carries the time it
@@ -240,7 +237,7 @@ store that already knows every date is a good one, so the store does the
 arithmetic and the reader reads the order.
 
 The field, and the seat's place in it
--------------------------------------
+=====================================
 
 Agent memory systems in the literature and on the market do one of a few
 jobs, and the seat's design can be read against each.
@@ -347,7 +344,7 @@ these rows. The scorer and verdict files are private; I share them on
 request.
 
 Agreement that learns
----------------------
+=====================
 
 A tally counts, and a count is right only when every voter is worth the
 same. The seat settles a vote with DeGroot's model
@@ -426,7 +423,7 @@ other ballot and tells the persona to cast before it reads a tally,
 since a ballot cast after the others adds a voice and no evidence.
 
 Judgment, and where a judge slots in
-------------------------------------
+====================================
 
 The seat has always made judgments at four points. Each had a local
 answer, and each answer fed a structure that was already there.
@@ -479,7 +476,7 @@ prompt. ``ljos judge-score`` joins a ballot with the outcome it was about.
 Nothing here trains on Jev's answers.
 
 Handover that can be checked
-----------------------------
+============================
 
 .. image:: _static/handover.svg
    :width: 100.0%
@@ -493,7 +490,7 @@ key the receiver accepts signed it. Only then are the atoms imported, trust
 rows included. Learning travels with its evidence.
 
 Model and runner agnostic, human readable
------------------------------------------
+=========================================
 
 The seat runs without a model unless ``jev.toml`` enables Jev, an opt-in call
 that judges a few questions. The stores are files a person can read:

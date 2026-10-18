@@ -1,16 +1,13 @@
 :description: How the seat meets the rest of the world: the memory systems it learns from, the concurrency designs it voted on, the runners it sits in, and the dogfooding that tests it every day.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-Integration
-===========
-
 How the seat meets the rest of the world: the memory systems it learns
 from, the concurrency designs it voted on, the runners it sits in, and
 the dogfooding that tests it every day. The :doc:`explanation <explanation>`
 says what the seat is; this page says what it plugs into and why.
 
 The seat among FOSS memory systems
-----------------------------------
+==================================
 
 Agent memory systems in the literature and on the market do one of a few
 jobs. The seat integrates with them rather than re-running them:
@@ -42,7 +39,7 @@ as written. Integration never crosses that line: foreign facts arrive as
 proposals, trust rows, or cited deeds, each attributable and retractable.
 
 Three concurrency designs and the vote
---------------------------------------
+======================================
 
 Three designs were on the table for the seat's concurrent life: many
 agents writing at once. The vote went as follows, and the code follows it.
@@ -84,7 +81,7 @@ runner. The :doc:`Grok Build <grok-build>` page is the reference
 integration; each runner registers the events its table names.
 
 Deep runner integration
------------------------
+=======================
 
 ``ljos onboard --harness NAME`` registers the MCP server, the hooks and the
 skill for one runner. ``NAME`` takes ``claude``, ``codex``, ``grok``, ``cursor``,
@@ -154,7 +151,7 @@ an answer, or runs past 12 seconds. The reason names the failure and
 says to run ``ljos doctor``.
 
 When a hook fails
-~~~~~~~~~~~~~~~~~
+-----------------
 
 A guard is only as strong as what the runner does when the hook breaks.
 Each runner decides that itself, and they disagree. The table says what
@@ -211,7 +208,7 @@ answer for one command without running it, so every integration is
 testable without the runner: ``scripts/smoke.sh`` does exactly that.
 
 Dogfooding
-----------
+==========
 
 This repository eats its own cooking. Sittings are claimed through the
 claim graph, lessons are remembered with ``ljos remember`` and reviewed

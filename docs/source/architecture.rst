@@ -1,15 +1,12 @@
 :description: ljos coordinates the pack, the tracker, the claim graph and the policy check for the runners it sits in. A persona runs in its own pane. The seat process does not share that pane's address space.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-Architecture
-============
-
 ``ljos`` coordinates the pack, the tracker, the claim graph and the policy
 check for the runners it sits in. A persona runs in its own pane. The seat
 process does not share that pane's address space.
 
 One writer
-----------
+==========
 
 The pack is one daemon and one Lightning Memory-Mapped Database (LMDB)
 file. The claim graph has one mutator,
@@ -21,7 +18,7 @@ that shape. The :doc:`integration <integration>` page says why the
 seat stayed in Rust.
 
 Personas
---------
+========
 
 A persona's home is ``$XDG_STATE_HOME/ljos/personas/NAME``. ``hand`` writes a
 markdown file under ``inbox/`` and types one line into the pane.
@@ -40,7 +37,7 @@ prints the line and does not run it. The pane the persona already has is
 the one ``persona_session`` opened.
 
 Hooks
------
+=====
 
 Each runner names its own events. Claude registers seven, including
 ``PreCompact`` and ``SessionStart``. Codex registers the prompt and
