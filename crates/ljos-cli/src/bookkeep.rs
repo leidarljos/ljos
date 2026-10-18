@@ -391,20 +391,40 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     if matches!(call.event.as_str(), "Stop" | "SessionEnd") {
         finish_open(&mut book);
     }
-    let recall = if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
-        book.repos
-            .get(&repo)
-            .map(|row| row.recall.clone())
-            .unwrap_or_default()
+    let held = if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
+        book.repos.get(&repo).map(|row| {
+            (
+                row.issue.clone().filter(|_| !row.finished),
+                row.recall.clone(),
+            )
+        })
     } else {
-        String::new()
+        None
     };
     if landed && !repo.is_empty() {
         book.last_repo.clone_from(&repo);
     }
     stamp_touch(&mut book, &repo, unix_secs());
     store_book(&path, &book);
-    recall
+    // The book is stored; the pack read below must not hold other hooks
+    // on the lock.
+    drop(_held);
+    match held {
+        Some((Some(issue), cached)) => claimed_recall(&issue, &cached),
+        Some((None, cached)) => cached,
+        None => String::new(),
+    }
+}
+
+/// The recall a SessionStart or prompt hook hands the model for the issue
+/// this checkout holds: the title line and [`super::recall_memories`], the
+/// same memories `ljos recall` lists, read now rather than at the claim. A
+/// seat with no pack keeps the line stored at the claim.
+fn claimed_recall(issue: &str, cached: &str) -> String {
+    if super::pack().is_err() {
+        return cached.to_string();
+    }
+    format!("{}{}", recall_line(issue), super::recall_memories(issue))
 }
 
 /// Whether this MCP tool writes a habitat, so the server claims before it runs.
