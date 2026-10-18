@@ -10662,9 +10662,11 @@ fn agent_sourced_atom(
 }
 
 /// A progress note, as an agent memory the default list shows. The tracker
-/// logbook is a separate write. Packset has no atom kind `note` (`KINDS` in
-/// packset-core, on 0.15.1 and on main); a progress note is a `summary`.
-/// A pack that refuses is the error; the caller keeps the logbook note.
+/// logbook is a separate write. The atom is packset's `note` kind (0.15.2),
+/// which keeps logbook text the one-claim gate would refuse and needs the
+/// issue it copies. A pack older than 0.15.2 answers "unknown atom kind",
+/// and the note goes again as a `summary`, the kind it was before. A pack
+/// that refuses is the error; the caller keeps the logbook note.
 ///
 /// # Errors
 ///
@@ -10672,15 +10674,32 @@ fn agent_sourced_atom(
 pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
     let client = pack()?;
     let atom = progress_note_atom(issue, text, &client.workspace())?;
-    with_writer(|| admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed"))
+    let first = with_writer(|| {
+        admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed")
+    });
+    match first {
+        Err(e) if note_kind_unknown(&e) => {
+            let mut atom = atom;
+            atom["kind"] = Value::String("summary".into());
+            with_writer(|| {
+                admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed")
+            })
+        }
+        other => other,
+    }
+}
+
+/// Whether a pack refused a note for its kind, as a pack before 0.15.2
+/// does. Any other refusal stays the answer.
+fn note_kind_unknown(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("unknown atom kind")
 }
 
 /// The line `ljos note` prints when the pack refuses its memory copy.
 /// The note is already on the issue's logbook, so the refusal is a
-/// warning and the command still succeeds. The pack's prose gate refuses
-/// an agent's sentence past its word limit, and it has no kind or flag
-/// that admits one; a weak model writes such notes, and the ticket keeps
-/// them.
+/// warning and the command still succeeds. A pack of 0.15.2 or later keeps
+/// a long note as kind `note`; an older one refuses an agent's sentence
+/// past its word limit, and the ticket still keeps the note.
 #[must_use]
 pub fn note_memory_warning(issue: &str, err: &anyhow::Error) -> String {
     let issue = issue.trim();
@@ -10689,7 +10708,7 @@ pub fn note_memory_warning(issue: &str, err: &anyhow::Error) -> String {
     )
 }
 
-/// The atom [`packset_write_note`] posts. Kind `summary` is one packset stores.
+/// The atom [`packset_write_note`] posts, of packset's `note` kind.
 ///
 /// # Errors
 ///
@@ -10699,8 +10718,13 @@ fn progress_note_atom(issue: &str, text: &str, workspace: &str) -> Result<Value>
     if trimmed.is_empty() {
         bail!("note: empty text is not a memory");
     }
-    let mut atom = atom_body("summary", trimmed, workspace);
-    stamp_horizon(&mut atom, "summary", trimmed, Some(true));
+    let mut atom = atom_body(packset_core::record::NOTE_KIND, trimmed, workspace);
+    stamp_horizon(
+        &mut atom,
+        packset_core::record::NOTE_KIND,
+        trimmed,
+        Some(true),
+    );
     add_entities(&mut atom, [format!("issue:{}", issue.trim())]);
     stamp_issue(&mut atom, issue);
     Ok(atom)
@@ -33527,13 +33551,32 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(line.contains("proj-aaaa's logbook"), "{line}");
     }
 
+    /// A note copies logbook text, so the pack keeps a long or three-sentence
+    /// note under kind `note` with the gate's verdict as a warning. The same
+    /// text as an agent's lesson is still refused.
     #[test]
-    fn a_long_note_sentence_has_no_kind_that_skips_the_prose_gate() {
+    fn a_long_note_is_kept_as_a_note_and_refused_as_a_lesson() {
         let long = "this single sentence keeps going well past the limit the pack sets for a memory because a weak model wrote it in one breath with no stop anywhere along the way to its end";
-        let mut atom = super::progress_note_atom("probe-0001", long, "ws").unwrap();
-        super::admit::stamp_origin(&mut atom, super::admit::ORIGIN_AGENT);
-        let mut map = atom.as_object().cloned().unwrap();
-        assert!(packset_core::record::validate(&mut map).is_err());
+        let three = "The parser kept the hyphen. The test pins it. The release ships it.";
+        for text in [long, three] {
+            let mut atom = super::progress_note_atom("probe-0001", text, "ws").unwrap();
+            super::admit::stamp_origin(&mut atom, super::admit::ORIGIN_AGENT);
+            let mut map = atom.as_object().cloned().unwrap();
+            packset_core::record::validate(&mut map).expect("packset keeps a note");
+            let mut lesson = super::atom_body("lesson", text, "ws");
+            super::admit::stamp_origin(&mut lesson, super::admit::ORIGIN_AGENT);
+            let mut map = lesson.as_object().cloned().unwrap();
+            assert!(packset_core::record::validate(&mut map).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn only_an_unknown_kind_sends_the_note_again() {
+        let old =
+            anyhow::anyhow!("400: unknown atom kind: note").context("note: POST /v1/atoms failed");
+        assert!(super::note_kind_unknown(&old));
+        let gate = anyhow::anyhow!("400: atom sentence 1 is very hard to read");
+        assert!(!super::note_kind_unknown(&gate));
     }
 
     #[test]
@@ -33548,19 +33591,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_progress_note_is_a_summary_the_pack_accepts() {
+    fn a_progress_note_is_a_note_the_pack_accepts() {
         let mut atom = super::progress_note_atom(
             "probe-0001",
             "the parser keeps a hyphen in the project",
             "ws",
         )
         .unwrap();
-        assert_eq!(atom["kind"], "summary");
-        assert!(packset_core::record::KINDS.contains(&"summary"));
-        assert!(!packset_core::record::KINDS.contains(&"note"));
+        assert_eq!(atom["kind"], "note");
+        assert_eq!(atom["issue"], "probe-0001");
+        assert!(packset_core::record::KINDS.contains(&"note"));
         super::admit::stamp_origin(&mut atom, super::admit::ORIGIN_AGENT);
         let mut map = atom.as_object().cloned().unwrap();
-        packset_core::record::validate(&mut map).expect("packset accepts a summary");
+        packset_core::record::validate(&mut map).expect("packset accepts a note");
         assert!(super::progress_note_atom("probe-0001", "  ", "ws").is_err());
     }
 

@@ -1,0 +1,1 @@
+`ljos note` copies the note to memory as packset's `note` kind, which keeps three sentences or a long one, and sends it as a `summary` to a pack older than 0.15.2. ljos needs packset-core and packset-client 0.15.2.

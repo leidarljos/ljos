@@ -358,7 +358,13 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         // A write tool claims even for a new file. A shell redirect claims
         // when it writes a file inside this work tree, tracked or not.
         // A commit claims too, so a sitting that only commits still has a ticket.
-        if is_edit(&value, &call.cue) || commit || writes_worktree(&repo, &call.cue) {
+        // A harness commit whose command names an open issue claims that
+        // issue once it lands, through the git hook's path, not a new one.
+        let names_open = commit && !git_hook && named_open_issue(&call.cue).is_some();
+        if is_edit(&value, &call.cue)
+            || (commit && !names_open)
+            || writes_worktree(&repo, &call.cue)
+        {
             let offered = subject_title.then_some(offered.as_str());
             let _ = ensure_claim(&mut book, &repo, offered);
         }
@@ -368,6 +374,15 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         // missing exit, with nothing else that says the commit landed, is
         // not one.
         if landed {
+            let named = if git_hook { None } else { named_head(&repo) };
+            if let Some((issue, head)) = named {
+                book_named_in(&mut book, &repo, &repo, &head, &issue);
+            } else if names_open {
+                // The command named an id the landed message does not: the
+                // commit still gets the claim a commit files.
+                let offered = subject_title.then_some(offered.as_str());
+                let _ = ensure_claim(&mut book, &repo, offered);
+            }
             let _ = ensure_deed(&mut book, &repo);
         } else if call.event == "PostToolUse" && commit && command_failed(exit) {
             note_failure(&mut book, &repo, "git commit exited non-zero");
@@ -1845,6 +1860,28 @@ pub(crate) fn book_named_commit(repo: &str, head: &str, issue: &str) {
     let (path, key) =
         open_row_for_repo(repo).unwrap_or_else(|| (book_path(&sitting_key()), repo.to_string()));
     let mut book = load_book(&path);
+    book_named_in(&mut book, &key, repo, head, issue);
+    store_book(&path, &book);
+}
+
+/// The commit `repo`'s HEAD message names an open issue: that id and the
+/// sha. A harness hook reads it once the commit has landed.
+fn named_head(repo: &str) -> Option<(String, String)> {
+    let said = run_timed("git", &["-C", repo, "log", "-1", "--format=%H%n%B"], &[]).ok()?;
+    let (sha, message) = said.stdout.split_once('\n')?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return None;
+    }
+    named_open_issue(message).map(|issue| (issue, sha.to_string()))
+}
+
+/// [`book_named_commit`] on a book already loaded under the book lock, at
+/// row `key`. The git hook and a harness hook both book through this, so a
+/// commit naming an open issue is claimed and cited the same way whichever
+/// of them saw it.
+fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str) {
+    let key = key.to_string();
     let now = unix_secs();
     let row = book.repos.entry(key.clone()).or_default();
     let open = row.issue.clone().filter(|_| !row.finished);
@@ -1899,8 +1936,7 @@ pub(crate) fn book_named_commit(repo: &str, head: &str, issue: &str) {
     if !repo.is_empty() {
         book.last_repo = repo.to_string();
     }
-    stamp_touch(&mut book, &key, now);
-    store_book(&path, &book);
+    stamp_touch(book, &key, now);
 }
 
 /// Remember a guard ask on this repository. The book file is the only
@@ -2456,10 +2492,19 @@ fn project_for_at(repo: &str, forced: Option<&str>, tracker: Option<&Path>) -> S
     if let Some(project) = forced.map(str::trim).filter(|project| !project.is_empty()) {
         return project.to_string();
     }
+    let remote = git_remote_url(repo);
     if let Some(tracker) = tracker {
         if let Some(project) = match_remote_project(repo, tracker) {
             return project;
         }
+    }
+    // A clone in a folder of its own name (`bench-w18b-tfn7`) is still the
+    // repository its origin names. The folder is the project only when the
+    // checkout has no origin.
+    if let Some(name) = remote.as_deref().and_then(remote_repo_name) {
+        return name;
+    }
+    if let Some(tracker) = tracker {
         if let Some(project) = sole_project_in(tracker) {
             return project;
         }
@@ -2493,8 +2538,32 @@ fn match_remote_project(repo: &str, tracker: &Path) -> Option<String> {
     let slug = remote_slug(&want);
     projects
         .into_iter()
-        .find(|(name, _)| name == &slug)
+        .find(|(name, _)| name.eq_ignore_ascii_case(&slug))
         .map(|(name, _)| name)
+}
+
+/// The repository name in an origin URL, as the forge spells it:
+/// `https://github.com/leidarljos/bench.git` and `git@github.com:leidarljos/bench`
+/// are `bench`. vissue names a project by its directory under the tracker,
+/// and `vissue create -p` matches an existing one whatever its case.
+/// A local path or `file:` origin names no forge repository, and the
+/// folder stays the fallback there.
+fn remote_repo_name(url: &str) -> Option<String> {
+    let raw = url.trim().trim_end_matches('/');
+    if raw.starts_with(['/', '.', '~']) || raw.starts_with("file:") {
+        return None;
+    }
+    let raw = raw.strip_suffix(".git").unwrap_or(raw);
+    let name = raw.rsplit(['/', ':']).next()?.trim();
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    ok.then(|| name.to_string())
 }
 
 fn git_remote_url(repo: &str) -> Option<String> {
@@ -4116,6 +4185,82 @@ mod tests {
             "bare",
             "no remote and more than one project uses the basename"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A clone in a folder named for the job (`bench-w18b-tfn7`) files on
+    /// the repository its origin names, even before the tracker holds a
+    /// project of that name. The folder is the fallback only with no origin.
+    #[test]
+    fn a_clone_folder_is_not_the_project_when_origin_names_the_repo() {
+        let _g = lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-clone-folder");
+        let _ = std::fs::remove_dir_all(&root);
+        let tracker = root.join("tracker");
+        std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
+        std::fs::write(tracker.join("Software/ljos/issues.org"), "* TODO ljos\n").unwrap();
+        let repo = root.join("bench-w18b-tfn7");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/leidarljos/bench.git",
+            ],
+        );
+        assert_eq!(
+            project_for_at(repo.to_str().unwrap(), None, Some(&tracker)),
+            "bench"
+        );
+        let mixed = root.join("orpc-clone");
+        std::fs::create_dir_all(tracker.join("Software/OmniPotentRPC")).unwrap();
+        std::fs::write(
+            tracker.join("Software/OmniPotentRPC/issues.org"),
+            "* TODO orpc\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&mixed).unwrap();
+        git(&mixed, &["init", "-q", "-b", "main"]);
+        git(
+            &mixed,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:HaoZeke/omnipotentrpc.git",
+            ],
+        );
+        assert_eq!(
+            project_for_at(mixed.to_str().unwrap(), None, Some(&tracker)),
+            "OmniPotentRPC",
+            "an existing project matches whatever its case"
+        );
+        let bare = root.join("scratch-folder");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "-q", "-b", "main"]);
+        assert_eq!(
+            project_for_at(bare.to_str().unwrap(), None, Some(&tracker)),
+            "scratch-folder"
+        );
+        for (url, name) in [
+            ("https://github.com/leidarljos/bench.git", Some("bench")),
+            (
+                "git@github.com:leidarljos/ljos-policyd",
+                Some("ljos-policyd"),
+            ),
+            (
+                "https://github.com/HaoZeke/haozeke.github.io/",
+                Some("haozeke.github.io"),
+            ),
+            ("/srv/git/bench.git", None),
+            ("file:///srv/git/bench.git", None),
+            ("", None),
+        ] {
+            assert_eq!(remote_repo_name(url).as_deref(), name, "{url}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

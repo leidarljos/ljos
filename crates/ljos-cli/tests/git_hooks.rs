@@ -362,6 +362,52 @@ fn a_prompt_field_does_not_hide_the_commit() {
     );
 }
 
+/// A harness session books its commit through the hook payload, and the
+/// git hook steps aside. A commit that names an open issue claims and cites
+/// that issue there too, through the same function the git hook uses.
+#[test]
+fn a_harness_commit_naming_an_open_issue_books_that_issue() {
+    for (message, command) in [
+        (
+            "probe-32fx: book the harness commit",
+            "git commit -m 'probe-32fx: book the harness commit'".to_string(),
+        ),
+        (
+            "tidy the harness commit\n\nFixes probe-32fx.",
+            "git commit -m \"$(cat <<'EOF'\ntidy the harness commit\n\nFixes probe-32fx.\nEOF\n)\""
+                .to_string(),
+        ),
+    ] {
+        let hab = Hab::new("repo");
+        seed_issue(&hab, "probe-32fx", "TODO");
+        let payload = |event: &str| {
+            serde_json::json!({
+                "hook_event_name": event,
+                "session_id": "claude-session-1",
+                "cwd": hab.repo.display().to_string(),
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 0},
+            })
+            .to_string()
+        };
+        hab.ljos_in(&hab.repo, &["hook"], Some(&payload("PreToolUse")), &[]);
+        let sha = commit_file(&hab, "harness.txt", message);
+        hab.ljos_in(&hab.repo, &["hook"], Some(&payload("PostToolUse")), &[]);
+        let log = vissue_log(&hab.tracker);
+        assert!(
+            !log.contains("create"),
+            "{message:?} filed a new issue:\n{log}"
+        );
+        assert!(log.contains("claim probe-32fx"), "{message:?}:\n{log}");
+        let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(
+            org.contains(&format!("deed-file-commit-{sha}")),
+            "{message:?}:\n{org}"
+        );
+    }
+}
+
 #[test]
 fn a_tool_hook_does_not_replace_owner_pid() {
     let hab = Hab::new("repo");

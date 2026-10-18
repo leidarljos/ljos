@@ -3583,9 +3583,9 @@ dependencies = [
 
 [[package]]
 name = "packset-client"
-version = "0.15.1"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d781fb6411d4c18320977029619b5bcd28651ee2a7f036b01e18e91814bb5b7d"
+checksum = "4fb6d77dca23d033182ff2876bfb0bdbbd0f98a90ae0fb38c98a13243b510c5f"
 dependencies = [
  "packset-core",
  "serde",
@@ -3596,9 +3596,9 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.15.1"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328c8084fb1c2f10b7f48fc5fc986ce92146c09311e373bcaf943bab54d0f3c1"
+checksum = "d6f1438c02220b62ea7b6205b00205cb03c5b79aa9b1786cfe365d7df8a3eac6"
 dependencies = [
  "rust-stemmers",
  "serde",
