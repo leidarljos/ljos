@@ -1,7 +1,7 @@
 //! The seat keeps the book when the model never calls ljos.
 //!
 //! A harness hook files a claim on the first edit in a session and
-//! repository, cites a deed after a git commit exits 0, and finishes at
+//! repository, cites a deed when a git commit has landed, and finishes at
 //! Stop or the end of the session. The finish writes one lesson from the
 //! sitting. `ljos-mcp` does the same on the first write and on shutdown,
 //! for a client that has no hooks. A failure is written to the runtime
@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -249,16 +249,22 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     // A clean PostToolUse is the commit that just ran. Record the starting
     // HEAD on every other call, including the ask that stopped the command,
     // so the after hook cannot cite the commit the sitting began on.
-    // Codex puts the command's output in `tool_response` as text and the
-    // exit code only in the transcript. An exit that cannot be read is not
-    // a success, so a failed commit does not cite the sitting's HEAD.
+    // A missing exit code is unknown, never a failure: Claude omits it on
+    // a commit that landed, and Codex leaves it in the transcript. Read
+    // the baseline before this call can record one.
     let exit = if call.event == "PostToolUse" {
         command_exit(&value)
     } else {
         CommandExit::Absent
     };
-    let ran = call.event == "PostToolUse" && commit && command_succeeded(exit, &value);
-    if !ran {
+    let start = book.repos.get(&repo).and_then(|row| row.start_sha.clone());
+    let landed = call.event == "PostToolUse"
+        && commit
+        && commit_landed(exit, &value, &repo, start.as_deref());
+    // A commit that did not land must not become the baseline, and a
+    // failed one must not finish the sitting or replace the start already
+    // recorded. note_start writes the sha only when this row has none.
+    if !landed {
         note_start(&mut book, &repo);
     }
     if call.event == "PostToolUseFailure"
@@ -274,11 +280,13 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
             let _ = ensure_claim(&mut book, &repo);
         }
         // The commit has not happened on the way in. Cite it on the way
-        // out, and only when it exited 0 and HEAD moved, so a failed commit
-        // or one the guard only asked about leaves no deed.
-        if ran {
+        // out when the evidence says it landed, every new sha since the
+        // recorded start. An explicit non-zero exit is the failure. A
+        // missing exit, with nothing else that says the commit landed, is
+        // not one.
+        if landed {
             let _ = ensure_deed(&mut book, &repo);
-        } else if call.event == "PostToolUse" && commit {
+        } else if call.event == "PostToolUse" && commit && command_failed(exit) {
             note_failure(&mut book, &repo, "git commit exited non-zero");
         }
     }
@@ -293,7 +301,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     } else {
         String::new()
     };
-    if ran && !repo.is_empty() {
+    if landed && !repo.is_empty() {
         book.last_repo.clone_from(&repo);
     }
     book.last_unix = unix_secs();
@@ -1097,45 +1105,137 @@ fn file_and_claim(project: &str, title: &str) -> Result<String, String> {
 }
 
 fn ensure_deed(book: &mut Book, repo: &str) -> Result<(), String> {
-    let sha = match head_sha(repo) {
+    cite_row(book, repo, repo)
+}
+
+/// Cite every commit that landed after the row's baseline. A compound
+/// command can write more than one. No baseline means this post is the
+/// first time the sitting saw the repository, so the sha is the one git wrote.
+fn cite_row(book: &mut Book, row_key: &str, git_repo: &str) -> Result<(), String> {
+    let head = match head_sha(git_repo) {
         Ok(sha) => sha,
         Err(e) => {
             log_line(&format!("deed: {e}"));
             return Ok(());
         }
     };
-    // The guard asked, nothing ran, and the after hook still looks like a
-    // clean exit. HEAD is the commit the sitting started on. Cite only a
-    // commit that moved past that. No baseline means this post is the first
-    // time the sitting saw the repository, so the sha is the one git wrote.
-    let unchanged = book
+    let start = book
         .repos
-        .get(repo)
-        .and_then(|row| row.start_sha.as_deref())
-        .is_some_and(|start| start == sha);
-    if unchanged {
-        return Ok(());
-    }
-    let row = book.repos.entry(repo.to_string()).or_default();
-    if row.deeds.iter().any(|seen| seen == &sha) {
-        return Ok(());
-    }
-    let Some(issue) = row.issue.clone() else {
+        .get(row_key)
+        .and_then(|row| row.start_sha.clone());
+    let Some(issue) = book.repos.get(row_key).and_then(|row| row.issue.clone()) else {
         return Ok(());
     };
-    match cite_deed(&issue, &sha) {
-        Ok(()) => {
-            book.repos
-                .entry(repo.to_string())
-                .or_default()
-                .deeds
-                .push(sha);
-            Ok(())
+    for sha in commits_since(git_repo, start.as_deref(), &head) {
+        if book
+            .repos
+            .get(row_key)
+            .is_some_and(|row| row.deeds.iter().any(|seen| seen == &sha))
+        {
+            continue;
         }
-        Err(e) => {
-            log_line(&format!("deed: {e}"));
-            Ok(())
+        match cite_deed(&issue, &sha) {
+            Ok(()) => {
+                book.repos
+                    .entry(row_key.to_string())
+                    .or_default()
+                    .deeds
+                    .push(sha);
+            }
+            Err(e) => {
+                log_line(&format!("deed: {e}"));
+                return Ok(());
+            }
         }
+    }
+    Ok(())
+}
+
+/// Commits strictly after `start`, oldest first. Without a baseline, the
+/// current HEAD is the commit this post is about.
+fn commits_since(repo: &str, start: Option<&str>, head: &str) -> Vec<String> {
+    let Some(start) = start.map(str::trim).filter(|sha| !sha.is_empty()) else {
+        return vec![head.to_string()];
+    };
+    if start == head {
+        return Vec::new();
+    }
+    let range = format!("{start}..{head}");
+    let shas = run_timed("git", &["-C", repo, "rev-list", "--reverse", &range], &[])
+        .ok()
+        .map(|said| {
+            said.stdout
+                .lines()
+                .map(str::trim)
+                .filter(|sha| sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+    match shas {
+        Some(shas) if !shas.is_empty() => shas,
+        _ => vec![head.to_string()],
+    }
+}
+
+/// Cite `repo`'s new commits on the open sitting that already holds it.
+/// A git hook books here instead of opening a seat book whose start is the
+/// commit that just landed. False when no sitting holds the checkout.
+pub(crate) fn cite_into_open_sitting(repo: &str) -> bool {
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let Some((path, key)) = open_row_for_repo(repo) else {
+        return false;
+    };
+    let mut book = load_book(&path);
+    let open = book
+        .repos
+        .get(&key)
+        .is_some_and(|row| !row.finished && row.issue.is_some());
+    if !open {
+        return false;
+    }
+    // The failure notes and the baseline stay. A retry cites the new sha
+    // on this issue; it does not finish the row or replace its start.
+    let _ = cite_row(&mut book, &key, repo);
+    book.last_unix = unix_secs();
+    store_book(&path, &book);
+    true
+}
+
+fn open_row_for_repo(repo: &str) -> Option<(PathBuf, String)> {
+    let mut best: Option<((u64, u128), PathBuf, String)> = None;
+    for path in book_files() {
+        let book = load_book(&path);
+        let rank = row_rank(&path, &book);
+        for (key, row) in &book.repos {
+            if row.finished || row.issue.is_none() || !same_checkout(key, repo) {
+                continue;
+            }
+            let take = best.as_ref().is_none_or(|(when, _, _)| rank >= *when);
+            if take {
+                best = Some((rank, path.clone(), key.clone()));
+            }
+        }
+    }
+    best.map(|(_, path, key)| (path, key))
+}
+
+fn row_rank(path: &Path, book: &Book) -> (u64, u128) {
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    (book.last_unix, modified)
+}
+
+fn same_checkout(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -1259,6 +1359,36 @@ fn refresh_landed_deeds() {
             }
         }
         store_book(&path, &book);
+    }
+}
+
+/// Unfinished claims already on disk, for a prompt that has not waited on
+/// the pack. Empty when none are held, so a quiet seat does not say `none`.
+#[must_use]
+pub fn prompt_claims() -> String {
+    let mut ids = Vec::new();
+    for path in book_files() {
+        let book = load_book(&path);
+        for row in book.repos.values() {
+            if row.finished {
+                continue;
+            }
+            if let Some(issue) = row
+                .issue
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                ids.push(issue.to_string());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        String::new()
+    } else {
+        format!("claims: {}", ids.join(" "))
     }
 }
 
@@ -2197,42 +2327,167 @@ enum CommandExit {
     /// A code from the payload or the transcript.
     Code(i64),
     /// The output was text, and neither the payload nor the transcript
-    /// named a code. That is not a success.
+    /// named a code. Unknown is not a failure. Other evidence decides.
     Unknown,
-    /// This runner does not hide the code. A missing one stays a success
-    /// unless the payload already refused the call.
+    /// The runner sent an object, or omitted the output, and named no code.
     Absent,
-}
-
-/// A post-tool result whose command finished cleanly. A missing exit on a
-/// runner that reports one in the payload is success. Codex's plain-text
-/// output is not: the code is read from the transcript, and a code that
-/// still cannot be determined does not cite a deed. A non-zero exit, or a
-/// guard refusal (`deny` or `ask`), is not a success, so a commit the guard
-/// stopped does not cite the previous HEAD. An explicit zero wins over an
-/// error string: some runners put the command's stderr there even when git
-/// exited 0.
-fn command_succeeded(exit: CommandExit, raw: &Value) -> bool {
-    if raw
-        .pointer("/tool_response/interrupted")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        return false;
-    }
-    if permission_block(raw) {
-        return false;
-    }
-    match exit {
-        CommandExit::Code(code) => code == 0,
-        CommandExit::Unknown => false,
-        CommandExit::Absent => !refusal_signal(raw),
-    }
 }
 
 /// A code the transcript or the payload named, and it was not zero.
 fn command_failed(exit: CommandExit) -> bool {
     matches!(exit, CommandExit::Code(code) if code != 0)
+}
+
+/// Whether this commit landed. An explicit code wins, including a zero
+/// beside an error string and a non-zero beside a banner. A missing code
+/// is unknown: a git operation, a `[branch sha]` line, then HEAD moving
+/// past the recorded start. A guard refusal or an interrupt blocks only
+/// that missing-code path, so a command that never ran is not a deed.
+fn commit_landed(exit: CommandExit, raw: &Value, repo: &str, start: Option<&str>) -> bool {
+    match exit {
+        CommandExit::Code(0) => return true,
+        CommandExit::Code(_) => return false,
+        CommandExit::Unknown | CommandExit::Absent => {}
+    }
+    if raw
+        .pointer("/tool_response/interrupted")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || permission_block(raw)
+    {
+        return false;
+    }
+    git_operation_committed(raw) || stdout_has_commit_banner(raw) || head_moved(repo, start)
+}
+
+/// `gitOperation.commit` names a sha or a kind that means the commit was
+/// written. Claude sends this beside the stdout, and omits the exit code.
+fn git_operation_committed(raw: &Value) -> bool {
+    [
+        "/gitOperation",
+        "/git_operation",
+        "/tool_response/gitOperation",
+        "/tool_response/git_operation",
+        "/toolResponse/gitOperation",
+    ]
+    .iter()
+    .any(|slot| raw.pointer(slot).is_some_and(commit_record_landed))
+}
+
+fn commit_record_landed(value: &Value) -> bool {
+    if value.get("commit").is_some_and(commit_record_landed) {
+        return true;
+    }
+    let sha = value
+        .get("sha")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if sha_token(sha) {
+        return true;
+    }
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    matches!(kind, "committed" | "amended" | "cherry-picked")
+}
+
+fn sha_token(text: &str) -> bool {
+    (7..=40).contains(&text.len()) && text.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn branch_token(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+}
+
+/// Git's `[branch sha]` line, including a root commit and a detached HEAD.
+fn stdout_has_commit_banner(raw: &Value) -> bool {
+    commit_output(raw)
+        .iter()
+        .any(|text| text.lines().any(line_has_commit_banner))
+}
+
+fn commit_output(raw: &Value) -> Vec<&str> {
+    let mut out = Vec::new();
+    for key in [
+        "tool_response",
+        "toolResponse",
+        "stdout",
+        "stderr",
+        "output",
+    ] {
+        if let Some(text) = raw.get(key).and_then(Value::as_str) {
+            out.push(text);
+        }
+    }
+    for slot in [
+        "/tool_response/stdout",
+        "/tool_response/output",
+        "/tool_response/stderr",
+        "/toolResponse/stdout",
+        "/toolResponse/output",
+        "/toolResponse/stderr",
+    ] {
+        if let Some(text) = raw.pointer(slot).and_then(Value::as_str) {
+            out.push(text);
+        }
+    }
+    out
+}
+
+fn line_has_commit_banner(line: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = line[from..].find('[') {
+        let start = from + rel + 1;
+        let Some(end_rel) = line[start..].find(']') else {
+            break;
+        };
+        if banner_inside(&line[start..start + end_rel]) {
+            return true;
+        }
+        from = start;
+    }
+    false
+}
+
+fn banner_inside(inside: &str) -> bool {
+    let mut rest = inside.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    if let Some(after) = rest.strip_prefix("detached HEAD") {
+        rest = after.trim_start();
+    } else {
+        let Some((branch, after)) = rest.split_once(|c: char| c.is_whitespace()) else {
+            return false;
+        };
+        if !branch_token(branch) {
+            return false;
+        }
+        rest = after.trim_start();
+    }
+    if let Some(after) = rest.strip_prefix("(root-commit)") {
+        rest = after.trim_start();
+    }
+    let Some((sha, tail)) = rest.split_once(|c: char| c.is_whitespace()) else {
+        return sha_token(rest);
+    };
+    tail.trim().is_empty() && sha_token(sha)
+}
+
+/// HEAD is past the sha recorded before this commit. No baseline means
+/// this post has not been shown an earlier commit, so movement is not
+/// evidence by itself.
+fn head_moved(repo: &str, start: Option<&str>) -> bool {
+    let Some(start) = start.map(str::trim).filter(|sha| !sha.is_empty()) else {
+        return false;
+    };
+    head_sha(repo).is_ok_and(|head| head != start)
 }
 
 /// The exit code for this call. The payload wins. Otherwise the Codex
@@ -2293,17 +2548,96 @@ const TRANSCRIPT_DEADLINE: Duration = COMMAND_DEADLINE;
 const TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
 
 fn read_transcript_tail(path: &Path) -> Option<String> {
-    let path = path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(read_tail_file(&path, TRANSCRIPT_TAIL_BYTES));
-    });
-    rx.recv_timeout(TRANSCRIPT_DEADLINE).ok().flatten()
+    read_bounded(path, TRANSCRIPT_TAIL_BYTES, true)
 }
 
-fn read_tail_file(path: &Path, max_bytes: u64) -> Option<String> {
+/// The whole file, or nothing if it does not become readable before
+/// [`TRANSCRIPT_DEADLINE`]. A prompt's transcript is read the same way as
+/// the exit lookup, so a fifo with no writer cannot hold the hook.
+pub(crate) fn read_text_bounded(path: &Path) -> Option<String> {
+    read_bounded(path, u64::MAX, false)
+}
+
+/// Open `path` without blocking and read at most `max_bytes`. A regular
+/// file is ready at once. A fifo with no writer reports hangup at once.
+/// `tail` keeps the end of a regular file and drops the partial first line.
+fn read_bounded(path: &Path, max_bytes: u64, tail: bool) -> Option<String> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut file = open_nonblock(path)?;
+    let kind = file.metadata().ok().map(|meta| meta.file_type());
+    // A fifo with no writer reads as immediate EOF. Poll does not say so
+    // on this kernel: POLLHUP shows up only after a writer has opened the
+    // fifo, so waiting on POLLIN spends the whole deadline.
+    if kind.as_ref().is_some_and(|ty| ty.is_fifo()) {
+        return read_available(&mut file, max_bytes, Duration::ZERO);
+    }
+    if kind.as_ref().is_some_and(|ty| ty.is_file()) {
+        if tail {
+            return read_file_tail(&mut file, max_bytes);
+        }
+        return read_available(&mut file, max_bytes, TRANSCRIPT_DEADLINE);
+    }
+    read_available(&mut file, max_bytes, Duration::ZERO)
+}
+
+fn open_nonblock(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+    let bytes = path.as_os_str().as_bytes();
+    let c_path = std::ffi::CString::new(bytes).ok()?;
+    // SAFETY: `c_path` is NUL-terminated and lives until `open` returns.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` is open and this function owns it.
+    Some(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+fn wait_readable(fd: i32, deadline: Duration) -> bool {
+    use std::io::ErrorKind;
+    let start = Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        let left = deadline.saturating_sub(elapsed);
+        let ms = i32::try_from(left.as_millis()).unwrap_or(i32::MAX);
+        let mut polled = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `polled` is one valid `pollfd` and lives until `poll` returns.
+        let rc = unsafe { libc::poll(&mut polled, 1, ms) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted && start.elapsed() < deadline {
+                continue;
+            }
+            return false;
+        }
+        if rc == 0 {
+            return false;
+        }
+        let rev = polled.revents;
+        if (rev & libc::POLLIN) != 0 {
+            return true;
+        }
+        if (rev & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0 {
+            return false;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+    }
+}
+
+fn read_file_tail(file: &mut std::fs::File, max_bytes: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let start = len.saturating_sub(max_bytes);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -2316,6 +2650,36 @@ fn read_tail_file(path: &Path, max_bytes: u64) -> Option<String> {
         }
     }
     Some(text)
+}
+
+fn read_available(file: &mut std::fs::File, max_bytes: u64, deadline: Duration) -> Option<String> {
+    use std::io::{ErrorKind, Read};
+    use std::os::unix::io::AsRawFd;
+    let start = Instant::now();
+    let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    while buf.len() < cap {
+        let room = cap - buf.len();
+        let nread = room.min(tmp.len());
+        match file.read(&mut tmp[..nread]) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                let left = deadline.saturating_sub(start.elapsed());
+                if left.is_zero() || !wait_readable(file.as_raw_fd(), left) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if buf.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
 }
 
 /// A code read from the transcript. The command item wins. The sentence in
@@ -2547,8 +2911,8 @@ fn explicit_exit(raw: &Value) -> Option<i64> {
 }
 
 /// A guard that already refused this call. A missing exit is not one of
-/// these: silent PostToolUse stays a success. An error string is not a
-/// guard decision; [`tool_exit_ok`] reads it only when no exit was given.
+/// these. An error string is not a guard decision: a commit is judged from
+/// its exit code, then from what git wrote.
 fn permission_block(raw: &Value) -> bool {
     let decisions = [
         raw.get("permissionDecision"),
@@ -2560,27 +2924,6 @@ fn permission_block(raw: &Value) -> bool {
     decisions.into_iter().flatten().any(|slot| {
         slot.as_str()
             .is_some_and(|word| matches!(word.trim(), "deny" | "ask" | "block"))
-    })
-}
-
-/// A guard or a tool that already refused this call. A missing exit is
-/// not one of these: silent PostToolUse stays a success.
-fn refusal_signal(raw: &Value) -> bool {
-    if permission_block(raw) {
-        return true;
-    }
-    if raw.get("is_error").and_then(Value::as_bool) == Some(true)
-        || raw.get("isError").and_then(Value::as_bool) == Some(true)
-    {
-        return true;
-    }
-    let errors = [
-        raw.get("error"),
-        raw.get("error_message"),
-        raw.pointer("/tool_response/error"),
-    ];
-    errors.into_iter().flatten().any(|slot| {
-        slot.as_str().is_some_and(|text| !text.trim().is_empty()) || slot.as_bool() == Some(true)
     })
 }
 
@@ -5272,7 +5615,7 @@ print(f"id={ident}")
     }
 
     /// ljos-qpiw: git's own stderr on exit 0 is still a commit to cite.
-    /// A non-zero exit is not.
+    /// A non-zero exit is not. A missing exit whose HEAD moved is.
     #[test]
     fn successful_commit_with_stderr_text_is_cited() {
         let _g = lock();
@@ -5333,8 +5676,8 @@ print(f"id={ident}")
         let _ = observe(&stderr_only, &stderr_call);
         let book = book_json(dir.path(), session);
         assert!(
-            !deeds_of(&book).contains(&quiet),
-            "stderr without an exit is not a clean commit: {book}"
+            deeds_of(&book).contains(&quiet),
+            "HEAD moved and no exit code is a landed commit: {book}"
         );
     }
 

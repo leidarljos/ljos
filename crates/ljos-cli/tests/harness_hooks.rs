@@ -1146,6 +1146,549 @@ fn a_relative_workdir_resolves_and_a_normal_git_command_is_allowed() {
     assert_ordinary(&out, &as_cwd);
 }
 
+fn book_rows(hab: &Habitat) -> Vec<serde_json::Value> {
+    let dir = hab.run.join("ljos");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("book-") && name.ends_with(".json")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(repos) = value.get("repos").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        rows.extend(repos.values().cloned());
+    }
+    rows
+}
+
+fn book_count(hab: &Habitat) -> usize {
+    let dir = hab.run.join("ljos");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("book-") && name.ends_with(".json")
+        })
+        .count()
+}
+
+fn sitting<'a>(rows: &'a [serde_json::Value], issue: &str) -> &'a serde_json::Value {
+    rows.iter()
+        .find(|row| row["issue"].as_str() == Some(issue))
+        .unwrap_or_else(|| panic!("no sitting for {issue} in {rows:?}"))
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+fn claim_session(hab: &Habitat, session: &str, prompt: &str) {
+    let cwd = hab.repo.clone();
+    ljos(
+        hab,
+        &claude(
+            "UserPromptSubmit",
+            session,
+            &cwd,
+            serde_json::json!({"prompt": prompt}),
+        ),
+        &[],
+    );
+    ljos(
+        hab,
+        &claude(
+            "PreToolUse",
+            session,
+            &cwd,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        ),
+        &[],
+    );
+}
+
+/// Claude Code's Bash PostToolUse carries stdout and `gitOperation`, and no
+/// exit code. A missing code is not a failure, and every commit HEAD moved
+/// past the recorded start is a deed, including a compound command.
+#[test]
+fn a_landed_commit_without_an_exit_code_is_deeded() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let session = "claude-landed";
+    claim_session(&hab, session, "Add a kebab_case helper");
+    let seed = head(&hab.repo);
+    let rows = book_rows(&hab);
+    let issue = rows
+        .iter()
+        .find_map(|row| row["issue"].as_str().map(str::to_string))
+        .expect("the edit claimed");
+    let start = sitting(&rows, &issue)["start_sha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(start, seed);
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m nope"},
+                "tool_response": "error: nothing to commit, working tree clean\n"
+            }),
+        ),
+        &[],
+    );
+    let rows = book_rows(&hab);
+    let row = sitting(&rows, &issue);
+    let failures = row["failures"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !failures
+            .iter()
+            .any(|item| item.as_str() == Some("git commit exited non-zero")),
+        "a missing exit was booked as a failure: {row}"
+    );
+    assert!(row["deeds"].as_array().unwrap().is_empty(), "{row}");
+    assert_eq!(row["start_sha"].as_str(), Some(start.as_str()), "{row}");
+    assert_eq!(row["finished"], false, "{row}");
+
+    let landed = commit_file(&hab.repo, "slug.py");
+    let short = short_sha(&landed);
+    let stdout = format!(
+        "[main {short}] Add kebab_case function and tests\n 3 files changed, 10 insertions(+)\n"
+    );
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "git add slug.py test_kebab.py test_slug.py && git commit -m \"Add kebab_case function and tests\""
+                },
+                "tool_response": stdout,
+                "gitOperation": {"commit": {"sha": short, "kind": "committed"}}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{landed}")),
+        "{deeds}"
+    );
+    let rows = book_rows(&hab);
+    let row = sitting(&rows, &issue);
+    assert_eq!(row["start_sha"].as_str(), Some(start.as_str()), "{row}");
+    assert!(
+        !row["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("git commit exited non-zero")),
+        "{row}"
+    );
+
+    let first = commit_file(&hab.repo, "test_kebab.py");
+    let second = commit_file(&hab.repo, "test_slug.py");
+    let banner = format!("[main {}] test_slug.py\n", short_sha(&second));
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "git add test_kebab.py; git commit -m kebab; git add test_slug.py; git commit -m slug"
+                },
+                "tool_response": {"stdout": banner, "stderr": "", "interrupted": false}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{first}")),
+        "the earlier commit in the compound command was not deeded:\n{deeds}"
+    );
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{second}")),
+        "{deeds}"
+    );
+
+    let nested = commit_file(&hab.repo, "nested.txt");
+    let nested_banner = format!("[main {}] nested\n", short_sha(&nested));
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "(git add nested.txt && git commit -m nested)"},
+                "tool_response": {"stdout": nested_banner, "stderr": ""}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{nested}")),
+        "{deeds}"
+    );
+
+    let rejected = commit_file(&hab.repo, "rejected.txt");
+    let rejected_banner = format!("[main {}] rejected\n", short_sha(&rejected));
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "git commit -m rejected"},
+                "tool_response": {"stdout": rejected_banner, "exit_code": 1},
+                "gitOperation": {"commit": {"sha": short_sha(&rejected), "kind": "committed"}}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
+    assert!(
+        !deeds.contains(&format!("--id deed-file-commit-{rejected}")),
+        "an explicit non-zero exit was deeded:\n{deeds}"
+    );
+    let rows = book_rows(&hab);
+    let row = sitting(&rows, &issue);
+    assert_eq!(row["start_sha"].as_str(), Some(start.as_str()), "{row}");
+    assert_eq!(row["finished"], false, "{row}");
+    assert!(
+        row["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("git commit exited non-zero")),
+        "{row}"
+    );
+}
+
+/// A failed `git commit -m X` stays on the claimed issue. The same command
+/// exiting 0 a few seconds later deeds the new commit there, and so does
+/// the git hook, instead of opening a book whose start is that sha.
+#[test]
+fn a_retried_commit_is_deeded_on_the_same_issue() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let session = "opencode-retry";
+    claim_session(&hab, session, "Record the retry");
+    let rows = book_rows(&hab);
+    let issue = rows
+        .iter()
+        .find_map(|row| row["issue"].as_str().map(str::to_string))
+        .expect("the edit claimed");
+    let start = sitting(&rows, &issue)["start_sha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let command = "git commit -m X";
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 1, "error": "nothing to commit"}
+            }),
+        ),
+        &[],
+    );
+    let rows = book_rows(&hab);
+    let row = sitting(&rows, &issue);
+    assert_eq!(row["finished"], false, "{row}");
+    assert_eq!(row["start_sha"].as_str(), Some(start.as_str()), "{row}");
+    assert_eq!(row["issue"].as_str(), Some(issue.as_str()), "{row}");
+    assert!(row["deeds"].as_array().unwrap().is_empty(), "{row}");
+    assert!(
+        row["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("git commit exited non-zero")),
+        "{row}"
+    );
+    assert_eq!(book_count(&hab), 1, "the failure opened another book");
+
+    let sha = commit_file(&hab.repo, "retried.txt");
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 0}
+            }),
+        ),
+        &[],
+    );
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
+    assert!(
+        deeds.contains(&format!("--id deed-file-commit-{sha}")),
+        "{deeds}"
+    );
+    let log = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    assert!(
+        log.contains(&format!("deed {issue}")),
+        "the retry was not deeded on {issue}:\n{log}"
+    );
+    let rows = book_rows(&hab);
+    let row = sitting(&rows, &issue);
+    assert_eq!(row["start_sha"].as_str(), Some(start.as_str()), "{row}");
+    assert_eq!(row["finished"], false, "{row}");
+    assert!(
+        row["deeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == &sha),
+        "{row}"
+    );
+    assert!(
+        row["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("git commit exited non-zero")),
+        "{row}"
+    );
+    assert!(
+        !rows.iter().any(|row| {
+            row["start_sha"].as_str() == Some(sha.as_str()) && row["issue"].is_null()
+        }),
+        "the landed sha became the start of an empty book: {rows:?}"
+    );
+
+    let session = "opencode-hook";
+    claim_session(&hab, session, "Record the hook retry");
+    let rows = book_rows(&hab);
+    let issue = rows
+        .iter()
+        .filter(|row| row["deeds"].as_array().is_none_or(|deeds| deeds.is_empty()))
+        .find_map(|row| row["issue"].as_str().map(str::to_string))
+        .expect("the second edit claimed");
+    let start = sitting(&rows, &issue)["start_sha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ljos(
+        &hab,
+        &claude(
+            "PostToolUse",
+            session,
+            &cwd,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 1, "error": "nothing to commit"}
+            }),
+        ),
+        &[],
+    );
+    let hooked = commit_file(&hab.repo, "hooked.txt");
+    ljos_cmd(&hab, &["hook", "--git-commit"], "", &[]);
+    let log = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
+    assert!(
+        log.contains(&format!("deed {issue}")),
+        "the git hook did not deed {hooked} on {issue}:\n{log}"
+    );
+    assert_eq!(
+        log.matches("create").count(),
+        2,
+        "the git hook filed another issue:\n{log}"
+    );
+    let rows = book_rows(&hab);
+    let row = sitting(&rows, &issue);
+    assert_eq!(row["start_sha"].as_str(), Some(start.as_str()), "{row}");
+    assert_eq!(row["finished"], false, "{row}");
+    assert!(
+        row["deeds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == &hooked),
+        "{row}"
+    );
+    assert!(
+        row["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("git commit exited non-zero")),
+        "{row}"
+    );
+    assert!(
+        !rows.iter().any(|row| {
+            row["start_sha"].as_str() == Some(hooked.as_str()) && row["issue"].is_null()
+        }),
+        "the hook opened an empty book at {hooked}: {rows:?}"
+    );
+}
+
+/// The first prompt of a fresh session says what is already on disk: the
+/// user rules and a stored lesson, without waiting for the encoder to load.
+#[test]
+fn a_cold_first_prompt_shows_rules_and_memory() {
+    let (_dir, hab) = habitat();
+    let rules = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(
+        rules.join("user-rules.json"),
+        r#"{"rules":[{"id":"ur-slugify","text":"Never rename the slugify helper.","author":"ada","reason":"the seat asked","written_at":"2026-10-01T00:00:00Z"}]}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(hab.run.join("ljos")).unwrap();
+    std::fs::write(
+        hab.run.join("ljos/book-held.json"),
+        r#"{"repos":{"held":{"issue":"probe-held","finished":false}}}
+"#,
+    )
+    .unwrap();
+    let pack = hab.root.join("cold-pack.py");
+    std::fs::write(
+        &pack,
+        r#"#!/usr/bin/env python3
+import json, os, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+atoms = json.loads(os.environ["ATOMS"])
+armed = False
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        global armed
+        path = self.path.split("?", 1)[0]
+        if path == "/v1/status":
+            armed = True
+            body = {"embedder": {"available": True, "answering": None}}
+        elif path == "/v1/atoms":
+            if armed:
+                time.sleep(30)
+            body = {"atoms": atoms}
+        else:
+            body = {"hits": []}
+        self._send(body)
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0") or 0)
+        self.rfile.read(n)
+        self._send({"hits": []})
+    def _send(self, body):
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+"#,
+    )
+    .unwrap();
+    let atoms = serde_json::json!([{
+        "id": "atom-slugify",
+        "kind": "lesson",
+        "text": "The slugify helper keeps kebab words whole.",
+        "entities": ["horizon:standing"],
+        "ts": "2026-10-17T00:00:00Z",
+        "origin": "agent-derived"
+    }]);
+    let mut pack_proc = Command::new("python3")
+        .arg(&pack)
+        .env("ATOMS", atoms.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut port = String::new();
+    let mut stdout = pack_proc.stdout.take().unwrap();
+    let mut byte = [0u8; 1];
+    let ready = std::time::Instant::now();
+    while ready.elapsed() < Duration::from_secs(5) {
+        if stdout.read(&mut byte).unwrap() == 0 {
+            break;
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        port.push(byte[0] as char);
+    }
+    let port: u16 = port.trim().parse().expect("pack port");
+    let url = format!("http://127.0.0.1:{port}");
+    let cwd = hab.repo.clone();
+    let started = std::time::Instant::now();
+    let first = ljos(
+        &hab,
+        &claude(
+            "UserPromptSubmit",
+            "1",
+            &cwd,
+            serde_json::json!({"prompt": "Fix the slugify helper"}),
+        ),
+        &[
+            ("PACKSET_URL", url.as_str()),
+            ("LJOS_USER_RULES_SYNC", "off"),
+        ],
+    );
+    let elapsed = started.elapsed();
+    let _ = pack_proc.kill();
+    let _ = pack_proc.wait();
+    let note = context(&first.stdout);
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "the first prompt took {elapsed:?}\n{note}"
+    );
+    assert!(note.contains("User rules"), "{note}");
+    assert!(note.contains("Never rename the slugify helper."), "{note}");
+    assert!(
+        note.contains("The slugify helper keeps kebab words whole."),
+        "{note}"
+    );
+    assert!(note.contains("What this seat already knows"), "{note}");
+    assert!(note.contains("probe-held"), "{note}");
+    assert!(
+        !note.contains("pack is loading its search model"),
+        "the warming line hid the recall: {note}"
+    );
+}
+
 /// A workdir that does not exist is not a seat-rule deny of a normal command.
 #[test]
 fn a_missing_workdir_is_not_a_seat_rule_deny() {

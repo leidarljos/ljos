@@ -5026,7 +5026,7 @@ pub(crate) fn prompt_of(v: &Value) -> String {
         .or_else(|| v.get("transcript_path").and_then(Value::as_str))
         .map(str::trim)
         .filter(|path| !path.is_empty())
-        .and_then(|path| std::fs::read_to_string(expand(path)).ok())
+        .and_then(|path| bookkeep::read_text_bounded(&expand(path)))
         .map(|text| last_user_text(&text))
         .unwrap_or_default()
 }
@@ -6072,7 +6072,24 @@ fn shown_on_prompt(hit: &Hit) -> bool {
 #[must_use]
 pub fn hook_note(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let (text, ids) = hook_note_from_pack(call, limit);
-    (user_rules::prepend(with_issue_recall(call, text)), ids)
+    let text = with_held_claims(call, with_issue_recall(call, text));
+    (user_rules::prepend(text), ids)
+}
+
+/// Claims already held, ahead of the pack note. A prompt with none is
+/// left as it is, so an empty seat does not say `claims: none`.
+fn with_held_claims(call: &HookCall, text: String) -> String {
+    if call.event != "UserPromptSubmit" {
+        return text;
+    }
+    let claims = bookkeep::prompt_claims();
+    if claims.is_empty() {
+        text
+    } else if text.is_empty() {
+        claims
+    } else {
+        format!("{claims}\n{text}")
+    }
 }
 
 /// `text`, then the recall of each tracker issue (at most two) a prompt
@@ -6297,12 +6314,14 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     }
     // While the encoder loads, a search waits on it past the hook's
     // deadline and the answer is lost. Rank the atoms already stored
-    // before starting that load: the warm-up search holds a pack worker
-    // until the model answers, and the listing behind it would time out.
-    // With nothing to show, the prompt hears that memory is starting,
-    // once a session.
+    // before asking whether the encoder is loaded: that status call is
+    // what starts the download, and a listing behind it would time out.
+    // The warm-up search then holds a pack worker until the model
+    // answers. With nothing to show, the prompt hears that memory is
+    // starting, once a session. A prompt that recalled something does
+    // not hear it.
+    let recalled = lexical_recall(call, cue, limit);
     if encoder_is_cold() {
-        let recalled = lexical_recall(call, cue, limit);
         start_encoder_warm();
         if let Some((text, mut ids)) = recalled {
             ids.extend(pending);
@@ -8042,20 +8061,24 @@ pub fn encoder_warming() -> bool {
     cold
 }
 
-/// Whether an identical call (event, session, text) started in the last 20
-/// seconds. A runner that loads another runner's hook file runs the same
-/// hook twice for one event, and both queue on the pack's one reranker.
-/// The first call makes the marker and answers; the second returns at once.
-pub fn hook_already_running(call: &HookCall) -> bool {
-    hook_marker_fresh(&running_key(call), std::time::Duration::from_secs(20))
+/// Whether this same delivery started in the last 20 seconds. The key is
+/// the event, the session, the command, and the payload, so a retry whose
+/// exit code differs is a new call. A runner that delivers one event twice
+/// with the same bytes still collapses onto the first answer.
+pub fn hook_already_running(call: &HookCall, input: &str) -> bool {
+    hook_marker_fresh(
+        &running_key(call, input),
+        std::time::Duration::from_secs(20),
+    )
 }
 
-fn running_key(call: &HookCall) -> String {
+fn running_key(call: &HookCall, input: &str) -> String {
     work_id(&format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}",
         call.event,
         call.session.as_deref().unwrap_or(""),
-        call.cue
+        call.cue,
+        input
     ))
 }
 
@@ -8073,17 +8096,17 @@ pub fn replays_its_copy(call: &HookCall) -> bool {
 
 /// Where the first call's answer waits for its copy. The name starts like
 /// the markers, so the same sweep clears it.
-fn hook_answer_path(call: &HookCall) -> PathBuf {
-    runtime_dir().join(format!("hook-once-{}.answer", running_key(call)))
+fn hook_answer_path(call: &HookCall, input: &str) -> PathBuf {
+    runtime_dir().join(format!("hook-once-{}.answer", running_key(call, input)))
 }
 
 /// Keep the answer the first call printed, for [`replay_hook_answer`].
 /// Readable by its owner only, and written whole before it can be read.
-pub fn keep_hook_answer(call: &HookCall, output: &str) {
+pub fn keep_hook_answer(call: &HookCall, input: &str, output: &str) {
     if !replays_its_copy(call) {
         return;
     }
-    let path = hook_answer_path(call);
+    let path = hook_answer_path(call, input);
     let partial = path.with_extension("partial");
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -8103,12 +8126,16 @@ pub fn keep_hook_answer(call: &HookCall, output: &str) {
 /// `None` when it never comes: the copy then answers with nothing, as a
 /// copy on any other runner does, and the first call's answer stands.
 #[must_use]
-pub fn replay_hook_answer(call: &HookCall, wait: std::time::Duration) -> Option<String> {
-    let path = hook_answer_path(call);
+pub fn replay_hook_answer(
+    call: &HookCall,
+    input: &str,
+    wait: std::time::Duration,
+) -> Option<String> {
+    let path = hook_answer_path(call, input);
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     // An answer older than the marker is an earlier prompt's with the same
     // words, and is not this one's.
-    let since = modified(&runtime_dir().join(format!("hook-once-{}", running_key(call))));
+    let since = modified(&runtime_dir().join(format!("hook-once-{}", running_key(call, input))));
     let start = std::time::Instant::now();
     loop {
         let current = modified(&path).is_some_and(|at| since.is_none_or(|since| at >= since));
@@ -27837,15 +27864,15 @@ mod tests {
         assert_eq!(atoms_timeout(), std::time::Duration::from_secs(2));
         std::env::remove_var("LJOS_IN_HOOK");
         assert!(
-            !hook_already_running(&call("fix the ci")),
+            !hook_already_running(&call("fix the ci"), ""),
             "the first answers"
         );
         assert!(
-            hook_already_running(&call("fix the ci")),
+            hook_already_running(&call("fix the ci"), ""),
             "its twin returns"
         );
         assert!(
-            !hook_already_running(&call("another prompt")),
+            !hook_already_running(&call("another prompt"), ""),
             "another prompt answers"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
@@ -27866,24 +27893,24 @@ mod tests {
             shape,
         };
         let codex = call(HookShape::DenyOnly);
-        assert!(!hook_already_running(&codex), "the first runs");
-        assert!(hook_already_running(&codex), "the copy does not");
+        assert!(!hook_already_running(&codex, ""), "the first runs");
+        assert!(hook_already_running(&codex, ""), "the copy does not");
         let quick = std::time::Duration::from_millis(100);
         assert_eq!(
-            replay_hook_answer(&codex, quick),
+            replay_hook_answer(&codex, "", quick),
             None,
             "nothing written yet"
         );
-        keep_hook_answer(&codex, "{\"hookSpecificOutput\":{}}\n");
+        keep_hook_answer(&codex, "", "{\"hookSpecificOutput\":{}}\n");
         assert_eq!(
-            replay_hook_answer(&codex, quick).as_deref(),
+            replay_hook_answer(&codex, "", quick).as_deref(),
             Some("{\"hookSpecificOutput\":{}}\n")
         );
         let cursor = call(HookShape::Cursor);
         assert!(!replays_its_copy(&cursor));
-        keep_hook_answer(&cursor, "x");
+        keep_hook_answer(&cursor, "", "x");
         assert_eq!(
-            replay_hook_answer(&codex, quick).as_deref(),
+            replay_hook_answer(&codex, "", quick).as_deref(),
             Some("{\"hookSpecificOutput\":{}}\n"),
             "a Cursor call writes no answer"
         );
@@ -27892,7 +27919,7 @@ mod tests {
         let marker = dir
             .path()
             .join("ljos")
-            .join(format!("hook-once-{}", running_key(&codex)));
+            .join(format!("hook-once-{}", running_key(&codex, "")));
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         std::fs::File::options()
             .write(true)
@@ -27900,7 +27927,7 @@ mod tests {
             .unwrap()
             .set_modified(later)
             .unwrap();
-        assert_eq!(replay_hook_answer(&codex, quick), None);
+        assert_eq!(replay_hook_answer(&codex, "", quick), None);
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
 

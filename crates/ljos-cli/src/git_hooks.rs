@@ -219,6 +219,12 @@ fn book_commit(hook: &str) -> Result<()> {
     // child git and ljos processes; this process keeps the environment it
     // was started with, so the rev-parse above still sees the checkout.
     let _children = HookChildren::enter();
+    // The commit already belongs to an open sitting in this checkout.
+    // Booking it on the seat's own session would open a second book.
+    if crate::bookkeep::cite_into_open_sitting(&repo) {
+        remember_booked(&repo, &head);
+        return Ok(());
+    }
     let session = crate::bookkeep::seat_session();
     let command = if subject.is_empty() {
         "git commit".to_string()

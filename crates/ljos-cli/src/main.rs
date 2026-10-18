@@ -2165,10 +2165,10 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             if matches!(call.event.as_str(), "UserPromptSubmit" | "PostToolUse") {
-                if ljos_cli::hook_already_running(&call) {
+                if ljos_cli::hook_already_running(&call, &input) {
                     if ljos_cli::replays_its_copy(&call) {
                         let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
-                        if let Some(answer) = ljos_cli::replay_hook_answer(&call, wait) {
+                        if let Some(answer) = ljos_cli::replay_hook_answer(&call, &input, wait) {
                             print!("{answer}");
                         }
                     }
@@ -2569,7 +2569,7 @@ fn run_command() -> Result<()> {
             }
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
             ljos_cli::answer_gate(&output);
-            ljos_cli::keep_hook_answer(&call, &output);
+            ljos_cli::keep_hook_answer(&call, &input, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);
                 ljos_cli::mail::ack_delivered(&seen_later);
