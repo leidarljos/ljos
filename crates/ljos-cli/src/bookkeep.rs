@@ -294,8 +294,8 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     // Stop and SessionEnd close what the sitting opened. In a checkout the
     // book has no row for, they open nothing: an MCP server that answered
     // only guard checks used to leave a row with no issue at its exit.
-    let ending_elsewhere = matches!(call.event.as_str(), "Stop" | "SessionEnd")
-        && !book.repos.contains_key(&repo);
+    let ending_elsewhere =
+        matches!(call.event.as_str(), "Stop" | "SessionEnd") && !book.repos.contains_key(&repo);
     let now = unix_secs();
     if prompt_set {
         bind_prompt(&mut book, &repo, now);
