@@ -3059,6 +3059,9 @@ mod tests {
 
     #[test]
     fn a_claim_uses_a_checkout_or_the_last_booked_repo() {
+        // git_toplevel looks git up with which(), so this holds the same
+        // lock as the other PATH readers.
+        let _g = lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-place-test");
         let _ = std::fs::remove_dir_all(&root);
         let repo = root.join("repo");
@@ -3097,6 +3100,9 @@ mod tests {
 
     #[test]
     fn project_for_matches_the_remote_before_the_basename() {
+        // The remote lookup runs git through which(), so this holds the
+        // same lock as the other PATH readers.
+        let _g = lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-project-test");
         let _ = std::fs::remove_dir_all(&root);
         let tracker = root.join("tracker");
@@ -3139,6 +3145,7 @@ mod tests {
             .arg("-C")
             .arg(dir)
             .args(args)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .output()
             .unwrap();
         assert!(
