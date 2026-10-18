@@ -21,6 +21,7 @@ pub mod command_prefs;
 pub mod converge;
 pub mod extract;
 pub mod gates;
+pub mod git_hooks;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -2709,6 +2710,64 @@ pub fn format_seat_row() -> String {
     )
 }
 
+/// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
+/// that is not listed becomes `grokbot-` plus its first eight characters,
+/// never the raw id.
+#[must_use]
+pub fn seat_for_agent(id: &str) -> String {
+    mapped_seat(&seats_file(), id).unwrap_or_else(|| fallback_seat(id))
+}
+
+/// `ljos seat` when this process carries `CURSOR_CONVERSATION_ID`: the
+/// mapped name alone, so a shell can export it. `None` when the variable
+/// is unset, and the command then prints the usual seat, holder and source.
+#[must_use]
+pub fn grokbot_seat_name() -> Option<String> {
+    let id = std::env::var("CURSOR_CONVERSATION_ID").ok()?;
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(seat_for_agent(id))
+}
+
+fn fallback_seat(id: &str) -> String {
+    let prefix: String = id.chars().take(8).collect();
+    format!("grokbot-{prefix}")
+}
+
+fn seats_file() -> PathBuf {
+    if let Some(path) = std::env::var_os("LJOS_SEATS").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("ljos").join("seats.toml")
+}
+
+fn mapped_seat(path: &Path, id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    match table.get(id)? {
+        toml::Value::String(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {
@@ -3297,9 +3356,36 @@ fn seat_env_text(name: &str) -> String {
          {}\n\
          {}\n",
         shared_holder_id(name),
-        keep_seat_assignment(name),
+        seat_lines(name),
         session_assignment(name),
         GUARD_PATH_LINES
+    )
+}
+
+/// Grok Bot has no prompt hook. The conversation id is looked up in
+/// `seats.toml` by `ljos seat`. Any other shell runner keeps an exported
+/// seat and otherwise uses its harness name.
+fn seat_lines(name: &str) -> String {
+    if name != "grokbot" {
+        return keep_seat_assignment(name);
+    }
+    format!(
+        "# Seat names live in ${{XDG_CONFIG_HOME:-$HOME/.config}}/ljos/seats.toml, read by `ljos seat`.\n\
+         # An unknown conversation id becomes grokbot-<first 8 characters>, never the raw id.\n\
+         if [ -z \"${{LJOS_SHELL_SESSION:-}}\" ]; then\n\
+         \texport LJOS_SHELL_SESSION=$$\n\
+         fi\n\
+         if [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
+         \t_ljos_named=$(ljos seat 2>/dev/null || true)\n\
+         \tcase \"$_ljos_named\" in\n\
+         \t\t\"\"|*[!A-Za-z0-9_-]*) LJOS_SEAT=grokbot-$(printf %.8s \"$CURSOR_CONVERSATION_ID\") ;;\n\
+         \t\t*) LJOS_SEAT=$_ljos_named ;;\n\
+         \tesac\n\
+         \texport LJOS_SEAT\n\
+         \tunset _ljos_named\n\
+         fi\n\
+         {}",
+        keep_seat_assignment(name)
     )
 }
 
@@ -3364,6 +3450,16 @@ under_temp() {
 }
 if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)" || under_temp "$(pwd -P)"; then
   exec "$real" "$@"
+fi
+# The first git of a conversation is the session start this runner never
+# hooks. The brief is held claims, recall and unread mail, on stderr, once.
+# Bound the wait: a slow seat must not hold the command. A failure allows it.
+if [ "$me" = git ] && command -v ljos >/dev/null 2>&1; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 0.3 ljos hook --event SessionStart --brief-once >&2 || true
+  else
+    ljos hook --event SessionStart --brief-once >&2 || true
+  fi
 fi
 if command -v ljos-policyd >/dev/null 2>&1; then
   verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
@@ -3446,6 +3542,30 @@ fn guard_step(dry: bool) -> Step {
         Err(e) => Step {
             what: "guard".into(),
             detail: format!("{}: {e}", dir.display()),
+            ok: false,
+        },
+    }
+}
+
+/// Grok Bot commits through git, with no prompt hook to book them.
+/// `onboard --harness grokbot` installs the global hooks.
+fn git_hooks_step(dry: bool) -> Step {
+    if dry {
+        return Step {
+            what: "git-hooks".into(),
+            detail: "would install git hooks that book commits".into(),
+            ok: true,
+        };
+    }
+    match git_hooks::install() {
+        Ok(dir) => Step {
+            what: "git-hooks".into(),
+            detail: format!("installed git hooks in {}", dir.display()),
+            ok: true,
+        },
+        Err(e) => Step {
+            what: "git-hooks".into(),
+            detail: format!("git hooks: {e:#}"),
             ok: false,
         },
     }
@@ -3554,6 +3674,9 @@ fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Re
     steps.push(write_skill(&expand(dir), dry));
     steps.push(env_step(&env_path_for(file, h), &h.name, dry));
     steps.push(guard_step(dry));
+    if h.name == "grokbot" {
+        steps.push(git_hooks_step(dry));
+    }
     steps.extend([
         deed_store_step(dry),
         tracker_step(dry),
@@ -5052,42 +5175,75 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         .or_else(|| v["conversation_id"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let raw = v["hook_event_name"]
+    let from_payload = v["hook_event_name"]
         .as_str()
         .or_else(|| v["hookEventName"].as_str())
-        .unwrap_or("PreToolUse");
-    let event = normalize_hook_event(raw).to_string();
-    let cue = if let Some(p) = v["prompt"].as_str() {
-        p.to_string()
-    } else if let Some(p) = v["extra"]["user_message"].as_str() {
-        p.to_string()
-    } else if let Some(c) = input["command"].as_str().or_else(|| v["command"].as_str()) {
-        c.to_string()
-    } else if let Some(path) = input["file_path"]
-        .as_str()
-        .or_else(|| input["notebook_path"].as_str())
-    {
-        // A file tool's input is the file's text, not a command line: the
-        // cue is the tool and the path it writes, for the seat's guard.
-        let tool = v["tool_name"]
-            .as_str()
-            .or_else(|| v["toolName"].as_str())
-            .unwrap_or("Edit");
-        format!("{tool} {path}")
-    } else if let Some(map) = input.as_object() {
-        map.values()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        String::new()
-    };
+        .filter(|name| !name.is_empty());
+    let raw = from_payload.or(event).unwrap_or("PreToolUse");
+    let event_name = normalize_hook_event(raw).to_string();
+    let cue = cue_for(&v, input, &event_name);
     HookCall {
-        event,
+        event: event_name,
         cue,
         session,
         shape,
     }
+}
+
+/// The text the seat judges. A tool event takes the command first: a runner
+/// that also sends `prompt` on `PostToolUse` would otherwise hide
+/// `tool_input.command`, and a commit would be recorded as the baseline
+/// instead of a deed. A prompt event still reads the prompt.
+fn cue_for(v: &Value, input: &Value, event: &str) -> String {
+    let text = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+    };
+    let command = text(input["command"].as_str().or_else(|| v["command"].as_str()));
+    let prompt = text(
+        v["prompt"]
+            .as_str()
+            .or_else(|| v["extra"]["user_message"].as_str()),
+    );
+    let file = input["file_path"]
+        .as_str()
+        .or_else(|| input["notebook_path"].as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let tool = v["tool_name"]
+                .as_str()
+                .or_else(|| v["toolName"].as_str())
+                .unwrap_or("Edit");
+            format!("{tool} {path}")
+        });
+    let joined = input.as_object().map(|map| {
+        map.values()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let tool = matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure");
+    if tool {
+        if let Some(command) = command {
+            return command;
+        }
+        if let Some(file) = file {
+            return file;
+        }
+        if let Some(prompt) = prompt {
+            return prompt;
+        }
+    } else if let Some(prompt) = prompt {
+        return prompt;
+    } else if let Some(command) = command {
+        return command;
+    } else if let Some(file) = file {
+        return file;
+    }
+    joined.unwrap_or_default()
 }
 
 /// Where the ids already injected in a session are kept: the runtime
@@ -28713,6 +28869,36 @@ mod tests {
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
 
+    /// A PostToolUse payload can carry the person's prompt beside the
+    /// command. The command is what ran. Reading the prompt hides a commit,
+    /// and the sitting then stores that HEAD as the baseline.
+    #[test]
+    fn a_tool_event_reads_the_command_ahead_of_a_prompt_field() {
+        let call = hook_call(
+            r#"{"hook_event_name":"PostToolUse","prompt":"please commit the readme","tool_name":"Bash","tool_input":{"command":"git commit -m readme"}}"#,
+        );
+        assert_eq!(call.event, "PostToolUse");
+        assert_eq!(call.cue, "git commit -m readme");
+        let prompt = hook_call(
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"please commit the readme","tool_input":{"command":"git commit -m readme"}}"#,
+        );
+        assert_eq!(prompt.event, "UserPromptSubmit");
+        assert_eq!(prompt.cue, "please commit the readme");
+    }
+
+    #[test]
+    fn an_unknown_agent_id_is_a_grokbot_prefix_not_the_raw_id() {
+        let id = "bc-1234abcd-rest";
+        assert_eq!(fallback_seat(id), "grokbot-bc-1234a");
+        assert_ne!(fallback_seat(id), id);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seats.toml");
+        std::fs::write(&path, format!("{id:?} = \"rgoswami\"\n")).unwrap();
+        assert_eq!(mapped_seat(&path, id).as_deref(), Some("rgoswami"));
+        assert_eq!(mapped_seat(&path, "other-id-9999"), None);
+        assert_eq!(mapped_seat(&dir.path().join("missing.toml"), id), None);
+    }
+
     /// A hook call is read from the runner's JSON or from plain text, and
     /// the answer is the runner's shape only when there is something to say.
     #[test]
@@ -31611,6 +31797,17 @@ mod tests {
         }
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Git hooks install writes core.hooksPath. Keep that off the login config.
+        // SAFETY: the lock above is the only environment this test touches.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", dir.join("share"));
+            std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+            std::env::set_var("GIT_CONFIG_GLOBAL", dir.join("gitconfig"));
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        }
         let file = dir.join("harnesses.toml");
         let skills = dir.join("given");
         let dry = super::onboard_in(&file, "grokbot", true, Some(&skills)).unwrap();
@@ -31636,6 +31833,8 @@ mod tests {
             env.contains("export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n"),
             "{env}"
         );
+        assert!(env.contains("ljos seat"), "{env}");
+        assert!(env.contains("seats.toml"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
@@ -31663,6 +31862,11 @@ mod tests {
         unsafe {
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+            std::env::remove_var("HOME");
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("GIT_CONFIG_GLOBAL");
+            std::env::remove_var("GIT_CONFIG_NOSYSTEM");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

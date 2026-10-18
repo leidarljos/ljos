@@ -95,6 +95,10 @@ struct Book {
     /// a lookup, not another `git rev-parse`.
     #[serde(default)]
     cwd_repo: BTreeMap<String, String>,
+    /// The last repository a git hook booked for this seat. An MCP claim
+    /// with no `repo` argument files there instead of under the server's cwd.
+    #[serde(default)]
+    last_repo: String,
 }
 
 /// What this session has already recorded for one repository.
@@ -219,9 +223,12 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         finish_orphans(&session);
         refresh_landed_deeds();
     }
+    // A sitting that only commits never sees SessionStart. Close one whose
+    // last call is older than the window before this call stamps it again.
+    close_idle_sittings(unix_secs());
     let path = book_path(&session);
     let mut book = load_book(&path);
-    book.owner_pid = hook_owner();
+    book.owner_pid = next_owner_pid(&call.event, book.owner_pid, hook_owner());
     if call.event == "UserPromptSubmit" {
         let prompt = collapse(&call.cue);
         if !prompt.is_empty() {
@@ -286,6 +293,10 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     } else {
         String::new()
     };
+    if ran && !repo.is_empty() {
+        book.last_repo.clone_from(&repo);
+    }
+    book.last_unix = unix_secs();
     store_book(&path, &book);
     recall
 }
@@ -312,14 +323,20 @@ pub fn before_mcp_write(name: &str, args: Option<&serde_json::Map<String, Value>
         }
         store_book(&path, &book);
     }
+    // The tool's repo, else the last checkout this seat's git hook booked,
+    // else the working directory. A path that is not a checkout is not a
+    // project: filing there names the directory ("workspace") and the claim
+    // is junk.
+    let explicit = args.and_then(|map| map.get("repo")).and_then(Value::as_str);
+    let Some(place) = place_for_claim(explicit) else {
+        log_line("claim: refused a directory that is not a git checkout");
+        return;
+    };
     // A hook's warm edit after Stop stays warm. An MCP write after the
     // idle close files a new claim: the finished row is this sitting, and
     // the next write is the next one.
     reopen_finished(&session);
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let cwd = place;
     let raw = serde_json::json!({
         "cwd": cwd,
         "session_id": session,
@@ -439,6 +456,50 @@ pub fn idle_limit_from(raw: Option<&str>) -> Option<Duration> {
 #[must_use]
 pub fn idle_due(now: u64, last: u64, limit: Duration) -> bool {
     last > 0 && now.saturating_sub(last) >= limit.as_secs()
+}
+
+/// How long a sitting may go without a hook call before the next call
+/// finishes it. Unset is two hours. `0` and `off` leave it open.
+fn sitting_idle() -> Option<Duration> {
+    sitting_idle_from(std::env::var("LJOS_SITTING_IDLE").ok().as_deref())
+}
+
+fn sitting_idle_from(raw: Option<&str>) -> Option<Duration> {
+    let Some(raw) = raw.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Some(Duration::from_secs(2 * 60 * 60));
+    };
+    let lowered = raw.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "0" | "off" | "false" | "no") {
+        return None;
+    }
+    match super::reap::parse_idle(raw) {
+        Ok(window) if window.is_zero() => None,
+        Ok(window) => Some(window),
+        Err(_) => Some(Duration::from_secs(2 * 60 * 60)),
+    }
+}
+
+/// Finish seat records idle longer than [`sitting_idle`], and drop the
+/// finished rows so the next call files its own claim.
+fn close_idle_sittings(now: u64) {
+    let Some(limit) = sitting_idle() else {
+        return;
+    };
+    for path in book_files() {
+        let mut book = load_book(&path);
+        if !book.repos.values().any(sitting_open) {
+            continue;
+        }
+        if !idle_due(now, book.last_unix, limit) {
+            continue;
+        }
+        finish_open(&mut book);
+        book.repos.retain(|_, row| !row.finished);
+        book.cwd_repo
+            .retain(|_, repo| book.repos.contains_key(repo));
+        book.prompt.clear();
+        store_book(&path, &book);
+    }
 }
 
 fn unix_secs() -> u64 {
@@ -694,11 +755,14 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
         .ok()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    let place = repo
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .unwrap_or(cwd.as_str())
-        .to_string();
+    let named = repo.map(str::trim).filter(|path| !path.is_empty());
+    let Some(place) = place_for_claim(named) else {
+        return Err(if named.is_some() {
+            "ljos_start: repo is not a git checkout".into()
+        } else {
+            "ljos_start: pass repo, a git checkout".into()
+        });
+    };
     let issue_id = match issue.map(str::trim).filter(|id| !blank_issue(id)) {
         Some(id) => {
             claim_existing(id)?;
@@ -907,6 +971,51 @@ fn repo_key(book: &mut Book, raw: &Value) -> String {
     key
 }
 
+/// Where a new claim is filed. An explicit path is used only when it is a
+/// checkout: it does not fall back to the working directory. With no path,
+/// the last repository this seat's git hook booked, then the working
+/// directory when that is a checkout.
+fn place_for_claim(explicit: Option<&str>) -> Option<String> {
+    place_for_claim_in(
+        explicit,
+        last_booked_repo().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+fn place_for_claim_in(
+    explicit: Option<&str>,
+    last: Option<&str>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    if let Some(path) = explicit.map(str::trim).filter(|path| !path.is_empty()) {
+        return git_toplevel(Path::new(path));
+    }
+    if let Some(path) = last.map(str::trim).filter(|path| !path.is_empty()) {
+        if let Some(top) = git_toplevel(Path::new(path)) {
+            return Some(top);
+        }
+    }
+    cwd.and_then(git_toplevel)
+}
+
+/// The checkout the git hook last booked for this seat.
+fn last_booked_repo() -> Option<String> {
+    let book = load_book(&book_path(&sitting_key()));
+    let repo = book.last_repo.trim();
+    if repo.is_empty() {
+        None
+    } else {
+        Some(repo.to_string())
+    }
+}
+
+/// The book key for this seat, shared by the git hook and the MCP server.
+#[must_use]
+pub fn seat_session() -> String {
+    sitting_key()
+}
+
 fn git_toplevel(cwd: &Path) -> Option<String> {
     if cwd.as_os_str().is_empty() {
         return None;
@@ -1068,6 +1177,17 @@ fn cite_deed(issue: &str, sha: &str) -> Result<(), String> {
         return Err(line.trim().to_string());
     }
     Ok(())
+}
+
+/// A short-lived hook must not replace the runner that owns the sitting.
+/// Session start and a new prompt are that runner. A pid of zero has never
+/// been set, so the first call of any kind may set it.
+fn next_owner_pid(event: &str, current: u32, incoming: u32) -> u32 {
+    if current == 0 || matches!(event, "SessionStart" | "UserPromptSubmit") {
+        incoming
+    } else {
+        current
+    }
 }
 
 /// The runner that spawned this hook. When it is gone, the next session
@@ -1290,6 +1410,8 @@ fn finish_open(book: &mut Book) {
             Err(e) => log_line(&format!("finish: {e}")),
         }
     }
+    // The next sitting must not inherit this title.
+    book.prompt.clear();
 }
 
 /// The ticket is done, the claim is released, the tracker commit says
@@ -1714,37 +1836,141 @@ fn title_from(prompt: &str, repo: &str) -> String {
 }
 
 fn project_for(repo: &str) -> String {
-    if let Some(project) = std::env::var("LJOS_PROJECT")
-        .ok()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-    {
-        return project;
+    let forced = std::env::var("LJOS_PROJECT").ok();
+    let tracker = std::env::var_os("VISSUE_ROOT").map(PathBuf::from);
+    project_for_at(repo, forced.as_deref(), tracker.as_deref())
+}
+
+fn project_for_at(repo: &str, forced: Option<&str>, tracker: Option<&Path>) -> String {
+    if let Some(project) = forced.map(str::trim).filter(|project| !project.is_empty()) {
+        return project.to_string();
     }
-    if let Some(project) = sole_project() {
-        return project;
+    if let Some(tracker) = tracker {
+        if let Some(project) = match_remote_project(repo, tracker) {
+            return project;
+        }
+        if let Some(project) = sole_project_in(tracker) {
+            return project;
+        }
     }
     Path::new(repo)
         .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
         .unwrap_or("agent")
         .to_string()
 }
 
-/// The project directory when the tracker has exactly one.
-fn sole_project() -> Option<String> {
-    let root = std::env::var_os("VISSUE_ROOT")?;
-    let root = PathBuf::from(root);
+/// The project whose recorded remote is this checkout's, else the project
+/// named like the repository in that URL. A checkout called `workspace`
+/// then files on the existing project instead of a new basename.
+fn match_remote_project(repo: &str, tracker: &Path) -> Option<String> {
+    let url = git_remote_url(repo)?;
+    let want = normalize_remote(&url);
+    if want.is_empty() {
+        return None;
+    }
+    let projects = projects_in(tracker);
+    for (name, dir) in &projects {
+        if project_records_remote(dir, &want) {
+            return Some(name.clone());
+        }
+    }
+    let slug = remote_slug(&want);
+    projects
+        .into_iter()
+        .find(|(name, _)| name == &slug)
+        .map(|(name, _)| name)
+}
+
+fn git_remote_url(repo: &str) -> Option<String> {
+    if repo.is_empty() {
+        return None;
+    }
+    let said = run_timed("git", &["-C", repo, "remote", "get-url", "origin"], &[]).ok()?;
+    let url = said.stdout.trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
+fn normalize_remote(raw: &str) -> String {
+    let mut raw = raw.trim().trim_end_matches('/').to_string();
+    if raw.ends_with(".git") {
+        raw.truncate(raw.len() - 4);
+    }
+    if let Some(rest) = raw
+        .strip_prefix("ssh://")
+        .or_else(|| raw.strip_prefix("git://"))
+    {
+        raw = rest.to_string();
+    }
+    if let Some(rest) = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+    {
+        return rest.trim_start_matches("git@").to_ascii_lowercase();
+    }
+    if let Some(rest) = raw.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            if !host.contains('/') {
+                return format!("{host}/{}", path.trim_start_matches('/')).to_ascii_lowercase();
+            }
+        }
+        return rest.to_ascii_lowercase();
+    }
+    raw.to_ascii_lowercase()
+}
+
+fn remote_slug(normalized: &str) -> String {
+    normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(normalized)
+        .to_string()
+}
+
+fn project_records_remote(dir: &Path, want: &str) -> bool {
+    for name in ["issues.org", "remote.url", "repo.url"] {
+        let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+            continue;
+        };
+        if text_mentions_remote(&text, want) {
+            return true;
+        }
+    }
+    false
+}
+
+fn text_mentions_remote(text: &str, want: &str) -> bool {
+    if want.is_empty() {
+        return false;
+    }
+    text.split_whitespace().any(|token| {
+        let token = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                ',' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | ':'
+            )
+        });
+        !token.is_empty() && normalize_remote(token) == want
+    })
+}
+
+fn projects_in(root: &Path) -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
     let mut consider = |dir: PathBuf| {
         if dir.join("issues.org").is_file() {
-            if let Some(name) = dir.file_name().and_then(|s| s.to_str()) {
-                found.push(name.to_string());
+            if let Some(name) = dir.file_name().and_then(|name| name.to_str()) {
+                found.push((name.to_string(), dir));
             }
         }
     };
-    let entries = std::fs::read_dir(&root).ok()?;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if entry.file_name() == "Software" {
@@ -1757,6 +1983,14 @@ fn sole_project() -> Option<String> {
             consider(path);
         }
     }
+    found
+}
+
+fn sole_project_in(root: &Path) -> Option<String> {
+    let mut found: Vec<String> = projects_in(root)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     found.sort();
     found.dedup();
     (found.len() == 1).then(|| found.remove(0))
@@ -1775,6 +2009,184 @@ fn recall_line(issue: &str) -> String {
         },
         Err(_) => head,
     }
+}
+
+/// The SessionStart brief, once per conversation, on stderr. A second call
+/// in the same conversation prints nothing. A temp sandbox and `LJOS_OFF`
+/// print nothing. This does not wait on the pack when it is off.
+pub fn print_brief_once() {
+    if ljos_off() || home_or_cwd_is_temp() {
+        return;
+    }
+    let path = brief_mark(&brief_key());
+    if path.exists() {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .is_err()
+    {
+        return;
+    }
+    let text = seat_brief();
+    if text.is_empty() {
+        return;
+    }
+    eprintln!("{text}");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+fn brief_key() -> String {
+    let seat = std::env::var("LJOS_SEAT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "seat".into());
+    let convo = std::env::var("CURSOR_CONVERSATION_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("LJOS_SHELL_SESSION")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(process_sid);
+    format!("{seat}:{convo}")
+}
+
+fn process_sid() -> String {
+    // SAFETY: getsid reads this process's session id.
+    let sid = unsafe { libc::getsid(0) };
+    if sid > 0 {
+        sid.to_string()
+    } else {
+        std::process::id().to_string()
+    }
+}
+
+fn brief_mark(key: &str) -> PathBuf {
+    let safe: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    super::runtime_dir().join("brief").join(safe)
+}
+
+fn seat_brief() -> String {
+    format!(
+        "claims: {}\nrecall: {}\nmail: {}",
+        held_claims_line(),
+        brief_recall_line(),
+        brief_mail_line()
+    )
+}
+
+fn held_claims_line() -> String {
+    let book = load_book(&book_path(&sitting_key()));
+    let mut ids: Vec<String> = book
+        .repos
+        .values()
+        .filter(|row| !row.finished)
+        .filter_map(|row| row.issue.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        "none".into()
+    } else {
+        ids.join(" ")
+    }
+}
+
+fn brief_recall_line() -> String {
+    let book = load_book(&book_path(&sitting_key()));
+    for row in book.repos.values() {
+        if row.finished {
+            continue;
+        }
+        if let Some(title) = row
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            return one_line(title);
+        }
+        if !row.recall.trim().is_empty() {
+            return one_line(&row.recall);
+        }
+    }
+    "none".into()
+}
+
+fn brief_mail_line() -> String {
+    let url = std::env::var("PACKSET_URL").unwrap_or_default();
+    let url = url.trim();
+    if url.is_empty() || url == "off" {
+        return "none".into();
+    }
+    let (text, _) = super::mail::prompt_note();
+    let line = one_line(&text);
+    if line.is_empty() || line.contains("nothing unread") {
+        "none".into()
+    } else {
+        line
+    }
+}
+
+/// One line for the commit hook when the sitting's title bears on the
+/// message. Empty when nothing filed matches.
+#[must_use]
+pub fn commit_recall_line(session: &str, repo: &str, subject: &str) -> Option<String> {
+    let book = load_book(&book_path(session));
+    let row = book.repos.get(repo).filter(|row| row.issue.is_some())?;
+    let title = row
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| subject.trim().to_string());
+    let body = format!("{title}\n{}", row.recall);
+    if !relevant(subject, &body) {
+        return None;
+    }
+    let line = one_line(&title);
+    if line.is_empty() {
+        None
+    } else {
+        Some(format!("recall: {line}"))
+    }
+}
+
+fn relevant(subject: &str, body: &str) -> bool {
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    if body.contains(&subject.to_ascii_lowercase()) {
+        return true;
+    }
+    subject
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.len() >= 4)
+        .any(|word| body.contains(&word.to_ascii_lowercase()))
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// How a PostToolUse names the command's exit. Codex 0.163 sends the
@@ -2533,6 +2945,125 @@ mod tests {
         assert!(!is_git_commit("echo git commit"));
         assert!(command_is_apply_patch("apply_patch <<'EOF'\n***\nEOF"));
         assert!(!command_is_apply_patch("git apply patch"));
+    }
+
+    #[test]
+    fn a_prompt_field_does_not_hide_the_commit_command() {
+        let raw = r#"{"hook_event_name":"PostToolUse","prompt":"please commit the readme","tool_input":{"command":"git commit -m readme"}}"#;
+        let call = crate::hook_call(raw);
+        assert!(
+            is_git_commit(&call.cue),
+            "the prompt hid the commit: {}",
+            call.cue
+        );
+    }
+
+    #[test]
+    fn owner_pid_stays_put_on_a_tool_hook() {
+        assert_eq!(next_owner_pid("SessionStart", 0, 10), 10);
+        assert_eq!(next_owner_pid("UserPromptSubmit", 10, 42), 42);
+        assert_eq!(next_owner_pid("PostToolUse", 10, 99), 10);
+        assert_eq!(next_owner_pid("PreToolUse", 10, 99), 10);
+        assert_eq!(next_owner_pid("Stop", 10, 99), 10);
+        assert_eq!(next_owner_pid("PostToolUse", 0, 99), 99);
+    }
+
+    #[test]
+    fn a_commit_only_sitting_idles_after_two_hours() {
+        assert_eq!(
+            sitting_idle_from(None),
+            Some(Duration::from_secs(2 * 60 * 60))
+        );
+        assert_eq!(
+            sitting_idle_from(Some("")),
+            Some(Duration::from_secs(2 * 60 * 60))
+        );
+        assert_eq!(sitting_idle_from(Some("0")), None);
+        assert_eq!(sitting_idle_from(Some("off")), None);
+        assert_eq!(
+            sitting_idle_from(Some("30m")),
+            Some(Duration::from_secs(1800))
+        );
+        assert!(idle_due(10_000, 10, Duration::from_secs(2 * 60 * 60)));
+        assert!(!idle_due(100, 10, Duration::from_secs(2 * 60 * 60)));
+        assert!(!idle_due(10_000, 0, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_claim_uses_a_checkout_or_the_last_booked_repo() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-place-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        let other = root.join("other");
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&plain).unwrap();
+        // This tree sits inside the ljos checkout. An invalid gitfile stops
+        // git from walking up and treating `plain` as that checkout.
+        std::fs::write(plain.join(".git"), "gitdir: /dev/null\n").unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&other, &["init", "-q", "-b", "main"]);
+        let top = git_toplevel(&repo).unwrap();
+        let other_top = git_toplevel(&other).unwrap();
+        assert_eq!(
+            place_for_claim_in(Some(repo.to_str().unwrap()), None, Some(&plain)).as_deref(),
+            Some(top.as_str())
+        );
+        assert_eq!(
+            place_for_claim_in(Some(plain.to_str().unwrap()), Some(&other_top), Some(&repo)),
+            None,
+            "a named path that is not a checkout does not fall back"
+        );
+        assert_eq!(
+            place_for_claim_in(None, Some(&other_top), Some(&plain)).as_deref(),
+            Some(other_top.as_str())
+        );
+        assert_eq!(place_for_claim_in(None, None, Some(&plain)), None);
+        assert_eq!(
+            place_for_claim_in(None, None, Some(&repo)).as_deref(),
+            Some(top.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_for_matches_the_remote_before_the_basename() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-project-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let tracker = root.join("tracker");
+        let repo = root.join("workspace");
+        std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
+        std::fs::create_dir_all(tracker.join("Software/other")).unwrap();
+        std::fs::write(
+            tracker.join("Software/ljos/issues.org"),
+            "#+REMOTE: https://github.com/acme/ljos.git\n",
+        )
+        .unwrap();
+        std::fs::write(tracker.join("Software/other/issues.org"), "* TODO other\n").unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &["remote", "add", "origin", "git@github.com:acme/ljos.git"],
+        );
+        assert_eq!(
+            project_for_at(repo.to_str().unwrap(), None, Some(&tracker)),
+            "ljos"
+        );
+        assert_eq!(
+            project_for_at(repo.to_str().unwrap(), Some("probe"), Some(&tracker)),
+            "probe"
+        );
+        let bare = root.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "-q", "-b", "main"]);
+        assert_eq!(
+            project_for_at(bare.to_str().unwrap(), None, Some(&tracker)),
+            "bare",
+            "no remote and more than one project uses the basename"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn git(dir: &Path, args: &[&str]) {

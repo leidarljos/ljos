@@ -141,6 +141,7 @@ fn as_tool_error(e: McpError) -> Result<CallToolResponse, McpError> {
 pub const SERVER_INSTRUCTIONS: &str = "\
 Pass seat on every call: your own bot name. It is required when this server has no LJOS_SEAT.
 Before any repo work, call ljos_start with the repo or the issue and the task. It recalls and claims.
+Git commits are booked automatically.
 Call ljos_note and ljos_remember freely while you work.
 Call ljos_guard_check before a destructive shell command, a git commit, a git push, or a merge.
 Call ljos_finish with the lesson when the task is done. It releases the claim, syncs, and pushes the tracker.
@@ -666,7 +667,8 @@ pub struct StartArgs {
     /// The tracker issue to claim. Absent, file one from the task.
     #[serde(default)]
     pub issue: Option<String>,
-    /// The repository this work is in. Absent, the working directory.
+    /// The repository this work is in. Absent, the last checkout this seat
+    /// booked a commit in, or the working directory when that is a git checkout.
     #[serde(default)]
     pub repo: Option<String>,
     /// What this sitting does, in one sentence.
