@@ -21727,53 +21727,125 @@ pub fn is_decision(v: &Value) -> bool {
     tagged || typed || listed
 }
 
-/// What the seat remembers that bears on an issue, for `ljos recall`: the
-/// pack searched on the issue's id and on its title, reviewed kinds only,
-/// at most five lines. Empty when the pack holds nothing on it. A pack that
-/// does not answer is started, as the doctor starts it, and the line says
-/// so only when the start did not bring it up.
+/// How many of an issue's own memories a recall lists, newest first,
+/// before it says how many older ones it left out.
+pub const ISSUE_MEMORY_CAP: usize = 20;
+
+/// How many text-search hits a recall adds after the issue's own memories.
+pub const RELATED_MEMORY_CAP: usize = 5;
+
+/// What the seat remembers that bears on an issue, for `ljos recall` and
+/// for the hooks that recall a claimed issue. First the memories tagged
+/// with the issue (`issue` on the atom, or an `issue:ID` entity), newest
+/// first, at most [`ISSUE_MEMORY_CAP`] with a count of the rest. Then up
+/// to [`RELATED_MEMORY_CAP`] hits from a search on the issue's id and
+/// title that are not already listed. Reviewed kinds only. Empty when the
+/// pack holds nothing on it. A pack that does not answer is started, as
+/// the doctor starts it, and the line says so only when the start did not
+/// bring it up.
 pub fn recall_memories(issue: &str) -> String {
+    let issue = issue.trim();
+    let mut woke = false;
+    let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
+        match what() {
+            Ok(h) => Ok(h),
+            Err(_) if !woke => {
+                woke = true;
+                wake_for_recall();
+                what()
+            }
+            Err(e) => Err(e),
+        }
+    };
+    // A pack that cannot list its atoms (an older or stand-in writer) still
+    // answers the search below, so the tagged list is empty rather than an
+    // error; a pack that answers neither is down.
+    let own = ask(&|| issue_memories(issue)).unwrap_or_default();
     let mut cues = vec![issue.to_string()];
     if let Ok(t) = issue_title(issue) {
         if t != issue {
             cues.push(t);
         }
     }
-    let now = now_utc();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut lines = Vec::new();
-    let mut woke = false;
+    let mut related = Vec::new();
     for cue in &cues {
-        let hits = match packset_search(cue) {
-            Ok(h) => h,
-            Err(_) if !woke => {
-                woke = true;
-                wake_for_recall();
-                match packset_search(cue) {
-                    Ok(h) => h,
-                    Err(e) => return recall_down(&e),
-                }
-            }
-            Err(e) => return recall_down(&e),
-        };
-        for h in hits {
-            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) {
-                continue;
-            }
-            let key = h.id.clone().unwrap_or_else(|| h.text.clone());
-            if seen.insert(key) {
-                lines.push(hit_line(&h, &now));
-            }
+        match ask(&|| packset_search(cue)) {
+            Ok(hits) => related.extend(hits),
+            Err(e) if own.is_empty() && related.is_empty() => return recall_down(&e),
+            Err(_) => break,
         }
     }
-    if lines.is_empty() {
+    recall_lines(&own, related, &now_utc())
+}
+
+/// The memories the pack holds on `issue`, newest first: every live atom
+/// of a reviewed kind whose `issue` is the id or whose entities carry
+/// `issue:ID`. One listing of the workspace, without the vectors.
+fn issue_memories(issue: &str) -> Result<Vec<Hit>> {
+    let atoms = with_writer(|| {
+        let client = pack()?;
+        let workspace = client.workspace();
+        client
+            .atoms_without_vectors(&workspace, None)
+            .context("recall: GET /v1/atoms failed")
+    })?;
+    Ok(tagged_with_issue(&atoms, issue))
+}
+
+/// [`issue_memories`] on a listing already read.
+fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
+    let tag = format!("issue:{issue}");
+    let mut own: Vec<Hit> = atoms
+        .iter()
+        .filter(|atom| atom["tombstone"] != Value::Bool(true))
+        .filter(|atom| {
+            atom["issue"].as_str().map(str::trim) == Some(issue)
+                || atom["entities"]
+                    .as_array()
+                    .is_some_and(|e| e.iter().any(|x| x.as_str() == Some(tag.as_str())))
+        })
+        .filter_map(|atom| serde_json::from_value::<Hit>(atom.clone()).ok())
+        .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
+        .collect();
+    own.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.id.cmp(&b.id)));
+    own
+}
+
+/// The `Memory` block: the issue's own memories, then related hits that
+/// are neither listed already nor unreviewed.
+fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str) -> String {
+    let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
+    let mut seen: std::collections::BTreeSet<String> = own.iter().map(key).collect();
+    let related: Vec<Hit> = related
+        .into_iter()
+        .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
+        .filter(|h| seen.insert(key(h)))
+        .take(RELATED_MEMORY_CAP)
+        .collect();
+    if own.is_empty() && related.is_empty() {
         return String::new();
     }
     let mut out = String::from("\nMemory\n");
-    for l in lines.iter().take(5) {
+    for h in own.iter().take(ISSUE_MEMORY_CAP) {
         out.push_str("  ");
-        out.push_str(l);
+        out.push_str(&hit_line(h, now));
         out.push('\n');
+    }
+    if own.len() > ISSUE_MEMORY_CAP {
+        out.push_str(&format!(
+            "  ({} older memories on this issue left out)\n",
+            own.len() - ISSUE_MEMORY_CAP
+        ));
+    }
+    if !related.is_empty() {
+        if !own.is_empty() {
+            out.push_str("  related:\n");
+        }
+        for h in &related {
+            out.push_str("  ");
+            out.push_str(&hit_line(h, now));
+            out.push('\n');
+        }
     }
     out
 }
@@ -26171,6 +26243,76 @@ mod tests {
             again.detail.contains("carries the memory hook"),
             "{again:?}"
         );
+    }
+
+    /// Recall lists an issue's own memories by their tag, newest first, with
+    /// a count past the cap, then related search hits it has not listed.
+    #[test]
+    fn recall_lists_the_issue_own_memories_newest_first() {
+        let mut atoms: Vec<Value> = (0..22)
+            .map(|n| {
+                serde_json::json!({
+                    "id": format!("own{n:02}"),
+                    "kind": "note",
+                    "text": format!("note {n:02}"),
+                    "ts": format!("2026-10-18T10:{n:02}:00.000Z"),
+                    "issue": "probe-0lm4",
+                    "entities": ["issue:probe-0lm4"],
+                })
+            })
+            .collect();
+        atoms.push(
+            serde_json::json!({"id": "lesson", "kind": "lesson", "text": "tagged lesson",
+            "ts": "2026-10-18T09:00:00.000Z", "entities": ["issue:probe-0lm4"]}),
+        );
+        atoms.push(
+            serde_json::json!({"id": "gone", "kind": "note", "text": "retracted",
+            "issue": "probe-0lm4", "tombstone": true}),
+        );
+        atoms.push(
+            serde_json::json!({"id": "other", "kind": "note", "text": "another issue",
+            "issue": "probe-7kxd", "entities": ["issue:probe-7kxd"]}),
+        );
+        atoms.push(
+            serde_json::json!({"id": "mail", "kind": "message", "text": "a letter",
+            "issue": "probe-0lm4"}),
+        );
+        let own = super::tagged_with_issue(&atoms, "probe-0lm4");
+        let ids: Vec<&str> = own.iter().filter_map(|h| h.id.as_deref()).collect();
+        assert_eq!(ids.len(), 23, "{ids:?}");
+        assert_eq!(ids[0], "own21");
+        assert_eq!(ids[21], "own00");
+        assert_eq!(ids[22], "lesson");
+        let hit = |id: &str, text: &str| packset_client::Hit {
+            id: Some(id.into()),
+            text: text.into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: Vec::new(),
+            ballots: None,
+            of: None,
+        };
+        let related = vec![hit("own21", "note 21"), hit("near", "a related lesson")];
+        let text = super::recall_lines(&own, related, "2026-10-18T12:00:00.000Z");
+        assert!(
+            text.starts_with("\nMemory\n  - [note, today] note 21\n"),
+            "{text}"
+        );
+        assert!(text.contains("note 02"), "{text}");
+        assert!(!text.contains("note 01"), "{text}");
+        assert!(
+            text.contains("(3 older memories on this issue left out)"),
+            "{text}"
+        );
+        assert_eq!(text.matches("note 21").count(), 1, "{text}");
+        assert!(
+            text.ends_with("  related:\n  - [lesson] a related lesson\n"),
+            "{text}"
+        );
+        assert_eq!(super::recall_lines(&[], Vec::new(), "now"), "");
+        let alone = super::recall_lines(&[], vec![hit("near", "a related lesson")], "now");
+        assert_eq!(alone, "\nMemory\n  - [lesson] a related lesson\n");
     }
 
     /// A prompt naming an issue is handed the issue's recall.
