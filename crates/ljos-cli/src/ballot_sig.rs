@@ -115,10 +115,10 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
+    let base = crate::env_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
     let name: String = seat
         .trim()
         .chars()

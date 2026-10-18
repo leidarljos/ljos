@@ -201,26 +201,30 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 struct SeatEnv {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _overlay: Vec<ljos_cli::isolated_env::Guard>,
     _runtime: tempfile::TempDir,
 }
 
 impl SeatEnv {
     fn set(pairs: &[(&'static str, &str)]) -> Self {
         let runtime = tempfile::tempdir().expect("runtime");
-        let mut keys: Vec<&str> = pairs.iter().map(|(key, _)| *key).collect();
-        keys.push("XDG_RUNTIME_DIR");
-        let saved = keys
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        unsafe {
-            for (key, value) in pairs {
-                std::env::set_var(key, value);
+        let mut saved = Vec::new();
+        let mut overlay = Vec::new();
+        for (key, value) in pairs {
+            if ljos_cli::isolated_env::is_isolated(std::ffi::OsStr::new(key)) {
+                overlay.push(ljos_cli::isolated_env::set(key, value));
+            } else {
+                saved.push((*key, std::env::var_os(key)));
+                unsafe { std::env::set_var(key, value) };
             }
-            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
         }
+        overlay.push(ljos_cli::isolated_env::set(
+            "XDG_RUNTIME_DIR",
+            runtime.path(),
+        ));
         Self {
             saved,
+            _overlay: overlay,
             _runtime: runtime,
         }
     }
@@ -229,12 +233,7 @@ impl SeatEnv {
 impl Drop for SeatEnv {
     fn drop(&mut self) {
         for (key, value) in &self.saved {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
+            ljos_cli::isolated_env::restore_process(key, value.as_deref());
         }
     }
 }

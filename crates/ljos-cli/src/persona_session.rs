@@ -85,10 +85,10 @@ fn declared_tools() -> Vec<Tool> {
 /// and keeps its session.
 #[must_use]
 pub fn home(name: &str) -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::env_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("personas")
@@ -323,7 +323,7 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
 /// needs the socket, so it fails when no server is running.
 #[must_use]
 pub fn herdr_up() -> bool {
-    which::which("herdr").is_ok()
+    crate::which_bin("herdr").is_ok()
         && std::process::Command::new("herdr")
             .args(["workspace", "list"])
             .stdout(std::process::Stdio::null())

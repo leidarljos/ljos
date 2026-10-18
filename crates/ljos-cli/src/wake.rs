@@ -204,9 +204,9 @@ pub fn show(seat: &str) -> String {
 }
 
 fn log_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::env_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("mail")
@@ -236,7 +236,7 @@ fn wake_bin() -> Option<String> {
     let beside = me.as_ref().map(|m| m.with_file_name("ljos"));
     me.filter(|m| m.file_stem().is_some_and(|s| s == "ljos"))
         .or(beside.filter(|p| p.is_file()))
-        .or_else(|| which::which("ljos").ok())
+        .or_else(|| crate::which_bin("ljos").ok())
         .map(|p| p.display().to_string())
 }
 
@@ -296,7 +296,7 @@ fn webhook_key(wake: &Wake) -> Option<String> {
     let from_file = wake.key_file.as_deref().and_then(|p| {
         let path = p
             .strip_prefix("~/")
-            .and_then(|rest| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)))
+            .and_then(|rest| crate::env_os("HOME").map(|h| PathBuf::from(h).join(rest)))
             .unwrap_or_else(|| PathBuf::from(p));
         std::fs::read_to_string(path).ok()
     });

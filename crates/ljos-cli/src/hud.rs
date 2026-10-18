@@ -39,7 +39,7 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
             }
         }
     }
-    let path = std::env::var_os("PATH")?;
+    let path = crate::env_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("ljos-hud");
         if candidate.is_file() {
@@ -113,7 +113,7 @@ mod tests {
     }
 
     fn missing_hud() -> PathBuf {
-        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("private runtime dir"))
+        PathBuf::from(crate::env_os("XDG_RUNTIME_DIR").expect("private runtime dir"))
             .join("ljos-hud-missing")
     }
 

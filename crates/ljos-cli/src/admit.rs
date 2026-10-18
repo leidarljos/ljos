@@ -63,9 +63,9 @@ fn proposal_cache() -> &'static Mutex<BTreeMap<String, bool>> {
 }
 
 fn proposals_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::env_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("proposals.jsonl")

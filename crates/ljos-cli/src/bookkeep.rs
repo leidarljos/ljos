@@ -152,14 +152,66 @@ pub fn guard_suspended() -> bool {
 
 /// `LJOS_OFF` set to one of the on-switches.
 fn ljos_off() -> bool {
+    #[cfg(test)]
+    if let Some(value) = ljos_off_frame() {
+        return ljos_off_value(value.as_deref());
+    }
+    ljos_off_value(std::env::var("LJOS_OFF").ok().as_deref())
+}
+
+fn ljos_off_value(value: Option<&str>) -> bool {
     matches!(
-        std::env::var("LJOS_OFF").ok().as_deref(),
+        value,
         Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
     )
 }
 
+// The in-process guard reads this before the process variable, so a test
+// can suspend its own thread without `set_var` racing another test.
+#[cfg(test)]
+thread_local! {
+    static LJOS_OFF_OVER: std::cell::RefCell<Vec<(u64, Option<String>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static LJOS_OFF_NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+#[cfg(test)]
+fn ljos_off_frame() -> Option<Option<String>> {
+    LJOS_OFF_OVER.with(|slot| slot.borrow().last().map(|(_, value)| value.clone()))
+}
+
+/// Record `LJOS_OFF` for this thread. `None` is unset. The process
+/// variable is left alone.
+#[cfg(test)]
+#[must_use = "LJOS_OFF stays recorded until this guard drops"]
+pub(crate) struct LjosOffGuard {
+    id: u64,
+}
+
+#[cfg(test)]
+impl Drop for LjosOffGuard {
+    fn drop(&mut self) {
+        LJOS_OFF_OVER.with(|slot| {
+            slot.borrow_mut().retain(|(id, _)| *id != self.id);
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_ljos_off(value: Option<&str>) -> LjosOffGuard {
+    let id = LJOS_OFF_NEXT.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    });
+    LJOS_OFF_OVER.with(|slot| {
+        slot.borrow_mut().push((id, value.map(str::to_string)));
+    });
+    LjosOffGuard { id }
+}
+
 fn home_or_cwd_is_temp() -> bool {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::env_os("HOME").map(PathBuf::from);
     let cwd = std::env::current_dir().ok();
     path_is_temp(home.as_deref()) || path_is_temp(cwd.as_deref())
 }
@@ -747,7 +799,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
 
 fn claim_existing(issue: &str) -> Result<(), String> {
     let assignee = super::resolve_assignee(None);
-    if which::which("claimdag").is_ok() && super::claim(issue, &assignee).is_ok() {
+    if crate::which_bin("claimdag").is_ok() && super::claim(issue, &assignee).is_ok() {
         return Ok(());
     }
     run_timed(
@@ -976,7 +1028,7 @@ fn file_and_claim(project: &str, title: &str) -> Result<String, String> {
     let issue = parse_issue_id(&said.stdout)
         .ok_or_else(|| format!("vissue create printed no issue id: {}", said.stdout.trim()))?;
     let assignee = super::resolve_assignee(None);
-    if which::which("claimdag").is_ok() {
+    if crate::which_bin("claimdag").is_ok() {
         if let Err(e) = super::claim(&issue, &assignee) {
             log_line(&format!("claim graph: {e:#}"));
             run_timed(
@@ -1364,7 +1416,7 @@ fn finish_open(book: &mut Book) {
 fn close_issue(issue: &str) -> Result<(), String> {
     run_timed("vissue", &["update", issue, "-s", "DONE"], &[]).map_err(|e| e.to_string())?;
     let assignee = super::resolve_assignee(None);
-    if which::which("claimdag").is_ok() {
+    if crate::which_bin("claimdag").is_ok() {
         if let Err(e) = super::release(issue, &assignee) {
             log_line(&format!("release: {e:#}"));
         }
@@ -2457,8 +2509,9 @@ struct Said {
 fn run_timed(bin: &str, args: &[&str], env: &[(&str, &str)]) -> anyhow::Result<Said> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let path = which::which(bin).map_err(|_| anyhow::anyhow!("{bin} not on PATH"))?;
+    let path = crate::which_bin(bin).map_err(|_| anyhow::anyhow!("{bin} not on PATH"))?;
     let mut cmd = Command::new(path);
+    crate::apply_isolated_env(&mut cmd);
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -2513,15 +2566,23 @@ mod tests {
 
     struct Restore {
         pairs: Vec<(String, Option<std::ffi::OsString>)>,
+        _isolated: Vec<crate::isolated_env::Guard>,
     }
 
     impl Restore {
         fn new(keys: &[&str]) -> Self {
+            let mut pairs = Vec::new();
+            let mut isolated = Vec::new();
+            for key in keys {
+                if crate::isolated_env::is_isolated(std::ffi::OsStr::new(key)) {
+                    isolated.push(crate::isolated_env::hold(key));
+                } else {
+                    pairs.push(((*key).to_string(), std::env::var_os(key)));
+                }
+            }
             Self {
-                pairs: keys
-                    .iter()
-                    .map(|k| ((*k).to_string(), std::env::var_os(k)))
-                    .collect(),
+                pairs,
+                _isolated: isolated,
             }
         }
     }
@@ -2529,29 +2590,25 @@ mod tests {
     impl Drop for Restore {
         fn drop(&mut self) {
             for (key, value) in &self.pairs {
-                // SAFETY: the caller holds test_env_lock, dropped after this.
-                unsafe {
-                    match value {
-                        Some(v) => std::env::set_var(key, v),
-                        None => std::env::remove_var(key),
-                    }
-                }
+                // The caller holds test_env_lock, dropped after this.
+                crate::isolated_env::restore_process(key, value.as_deref());
             }
         }
     }
 
     #[test]
     fn a_bookkeep_test_does_not_read_the_login_user_rules() {
+        let _g = lock();
         let home = Path::new("/home/someone");
         let got = super::super::resolve_config_base(None, Some(home)).expect("isolated base");
         assert_ne!(got, home.join(".config"));
         assert!(!got.starts_with(home), "{got:?}");
         let rules = super::super::user_rules::rules_path().expect("rules path");
-        if std::env::var_os("XDG_CONFIG_HOME")
+        if crate::env_os("XDG_CONFIG_HOME")
             .filter(|value| !value.is_empty())
             .is_none()
         {
-            let login = std::env::var_os("HOME").map(PathBuf::from);
+            let login = crate::env_os("HOME").map(PathBuf::from);
             if let Some(login) = login {
                 assert!(!rules.starts_with(&login), "{rules:?} is the login config");
             }
@@ -2569,24 +2626,17 @@ mod tests {
     #[test]
     fn ljos_off_and_a_temp_home_suspend_the_guard() {
         let _g = lock();
-        let _saved = Restore::new(&["HOME", "LJOS_OFF"]);
-        unsafe {
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", "/home/ubuntu");
-        }
+        let _env_1 = crate::isolated_env::set("HOME", "/home/ubuntu");
+        let _clear = set_ljos_off(None);
         assert!(!guard_suspended(), "a normal home is a seat");
-        unsafe { std::env::set_var("LJOS_OFF", "1") };
+        let _one = set_ljos_off(Some("1"));
         assert!(guard_suspended());
-        unsafe {
-            std::env::set_var("LJOS_OFF", "yes");
-        }
+        let _yes = set_ljos_off(Some("yes"));
         assert!(guard_suspended());
-        unsafe {
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", "/tmp/ljos-not-a-seat");
-        }
+        let _env_2 = crate::isolated_env::set("HOME", "/tmp/ljos-not-a-seat");
+        let _clear_again = set_ljos_off(None);
         assert!(guard_suspended(), "a temp HOME is not a seat");
-        unsafe { std::env::set_var("HOME", "/tmpfoo") };
+        let _env_3 = crate::isolated_env::set("HOME", "/tmpfoo");
         assert!(!guard_suspended(), "/tmpfoo is a name, not /tmp");
     }
 
@@ -2606,6 +2656,8 @@ mod tests {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
+            .arg("-c")
+            .arg("commit.gpgsign=false")
             .args(args)
             .output()
             .unwrap();
@@ -2736,24 +2788,32 @@ print(f"id={ident}")
         (dir, tracker, repo)
     }
 
-    fn arm(dir: &Path, tracker: &Path) {
-        let bin = dir.join("bin");
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut next = std::ffi::OsString::from(bin);
-        next.push(":");
-        next.push(path);
+    struct Armed {
+        _bins: crate::isolated_env::Guard,
+        _run: crate::isolated_env::Guard,
+        _off: super::LjosOffGuard,
+    }
+
+    /// Prepend `dir/bin` on this thread and point the book at `tracker`.
+    /// The guard is the record: bind it (`let _bins = arm(...)`) so the
+    /// fake `vissue` stays visible for the whole test.
+    fn arm(dir: &Path, tracker: &Path) -> Armed {
+        let bins = crate::isolated_env::prepend_path(&dir.join("bin"));
+        let run = crate::isolated_env::set("XDG_RUNTIME_DIR", dir.join("run"));
         unsafe {
-            std::env::set_var("PATH", next);
             std::env::set_var("VISSUE_ROOT", tracker);
             std::env::set_var("VISSUE_NO_ROUTE", "1");
             std::env::set_var("LJOS_TRACKER_GIT", "commit");
             std::env::set_var("LJOS_PROJECT", "probe");
-            std::env::set_var("XDG_RUNTIME_DIR", dir.join("run"));
             std::env::set_var("LJOS_IN_HOOK", "1");
             std::env::set_var("PACKSET_URL", "off");
             std::env::remove_var("ISSUE_ROOT");
-            std::env::remove_var("LJOS_OFF");
             std::env::remove_var("LJOS_SESSION_ID");
+        }
+        Armed {
+            _bins: bins,
+            _run: run,
+            _off: set_ljos_off(None),
         }
     }
 
@@ -3012,7 +3072,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         assert_redirect_claims(&repo, &tracker);
     }
 
@@ -3033,7 +3093,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "book-session-1";
         let (prompt_raw, prompt_call) = payload(
             "UserPromptSubmit",
@@ -3145,19 +3205,18 @@ print(f"id={ident}")
             "XDG_RUNTIME_DIR",
             "LJOS_IN_HOOK",
             "PACKSET_URL",
-            "LJOS_OFF",
             "LJOS_PROJECT",
         ]);
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
+        let _bins_6 = crate::isolated_env::set("PATH", "/usr/bin:/bin");
+        let _env_7 = crate::isolated_env::set("XDG_RUNTIME_DIR", dir.path().join("run"));
+        let _off = set_ljos_off(None);
         unsafe {
-            std::env::set_var("PATH", "/usr/bin:/bin");
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
             std::env::set_var("LJOS_IN_HOOK", "1");
             std::env::set_var("PACKSET_URL", "off");
-            std::env::remove_var("LJOS_OFF");
             std::env::set_var("VISSUE_ROOT", dir.path().join("tracker"));
             std::env::set_var("LJOS_PROJECT", "probe");
         }
@@ -3200,7 +3259,7 @@ print(f"id={ident}")
             "LJOS_OFF",
         ]);
         let (dir, tracker, _repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-session-9");
         }
@@ -3254,7 +3313,7 @@ print(f"id={ident}")
             "LJOS_OFF",
         ]);
         let (dir, tracker, _repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SEAT", "Disk Saver");
             std::env::set_var("LJOS_SESSION_ID", "mcp-call-1");
@@ -3388,8 +3447,8 @@ print(f"id={ident}")
             "seats = [\"free-claude\", \"inky\"]\n",
         )
         .unwrap();
+        let _env_8 = crate::isolated_env::set("HOME", home.path());
         unsafe {
-            std::env::set_var("HOME", home.path());
             std::env::set_var("VISSUE_ROOT", dir.path());
             std::env::set_var("VISSUE_NO_ROUTE", "1");
             std::env::remove_var("ISSUE_ROOT");
@@ -3432,14 +3491,15 @@ print(f"id={ident}")
         let run = dir.path().join("run");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::write(dir.path().join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        let _env_9 = crate::isolated_env::set("XDG_RUNTIME_DIR", &run);
+        let _env_10 = crate::isolated_env::set("HOME", dir.path().join("home"));
         unsafe {
             std::env::set_var("VISSUE_ROOT", dir.path());
             std::env::set_var("VISSUE_NO_ROUTE", "1");
-            std::env::set_var("XDG_RUNTIME_DIR", &run);
+
             std::env::remove_var("ISSUE_ROOT");
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("HOME", dir.path().join("home"));
         }
         let seat = crate::resolve_call_seat(Some("ljosbot")).unwrap();
         assert_eq!(seat.seat, "ljosbot");
@@ -3471,7 +3531,7 @@ print(f"id={ident}")
             "LJOS_SEAT",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("LJOS_HARNESS_SESSION");
@@ -3522,7 +3582,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-start-1");
         }
@@ -3559,7 +3619,7 @@ print(f"id={ident}")
             "LJOS_SEAT",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SEAT", "probe-seat");
             std::env::set_var("LJOS_HOLD", "book-holder");
@@ -3705,7 +3765,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let refused = serve_pack(|_| {
             (
                 400,
@@ -3830,7 +3890,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -3940,7 +4000,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         assert!(!marker.exists(), "a fresh home has not started warming");
         let atoms = Arc::new(Mutex::new(vec![
@@ -4035,7 +4095,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
         let pack = serve_pack({
             let atoms = Arc::clone(&atoms);
@@ -4096,7 +4156,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "unrun-commit";
         prompt_and_edit(&repo, session, "Add a readme line");
         let seed = head_sha_of(&repo);
@@ -4158,7 +4218,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -4314,7 +4374,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "01a14bc1-59ae-7d43-9a16-bc94c6a0ef56";
         let id = "exec_command_058e85yevw32";
         let other = "exec_command_q3kpac3wpztr";
@@ -4372,7 +4432,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = arm_lessons(dir.path());
         let session = "codex-exit-127";
         let id = "exec_command_n38zthdamfmc";
@@ -4437,7 +4497,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = arm_lessons(dir.path());
         let session = "codex-failures-only";
         let transcript = dir.path().join("rollout.jsonl");
@@ -4517,7 +4577,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "codex-commit";
         let seed = head_sha_of(&repo);
         let transcript = dir.path().join("rollout.jsonl");
@@ -4580,7 +4640,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "codex-stuck";
         let seed = head_sha_of(&repo);
         let (prompt, prompt_call) = payload(
@@ -4606,8 +4666,10 @@ print(f"id={ident}")
         );
         let started = std::time::Instant::now();
         let _ = observe(&failed, &failed_call);
+        // The fifo never answers. The read stops at its deadline; the extra
+        // seconds are the rest of the hook plus a busy test runner.
         assert!(
-            started.elapsed() < TRANSCRIPT_DEADLINE + Duration::from_secs(2),
+            started.elapsed() < TRANSCRIPT_DEADLINE + Duration::from_secs(3),
             "the transcript read held the hook for {:?}",
             started.elapsed()
         );
@@ -4633,7 +4695,7 @@ print(f"id={ident}")
 
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -4763,7 +4825,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "agy-deed";
         let cwd = repo.to_str().unwrap();
         let (prompt, prompt_call) = payload(
@@ -4813,7 +4875,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, _tracker, repo) = scratch();
-        arm(dir.path(), &_tracker);
+        let _bins = arm(dir.path(), &_tracker);
         let session = "qpiw";
         prompt_and_edit(&repo, session, "Add a readme line");
         let sha = commit_file(&repo, "README.md", "hello from cloudflare\n");
@@ -4880,7 +4942,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let gone = dead_pid();
         for session in ["dead-a", "dead-b"] {
             prompt_and_edit(&repo, session, "Add a readme line");
@@ -4917,7 +4979,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let texts = Arc::new(Mutex::new(Vec::<String>::new()));
         let kept = serve_pack({
             let texts = Arc::clone(&texts);
@@ -4965,7 +5027,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let head = head_sha_of(&repo);
         let repo_key = repo.display().to_string();
         let sittings = 300;
@@ -5032,7 +5094,7 @@ print(f"id={ident}")
     }
 
     fn set_var(key: &str, value: &str) {
-        unsafe { std::env::set_var(key, value) };
+        crate::isolated_env::restore_process(key, Some(value));
     }
 
     /// A Codex 0.163 transcript line, trimmed to the fields the exit lookup

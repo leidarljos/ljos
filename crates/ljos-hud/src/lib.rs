@@ -19,14 +19,97 @@ pub mod wlactivate;
 pub use cli::run_cli;
 pub use summon::{parse_request, sanitize_token, SummonAction, SummonRequest};
 
+/// `PATH`, `HOME`, and `XDG_*` for the calling thread.
+///
+/// A HUD test records those here. The process environment is not edited,
+/// so another crate's `which("cat")` still finds cat. Nothing here takes
+/// a lock.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::ffi::{OsStr, OsString};
+
+    thread_local! {
+        static OVERLAY: RefCell<BTreeMap<OsString, Option<OsString>>> =
+            const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(crate) fn is_isolated(key: &OsStr) -> bool {
+        let Some(text) = key.to_str() else {
+            return false;
+        };
+        text == "PATH" || text == "HOME" || text.starts_with("XDG_")
+    }
+
+    enum Prev {
+        Absent,
+        Recorded(Option<OsString>),
+    }
+
+    #[must_use = "the recorded environment lasts until this guard drops"]
+    pub(crate) struct Guard {
+        key: OsString,
+        prev: Prev,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERLAY.with(|slot| {
+                let mut map = slot.borrow_mut();
+                match &self.prev {
+                    Prev::Absent => {
+                        map.remove(&self.key);
+                    }
+                    Prev::Recorded(value) => {
+                        map.insert(self.key.clone(), value.clone());
+                    }
+                }
+            });
+        }
+    }
+
+    fn record(key: &OsStr, value: Option<OsString>) -> Guard {
+        assert!(
+            is_isolated(key),
+            "only PATH, HOME, and XDG_* are recorded on the calling thread"
+        );
+        let owned = key.to_os_string();
+        let prev = OVERLAY.with(
+            |slot| match slot.borrow_mut().insert(owned.clone(), value) {
+                Some(old) => Prev::Recorded(old),
+                None => Prev::Absent,
+            },
+        );
+        Guard { key: owned, prev }
+    }
+
+    pub(crate) fn set(key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Guard {
+        record(key.as_ref(), Some(value.as_ref().to_os_string()))
+    }
+
+    /// Drop the record. A later read sees the process environment.
+    pub(crate) fn clear(key: &str) {
+        OVERLAY.with(|slot| {
+            slot.borrow_mut().remove(OsStr::new(key));
+        });
+    }
+
+    /// `Some` when this thread recorded `key`, including a removal.
+    pub(crate) fn recorded(key: &str) -> Option<Option<OsString>> {
+        OVERLAY.with(|slot| slot.borrow().get(OsStr::new(key)).cloned())
+    }
+}
+
 /// Serialises HUD tests that read or write the process environment.
-/// Each holder gets a private `XDG_RUNTIME_DIR`, and the environment it
-/// found is put back while the mutex is still held.
+/// Each holder records a private `XDG_RUNTIME_DIR` on this thread. `PATH`,
+/// `HOME`, and `XDG_*` are not written back onto the process.
 #[cfg(test)]
 #[must_use = "the environment is restored when this guard drops"]
 pub(crate) struct EnvLock {
     _guard: std::sync::MutexGuard<'static, ()>,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    _runtime_env: test_env::Guard,
     runtime: tempfile::TempDir,
 }
 
@@ -36,6 +119,9 @@ impl Drop for EnvLock {
         let keep: std::collections::HashSet<std::ffi::OsString> =
             self.snapshot.iter().map(|(key, _)| key.clone()).collect();
         for (key, value) in &self.snapshot {
+            if test_env::is_isolated(key) {
+                continue;
+            }
             #[allow(unused_unsafe)]
             unsafe {
                 std::env::set_var(key, value);
@@ -46,6 +132,9 @@ impl Drop for EnvLock {
             .filter(|key| !keep.contains(key))
             .collect();
         for key in added {
+            if test_env::is_isolated(&key) {
+                continue;
+            }
             #[allow(unused_unsafe)]
             unsafe {
                 std::env::remove_var(key);
@@ -63,13 +152,11 @@ pub(crate) fn env_lock() -> EnvLock {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let snapshot: Vec<_> = std::env::vars_os().collect();
     let runtime = tempfile::tempdir().expect("private runtime dir");
-    #[allow(unused_unsafe)]
-    unsafe {
-        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    }
+    let runtime_env = test_env::set("XDG_RUNTIME_DIR", runtime.path());
     EnvLock {
         _guard: guard,
         snapshot,
+        _runtime_env: runtime_env,
         runtime,
     }
 }

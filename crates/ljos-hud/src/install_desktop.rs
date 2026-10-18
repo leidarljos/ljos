@@ -44,12 +44,24 @@ impl Report {
 
 /// Install under `xdg_data` / `xdg_config` using `exe` as Exec=.
 pub fn install(home: &Path, exe: &Path, xdg_data: Option<&Path>) -> io::Result<Report> {
+    install_in(home, exe, xdg_data, None)
+}
+
+/// [`install`] with an explicit config directory.
+/// `None` reads `XDG_CONFIG_HOME`, then `home/.config`.
+fn install_in(
+    home: &Path,
+    exe: &Path,
+    xdg_data: Option<&Path>,
+    xdg_config: Option<&Path>,
+) -> io::Result<Report> {
     let data = xdg_data
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
         .unwrap_or_else(|| home.join(".local/share"));
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
+    let config = xdg_config
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
         .unwrap_or_else(|| home.join(".config"));
     let mut report = Report::default();
 
@@ -134,11 +146,7 @@ mod tests {
         fs::write(&exe, b"x").unwrap();
         let data = root.join("share");
         let config = root.join("config");
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-        }
-        let report = install(root, &exe, Some(&data)).unwrap();
+        let report = install_in(root, &exe, Some(&data), Some(&config)).unwrap();
         assert!(report.wrote.iter().any(|p| p.ends_with("ljos-hud.desktop")));
         assert!(report.wrote.iter().any(|p| p.ends_with("sway-hud.conf")));
         let desktop = fs::read_to_string(data.join("applications/ljos-hud.desktop")).unwrap();

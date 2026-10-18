@@ -1089,7 +1089,14 @@ fn mentions_name(text: &str, name: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn isolated() -> (super::super::EnvLock, tempfile::TempDir) {
+    struct Isolated {
+        _lock: super::super::EnvLock,
+        dir: tempfile::TempDir,
+        _xdg: crate::isolated_env::Guard,
+        _home: crate::isolated_env::Guard,
+    }
+
+    fn isolated() -> Isolated {
         let lock = super::super::test_env_lock();
         // A home under `/tmp` suspends the guard. The scratch directory
         // sits beside the build output so these rules are actually judged.
@@ -1097,16 +1104,21 @@ mod tests {
             .join("../../target/user-rule-homes");
         std::fs::create_dir_all(&root).unwrap();
         let dir = tempfile::TempDir::new_in(&root).unwrap();
+        let xdg = crate::isolated_env::set("XDG_CONFIG_HOME", dir.path().join("config"));
+        let home = crate::isolated_env::set("HOME", dir.path());
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("HOME", dir.path());
             std::env::set_var("LJOS_HOLD", "rohit");
             std::env::set_var("LJOS_SEAT", "claude");
             std::env::set_var("PACKSET_URL", "off");
             std::env::set_var("PACKSET_WORKSPACE", "seat-a");
             std::env::set_var("LJOS_USER_RULES_SYNC", "off");
         }
-        (lock, dir)
+        Isolated {
+            _lock: lock,
+            dir,
+            _xdg: xdg,
+            _home: home,
+        }
     }
 
     fn alan() -> UserRule {
@@ -1127,7 +1139,8 @@ mod tests {
 
     #[test]
     fn a_user_rule_is_surfaced_in_a_second_seat() {
-        let (_lock, dir) = isolated();
+        let seat = isolated();
+        let dir = seat.dir.path();
         let written = alan();
         assert_eq!(written.author, "rohit");
         assert!(written.due_at.is_none());
@@ -1136,7 +1149,7 @@ mod tests {
             std::env::set_var("PACKSET_WORKSPACE", "seat-b");
         }
         let path = rules_path().unwrap();
-        assert!(path.starts_with(dir.path().join("config")));
+        assert!(path.starts_with(dir.join("config")));
         assert!(!path.to_string_lossy().contains("codex"));
         assert!(!path.to_string_lossy().contains("claude"));
         let head = preface();
@@ -1177,15 +1190,13 @@ mod tests {
         let agy_out = super::super::hook_output(&agy, &agy_note);
         assert!(agy_out.contains("injectSteps"), "{agy_out}");
         assert!(agy_out.contains("never post or reply to Alan"), "{agy_out}");
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("other"));
-        }
+        let _env_3 = crate::isolated_env::set("XDG_CONFIG_HOME", dir.join("other"));
         assert!(preface().is_empty(), "a second config home has no rules");
     }
 
     #[test]
     fn a_user_rule_does_not_decay_after_simulated_time() {
-        let (_lock, _dir) = isolated();
+        let _seat = isolated();
         let written = alan();
         let later = "2099-01-01T00:00:00Z";
         assert_eq!(sweep(later).unwrap(), 0);
@@ -1227,7 +1238,7 @@ mod tests {
 
     #[test]
     fn the_preface_stays_inside_its_budget_and_keeps_the_first_rule() {
-        let (_lock, _dir) = isolated();
+        let _seat = isolated();
         let first = "a".repeat(80);
         write_preference(&first, "first", &People::default(), &People::default()).unwrap();
         for n in 0..30 {
@@ -1246,7 +1257,7 @@ mod tests {
 
     #[test]
     fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
-        let (_lock, _dir) = isolated();
+        let _seat = isolated();
         write_preference(
             "never post or reply to Alan (ocaisa)",
             "he asked not to be pinged",
@@ -1308,7 +1319,7 @@ mod tests {
 
     #[test]
     fn promote_copies_a_lesson_and_refuses_anything_else() {
-        let (_lock, _dir) = isolated();
+        let _seat = isolated();
         let atom = serde_json::json!({
             "id": "lesson-ocaisa",
             "kind": "lesson",
@@ -1353,7 +1364,7 @@ mod tests {
 
     #[test]
     fn an_argv_user_rule_denies_in_the_static_guard() {
-        let (_lock, _dir) = isolated();
+        let _seat = isolated();
         write_argv(&Rule {
             pattern: "gh pr comment*".into(),
             verdict: "deny".into(),
@@ -1396,6 +1407,8 @@ mod tests {
         b: std::path::PathBuf,
         cfg_a: std::path::PathBuf,
         cfg_b: std::path::PathBuf,
+        _home: crate::isolated_env::Guard,
+        _cfg: Option<crate::isolated_env::Guard>,
     }
 
     impl Homes {
@@ -1445,11 +1458,12 @@ mod tests {
             prepare_clone(&shared);
             let cfg_a = root.path().join("cfg-a");
             let cfg_b = root.path().join("cfg-b");
+            let home = crate::isolated_env::set("HOME", root.path());
             unsafe {
                 std::env::set_var("LJOS_USER_RULES_SYNC", "off");
                 std::env::set_var("LJOS_HOLD", "rohit");
                 std::env::set_var("PACKSET_URL", "off");
-                std::env::set_var("HOME", root.path());
+
                 std::env::remove_var("LJOS_USER_RULES_TRACKER");
             }
             Self {
@@ -1459,11 +1473,21 @@ mod tests {
                 b: shared,
                 cfg_a,
                 cfg_b,
+                _home: home,
+                _cfg: None,
             }
         }
 
-        fn home(&self, cfg: &std::path::Path) {
-            unsafe { std::env::set_var("XDG_CONFIG_HOME", cfg) };
+        fn home_a(&mut self) {
+            let cfg = self.cfg_a.clone();
+            self._cfg = None;
+            self._cfg = Some(crate::isolated_env::set("XDG_CONFIG_HOME", cfg));
+        }
+
+        fn home_b(&mut self) {
+            let cfg = self.cfg_b.clone();
+            self._cfg = None;
+            self._cfg = Some(crate::isolated_env::set("XDG_CONFIG_HOME", cfg));
         }
     }
 
@@ -1490,8 +1514,8 @@ mod tests {
 
     #[test]
     fn two_homes_with_different_rules_converge() {
-        let homes = Homes::new();
-        homes.home(&homes.cfg_a);
+        let mut homes = Homes::new();
+        homes.home_a();
         let alan = write_preference(
             "never post or reply to Alan (ocaisa)",
             "he asked not to be pinged",
@@ -1500,7 +1524,7 @@ mod tests {
         )
         .unwrap();
         exchange(&homes.a, "laptop");
-        homes.home(&homes.cfg_b);
+        homes.home_b();
         exchange(&homes.b, "shared");
         let got = load().unwrap();
         assert_eq!(got.len(), 1, "{got:?}");
@@ -1516,12 +1540,12 @@ mod tests {
         .unwrap();
         assert_eq!(credit.id, load().unwrap()[1].id);
         exchange(&homes.b, "shared");
-        homes.home(&homes.cfg_a);
+        homes.home_a();
         exchange(&homes.a, "laptop");
         let got = load().unwrap();
         assert!(got.iter().any(|rule| rule.id == alan.id), "{got:?}");
         assert!(got.iter().any(|rule| rule.id == credit.id), "{got:?}");
-        homes.home(&homes.cfg_b);
+        homes.home_b();
         let got = load().unwrap();
         assert_eq!(got.len(), 2, "{got:?}");
         assert!(got.iter().any(|rule| rule.id == alan.id));
@@ -1530,8 +1554,8 @@ mod tests {
 
     #[test]
     fn a_newer_edit_wins_and_a_tombstone_beats_an_older_edit() {
-        let homes = Homes::new();
-        homes.home(&homes.cfg_a);
+        let mut homes = Homes::new();
+        homes.home_a();
         let rule = write_preference(
             "the standing line",
             "first reason",
@@ -1541,7 +1565,7 @@ mod tests {
         .unwrap();
         let id = rule.id.clone();
         exchange(&homes.a, "laptop");
-        homes.home(&homes.cfg_b);
+        homes.home_b();
         exchange(&homes.b, "shared");
 
         rewrite(
@@ -1553,7 +1577,7 @@ mod tests {
             false,
         );
         exchange(&homes.b, "shared");
-        homes.home(&homes.cfg_a);
+        homes.home_a();
         rewrite(
             &id,
             "newest edit",
@@ -1563,7 +1587,7 @@ mod tests {
             false,
         );
         exchange(&homes.a, "laptop");
-        homes.home(&homes.cfg_b);
+        homes.home_b();
         exchange(&homes.b, "shared");
         let got = load().unwrap();
         assert_eq!(got.len(), 1, "{got:?}");
@@ -1571,7 +1595,7 @@ mod tests {
         assert_eq!(got[0].text, "newest edit");
         assert_eq!(got[0].author, "rohit");
         assert_eq!(got[0].reason, "because newest");
-        homes.home(&homes.cfg_a);
+        homes.home_a();
         let got = load().unwrap();
         assert_eq!(got[0].text, "newest edit");
         assert_eq!(got[0].author, "rohit");
@@ -1590,7 +1614,7 @@ mod tests {
             true,
         );
         exchange(&homes.a, "laptop");
-        homes.home(&homes.cfg_b);
+        homes.home_b();
         exchange(&homes.b, "shared");
         assert!(load().unwrap().is_empty(), "{:?}", load().unwrap());
         let tomb = read_all().unwrap();
@@ -1619,7 +1643,8 @@ mod tests {
 
     #[test]
     fn the_hook_shows_local_rules_when_the_tracker_does_not_answer() {
-        let (_lock, dir) = isolated();
+        let seat = isolated();
+        let dir = seat.dir.path();
         write_preference(
             "never post or reply to Alan (ocaisa)",
             "he asked not to be pinged",
@@ -1627,7 +1652,7 @@ mod tests {
             &People::default(),
         )
         .unwrap();
-        let repo = dir.path().join("tracker");
+        let repo = dir.join("tracker");
         std::fs::create_dir_all(&repo).unwrap();
         git_ok(&repo, &["init", "-q", "-b", "main"]);
         prepare_clone(&repo);

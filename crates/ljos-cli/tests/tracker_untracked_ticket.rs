@@ -23,8 +23,39 @@ fn git(dir: &Path, args: &[&str]) -> String {
 const TICKET: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
 * TODO [#C] fresh ticket\n:PROPERTIES:\n:ID:         proj-nnnn\n:CREATED:    [2026-10-11 Sun]\n:END:\n";
 
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct GitMode {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl GitMode {
+    fn commit() -> Self {
+        let prev = std::env::var_os("LJOS_TRACKER_GIT");
+        unsafe { std::env::set_var("LJOS_TRACKER_GIT", "commit") };
+        Self { prev }
+    }
+}
+
+impl Drop for GitMode {
+    fn drop(&mut self) {
+        unsafe {
+            match self.prev.take() {
+                Some(value) => std::env::set_var("LJOS_TRACKER_GIT", value),
+                None => std::env::remove_var("LJOS_TRACKER_GIT"),
+            }
+        }
+    }
+}
+
 #[test]
 fn an_untracked_ticket_is_added_and_committed_alone() {
+    let _lock = env_lock();
+    let _git = GitMode::commit();
     let repo = tempfile::tempdir().unwrap();
     let dir = repo.path();
     git(dir, &["init", "-q", "."]);
@@ -43,7 +74,6 @@ fn an_untracked_ticket_is_added_and_committed_alone() {
     std::fs::write(&sibling, TICKET.replace("nnnn", "oooo")).unwrap();
     assert!(git(dir, &["ls-files"]).is_empty());
 
-    std::env::set_var("LJOS_TRACKER_GIT", "commit");
     let said = ljos_cli::persist_tracker_file(&ticket, "proj-nnnn", "noted");
 
     assert!(said.contains("committed"), "{said}");
@@ -57,6 +87,8 @@ fn an_untracked_ticket_is_added_and_committed_alone() {
 
 #[test]
 fn a_ticket_reached_through_a_symlinked_checkout_is_committed() {
+    let _lock = env_lock();
+    let _git = GitMode::commit();
     let real = tempfile::tempdir().unwrap();
     let dir = real.path();
     git(dir, &["init", "-q", "."]);
@@ -73,7 +105,6 @@ fn a_ticket_reached_through_a_symlinked_checkout_is_committed() {
     let ticket = link.join("issues/proj-pppp.org");
     std::fs::write(&ticket, TICKET.replace("nnnn", "pppp")).unwrap();
 
-    std::env::set_var("LJOS_TRACKER_GIT", "commit");
     let said = ljos_cli::persist_tracker_file(&ticket, "proj-pppp", "noted");
 
     assert!(said.contains("committed"), "{said}");

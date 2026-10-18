@@ -591,9 +591,9 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
     if sid.is_empty() {
         return None;
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
+    let state = crate::env_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/state")))?;
+        .or_else(|| crate::env_os("HOME").map(|h| Path::new(&h).join(".local/state")))?;
     let mark = state.join("ljos/openhands-started").join(&sid);
     if mark.exists() {
         return None;
@@ -1268,22 +1268,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let keys = [
-            "HOME",
-            "XDG_DATA_HOME",
-            "LJOS_OFF",
-            "POLICYD_BIN",
-            "PACKSET_WORKSPACE",
-        ];
+        let keys = ["HOME", "XDG_DATA_HOME", "POLICYD_BIN", "PACKSET_WORKSPACE"];
         struct RestoreEnv(Vec<(String, Option<std::ffi::OsString>)>);
         impl Drop for RestoreEnv {
             fn drop(&mut self) {
                 for (k, v) in &self.0 {
-                    unsafe {
-                        match v {
-                            Some(v) => std::env::set_var(k, v),
-                            None => std::env::remove_var(k),
-                        }
+                    match v {
+                        Some(v) => crate::isolated_env::restore_process(k, Some(v)),
+                        None => crate::isolated_env::remove_process(k),
                     }
                 }
             }
@@ -1294,10 +1286,10 @@ mod tests {
                 .collect(),
         );
         let data = dir.join("data");
+        let _env_1 = crate::isolated_env::set("HOME", &dir);
+        let _env_2 = crate::isolated_env::set("XDG_DATA_HOME", &data);
+        let _off = crate::bookkeep::set_ljos_off(Some("0"));
         unsafe {
-            std::env::set_var("HOME", &dir);
-            std::env::set_var("XDG_DATA_HOME", &data);
-            std::env::set_var("LJOS_OFF", "0");
             std::env::set_var("POLICYD_BIN", dir.join("does-not-run"));
             std::env::set_var("PACKSET_WORKSPACE", "early-guard");
         }

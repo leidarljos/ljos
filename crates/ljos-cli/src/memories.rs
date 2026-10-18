@@ -138,9 +138,9 @@ pub struct Review {
 /// The file the verdicts are kept in.
 #[must_use]
 pub fn reviews_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::env_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos/memory-reviews.jsonl")
 }
@@ -788,6 +788,7 @@ impl Drop for Raw {
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &self.saved);
         }
+
         print!("\x1b[?25h\x1b[?1049l");
         let _ = std::io::stdout().flush();
     }
@@ -801,6 +802,7 @@ fn term_size() -> (usize, usize) {
             return (usize::from(ws.ws_col), usize::from(ws.ws_row));
         }
     }
+
     (100, 30)
 }
 
@@ -829,6 +831,7 @@ fn ask_line(raw: &Raw, prompt: &str) -> String {
     unsafe {
         libc::tcsetattr(0, libc::TCSANOW, &raw.saved);
     }
+
     let (_, h) = term_size();
     print!("\x1b[{h};1H\x1b[2K\x1b[?25h{prompt}");
     let _ = std::io::stdout().flush();
@@ -840,6 +843,7 @@ fn ask_line(raw: &Raw, prompt: &str) -> String {
         t.c_lflag &= !(libc::ICANON | libc::ECHO);
         libc::tcsetattr(0, libc::TCSANOW, &t);
     }
+
     line.trim().to_string()
 }
 
@@ -1095,8 +1099,7 @@ mod tests {
     fn keep_records_a_verdict_and_an_ambiguous_id_is_refused() {
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let _env_1 = crate::isolated_env::set("XDG_STATE_HOME", dir.path());
         let all = sample();
         assert!(keep("a1", &all).unwrap().starts_with("kept a1aaaaaa"));
         let r = reviews();
@@ -1108,10 +1111,6 @@ mod tests {
             ..all[0].clone()
         });
         assert!(resolve("a1", &twin).is_err());
-        match old {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
     }
 
     #[test]
@@ -1203,7 +1202,7 @@ mod tests {
     fn a_recall_bumps_the_count_the_list_shows() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let _env_2 = crate::isolated_env::set("XDG_STATE_HOME", dir.path());
         let atoms = vec![atom(
             "a1aaaaaaaaaaaaaa",
             "pin the fuse",
@@ -1221,6 +1220,6 @@ mod tests {
             "{}",
             describe(&after[0])
         );
-        std::env::remove_var("XDG_STATE_HOME");
+        let _env_3 = crate::isolated_env::unset("XDG_STATE_HOME");
     }
 }

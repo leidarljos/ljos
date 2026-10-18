@@ -121,10 +121,10 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
     let base = format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}");
     // The cache directory, on the home filesystem: a temporary directory
     // can be a quota'd tmpfs that is already full.
-    let work = std::env::var_os("XDG_CACHE_HOME")
+    let work = crate::env_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir)
         .join("ljos")
         .join(format!("upgrade-{}", std::process::id()));

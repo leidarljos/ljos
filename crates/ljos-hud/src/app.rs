@@ -663,13 +663,14 @@ mod tests {
     #[test]
     fn visible_boot_stashes_env_token() {
         let _guard = crate::env_lock();
+        let _tok = crate::test_env::set("XDG_ACTIVATION_TOKEN", "tok-boot");
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-boot");
             std::env::set_var("DESKTOP_STARTUP_ID", "startup");
         }
         let app = HudApp::new(true, None);
         assert_eq!(app.pending_activation_token.as_deref(), Some("tok-boot"));
+        assert!(crate::summon::peek_env_token().is_none());
         assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
         assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
     }
@@ -677,14 +678,15 @@ mod tests {
     #[test]
     fn hidden_boot_unsets_token_without_stashing() {
         let _guard = crate::env_lock();
+        let _tok = crate::test_env::set("XDG_ACTIVATION_TOKEN", "tok-hid");
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-hid");
             std::env::set_var("DESKTOP_STARTUP_ID", "startup");
         }
         let app = HudApp::new(false, None);
         assert_eq!(app.pending_activation_token, None);
         assert!(!app.visible);
+        assert!(crate::summon::peek_env_token().is_none());
         assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
         assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
     }

@@ -31,7 +31,7 @@
 //! its own, in a session it keeps (see `persona_session`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -246,10 +246,10 @@ fn cost_of(body: &Value, usd_per_mtok_in: f64) -> f64 {
 const PROMPT_CHARS: usize = 2000;
 
 fn config_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
+    crate::env_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("ljos")
         .join("jev.toml")
@@ -257,7 +257,7 @@ fn config_path() -> PathBuf {
 
 fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
+        Some(rest) => crate::env_os("HOME")
             .map_or_else(|| PathBuf::from(path), |h| PathBuf::from(h).join(rest)),
         None => PathBuf::from(path),
     }
@@ -288,7 +288,7 @@ fn key_from(text: &str) -> Option<String> {
 }
 
 fn key_cache(judge: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty())?;
+    let dir = crate::env_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty())?;
     let file = if judge == "default" {
         "jev-key".to_string()
     } else {
@@ -614,7 +614,7 @@ struct Attempt {
 
 /// One judge's reply to `body`, from the cache or inside its budget.
 /// A miss is still an attempt, so the log can score a timeout.
-fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
+fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64, cache: Option<&Path>) -> Attempt {
     let started = std::time::Instant::now();
     let backend = j.backend.name();
     let model = j.model.clone();
@@ -639,7 +639,7 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     let mut body = body.clone();
     body["model"] = Value::String(j.model.clone());
     let request = format!("{}\n{body}", judge_name(j));
-    if let Some(reply) = cached(&request, cache_days) {
+    if let Some(reply) = cached_in(cache, &request, cache_days) {
         let latency_ms = started.elapsed().as_millis();
         return Attempt {
             name: String::new(),
@@ -664,7 +664,7 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     if answered {
         if let Some(reply) = reply.as_ref() {
             if cache_days > 0 {
-                keep(&request, reply);
+                keep_in(cache, &request, reply);
             }
         }
     }
@@ -709,14 +709,18 @@ fn post(
 }
 
 /// Ask each judge at once, each inside its own budget.
+/// The cache directory is resolved on this thread and handed to each
+/// worker: a worker does not read the process environment.
 fn ask_all(judges: &[(String, Judge, String)], body: &Value, cache_days: u64) -> Vec<Attempt> {
+    let cache = cache_dir();
     std::thread::scope(|scope| {
         let handles: Vec<_> = judges
             .iter()
             .map(|(name, j, key)| {
                 let name = name.clone();
+                let cache = cache.clone();
                 scope.spawn(move || {
-                    let mut attempt = ask_one(j, key, body, cache_days);
+                    let mut attempt = ask_one(j, key, body, cache_days, cache.as_deref());
                     attempt.name = name;
                     attempt
                 })
@@ -1352,10 +1356,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 /// `$XDG_CACHE_HOME/ljos/jev`, mode 0700, one file per request hash.
 fn cache_dir() -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_CACHE_HOME")
+    let dir = crate::env_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
         .join("ljos")
         .join("jev");
     std::fs::create_dir_all(&dir).ok()?;
@@ -1369,17 +1373,22 @@ fn cache_dir() -> Option<PathBuf> {
 
 /// The file an identical request lands in. The name is the hash. The file
 /// holds the hash and the reply, not the request.
-fn cache_file(request: &str) -> Option<PathBuf> {
-    Some(cache_dir()?.join(sha256_hex(request.as_bytes())))
+fn cache_file_in(dir: Option<&Path>, request: &str) -> Option<PathBuf> {
+    Some(dir?.join(sha256_hex(request.as_bytes())))
 }
 
 /// The answer to an identical request made within `days`.
+#[cfg(test)]
 fn cached(request: &str, days: u64) -> Option<Value> {
+    cached_in(cache_dir().as_deref(), request, days)
+}
+
+fn cached_in(dir: Option<&Path>, request: &str, days: u64) -> Option<Value> {
     if days == 0 {
         return None;
     }
     let hash = sha256_hex(request.as_bytes());
-    let path = cache_file(request)?;
+    let path = cache_file_in(dir, request)?;
     let age = std::fs::metadata(&path)
         .ok()?
         .modified()
@@ -1394,9 +1403,14 @@ fn cached(request: &str, days: u64) -> Option<Value> {
     (entry["hash"].as_str() == Some(hash.as_str())).then(|| entry["reply"].clone())
 }
 
+#[cfg(test)]
 fn keep(request: &str, reply: &Value) {
+    keep_in(cache_dir().as_deref(), request, reply);
+}
+
+fn keep_in(dir: Option<&Path>, request: &str, reply: &Value) {
     let hash = sha256_hex(request.as_bytes());
-    let Some(path) = cache_file(request) else {
+    let Some(path) = cache_file_in(dir, request) else {
         return;
     };
     let entry = serde_json::json!({"hash": hash, "reply": reply});
@@ -1582,10 +1596,10 @@ pub fn audit_reason(a: &Audit, test_ran: bool) -> Option<String> {
 
 fn state_dir() -> Option<PathBuf> {
     Some(
-        std::env::var_os("XDG_STATE_HOME")
+        crate::env_os("XDG_STATE_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?
+            .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?
             .join("ljos"),
     )
 }
@@ -1874,7 +1888,7 @@ mod tests {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        let _env_1 = crate::isolated_env::set("XDG_CONFIG_HOME", dir.path());
         assert!(config().is_none(), "no file, no call");
         std::fs::create_dir_all(dir.path().join("ljos")).unwrap();
         let key = dir.path().join("key");
@@ -1894,7 +1908,7 @@ mod tests {
         assert_eq!(k, "sk-or-test");
         assert_eq!(cfg.budget_ms, 2000);
         assert_eq!(cfg.min_candidates, 2);
-        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        let _env_2 = crate::isolated_env::unset("XDG_CONFIG_HOME");
     }
 
     #[test]
@@ -2129,7 +2143,7 @@ mod tests {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
-        unsafe { std::env::set_var("XDG_CACHE_HOME", dir.path()) };
+        let _env_3 = crate::isolated_env::set("XDG_CACHE_HOME", dir.path());
         let reply = serde_json::json!({"answers": {"x": {"noul": 0.9}}});
         assert!(cached("req-a", 7).is_none(), "nothing kept yet");
         keep("req-a", &reply);
@@ -2154,7 +2168,7 @@ mod tests {
             dir_mode, 0o700,
             "cache directory is mode 0700, got {dir_mode:o}"
         );
-        unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+        let _env_4 = crate::isolated_env::unset("XDG_CACHE_HOME");
     }
 
     #[test]
@@ -2291,11 +2305,9 @@ mod tests {
         let cfg_dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", cfg_dir.path());
-            std::env::set_var("XDG_STATE_HOME", state.path());
-            std::env::set_var("XDG_CACHE_HOME", cache.path());
-        }
+        let _env_5 = crate::isolated_env::set("XDG_CONFIG_HOME", cfg_dir.path());
+        let _env_6 = crate::isolated_env::set("XDG_STATE_HOME", state.path());
+        let _env_7 = crate::isolated_env::set("XDG_CACHE_HOME", cache.path());
         std::fs::create_dir_all(cfg_dir.path().join("ljos")).unwrap();
         std::fs::write(
             cfg_dir.path().join("ljos/jev.toml"),
@@ -2327,10 +2339,8 @@ mod tests {
         assert!(judge("fix the ci tonight please", &["alpha claim"], &claims).is_none());
         let log = std::fs::read_to_string(state.path().join("ljos/jev-log.jsonl")).unwrap();
         assert!(log.contains("\"status\":\"error\""), "{log}");
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("XDG_STATE_HOME");
-            std::env::remove_var("XDG_CACHE_HOME");
-        }
+        let _env_8 = crate::isolated_env::unset("XDG_CONFIG_HOME");
+        let _env_9 = crate::isolated_env::unset("XDG_STATE_HOME");
+        let _env_10 = crate::isolated_env::unset("XDG_CACHE_HOME");
     }
 }

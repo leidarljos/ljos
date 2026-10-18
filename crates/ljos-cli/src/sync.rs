@@ -69,7 +69,7 @@ fn local() -> Local {
 
 fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
+        Some(rest) => crate::env_os("HOME")
             .map_or_else(|| PathBuf::from(path), |h| PathBuf::from(h).join(rest)),
         None => PathBuf::from(path),
     }
@@ -92,17 +92,17 @@ pub fn host() -> String {
 }
 
 fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
+    crate::env_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("ljos")
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::env_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| crate::env_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("sync")
@@ -231,7 +231,9 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     if recipients.is_empty() {
         bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
     }
-    let mut cmd = Command::new("age");
+    let age = crate::which_bin("age").context("age not on PATH; install age")?;
+    let mut cmd = Command::new(age);
+    crate::apply_isolated_env(&mut cmd);
     for r in recipients {
         cmd.arg("-r").arg(r);
     }
@@ -261,7 +263,10 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
 /// Open a sealed log with this machine's identity; none when this machine
 /// is not one of its recipients.
 fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
-    let out = Command::new("age")
+    let age = crate::which_bin("age").context("age not on PATH; install age")?;
+    let mut cmd = Command::new(age);
+    crate::apply_isolated_env(&mut cmd);
+    let out = cmd
         .arg("-d")
         .arg("-i")
         .arg(identity)
@@ -967,6 +972,7 @@ fn git_within(
             Ok(())
         });
     }
+
     let child = cmd.spawn().with_context(|| {
         format!(
             "sync: user rules: git {}",
@@ -988,6 +994,7 @@ fn git_within(
                 libc::kill(-(pid as i32), libc::SIGKILL);
                 libc::kill(pid as i32, libc::SIGKILL);
             }
+
             bail!(
                 "sync: user rules: the tracker did not answer within {} ms",
                 budget.as_millis()

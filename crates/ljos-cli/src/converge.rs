@@ -333,11 +333,11 @@ fn budget_paths() -> Vec<PathBuf> {
 }
 
 fn config_base() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
+    crate::env_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| {
-            std::env::var_os("HOME")
+            crate::env_os("HOME")
                 .map(|h| PathBuf::from(h).join(".config"))
                 .filter(|p| p.is_absolute())
         })
