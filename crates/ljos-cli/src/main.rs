@@ -1591,8 +1591,23 @@ fn run_command() -> Result<()> {
                     let id = body["id"].as_str().unwrap_or("?");
                     let short: String = id.chars().take(8).collect();
                     println!("noted in memory (id {short})");
+                    match ljos_cli::flush_note_queue() {
+                        Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
+                        Err(e) => eprintln!("ljos note: note queue: {e:#}"),
+                    }
                 }
-                Err(e) => print!("{}", ljos_cli::note_memory_warning(&issue, &e)),
+                Err(e) => {
+                    print!("{}", ljos_cli::note_memory_warning(&issue, &e));
+                    if ljos_cli::note_can_wait(&e) {
+                        match ljos_cli::queue_note(&issue, &text) {
+                            Ok(true) => println!(
+                                "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
+                            ),
+                            Ok(false) => println!("memory: the same note is already queued"),
+                            Err(q) => eprintln!("ljos note: could not queue the copy: {q:#}"),
+                        }
+                    }
+                }
             }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
@@ -2960,20 +2975,26 @@ fn run_command() -> Result<()> {
             gen,
             assignee,
             close,
-        } => print!(
-            "{}",
-            finish(
-                &issue,
-                &status,
-                lesson.or(lesson_text).as_deref(),
-                outcome.as_deref(),
-                new_option,
-                beta,
-                &cli_assignee(assignee.as_deref()),
-                gen,
-                close
-            )?
-        ),
+        } => {
+            match ljos_cli::flush_note_queue() {
+                Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
+                Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
+            }
+            print!(
+                "{}",
+                finish(
+                    &issue,
+                    &status,
+                    lesson.or(lesson_text).as_deref(),
+                    outcome.as_deref(),
+                    new_option,
+                    beta,
+                    &cli_assignee(assignee.as_deref()),
+                    gen,
+                    close
+                )?
+            );
+        }
         Cmd::Calibrate { project, rounds } => {
             let rows = calibrate(&project, rounds)?;
             for row in &rows {

@@ -2465,6 +2465,15 @@ fn remember_title(book: &mut Book, repo: &str) {
 }
 
 fn title_from(prompt: &str, repo: &str) -> String {
+    let forced = std::env::var("LJOS_PROJECT").ok();
+    let tracker = std::env::var_os("VISSUE_ROOT").map(PathBuf::from);
+    title_at(prompt, repo, forced.as_deref(), tracker.as_deref())
+}
+
+/// [`title_from`] with the project inputs passed in. With no prompt the
+/// title names the project the issue files under, as [`project_for_at`]
+/// picks it, so a clone in `bench-w18b-tfn7` is "Work in bench".
+fn title_at(prompt: &str, repo: &str, forced: Option<&str>, tracker: Option<&Path>) -> String {
     let words: String = prompt
         .split_whitespace()
         .take(12)
@@ -2474,12 +2483,15 @@ fn title_from(prompt: &str, repo: &str) -> String {
     if !title.is_empty() {
         return title;
     }
-    Path::new(repo)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .map(|name| format!("Work in {name}"))
-        .unwrap_or_else(|| "agent work".to_string())
+    if repo.trim().is_empty() {
+        return "agent work".to_string();
+    }
+    let project = project_for_at(repo, forced, tracker);
+    if project.trim().is_empty() {
+        "agent work".to_string()
+    } else {
+        format!("Work in {project}")
+    }
 }
 
 fn project_for(repo: &str) -> String {
@@ -4215,6 +4227,11 @@ mod tests {
             project_for_at(repo.to_str().unwrap(), None, Some(&tracker)),
             "bench"
         );
+        assert_eq!(
+            title_at("", repo.to_str().unwrap(), None, Some(&tracker)),
+            "Work in bench"
+        );
+        assert_eq!(title_at("  ", "", None, Some(&tracker)), "agent work");
         let mixed = root.join("orpc-clone");
         std::fs::create_dir_all(tracker.join("Software/OmniPotentRPC")).unwrap();
         std::fs::write(
