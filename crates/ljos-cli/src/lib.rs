@@ -3497,9 +3497,10 @@ fi
 exec "$real" "$@"
 "#;
 
-/// Write the guard shims into [`guard_bin_dir`].
-fn guard_step(dry: bool) -> Step {
-    let dir = guard_bin_dir();
+/// Write the guard shims into [`guard_bin_dir`], or into `guard_dir` when
+/// the caller names one.
+fn guard_step(dry: bool, guard_dir: Option<&Path>) -> Step {
+    let dir = guard_dir.map_or_else(guard_bin_dir, PathBuf::from);
     let current = GUARD_SHIMMED
         .iter()
         .all(|c| std::fs::read_to_string(dir.join(c)).is_ok_and(|t| t == GUARD_SHIM));
@@ -3547,9 +3548,19 @@ fn guard_step(dry: bool) -> Step {
     }
 }
 
+/// Where a test installs the grokbot hooks and guard shims without
+/// changing the process environment. `git_env` is the child `git config`
+/// environment (`GIT_CONFIG_GLOBAL`, `HOME`, and the XDG dirs).
+#[derive(Clone, Copy)]
+pub(crate) struct OnboardPlace<'a> {
+    pub hooks_dir: &'a Path,
+    pub guard_dir: &'a Path,
+    pub git_env: &'a [(&'a str, &'a str)],
+}
+
 /// Grok Bot commits through git, with no prompt hook to book them.
 /// `onboard --harness grokbot` installs the global hooks.
-fn git_hooks_step(dry: bool) -> Step {
+fn git_hooks_step(dry: bool, place: Option<OnboardPlace<'_>>) -> Step {
     if dry {
         return Step {
             what: "git-hooks".into(),
@@ -3557,7 +3568,11 @@ fn git_hooks_step(dry: bool) -> Step {
             ok: true,
         };
     }
-    match git_hooks::install() {
+    let installed = match place {
+        Some(place) => git_hooks::install_at(place.hooks_dir, place.git_env),
+        None => git_hooks::install(),
+    };
+    match installed {
         Ok(dir) => Step {
             what: "git-hooks".into(),
             detail: format!("installed git hooks in {}", dir.display()),
@@ -3663,7 +3678,13 @@ fn env_step(path: &Path, name: &str, dry: bool) -> Step {
     }
 }
 
-fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Result<Vec<Step>> {
+fn shell_steps(
+    file: &Path,
+    h: &Harness,
+    dry: bool,
+    shipped: Option<Step>,
+    place: Option<OnboardPlace<'_>>,
+) -> Result<Vec<Step>> {
     let Some(dir) = &h.skills else {
         bail!(
             "onboard: {} is a shell runner and needs a skills directory; pass --skills DIR",
@@ -3673,9 +3694,9 @@ fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Re
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
     steps.push(env_step(&env_path_for(file, h), &h.name, dry));
-    steps.push(guard_step(dry));
+    steps.push(guard_step(dry, place.map(|place| place.guard_dir)));
     if h.name == "grokbot" {
-        steps.push(git_hooks_step(dry));
+        steps.push(git_hooks_step(dry, place));
     }
     steps.extend([
         deed_store_step(dry),
@@ -3691,6 +3712,16 @@ pub fn onboard_in(
     harness: &str,
     dry: bool,
     skills: Option<&Path>,
+) -> Result<Vec<Step>> {
+    onboard_in_at(file, harness, dry, skills, None)
+}
+
+pub(crate) fn onboard_in_at(
+    file: &Path,
+    harness: &str,
+    dry: bool,
+    skills: Option<&Path>,
+    place: Option<OnboardPlace<'_>>,
 ) -> Result<Vec<Step>> {
     if harness == "json" {
         return Ok(vec![Step {
@@ -3773,7 +3804,7 @@ pub fn onboard_in(
         h.skills = Some(dir.display().to_string());
     }
     if h.shell {
-        return shell_steps(file, &h, dry, shipped_step);
+        return shell_steps(file, &h, dry, shipped_step, place);
     }
     let h = &h;
     let server = server_path()?;
@@ -18274,13 +18305,13 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
+        .stdin(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    cmd.output().ok()
 }
 
 fn git_ok_stdout(dir: &Path, args: &[&str]) -> Option<String> {
@@ -19950,6 +19981,7 @@ pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said>
     for a in args {
         cmd.arg(a.as_ref());
     }
+    git_hooks::hook_child_env(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -22557,12 +22589,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         return format!("tracker git: {} has no directory\n", path.display());
     };
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
             .arg(dir)
             .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        cmd.output()
     };
     let file = path.to_string_lossy().to_string();
     match git(&["rev-parse", "--is-inside-work-tree"]) {
@@ -22665,6 +22698,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     if let Ok(err) = err {
         push.stderr(err);
     }
+    git_hooks::hook_child_env(&mut push);
     let mut child = match push.spawn() {
         Ok(c) => c,
         Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
@@ -24328,6 +24362,7 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
     for a in args {
         cmd.arg(a.as_ref());
     }
+    git_hooks::hook_child_env(&mut cmd);
     let st = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -24379,6 +24414,7 @@ pub fn run_captured_as(
     for a in args {
         cmd.arg(a.as_ref());
     }
+    git_hooks::hook_child_env(&mut cmd);
     let out = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -31798,19 +31834,39 @@ mod tests {
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
         let home = dir.join("home");
+        let share = dir.join("share");
+        let config = dir.join("config");
         std::fs::create_dir_all(&home).unwrap();
-        // Git hooks install writes core.hooksPath. Keep that off the login config.
-        // SAFETY: the lock above is the only environment this test touches.
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_DATA_HOME", dir.join("share"));
-            std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
-            std::env::set_var("GIT_CONFIG_GLOBAL", dir.join("gitconfig"));
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-        }
+        // Git hooks install writes core.hooksPath. The dirs and the git
+        // environment go to the child `git config`, not this process.
+        let gitconfig = dir.join("gitconfig");
+        let hooks = share.join("ljos").join("git-hooks");
+        let guard = share.join("ljos").join("guard-bin");
+        let git_env = [
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", share.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+            ("GIT_CONFIG_GLOBAL", gitconfig.to_str().unwrap()),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        let kept: Vec<_> = [
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+        let place = super::OnboardPlace {
+            hooks_dir: &hooks,
+            guard_dir: &guard,
+            git_env: &git_env,
+        };
         let file = dir.join("harnesses.toml");
         let skills = dir.join("given");
-        let dry = super::onboard_in(&file, "grokbot", true, Some(&skills)).unwrap();
+        let dry = super::onboard_in_at(&file, "grokbot", true, Some(&skills), Some(place)).unwrap();
         assert!(dry.iter().all(|s| s.ok), "{dry:?}");
         assert!(dry
             .iter()
@@ -31823,7 +31879,8 @@ mod tests {
             .all(|s| s.what != "hook" && !s.what.contains("mcp")));
         assert!(!skills.exists(), "a dry run wrote the skill");
 
-        let steps = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
+        let steps =
+            super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
         assert!(steps.iter().all(|s| s.ok), "{steps:?}");
         let skill = std::fs::read_to_string(skills.join("ljos/SKILL.md")).unwrap();
         assert!(skill.starts_with("---\nname: ljos\n"));
@@ -31848,7 +31905,17 @@ mod tests {
         );
         assert!(saved.contains(&skills.display().to_string()), "{saved}");
         assert!(!saved.contains("json_pointer"), "{saved}");
-        let again = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
+        let recorded = std::fs::read_to_string(&gitconfig).unwrap_or_default();
+        assert!(
+            recorded.contains(&hooks.display().to_string()),
+            "hooks were not recorded in the scratch gitconfig: {recorded}"
+        );
+        assert!(
+            guard.join("git").is_file(),
+            "guard shims were not written under the scratch data dir"
+        );
+        let again =
+            super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
         assert!(again
             .iter()
             .any(|s| s.what == "skill" && s.detail.contains("is current")));
@@ -31859,14 +31926,12 @@ mod tests {
         std::fs::write(&missing, "[[harness]]\nname = \"box\"\nshell = true\n").unwrap();
         let err = super::onboard_in(&missing, "box", true, None).unwrap_err();
         assert!(err.to_string().contains("--skills"), "{err}");
+        for (key, value) in kept {
+            assert_eq!(std::env::var_os(key), value, "{key}");
+        }
         unsafe {
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
-            std::env::remove_var("HOME");
-            std::env::remove_var("XDG_DATA_HOME");
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("GIT_CONFIG_GLOBAL");
-            std::env::remove_var("GIT_CONFIG_NOSYSTEM");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

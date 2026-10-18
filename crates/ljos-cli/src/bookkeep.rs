@@ -2807,6 +2807,7 @@ fn run_timed(bin: &str, args: &[&str], env: &[(&str, &str)]) -> anyhow::Result<S
     for (key, value) in env {
         cmd.env(key, value);
     }
+    crate::git_hooks::hook_child_env(&mut cmd);
     let mut child = cmd
         .args(args)
         .stdin(Stdio::null())

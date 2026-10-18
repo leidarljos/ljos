@@ -5,6 +5,7 @@
 //! the middle of a rebase or merge, and a Claude Code, Codex, or opencode
 //! session are left to their own hooks. An amend and a rebase book once.
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,8 +45,20 @@ pub fn run(action: &str) -> Result<()> {
 ///
 /// The directory cannot be written, or `git config` fails.
 pub fn install() -> Result<PathBuf> {
-    let dir = hooks_dir();
-    fs::create_dir_all(&dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
+    install_at(&hooks_dir(), &[])
+}
+
+/// [`install`] into `dir`, with `git_env` on the child `git config`.
+///
+/// An empty `git_env` leaves that child with this process's environment.
+/// `GIT_CONFIG_GLOBAL` and `HOME` belong here when the caller is keeping
+/// the login config untouched.
+///
+/// # Errors
+///
+/// The directory cannot be written, or `git config` fails.
+pub(crate) fn install_at(dir: &Path, git_env: &[(&str, &str)]) -> Result<PathBuf> {
+    fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
     let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ljos"));
     for name in HOOK_NAMES {
         let path = dir.join(name);
@@ -57,7 +70,7 @@ pub fn install() -> Result<PathBuf> {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
         }
     }
-    let current = global_hooks_path();
+    let current = global_hooks_path(git_env);
     let ours = dir.display().to_string();
     if current.as_deref() != Some(ours.as_str()) {
         match current {
@@ -69,8 +82,8 @@ pub fn install() -> Result<PathBuf> {
             }
         }
     }
-    set_global_hooks_path(&dir)?;
-    Ok(dir)
+    set_global_hooks_path(dir, git_env)?;
+    Ok(dir.to_path_buf())
 }
 
 /// Remove the scripts and put `core.hooksPath` back.
@@ -80,7 +93,7 @@ pub fn install() -> Result<PathBuf> {
 /// `git config` cannot restore or unset the path.
 pub fn uninstall() -> Result<()> {
     let dir = hooks_dir();
-    let current = global_hooks_path();
+    let current = global_hooks_path(&[]);
     let ours = dir.display().to_string();
     if current.as_deref() == Some(ours.as_str()) {
         let previous = fs::read_to_string(dir.join("previous-hooks-path"))
@@ -88,9 +101,9 @@ pub fn uninstall() -> Result<()> {
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty());
         if let Some(prev) = previous {
-            set_global_hooks_path(Path::new(&prev))?;
+            set_global_hooks_path(Path::new(&prev), &[])?;
         } else {
-            unset_global_hooks_path()?;
+            unset_global_hooks_path(&[])?;
         }
     }
     for name in HOOK_NAMES {
@@ -105,7 +118,7 @@ pub fn uninstall() -> Result<()> {
 pub fn status() -> String {
     let dir = hooks_dir();
     let installed = HOOK_NAMES.iter().all(|name| dir.join(name).is_file());
-    let configured = global_hooks_path().unwrap_or_else(|| "(unset)".into());
+    let configured = global_hooks_path(&[]).unwrap_or_else(|| "(unset)".into());
     let hooks = if installed {
         dir.display().to_string()
     } else {
@@ -181,9 +194,6 @@ fn book_commit(hook: &str) -> Result<()> {
     if std::env::var_os("LJOS_GIT_HOOK").is_some() || booking_off() {
         return Ok(());
     }
-    // Nested commits (the tracker's own) must not re-enter this hook.
-    // SAFETY: this process is the hook, and nothing has read the variable.
-    unsafe { std::env::set_var("LJOS_GIT_HOOK", "1") };
     if foreign_session() {
         return Ok(());
     }
@@ -204,8 +214,11 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     }
     let subject = git_line(&["log", "-1", "--format=%s"]).unwrap_or_default();
-    // A hook exports GIT_DIR. Later `git -C` on the tracker must not follow it.
-    clear_git_env();
+    // A hook exports GIT_DIR. Later `git -C` on the tracker must not follow
+    // it, and a nested commit must not re-enter this hook. Both ride on the
+    // child git and ljos processes; this process keeps the environment it
+    // was started with, so the rev-parse above still sees the checkout.
+    let _children = HookChildren::enter();
     let session = crate::bookkeep::seat_session();
     let command = if subject.is_empty() {
         "git commit".to_string()
@@ -360,23 +373,71 @@ fn git_dir() -> Option<PathBuf> {
     }
 }
 
-fn clear_git_env() {
-    for key in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_PREFIX",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-        "GIT_NAMESPACE",
-    ] {
-        // SAFETY: this process is the hook. Children must see a normal checkout.
-        unsafe { std::env::remove_var(key) };
+/// `GIT_*` values a hook exports. A later `git -C` follows `GIT_DIR` and
+/// ignores `-C`, so a tracker commit would land in the checkout that just
+/// finished.
+const HOOK_GIT_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
+thread_local! {
+    static HOOK_CHILDREN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While this guard is alive, child processes started through
+/// [`hook_child_env`] carry `LJOS_GIT_HOOK=1` and do not inherit the hook's
+/// `GIT_DIR`. Dropping it restores the previous flag. The process
+/// environment is not changed.
+#[must_use]
+struct HookChildren {
+    previous: bool,
+}
+
+impl HookChildren {
+    fn enter() -> Self {
+        let previous = HOOK_CHILDREN.with(Cell::get);
+        HOOK_CHILDREN.with(|flag| flag.set(true));
+        Self { previous }
     }
 }
 
+impl Drop for HookChildren {
+    fn drop(&mut self) {
+        HOOK_CHILDREN.with(|flag| flag.set(self.previous));
+    }
+}
+
+/// Put the re-entry guard on a child `git` or `ljos`, and drop the hook's
+/// git directory from that child. No effect unless a git hook is booking
+/// a commit on this thread.
+pub(crate) fn hook_child_env(cmd: &mut Command) {
+    if !HOOK_CHILDREN.with(Cell::get) {
+        return;
+    }
+    cmd.env("LJOS_GIT_HOOK", "1");
+    for key in HOOK_GIT_ENV {
+        cmd.env_remove(key);
+    }
+}
+
+fn git_command(args: &[&str], git_env: &[(&str, &str)]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(args);
+    for (key, value) in git_env {
+        cmd.env(key, value);
+    }
+    hook_child_env(&mut cmd);
+    cmd
+}
+
 fn git_line(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
+    let out = git_command(args, &[]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -389,9 +450,8 @@ fn git_line(args: &[&str]) -> Option<String> {
     }
 }
 
-fn global_hooks_path() -> Option<String> {
-    let out = Command::new("git")
-        .args(["config", "--global", "--get", "core.hooksPath"])
+fn global_hooks_path(git_env: &[(&str, &str)]) -> Option<String> {
+    let out = git_command(&["config", "--global", "--get", "core.hooksPath"], git_env)
         .output()
         .ok()?;
     if !out.status.success() {
@@ -406,14 +466,9 @@ fn global_hooks_path() -> Option<String> {
     }
 }
 
-fn set_global_hooks_path(path: &Path) -> Result<()> {
-    let status = Command::new("git")
-        .args([
-            "config",
-            "--global",
-            "core.hooksPath",
-            &path.display().to_string(),
-        ])
+fn set_global_hooks_path(path: &Path, git_env: &[(&str, &str)]) -> Result<()> {
+    let value = path.display().to_string();
+    let status = git_command(&["config", "--global", "core.hooksPath", &value], git_env)
         .status()
         .context("git-hooks: git config")?;
     if !status.success() {
@@ -422,13 +477,52 @@ fn set_global_hooks_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unset_global_hooks_path() -> Result<()> {
-    let status = Command::new("git")
-        .args(["config", "--global", "--unset", "core.hooksPath"])
-        .status()
-        .context("git-hooks: git config")?;
+fn unset_global_hooks_path(git_env: &[(&str, &str)]) -> Result<()> {
+    let status = git_command(
+        &["config", "--global", "--unset", "core.hooksPath"],
+        git_env,
+    )
+    .status()
+    .context("git-hooks: git config")?;
     if !status.success() {
         bail!("git-hooks: could not unset core.hooksPath");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    fn mapped<'a>(cmd: &'a Command, key: &str) -> Option<Option<&'a OsStr>> {
+        cmd.get_envs()
+            .find(|(name, _)| *name == OsStr::new(key))
+            .map(|(_, value)| value)
+    }
+
+    #[test]
+    fn hook_children_carry_the_guard_without_touching_the_process() {
+        let before_hook = std::env::var_os("LJOS_GIT_HOOK");
+        let before_dir = std::env::var_os("GIT_DIR");
+        let mut plain = Command::new("true");
+        plain.env("GIT_DIR", "keep");
+        hook_child_env(&mut plain);
+        assert_eq!(mapped(&plain, "GIT_DIR"), Some(Some(OsStr::new("keep"))));
+        assert_eq!(mapped(&plain, "LJOS_GIT_HOOK"), None);
+
+        let _guard = HookChildren::enter();
+        let mut cmd = Command::new("true");
+        cmd.env("GIT_DIR", "from-the-hook");
+        cmd.env("PATH", "/usr/bin");
+        hook_child_env(&mut cmd);
+        assert_eq!(mapped(&cmd, "LJOS_GIT_HOOK"), Some(Some(OsStr::new("1"))));
+        for key in HOOK_GIT_ENV {
+            assert_eq!(mapped(&cmd, key), Some(None), "{key}");
+        }
+        assert_eq!(mapped(&cmd, "PATH"), Some(Some(OsStr::new("/usr/bin"))));
+        assert_eq!(std::env::var_os("LJOS_GIT_HOOK"), before_hook);
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+    }
 }
