@@ -1,7 +1,14 @@
-What each store keeps
-=====================
+:description: ljos keeps nothing of its own. Each kind of fact lives in one store, and ljos calls that store's command line to read or write it.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
 
-|image1|
+Explanation
+===========
+
+What each store keeps
+---------------------
+
+.. image:: _static/seat.svg
+   :width: 100.0%
 
 ljos keeps nothing of its own. Each kind of fact lives in one store, and
 ljos calls that store's command line to read or write it.
@@ -30,7 +37,7 @@ tracker cites it on an issue and the pack cites it in a memory; the deed
 store answers for it.
 
 How a shell command is judged
-=============================
+-----------------------------
 
 Before an agent's shell command runs, the runner's hook hands it to
 ``ljos hook``, which asks five layers, in the order below. No later layer can allow
@@ -90,7 +97,7 @@ hook is asked.
 without running it.
 
 The contracts
-=============
+-------------
 
 -  Citing a deed names it; the bytes stay in deedar.
 -  A finish closes the sitting. The ticket closes only with ``ljos finish ISSUE --close``, when the work is accepted. The claim graph is
@@ -104,9 +111,10 @@ The contracts
    never an empty answer.
 
 Memory that grows, is reviewed, decays, and is retracted
-========================================================
+--------------------------------------------------------
 
-|image2|
+.. image:: _static/memory.svg
+   :width: 100.0%
 
 A claim enters the pack because the seat decided it was worth keeping, and
 enters a review clock at the same moment. The clock is the spaced-repetition
@@ -126,7 +134,7 @@ claim first 0.947 of the time; lexical scoring scores at chance and a
 recency half-life at 0.270 (the packset site carries the table).
 
 When the seat speaks
-====================
+--------------------
 
 The hook speaks at a prompt, a failed tool and a stop, and fires its
 memories before a compaction. A prompt gets what it activates, three
@@ -158,9 +166,10 @@ and never touched the seat. A turn asked for a decision that cast no
 ballot is held too. It also audits the turn when Jev is on.
 
 Islands
-=======
+-------
 
-|image3|
+.. image:: _static/island.svg
+   :width: 100.0%
 
 A task does not touch everything a seat knows. The pack links each claim to
 the claims it shares names with, pruned so a neighbourhood spreads over the
@@ -199,7 +208,7 @@ seat prints beside the hits at a sitting, for orientation, and what fires
 together after use; never the order the hits come in.
 
 Time as data
-============
+------------
 
 Every record in the seat is dated: an atom carries the writer's clock and,
 when it was retired, the window it was live in; a deed carries the time it
@@ -230,7 +239,7 @@ store that already knows every date is a good one, so the store does the
 arithmetic and the reader reads the order.
 
 The field, and the seat's place in it
-=====================================
+-------------------------------------
 
 Agent memory systems in the literature and on the market do one of a few
 jobs, and the seat's design can be read against each.
@@ -337,7 +346,7 @@ these rows. The scorer and verdict files are private; I share them on
 request.
 
 Agreement that learns
-=====================
+---------------------
 
 A tally counts, and a count is right only when every voter is worth the
 same. The seat settles a vote with DeGroot's model
@@ -401,7 +410,11 @@ noise. The consensus crate's ``derive/`` checks the settle and that test.
 
 A short record misleads the weights too: plug-in log odds drop a good
 voter who started unlucky, and lose to a plain count by 6.4 points on a
-panel of seven similar voters at three outcomes. ``learn`` therefore shrinks
+panel of seven similar voters at three outcomes. That figure is the
+consensus crate's
+`examples/correlation\ history.rs <https://github.com/leidarljos/consensus/blob/main/examples/correlation_history.rs>`__,
+the row for seven voters in [0.60, 0.75] after three named outcomes.
+``learn`` therefore shrinks
 each voter's accuracy toward the panel's pooled accuracy before weighing
 it, by empirical Bayes (Efron and Morris,
 doi:10.1080/01621459.1975.10479864). The first outcome leaves the voters
@@ -412,19 +425,19 @@ other ballot and tells the persona to cast before it reads a tally,
 since a ballot cast after the others adds a voice and no evidence.
 
 Judgment, and where a judge slots in
-====================================
+------------------------------------
 
 The seat has always made judgments at four points. Each had a local
 answer, and each answer fed a structure that was already there.
 
-=========== ================================================== ================================================================ ===============================================
-point       the judgment                                       the local answer                                                 what consumes it
-=========== ================================================== ================================================================ ===============================================
-prompt hook which claims bear on the prompt                    the encoder's cosine or two scorers, a floor, a shared word      the injected context
-prompt hook is this a correction, or a choice put to the agent two phrase lists                                                 a proposal, then the nudges
-panel       which option a persona votes for                   one subagent per persona                                         the settle, forecasts, ``learn``, ``calibrate``
-stop        may the agent stop                                 rules on the held issue                                          one more round, once
-=========== ================================================== ================================================================ ===============================================
+=========== ================================================== =========================================================== ===============================================
+point       the judgment                                       the local answer                                            what consumes it
+=========== ================================================== =========================================================== ===============================================
+prompt hook which claims bear on the prompt                    the encoder's cosine or two scorers, a floor, a shared word the injected context
+prompt hook is this a correction, or a choice put to the agent two phrase lists                                            a proposal, then the nudges
+panel       which option a persona votes for                   one subagent per persona                                    the settle, forecasts, ``learn``, ``calibrate``
+stop        may the agent stop                                 rules on the held issue                                     one more round, once
+=========== ================================================== =========================================================== ===============================================
 
 Jev, TypeSafe's decision model, answers the same questions with a
 probability and writes no text. So it replaces the answer at each point
@@ -465,9 +478,10 @@ prompt. ``ljos judge-score`` joins a ballot with the outcome it was about.
 Nothing here trains on Jev's answers.
 
 Handover that can be checked
-============================
+----------------------------
 
-|image4|
+.. image:: _static/handover.svg
+   :width: 100.0%
 
 A handover is a BagIt bag with the tracker slice, the pack's atoms, and
 the deeds both cite, each deed with its inclusion receipt against the log
@@ -478,7 +492,7 @@ key the receiver accepts signed it. Only then are the atoms imported, trust
 rows included. Learning travels with its evidence.
 
 Model and runner agnostic, human readable
-=========================================
+-----------------------------------------
 
 The seat runs without a model unless ``jev.toml`` enables Jev, an opt-in call
 that judges a few questions. The stores are files a person can read:
@@ -524,12 +538,3 @@ every case seen so far, not been handed that text: it asked the pack for
 a deed, claimed with a hex id, or read a failure as an empty answer. Each
 tool description opens with when to call that tool, so an agent that
 skipped the protocol still meets the order.
-
-.. |image1| image:: _static/seat.svg
-   :width: 100.0%
-.. |image2| image:: _static/memory.svg
-   :width: 100.0%
-.. |image3| image:: _static/island.svg
-   :width: 100.0%
-.. |image4| image:: _static/handover.svg
-   :width: 100.0%

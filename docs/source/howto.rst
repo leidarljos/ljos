@@ -1,5 +1,11 @@
+:description: How to wire ljos into a runner, write to another seat, sit an issue, and check the seat.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+How-to
+======
+
 Wire the seat into an agent runner
-==================================
+----------------------------------
 
 One entry, for any runner that speaks the Model Context Protocol (MCP)
 over stdio:
@@ -85,7 +91,7 @@ too; for the others the skill and the ``ljos://protocol`` resource carry
 what the seat knows, and the sitting's island brings the memories in.
 
 Seat a shell-only agent
-=======================
+-----------------------
 
 Grok Bot runs shell commands on a Linux box. It is not an MCP runner and
 it has no command hook, so the process tree is not its seat.
@@ -106,22 +112,8 @@ or a hook. ``--fail-on-deny`` exits 1 when the answer is a deny. Without
 the flag, ``ljos hook`` and ``ljos policy`` still exit 0, so a runner that
 reads the JSON sees no change. An ``ask`` still exits 0; the text says ``ask``.
 
-Commit identity on a box
-========================
-
-The commit gate checks the author only when a config file names one. No
-person is built into the program. On a shared box the file is
-``~/.config/ljos/ljos.toml`` for every seat, or
-``~/.config/ljos/seats/<LJOS_SEAT>/ljos.toml`` for one seat. A repository
-may set the same keys in ``ljos.toml`` or ``.ljos/gates.toml``, and a later
-file overrides the keys it sets. ``examples/ljos.toml`` is one such file.
-With none of these set, any author may commit. A machine trailer is still
-refused. A plain ``git push`` is allowed unless ``test`` is set in that
-config; a force push still asks. A denial names the config file. It does
-not ask for a change to git's identity.
-
 Write to another seat
-=====================
+---------------------
 
 Seats on one pack write to each other as pack atoms. ``ljos sync`` carries
 those atoms in the sealed log, so a seat on another machine sees them
@@ -149,7 +141,7 @@ A shell seat has no hook, so it polls ``ljos inbox`` and reads with
 ``ljos read``.
 
 Wake a seat when mail reaches it
-================================
+--------------------------------
 
 Mail waits until the recipient's next prompt, and an idle agent has no next prompt.
 A seat names how to wake it, and ``ljos send`` starts that wake after the message is written.
@@ -185,7 +177,7 @@ Each letter is receipted once it is delivered, so the next stop is not held for 
 Plain mail waits for the next prompt or the wake.
 
 Inject memory before the agent acts
-===================================
+-----------------------------------
 
 Add ``hooks`` to the runner's table and onboard again:
 
@@ -273,7 +265,7 @@ A policy daemon does the same with the argv:
    What this seat already knows that bears on this ...
 
 Let Jev judge the prompt
-========================
+------------------------
 
 The prompt hook makes three judgments locally. A cross-encoder picks
 the claims that bear on the prompt. Two phrase lists spot a correction
@@ -425,7 +417,7 @@ stays due. Everything between stays due. No judge lapses a claim,
 because a lapse says that a reader forgot it.
 
 Open persona panes in another tool
-==================================
+----------------------------------
 
 ``ljos doctor`` names the tool persona panes open in:
 
@@ -458,7 +450,7 @@ A tool that refuses says so in the line ``ljos ask`` prints, with the
 tool's own words, and the next tool is tried.
 
 Wire the seat into Cursor
-=========================
+-------------------------
 
 .. code:: console
 
@@ -481,7 +473,7 @@ still written to ``~/.cursor/hooks.json``, and the permission events
 fail closed. The seat answers both files in Cursor's shape.
 
 Spawn a persona as a subagent
-=============================
+-----------------------------
 
 .. code:: console
 
@@ -500,7 +492,7 @@ table names ``agents``, and a persona written later refreshes each such
 directory that exists.
 
 Show the seat in the status bar
-===============================
+-------------------------------
 
 In ``~/.grok/config.toml``:
 
@@ -522,7 +514,7 @@ for fifteen seconds. A pack that does not answer in 300 ms shows as
 ``pack down``.
 
 Put the judgments to a local model or a runner
-==============================================
+----------------------------------------------
 
 The same four judgments go to any judge that answers in Jev's shape.
 ``backend`` in ``jev.toml`` picks it; the parsers, the cache, the ledger and
@@ -564,7 +556,7 @@ and ``min_candidates`` keep the prompt calls few. The log carries the
 ``backend`` name, and ``ljos doctor`` prints it before the model.
 
 Give an agent the protocol without a runner
-===========================================
+-------------------------------------------
 
 .. code:: console
 
@@ -575,7 +567,7 @@ of verbs before, during and after the work, and the refusals worth knowing.
 Put it where the agent reads its instructions.
 
 Ask what a task involves
-========================
+------------------------
 
 .. code:: text
 
@@ -591,7 +583,7 @@ use the island: the strongest eight fire together and their links gain
 weight.
 
 Bump a recipe with eb-stack, and keep what the campaign taught
-==============================================================
+--------------------------------------------------------------
 
 One sitting on the ticket, one island per recipe before it is touched:
 
@@ -643,7 +635,7 @@ proposal, the recipe's next bump recalls this lesson from its island.
    GCCcore-15.2.0 on terra: compile failed in the build step with fatal error: linux/scc,h. Fix: applied the GCC 14 libsanitizer kernel headers patch in GCCcore-15.2.0.
 
 Keep a number
-=============
+-------------
 
 A number the seat measures again and again, a benchmark score, a hook
 latency, a count of open tickets, is a habit. A reading is one verb:
@@ -666,7 +658,7 @@ says so once a session. The sheet a paper's table is written from is the
 pack, and it is dated.
 
 Ask when
-========
+--------
 
 .. code:: console
 
@@ -692,7 +684,7 @@ memories withdrawn since included, memories written since left out. The
 pack tombstones rather than erases, so the question has an answer.
 
 Start a sitting, and end one
-============================
+----------------------------
 
 .. code:: console
 
@@ -741,7 +733,7 @@ and ``ljos release`` hands it back.
    the ticket stays proj-1a2b's state; `vissue update proj-1a2b -s DONE` closes it
 
 Vote with personas
-==================
+------------------
 
 .. code:: console
 
@@ -772,7 +764,7 @@ personas that read the same island differently end up with different
 islands over the same claims.
 
 Cast persona ballots through Jev
-================================
+--------------------------------
 
 With Jev on, a persona's ballot can come from Jev instead of a subagent.
 The issue needs an ``Options: A, B`` line.
@@ -813,7 +805,7 @@ accuracy and calibration per decision. ``ljos learn`` scores a cast
 ballot's confidence as it does any voter's.
 
 Hold a done claim beside a red test
-===================================
+-----------------------------------
 
 ``Stop`` also blocks one turn, with no model in the loop, when the
 conversation has no issue and the turn used tools without touching
@@ -846,7 +838,7 @@ not sent. The cuts sit in ``jev.rs`` beside the questions. A stop costs
 about 3,000 input tokens, or $0.00013.
 
 Move the trust rows without an outcome
-======================================
+--------------------------------------
 
 .. code:: console
 
@@ -862,14 +854,14 @@ every other voter gives that voter. Run it once a project has a few voted
 issues, and again when it has many more.
 
 Keep the cards
-==============
+--------------
 
 Cards are two files a person writes: ``USER.md`` and ``MEMORY.md``. The seat
 reads them and never writes them; ``ljos cards`` prints them. The pack is
 where the seat writes.
 
 Sign what you hand over
-=======================
+-----------------------
 
 .. code:: console
 
@@ -886,7 +878,7 @@ both vote, consensus, finish closes. ``scripts/smoke.sh`` runs it on
 scratch stores; ``scripts/herd.sh`` is the concurrent contention check.
 
 Receive from the same sender again
-==================================
+----------------------------------
 
 .. code:: console
 
@@ -905,7 +897,7 @@ check. A bridge alone proves nothing, because the sender picks both of its
 ends. This needs deedar with ``check --keep``.
 
 Close what a later lesson replaced
-==================================
+----------------------------------
 
 .. code:: console
 
@@ -925,7 +917,7 @@ before that rule, or filled by a handover, has pairs the rule never saw;
 its window: ``ljos search --as-of`` finds it at the time it was live.
 
 Retire a claim with its reason
-==============================
+------------------------------
 
 .. code:: console
 
@@ -936,7 +928,7 @@ Disagreeing with a claim is not showing it wrong; a retraction names its
 evidence.
 
 Set trust by hand
-=================
+-----------------
 
 .. code:: console
 
@@ -946,7 +938,7 @@ One row, one weight in (0, 1], the deeds it rests on. A later row for the
 same pair supersedes it.
 
 Settle under the pack's trust
-=============================
+-----------------------------
 
 ``ljos consensus ID`` reads the live trust rows and passes them to the
 settle (and to the tracker's, with ``--compare``). To anchor voters to their own ballots (Friedkin-Johnsen) on the
@@ -957,23 +949,22 @@ model crate alone, pass the rows as JSON tuples:
    $ ljos-consensus settle --issue ID --susceptibility 0.8 --trust '[["alice","carol",0.9]]'
 
 Check the seat
-==============
+--------------
+
+``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer.
+``ljos doctor --all`` prints every row.
+The block is an example of that listing, not a transcript of one machine.
+On this tree ``ljos doctor`` read these versions from crates.io: ljos 0.30.0, vissue-cli 0.21.0, packset 0.15.1.
+``ljos --version`` printed ``ljos 0.30.0``.
+The rows are the shape when the binary on ``PATH`` is that version: no ``behind`` and no ``ahead of`` in front of ``crates.io``.
+Paths stand in for those binaries.
 
 .. code:: text
 
-   $ ljos doctor
-   ok  ljos    /path/to/ljos  0.18.0  crates.io (cached) 0.18.0
-   ok  vissue  /path/to/vissue  0.18.0  crates.io (cached) 0.18.0
-   ok  packsetd    /path/to/packsetd  0.11.0  crates.io (cached) 0.11.0
-   ok  seat    <runner>, holding as sess-<hash> (from this conversation's record)
-   ok  pack    http://127.0.0.1:PORT workspace seat
-   ok  memory  520 live of 20000
-   ok  host key    /path/to/host.key (32-byte seed)
-   ok  deed store  size=150 root=<hash> ed25519 <hash>
-   ok  tracker vissue 0.18.0 root=/path/to/tracker prefix=Issues; 0 unpushed
-   ok  claim graph <hash>  claimed  task  <hash>  gen=2  ISSUE
-   ok  runner mcp  <runner>: ljos registered
-   ok  jev on  jev-1.13.0  88 calls, 0 cached  $0.0035 of $4.00 this month
+   $ ljos doctor --all
+   ok  ljos    /path/to/ljos  0.30.0  crates.io 0.30.0
+   ok  vissue  /path/to/vissue  0.21.0  crates.io 0.21.0
+   ok  packsetd    /path/to/packsetd  0.15.1  crates.io 0.15.1
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names how many commits origin lacks, and fails when that count

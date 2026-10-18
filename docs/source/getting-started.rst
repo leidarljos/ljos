@@ -1,10 +1,16 @@
+:description: Everything below runs on a scratch tracker and a scratch deed store. By the end you will have remembered a lesson and been told when to review it.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+Getting started
+===============
+
 Everything below runs on a scratch tracker and a scratch deed store. By the
 end you will have remembered a lesson and been told when to review it. You
 will have settled a vote with learned trust, and handed the work to a
 second seat that checked it.
 
 0. Point the seat at scratch stores
-===================================
+-----------------------------------
 
 Install the binaries once:
 
@@ -34,7 +40,7 @@ so git needs an identity (``git config --global user.email``).
    ok  deed store  size=0 root=...
 
 1. The memory loop
-==================
+------------------
 
 .. code:: console
 
@@ -58,7 +64,7 @@ a claim shown wrong is retired with the deed that showed it:
 ``ljos forget 3f9c... --why deed-...``.
 
 2. The agreement loop
-=====================
+---------------------
 
 Three identities vote on one issue.
 
@@ -109,7 +115,7 @@ superseded, and travel in a handover. A person can also set one by hand:
 ``ljos trust alice carol 0.9 --why deed-...``.
 
 3. The work loop
-================
+----------------
 
 .. code:: console
 
@@ -145,7 +151,7 @@ and the outcome reweighs the voters as in step 2. Completing the session node do
 ``claim`` under the same name is refused, and the refusal names this issue.
 
 4. The handover loop
-====================
+--------------------
 
 .. code:: console
 
@@ -179,7 +185,7 @@ scratch stores. The herd is the other check: eight sittings at once on
 one contended ticket.
 
 5. Hand the protocol to an agent
-================================
+--------------------------------
 
 .. code:: console
 
@@ -212,7 +218,7 @@ a command of its own can be described once in
 NAME``; the :doc:`how-to <howto>` shows the file.
 
 Clean up
-========
+--------
 
 The scratch seat is one directory and the pack writer started in step 0.
 Stop the writer and remove the directory, and the next run starts clean on
@@ -223,7 +229,7 @@ the same port:
    $ kill %1 && rm -rf "$seat"
 
 Where next
-==========
+----------
 
 -  :doc:`How-to <howto>`: wire the server into an agent runner, sign handovers, read the cards.
 -  :doc:`Reference <reference>`: every verb and tool.

@@ -376,7 +376,8 @@ body::before {
 .vi-hero { padding: 2.2rem 0 0.4rem; }
 .vi-hero-brand { display: flex; align-items: center; gap: 1rem; }
 .vi-hero-mark { flex: none; border-radius: 8px; }
-.vi-hero-name {
+.vi-hero-name,
+.yue h1.vi-hero-name {
   font-family: var(--ll-serif);
   font-size: clamp(2.1rem, 5vw, 3.4rem);
   font-weight: 600;
@@ -385,6 +386,29 @@ body::before {
   line-height: 1.08;
   text-wrap: balance;
   color: var(--ll-fg);
+}
+/* The index document title repeats the hero name. Keep the hero. */
+#ljos > h1 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.ll-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .vi-hero-tag {
   font-family: var(--ll-serif);

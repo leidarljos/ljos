@@ -396,7 +396,11 @@ noise. The consensus crate's =derive/= checks the settle and that test.
 
 A short record misleads the weights too: plug-in log odds drop a good
 voter who started unlucky, and lose to a plain count by 6.4 points on a
-panel of seven similar voters at three outcomes. =learn= therefore shrinks
+panel of seven similar voters at three outcomes. That figure is the
+consensus crate's
+[[https://github.com/leidarljos/consensus/blob/main/examples/correlation_history.rs][examples/correlation_history.rs]],
+the row for seven voters in [0.60, 0.75] after three named outcomes.
+=learn= therefore shrinks
 each voter's accuracy toward the panel's pooled accuracy before weighing
 it, by empirical Bayes (Efron and Morris,
 doi:10.1080/01621459.1975.10479864). The first outcome leaves the voters
