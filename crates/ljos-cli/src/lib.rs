@@ -2702,14 +2702,55 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
 }
 
 /// The doctor's `seat` row: who votes, who holds, and where the names came
-/// from.
+/// from. The same resolution as [`format_seat_command`].
 #[must_use]
 pub fn format_seat_row() -> String {
-    let who = whoami();
+    let who = resolve_seat();
     format!(
         "{}, holding as {} (from {})",
         who.seat, who.holder, who.source
     )
+}
+
+/// Who `ljos seat` and `ljos doctor` name.
+///
+/// A call's seat, then a name from `LJOS_SEAT`, `VISSUE_AGENT` or
+/// `LJOS_HOLD`, with the source label [`whoami`] already gives those.
+/// With none of those, a Grok Bot conversation id is the seat: `seats.toml`,
+/// else `grokbot-` and the first eight characters. Otherwise [`whoami`].
+#[must_use]
+pub fn resolve_seat() -> Seat {
+    if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
+        return seat;
+    }
+    if named_var("LJOS_SEAT").is_some()
+        || named_var("VISSUE_AGENT").is_some()
+        || named_var("LJOS_HOLD").is_some()
+    {
+        return whoami();
+    }
+    if let Some(seat) = conversation_seat() {
+        return seat;
+    }
+    whoami()
+}
+
+/// The seat a `CURSOR_CONVERSATION_ID` maps to, when nothing else named one.
+fn conversation_seat() -> Option<Seat> {
+    let id = std::env::var("CURSOR_CONVERSATION_ID").ok()?;
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let (name, source) = match mapped_seat(&seats_file(), id) {
+        Some(name) => (name, "seats.toml"),
+        None => (fallback_seat(id), "CURSOR_CONVERSATION_ID"),
+    };
+    let slug = seat_slug(&name);
+    if slug == "runner" || omitted_actor_name(&slug) {
+        return None;
+    }
+    Some(Seat::whole(&name, source))
 }
 
 /// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
@@ -2768,9 +2809,9 @@ pub fn git_hook_seat() -> Option<String> {
     })
 }
 
-/// `ljos seat` when this process carries `CURSOR_CONVERSATION_ID`: the
-/// mapped name alone, so a shell can export it. `None` when the variable
-/// is unset, and the command then prints the usual seat, holder and source.
+/// The seat `CURSOR_CONVERSATION_ID` maps to: `seats.toml`, else `grokbot-`
+/// plus the first eight characters. `None` when the variable is unset.
+/// [`format_seat_command`] prints that name alone when no seat was named.
 #[must_use]
 pub fn grokbot_seat_name() -> Option<String> {
     let id = std::env::var("CURSOR_CONVERSATION_ID").ok()?;
@@ -2815,6 +2856,19 @@ fn mapped_seat(path: &Path, id: &str) -> Option<String> {
             }
         }
         _ => None,
+    }
+}
+
+/// What `ljos seat` prints. A conversation id with no named seat prints
+/// the mapped name alone, so a shell can export it. Every other resolution
+/// is the seat, holder and source [`format_seat_row`] uses.
+#[must_use]
+pub fn format_seat_command() -> String {
+    let seat = resolve_seat();
+    if seat.source == "seats.toml" || seat.source == "CURSOR_CONVERSATION_ID" {
+        format!("{}\n", seat.seat)
+    } else {
+        format_seat(&seat)
     }
 }
 
@@ -3412,9 +3466,10 @@ fn seat_env_text(name: &str) -> String {
     )
 }
 
-/// Grok Bot has no prompt hook. The conversation id is looked up in
-/// `seats.toml` by `ljos seat`. Any other shell runner keeps an exported
-/// seat and otherwise uses its harness name.
+/// Grok Bot has no prompt hook. An exported `LJOS_SEAT` is that seat.
+/// Otherwise the conversation id is looked up in `seats.toml` by `ljos seat`.
+/// Any other shell runner keeps an exported seat and otherwise uses its
+/// harness name.
 fn seat_lines(name: &str) -> String {
     if name != "grokbot" {
         return keep_seat_assignment(name);
@@ -3422,11 +3477,12 @@ fn seat_lines(name: &str) -> String {
     format!(
         "# Seat names live in ${{XDG_CONFIG_HOME:-$HOME/.config}}/ljos/seats.toml, read by `ljos seat`.\n\
          # An unknown conversation id becomes grokbot-<first 8 characters>, never the raw id.\n\
+         # An exported LJOS_SEAT is kept; the conversation id does not replace it.\n\
          if [ -z \"${{LJOS_SHELL_SESSION:-}}\" ]; then\n\
          \texport LJOS_SHELL_SESSION=$$\n\
          fi\n\
-         if [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
-         \t_ljos_named=$(ljos seat 2>/dev/null || true)\n\
+         if [ -z \"${{LJOS_SEAT:-}}\" ] && [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
+         \t_ljos_named=$(ljos seat 2>/dev/null | head -n 1 | awk '{{ print $NF }}')\n\
          \tcase \"$_ljos_named\" in\n\
          \t\t\"\"|*[!A-Za-z0-9_-]*) LJOS_SEAT=grokbot-$(printf %.8s \"$CURSOR_CONVERSATION_ID\") ;;\n\
          \t\t*) LJOS_SEAT=$_ljos_named ;;\n\
@@ -10551,24 +10607,34 @@ fn agent_sourced_atom(
 }
 
 /// A progress note, as an agent memory the default list shows. The tracker
-/// logbook is a separate write. A pack that refuses is the error; the
-/// caller keeps the logbook note.
+/// logbook is a separate write. Packset has no atom kind `note` (`KINDS` in
+/// packset-core, on 0.15.1 and on main); a progress note is a `summary`.
+/// A pack that refuses is the error; the caller keeps the logbook note.
 ///
 /// # Errors
 ///
 /// An empty text, or the pack refusing the note.
 pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
     let client = pack()?;
-    let workspace = client.workspace();
+    let atom = progress_note_atom(issue, text, &client.workspace())?;
+    with_writer(|| admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed"))
+}
+
+/// The atom [`packset_write_note`] posts. Kind `summary` is one packset stores.
+///
+/// # Errors
+///
+/// An empty text.
+fn progress_note_atom(issue: &str, text: &str, workspace: &str) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("note: empty text is not a memory");
     }
-    let mut atom = atom_body("note", trimmed, &workspace);
-    stamp_horizon(&mut atom, "note", trimmed, Some(true));
+    let mut atom = atom_body("summary", trimmed, workspace);
+    stamp_horizon(&mut atom, "summary", trimmed, Some(true));
     add_entities(&mut atom, [format!("issue:{}", issue.trim())]);
     stamp_issue(&mut atom, issue);
-    with_writer(|| admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed"))
+    Ok(atom)
 }
 
 /// [`packset_write_agent`] with extra entities on the atom, such as the
@@ -31924,8 +31990,15 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         };
         // A seat already exported survives sourcing; the harness name is the default.
+        // A conversation id does not replace it.
         assert_eq!(seat_in_a_new_shell(""), "grokbot");
         assert_eq!(seat_in_a_new_shell("export LJOS_SEAT=inky;"), "inky");
+        assert_eq!(
+            seat_in_a_new_shell(
+                "export LJOS_SEAT=ljosbot CURSOR_CONVERSATION_ID=sand-subagent-001;"
+            ),
+            "ljosbot"
+        );
         assert_eq!(
             holder_in_a_new_shell("export LJOS_SESSION_ID=runner-own-id;"),
             "runner-own-id"
@@ -33231,6 +33304,23 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             &weak,
         );
         assert_eq!(kept[0]["id"], "a", "a weak island does not reorder");
+    }
+
+    #[test]
+    fn a_progress_note_is_a_summary_the_pack_accepts() {
+        let mut atom = super::progress_note_atom(
+            "probe-0001",
+            "the parser keeps a hyphen in the project",
+            "ws",
+        )
+        .unwrap();
+        assert_eq!(atom["kind"], "summary");
+        assert!(packset_core::record::KINDS.contains(&"summary"));
+        assert!(!packset_core::record::KINDS.contains(&"note"));
+        super::admit::stamp_origin(&mut atom, super::admit::ORIGIN_AGENT);
+        let mut map = atom.as_object().cloned().unwrap();
+        packset_core::record::validate(&mut map).expect("packset accepts a summary");
+        assert!(super::progress_note_atom("probe-0001", "  ", "ws").is_err());
     }
 
     #[test]

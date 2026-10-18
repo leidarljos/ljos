@@ -3468,20 +3468,37 @@ fn parse_issue_id(text: &str) -> Option<String> {
     found
 }
 
+/// A vissue id, as `vissue-core` reads one in `is_vissue_id`: `{project}-{suffix}`
+/// with the suffix after the last hyphen. `generate_id` mints that suffix from
+/// `ID_ALPHABET` (`0-9a-z`) at `issues.id_length`, which defaults to 4 and is
+/// at least 2. The project is the rest, so it may contain hyphens and digits
+/// (`ljos-policyd-c0jc`, `lgio-1792329616-q4uh`). A nested project may contain
+/// `/` (`acme/cli-1a2b`).
 fn is_issue_id(token: &str) -> bool {
-    let Some((prefix, tail)) = token.split_once('-') else {
+    let Some((project, suffix)) = token.rsplit_once('-') else {
         return false;
     };
-    prefix
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic())
-        && prefix.chars().all(|c| c.is_ascii_alphanumeric())
-        && tail.len() >= 4
-        && tail.chars().all(|c| c.is_ascii_alphanumeric())
-        && !token
-            .split_once('-')
-            .is_some_and(|(_, rest)| rest.contains('-'))
+    issue_project(project) && issue_suffix(suffix)
+}
+
+fn issue_project(project: &str) -> bool {
+    let mut chars = project.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && project
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/'))
+        && !project.ends_with('-')
+        && !project.ends_with('/')
+        && !project.contains("--")
+}
+
+fn issue_suffix(suffix: &str) -> bool {
+    // Shorter than the default mint stays out. A longer configured
+    // `id_length` is still the same id.
+    suffix.len() >= 4
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
 }
 
 fn parse_deed(text: &str) -> Option<String> {
@@ -3589,6 +3606,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_hyphenated_project_id_is_a_vissue_id() {
+        for id in [
+            "ljos-policyd-c0jc",
+            "lgio-1792329616-q4uh",
+            "probe-0001",
+            "acme/cli-1a2b",
+        ] {
+            assert_eq!(parse_issue_id(id).as_deref(), Some(id), "{id}");
+        }
+        assert_eq!(
+            parse_issue_id("created ljos-policyd-c0jc.").as_deref(),
+            Some("ljos-policyd-c0jc")
+        );
+        assert!(parse_issue_id("ljos-policyd-C0JC").is_none());
+        assert!(parse_issue_id("not-an-id").is_none());
+        assert!(parse_issue_id("well").is_none());
     }
 
     #[test]

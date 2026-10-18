@@ -21,7 +21,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Kinds a review holds: the claims recall shows as lessons or rules.
-pub const REVIEW_KINDS: &[&str] = &["lesson", "preference", "rule", "fact", "note", "episode"];
+pub const REVIEW_KINDS: &[&str] = &[
+    "lesson",
+    "preference",
+    "rule",
+    "fact",
+    "summary",
+    "note",
+    "episode",
+];
 
 /// Why an agent wrote a memory now: `LJOS_MEMORY_WHY` when the runner or
 /// the agent set it, else the opening of the person's latest prompt.

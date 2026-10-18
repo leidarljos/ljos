@@ -780,7 +780,7 @@ fn ljos_seat_reads_seats_toml_and_never_prints_a_raw_id() {
         &hab.repo,
         &["seat"],
         None,
-        &[("CURSOR_CONVERSATION_ID", id)],
+        &[("LJOS_SEAT", ""), ("CURSOR_CONVERSATION_ID", id)],
     );
     assert_eq!(String::from_utf8(known.stdout).unwrap().trim(), "rgoswami");
     let unknown_id = "zzzzzzzz-hello";
@@ -788,11 +788,101 @@ fn ljos_seat_reads_seats_toml_and_never_prints_a_raw_id() {
         &hab.repo,
         &["seat"],
         None,
-        &[("CURSOR_CONVERSATION_ID", unknown_id)],
+        &[("LJOS_SEAT", ""), ("CURSOR_CONVERSATION_ID", unknown_id)],
     );
     let name = String::from_utf8(unknown.stdout).unwrap();
     assert_eq!(name.trim(), "grokbot-zzzzzzzz");
     assert_ne!(name.trim(), unknown_id);
+}
+
+/// `LJOS_SEAT` names the seat for `ljos seat` and `ljos doctor` alike.
+/// A conversation id does not replace it with `grokbot-<id8>`.
+#[test]
+fn ljos_seat_and_doctor_keep_an_exported_seat() {
+    let hab = Hab::new("repo");
+    let extra = [
+        ("LJOS_SEAT", "ljosbot"),
+        ("CURSOR_CONVERSATION_ID", "sand-subagent-001"),
+    ];
+    let seat = hab.ljos_in(&hab.repo, &["seat"], None, &extra);
+    let said = String::from_utf8(seat.stdout).unwrap();
+    assert!(said.contains("ljosbot"), "{said}");
+    assert!(said.contains("LJOS_SEAT"), "{said}");
+    assert!(!said.contains("grokbot-sand-sub"), "{said}");
+    let doctor = Command::new("timeout")
+        .args(["90", env!("CARGO_BIN_EXE_ljos"), "doctor", "--all"])
+        .current_dir(&hab.repo)
+        .env_clear()
+        .envs(hab.base_env())
+        .envs(extra)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&doctor.stdout);
+    let row = text
+        .lines()
+        .find(|line| line.split('\t').nth(1) == Some("seat"))
+        .unwrap_or("");
+    assert!(row.contains("ljosbot"), "{text}");
+    assert!(row.contains("LJOS_SEAT"), "{row}");
+    assert!(!row.contains("grokbot-sand-sub"), "{row}");
+    assert_eq!(
+        said.lines()
+            .find_map(|line| line.strip_prefix("source\t"))
+            .unwrap_or(""),
+        row.split(" (from ")
+            .nth(1)
+            .unwrap_or("")
+            .trim_end_matches(')'),
+        "seat and doctor name different sources:\n{said}\n{row}"
+    );
+}
+
+/// A project whose name contains a hyphen or digits is created, claimed
+/// and cited. The id is the project plus the four-character suffix vissue mints.
+#[test]
+fn a_hyphenated_project_is_created_claimed_and_cited() {
+    for project in ["ljos-policyd", "lgio-1792329616"] {
+        let mut hab = Hab::new("repo");
+        hab.project = Some(project.to_string());
+        install(&hab);
+        let sha = commit_file(&hab, "noted.txt", "book the hyphenated project");
+        let org = fs::read_to_string(hab.tracker.join(format!("Software/{project}/issues.org")))
+            .unwrap_or_default();
+        assert!(org.contains("STARTED"), "{project}:\n{org}");
+        assert!(
+            org.contains(&format!("deed-file-commit-{sha}")),
+            "{project}:\n{org}"
+        );
+        let log = vissue_log(&hab.tracker);
+        assert!(log.contains("create"), "{project}:\n{log}");
+        assert!(log.contains("claim"), "{project}:\n{log}");
+        let books = book_files(&hab);
+        assert_eq!(books.len(), 1, "{project}: {books:?}");
+        let book: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&books[0]).unwrap()).unwrap();
+        let row = book["repos"]
+            .as_object()
+            .and_then(|repos| repos.values().next())
+            .unwrap_or(&serde_json::Value::Null);
+        assert_eq!(row["claim_failed"], false, "{project}: {book}");
+        let issue = row["issue"].as_str().unwrap_or("");
+        let suffix = issue
+            .strip_prefix(&format!("{project}-"))
+            .unwrap_or_else(|| panic!("{project}: issue {issue} in {book}"));
+        assert_eq!(suffix.len(), 4, "{issue}");
+        assert!(
+            suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()),
+            "{issue}"
+        );
+        assert!(
+            row["deeds"]
+                .as_array()
+                .is_some_and(|deeds| !deeds.is_empty()),
+            "{project}: {book}"
+        );
+    }
 }
 
 fn shellish(path: &Path) -> String {
