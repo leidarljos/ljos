@@ -26,6 +26,7 @@ pub mod hud;
 pub mod jev;
 pub mod mail;
 pub mod memories;
+pub mod note_queue;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
@@ -10673,19 +10674,136 @@ fn agent_sourced_atom(
 /// An empty text, or the pack refusing the note.
 pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
     let client = pack()?;
+    write_note_with(&client, issue, text)
+}
+
+/// [`packset_write_note`] through a client already opened, so a queued
+/// note goes to the workspace it was meant for.
+fn write_note_with(client: &PacksetClient, issue: &str, text: &str) -> Result<Value> {
     let atom = progress_note_atom(issue, text, &client.workspace())?;
     let first = with_writer(|| {
-        admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed")
+        admit::write_agent(client, atom.clone()).context("note: POST /v1/atoms failed")
     });
     match first {
         Err(e) if note_kind_unknown(&e) => {
             let mut atom = atom;
             atom["kind"] = Value::String("summary".into());
             with_writer(|| {
-                admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed")
+                admit::write_agent(client, atom.clone()).context("note: POST /v1/atoms failed")
             })
         }
         other => other,
+    }
+}
+
+/// Whether a note the pack did not take should wait for it: the pack is
+/// off, missing, not answering, or does not know this seat's token. A
+/// refusal (an HTTP 4xx other than 401, 408 or 429) is final, so the note does not wait, and an empty text is no
+/// note at all.
+#[must_use]
+pub fn note_can_wait(err: &anyhow::Error) -> bool {
+    if format!("{err:#}").contains("empty text is not a memory") {
+        return false;
+    }
+    !err.chain().any(
+        |cause| match cause.downcast_ref::<packset_client::Error>() {
+            Some(packset_client::Error::Bad(why)) => refusal_status(why),
+            Some(packset_client::Error::Http(inner)) => {
+                matches!(&**inner, ureq::Error::Status(code, _) if refused_code(*code))
+            }
+            _ => false,
+        },
+    )
+}
+
+fn refused_code(code: u16) -> bool {
+    (400..500).contains(&code) && !matches!(code, 401 | 408 | 429)
+}
+
+/// A `bad response: URL: CODE: why` line from packset-client that names
+/// a refusal code.
+fn refusal_status(why: &str) -> bool {
+    why.split(": ")
+        .filter_map(|part| {
+            let part = part.trim();
+            part.strip_prefix("status code ")
+                .unwrap_or(part)
+                .parse::<u16>()
+                .ok()
+        })
+        .any(refused_code)
+}
+
+/// Queue the memory copy of a note the pack did not take, for the next
+/// note, finish or doctor to send. `false` when it was already queued.
+///
+/// # Errors
+///
+/// The queue file cannot be written.
+pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
+    let workspace = std::env::var("PACKSET_WORKSPACE")
+        .ok()
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    note_queue::push_in(
+        &note_queue::state_dir(),
+        note_queue::Queued {
+            issue: issue.trim().to_string(),
+            text: text.trim().to_string(),
+            workspace,
+            at,
+        },
+    )
+}
+
+/// Send the notes queued while the pack was off or not answering. A pack
+/// that still cannot be reached leaves them all queued.
+///
+/// # Errors
+///
+/// The queue file cannot be rewritten.
+pub fn flush_note_queue() -> Result<note_queue::Drained> {
+    flush_note_queue_in(&note_queue::state_dir())
+}
+
+fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
+    if note_queue::pending_in(dir).is_empty() {
+        return Ok(note_queue::Drained::default());
+    }
+    let client = pack();
+    note_queue::drain_in(dir, |note| {
+        let client = match &client {
+            Ok(client) => client.clone().with_workspace(note.workspace.clone()),
+            Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
+        };
+        match write_note_with(&client, &note.issue, &note.text) {
+            Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
+            Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
+            Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
+        }
+    })
+}
+
+/// The doctor row for the note queue. It sends what waits first, so a
+/// doctor run after the pack comes back empties the queue.
+fn note_queue_row() -> Habitat {
+    let (ok, state) = match flush_note_queue() {
+        Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
+        Ok(done) => (
+            done.left == 0,
+            note_queue::drained_lines(&done)
+                .trim_end()
+                .replace('\n', "; "),
+        ),
+        Err(e) => (false, format!("could not read or rewrite the queue: {e:#}")),
+    };
+    Habitat {
+        name: "note queue",
+        state,
+        ok,
     }
 }
 
@@ -18110,6 +18228,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.push(policy_row());
     out.push(bypass_row());
     out.push(panes_row());
+    out.push(note_queue_row());
     out
 }
 
@@ -33568,6 +33687,54 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let mut map = lesson.as_object().cloned().unwrap();
             assert!(packset_core::record::validate(&mut map).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_note_waits_for_a_pack_that_did_not_answer_but_not_for_a_refusal() {
+        let off = anyhow::Error::new(packset_client::Error::NoUrl)
+            .context("PACKSET_URL=off: this seat has no pack on purpose");
+        assert!(super::note_can_wait(&off));
+        let gate = anyhow::Error::new(packset_client::Error::Bad(
+            "http://127.0.0.1:8761/v1/atoms: 400: atom sentence 1 is very hard to read".into(),
+        ))
+        .context("note: POST /v1/atoms failed");
+        assert!(!super::note_can_wait(&gate));
+        let bare = anyhow::Error::new(packset_client::Error::Bad(
+            "http://127.0.0.1:8761/v1/atoms: status code 422".into(),
+        ));
+        assert!(!super::note_can_wait(&bare));
+        for code in ["401", "429", "503"] {
+            let busy = anyhow::Error::new(packset_client::Error::Bad(format!(
+                "http://127.0.0.1:8761/v1/atoms: {code}: try later"
+            )));
+            assert!(super::note_can_wait(&busy), "{code}");
+        }
+        let empty = super::progress_note_atom("probe-0001", " ", "ws").unwrap_err();
+        assert!(!super::note_can_wait(&empty));
+    }
+
+    /// With the pack off, a flush sends nothing and keeps every note.
+    #[test]
+    fn a_flush_with_the_pack_off_keeps_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        crate::note_queue::push_in(
+            &dir,
+            crate::note_queue::Queued {
+                issue: "probe-0001".into(),
+                text: "the pack was off".into(),
+                workspace: "ws".into(),
+                at: 1,
+            },
+        )
+        .unwrap();
+        let _env = crate::test_env_lock();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let done = super::flush_note_queue_in(&dir).unwrap();
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert_eq!(done.left, 1, "{done:?}");
+        assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
     }
 
     #[test]

@@ -250,6 +250,8 @@ elif cmd == "deed":
             f.write_text(text.replace(needle, needle + f"cited {acc}\n", 1))
             sys.exit(0)
     sys.exit("no issue " + iid)
+elif cmd == "note":
+    pass
 elif cmd == "claims":
     print("[]")
 elif cmd == "show":
@@ -406,6 +408,29 @@ fn a_harness_commit_naming_an_open_issue_books_that_issue() {
             "{message:?}:\n{org}"
         );
     }
+}
+
+/// A note written while the pack is off keeps its memory copy in the
+/// queue, once however often the same note is written.
+#[test]
+fn a_note_with_the_pack_off_waits_in_the_queue_once() {
+    let hab = Hab::new("repo");
+    let said: Vec<String> = (0..2)
+        .map(|_| {
+            let out = hab.ljos_in(
+                &hab.repo,
+                &["note", "probe-32fx", "the pack was off for this note"],
+                None,
+                &[],
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        })
+        .collect();
+    assert!(said[0].contains("memory: queued the copy"), "{}", said[0]);
+    assert!(said[1].contains("already queued"), "{}", said[1]);
+    let queue = fs::read_to_string(hab.root.join("state/ljos/note-queue.jsonl")).unwrap();
+    assert_eq!(queue.lines().count(), 1, "{queue}");
+    assert!(queue.contains("\"issue\":\"probe-32fx\""), "{queue}");
 }
 
 #[test]
