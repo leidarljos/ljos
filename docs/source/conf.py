@@ -33,7 +33,7 @@ html_baseurl = "https://leidarljos.github.io/ljos/"
 html_copy_source = True
 html_css_files = ["custom.css"]
 
-# Preview card. docs/scripts/og_image.py paints this from the repo logo.
+# Preview card. .github/render-og-png.sh paints docs/source/_static/og.svg.
 _OG_IMAGE = "https://leidarljos.github.io/ljos/_static/og.png"
 _PAGE_DESCRIPTION = {
     "search": "Search the ljos documentation.",
