@@ -110,6 +110,13 @@ struct RepoBook {
     /// second commit is a second deed, and the same sha is not cited twice.
     #[serde(default)]
     deeds: Vec<String>,
+    /// Cited shas found in HEAD by a sweep. A sweep asks git once for a
+    /// sha, not on every prompt.
+    #[serde(default)]
+    landed: Vec<String>,
+    /// The HEAD those shas were found in.
+    #[serde(default)]
+    landed_head: Option<String>,
     /// Short notes from tool failures, for the lesson written at Stop.
     #[serde(default)]
     failures: Vec<String>,
@@ -213,15 +220,18 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     if !BOOK_EVENTS.contains(&call.event.as_str()) {
         return String::new();
     }
-    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
     let session = session_key(call);
-    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let _held = super::hook_timed("book_lock", || {
+        super::CommitLock::acquire(&super::runtime_dir().join("book.lock"))
+    });
     // A runner killed before Stop leaves its claims open. The next session
     // finishes those whose pid is gone, and replaces a deed whose commit is
     // no longer in the checkout with the one that is.
     if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
-        finish_orphans(&session);
-        refresh_landed_deeds();
+        let deadline = std::time::Instant::now() + SWEEP_BUDGET;
+        super::hook_timed("finish_orphans", || finish_orphans(&session, deadline));
+        super::hook_timed("refresh_landed_deeds", || refresh_landed_deeds(deadline));
     }
     // A sitting that only commits never sees SessionStart. Close one whose
     // last call is older than the window before this call stamps it again.
@@ -1307,15 +1317,23 @@ fn hook_owner() -> u32 {
     // SAFETY: getppid only reads the parent pid.
     unsafe { libc::getppid() as u32 }
 }
+/// How long the sweeps over past sittings may take in one hook call. They
+/// walk every book the seat has kept, and the landed check runs git once per
+/// cited commit, so the walk grows with the seat's history. Books the walk
+/// does not reach are the next call's, most recently written first.
+const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Finish every other sitting whose runner has exited. A sitting that
 /// never claimed still counts when a tool failed or the guard asked and
 /// the lesson has not been written.
-fn finish_orphans(current: &str) {
+fn finish_orphans(current: &str, deadline: std::time::Instant) {
     let keep = book_path(current);
     for path in book_files() {
         if path == keep {
             continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
         }
         let mut book = load_book(&path);
         let open = book.repos.values().any(sitting_open);
@@ -1329,15 +1347,23 @@ fn finish_orphans(current: &str) {
 
 /// Replace a cited commit that is not in HEAD with the commit that is, and
 /// write the lesson again when it already named the one that did not land.
-fn refresh_landed_deeds() {
+fn refresh_landed_deeds(deadline: std::time::Instant) {
+    let mut heads = Heads::new();
     for path in book_files() {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         let mut book = load_book(&path);
         let repos: Vec<String> = book.repos.keys().cloned().collect();
         let mut changed = false;
+        let mut cached = false;
         for repo in repos {
-            changed |= reconcile_deeds(&mut book, &repo);
+            changed |= reconcile_deeds(&mut book, &repo, deadline, &mut heads, &mut cached);
         }
         if !changed {
+            if cached {
+                store_book(&path, &book);
+            }
             continue;
         }
         let repos: Vec<String> = book.repos.keys().cloned().collect();
@@ -1403,6 +1429,8 @@ pub fn prompt_claims() -> String {
     }
 }
 
+/// The books, most recently written first: a sitting that ended a moment ago
+/// is the one a sweep is likely to find work in.
 fn book_files() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(super::runtime_dir()) else {
         return Vec::new();
@@ -1412,31 +1440,68 @@ fn book_files() -> Vec<PathBuf> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("book-") && name.ends_with(".json") {
-            out.push(entry.path());
+            let written = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            out.push((written, entry.path()));
         }
     }
-    out
+    out.sort_by_key(|row| std::cmp::Reverse(row.0));
+    out.into_iter().map(|(_, path)| path).collect()
 }
+
+/// HEAD of each checkout, asked once per sweep: the books of a seat share a
+/// few checkouts, and a row's cached answer stands while its HEAD does.
+type Heads = std::collections::HashMap<String, Option<String>>;
 
 /// Drop deed shas that are not ancestors of HEAD, then cite HEAD when the
 /// sitting had cited one that never landed. `false` when nothing changed,
-/// or when git could not say.
-fn reconcile_deeds(book: &mut Book, repo: &str) -> bool {
+/// or when git could not say. The shas found in HEAD are remembered with
+/// the HEAD they were found in, so a later sweep asks git again only when
+/// HEAD has moved (an amend, a rebase); `cached` says a row grew.
+fn reconcile_deeds(
+    book: &mut Book,
+    repo: &str,
+    deadline: std::time::Instant,
+    heads: &mut Heads,
+    cached: &mut bool,
+) -> bool {
     let Some(row) = book.repos.get(repo) else {
         return false;
     };
     if row.deeds.is_empty() || row.issue.is_none() {
         return false;
     }
+    let head = heads
+        .entry(repo.to_string())
+        .or_insert_with(|| head_sha(repo).ok())
+        .clone();
+    let same_head = head.is_some() && row.landed_head == head;
     let mut kept = Vec::new();
     for sha in &row.deeds {
+        if same_head && row.landed.contains(sha) {
+            kept.push(sha.clone());
+            continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         match sha_landed(repo, sha) {
             Some(true) => kept.push(sha.clone()),
             Some(false) => {}
             None => return false,
         }
     }
-    if kept.len() == row.deeds.len() {
+    let all_landed = kept.len() == row.deeds.len();
+    if head.is_some() && !(same_head && all_landed) {
+        if let Some(row) = book.repos.get_mut(repo) {
+            row.landed.clone_from(&kept);
+            row.landed_head = head;
+        }
+        *cached = true;
+    }
+    if all_landed {
         return false;
     }
     if let Some(row) = book.repos.get_mut(repo) {
@@ -1507,7 +1572,9 @@ fn head_sha(repo: &str) -> Result<String, String> {
 fn finish_open(book: &mut Book) {
     let repos: Vec<String> = book.repos.keys().cloned().collect();
     for repo in repos {
-        let _ = reconcile_deeds(book, &repo);
+        let mut cached = false;
+        let in_a_minute = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let _ = reconcile_deeds(book, &repo, in_a_minute, &mut Heads::new(), &mut cached);
         let Some(row) = book.repos.get(&repo) else {
             continue;
         };
@@ -3411,6 +3478,9 @@ mod tests {
 
     #[test]
     fn a_claim_uses_a_checkout_or_the_last_booked_repo() {
+        // git_toplevel looks git up with which(), so this holds the same
+        // lock as the other PATH readers.
+        let _g = lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-place-test");
         let _ = std::fs::remove_dir_all(&root);
         let repo = root.join("repo");
@@ -3449,6 +3519,9 @@ mod tests {
 
     #[test]
     fn project_for_matches_the_remote_before_the_basename() {
+        // The remote lookup runs git through which(), so this holds the
+        // same lock as the other PATH readers.
+        let _g = lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-project-test");
         let _ = std::fs::remove_dir_all(&root);
         let tracker = root.join("tracker");
@@ -3491,6 +3564,9 @@ mod tests {
     /// project whose metadata records that remote.
     #[test]
     fn a_decoy_note_does_not_take_the_project() {
+        // The remote lookup runs git through which(), so this holds the
+        // same lock as the other PATH readers.
+        let _g = lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-decoy-remote");
         let _ = std::fs::remove_dir_all(&root);
         let tracker = root.join("tracker");
@@ -3542,6 +3618,7 @@ mod tests {
             .arg("-C")
             .arg(dir)
             .args(args)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .output()
             .unwrap();
         assert!(
@@ -3675,14 +3752,9 @@ print(f"id={ident}")
         (dir, tracker, repo)
     }
 
-    fn arm(dir: &Path, tracker: &Path) {
-        let bin = dir.join("bin");
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut next = std::ffi::OsString::from(bin);
-        next.push(":");
-        next.push(path);
+    fn arm(dir: &Path, tracker: &Path) -> crate::PathGuard {
+        let bins = crate::prepend_path(&dir.join("bin"));
         unsafe {
-            std::env::set_var("PATH", next);
             std::env::set_var("VISSUE_ROOT", tracker);
             std::env::set_var("VISSUE_NO_ROUTE", "1");
             std::env::set_var("LJOS_TRACKER_GIT", "commit");
@@ -3694,6 +3766,7 @@ print(f"id={ident}")
             std::env::remove_var("LJOS_OFF");
             std::env::remove_var("LJOS_SESSION_ID");
         }
+        bins
     }
 
     fn payload(event: &str, session: &str, cwd: &Path, extra: Value) -> (String, crate::HookCall) {
@@ -3951,7 +4024,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         assert_redirect_claims(&repo, &tracker);
     }
 
@@ -3972,7 +4045,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "book-session-1";
         let (prompt_raw, prompt_call) = payload(
             "UserPromptSubmit",
@@ -4091,8 +4164,10 @@ print(f"id={ident}")
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
+        // Hide vissue, which lives outside the coreutils directories.
+        // cat and sh stay on PATH.
+        let _bins = crate::set_path(crate::path_without(&["vissue"]));
         unsafe {
-            std::env::set_var("PATH", "/usr/bin:/bin");
             std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
             std::env::set_var("LJOS_IN_HOOK", "1");
             std::env::set_var("PACKSET_URL", "off");
@@ -4139,7 +4214,7 @@ print(f"id={ident}")
             "LJOS_OFF",
         ]);
         let (dir, tracker, _repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-session-9");
         }
@@ -4193,7 +4268,7 @@ print(f"id={ident}")
             "LJOS_OFF",
         ]);
         let (dir, tracker, _repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SEAT", "Disk Saver");
             std::env::set_var("LJOS_SESSION_ID", "mcp-call-1");
@@ -4410,7 +4485,7 @@ print(f"id={ident}")
             "LJOS_SEAT",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("LJOS_HARNESS_SESSION");
@@ -4461,7 +4536,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-start-1");
         }
@@ -4498,7 +4573,7 @@ print(f"id={ident}")
             "LJOS_SEAT",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SEAT", "probe-seat");
             std::env::set_var("LJOS_HOLD", "book-holder");
@@ -4644,7 +4719,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let refused = serve_pack(|_| {
             (
                 400,
@@ -4769,7 +4844,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -4879,7 +4954,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         assert!(!marker.exists(), "a fresh home has not started warming");
         let atoms = Arc::new(Mutex::new(vec![
@@ -4974,7 +5049,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
         let pack = serve_pack({
             let atoms = Arc::clone(&atoms);
@@ -5035,7 +5110,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "unrun-commit";
         prompt_and_edit(&repo, session, "Add a readme line");
         let seed = head_sha_of(&repo);
@@ -5097,7 +5172,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -5253,7 +5328,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "01a14bc1-59ae-7d43-9a16-bc94c6a0ef56";
         let id = "exec_command_058e85yevw32";
         let other = "exec_command_q3kpac3wpztr";
@@ -5311,7 +5386,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = arm_lessons(dir.path());
         let session = "codex-exit-127";
         let id = "exec_command_n38zthdamfmc";
@@ -5376,7 +5451,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = arm_lessons(dir.path());
         let session = "codex-failures-only";
         let transcript = dir.path().join("rollout.jsonl");
@@ -5456,7 +5531,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "codex-commit";
         let seed = head_sha_of(&repo);
         let transcript = dir.path().join("rollout.jsonl");
@@ -5519,7 +5594,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "codex-stuck";
         let seed = head_sha_of(&repo);
         let (prompt, prompt_call) = payload(
@@ -5572,7 +5647,7 @@ print(f"id={ident}")
 
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -5702,7 +5777,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "agy-deed";
         let cwd = repo.to_str().unwrap();
         let (prompt, prompt_call) = payload(
@@ -5752,7 +5827,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, _tracker, repo) = scratch();
-        arm(dir.path(), &_tracker);
+        let _bins = arm(dir.path(), &_tracker);
         let session = "qpiw";
         prompt_and_edit(&repo, session, "Add a readme line");
         let sha = commit_file(&repo, "README.md", "hello from cloudflare\n");
@@ -5819,7 +5894,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let gone = dead_pid();
         for session in ["dead-a", "dead-b"] {
             prompt_and_edit(&repo, session, "Add a readme line");
@@ -5856,7 +5931,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let texts = Arc::new(Mutex::new(Vec::<String>::new()));
         let kept = serve_pack({
             let texts = Arc::clone(&texts);
@@ -5894,6 +5969,63 @@ print(f"id={ident}")
         assert!(!lesson.contains(&abandoned[..7]), "{lesson}");
         let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
         assert!(org.contains(&format!("deed-file-commit-{landed}")), "{org}");
+    }
+
+    /// A prompt answers inside the sweep budget however many past sittings
+    /// the seat keeps, and the sweeps still reach every book: a sha found in
+    /// HEAD is remembered, so a later pass does not ask git again.
+    #[test]
+    fn a_prompt_does_not_wait_on_the_seats_history() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let head = head_sha_of(&repo);
+        let repo_key = repo.display().to_string();
+        let sittings = 300;
+        for n in 0..sittings {
+            let mut book = Book::default();
+            book.repos.insert(
+                repo_key.clone(),
+                RepoBook {
+                    issue: Some("probe-aaaa".into()),
+                    deeds: vec![head.clone()],
+                    finished: true,
+                    lesson: true,
+                    ..RepoBook::default()
+                },
+            );
+            let path = book_path(&format!("old-{n}"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            store_book(&path, &book);
+        }
+        let landed = || {
+            (0..sittings)
+                .filter(|n| {
+                    let book = load_book(&book_path(&format!("old-{n}")));
+                    book.repos.values().all(|row| !row.landed.is_empty())
+                })
+                .count()
+        };
+        assert_eq!(landed(), 0);
+        let mut passes = 0;
+        while landed() < sittings && passes < 60 {
+            let (raw, call) = payload(
+                "UserPromptSubmit",
+                "now",
+                &repo,
+                serde_json::json!({"prompt": "summarize the failing build"}),
+            );
+            let started = std::time::Instant::now();
+            let _ = observe(&raw, &call);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_millis(2500),
+                "pass {passes} took {took:?}"
+            );
+            passes += 1;
+        }
+        assert_eq!(landed(), sittings, "the sweep reached every book");
     }
 
     fn saved_env() -> Restore {

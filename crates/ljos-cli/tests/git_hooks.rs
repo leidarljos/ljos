@@ -110,7 +110,7 @@ impl Hab {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> Output {
-        let out = Command::new("git")
+        let out = Command::new("/usr/bin/git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -172,7 +172,7 @@ impl Drop for Hab {
 }
 
 fn git_bare(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -683,10 +683,11 @@ fn exec_daemon(dir: &Path) -> PathBuf {
          }\n",
     )
     .unwrap();
-    let out = Command::new("cc")
+    let out = Command::new("/usr/bin/cc")
         .args(["-O2", "-o"])
         .arg(&bin)
         .arg(&src)
+        .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
     assert!(
@@ -843,7 +844,7 @@ fn write_hook(path: &Path, body: &str) {
 }
 
 fn git_status(hab: &Hab, args: &[&str]) -> Output {
-    Command::new("git")
+    Command::new("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(args)

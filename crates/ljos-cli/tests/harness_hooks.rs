@@ -14,10 +14,11 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
+        .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
     assert!(
@@ -41,10 +42,11 @@ fn record_evidence(repo: &Path) {
 }
 
 fn head(dir: &Path) -> String {
-    let out = Command::new("git")
+    let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "HEAD"])
+        .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
     String::from_utf8(out.stdout).unwrap().trim().to_string()
@@ -1630,8 +1632,9 @@ server.serve_forever()
         "ts": "2026-10-17T00:00:00Z",
         "origin": "agent-derived"
     }]);
-    let mut pack_proc = Command::new("python3")
+    let mut pack_proc = Command::new("/usr/bin/python3")
         .arg(&pack)
+        .env("PATH", "/usr/bin:/bin")
         .env("ATOMS", atoms.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
