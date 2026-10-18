@@ -213,7 +213,17 @@ print(f"id={ident}")
 }
 
 fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::Output {
-    let out = hook_in(hab, payload, &hab.repo, false, extra);
+    ljos_cmd(hab, &["hook"], payload, extra)
+}
+
+/// `ljos ARGS` in the habitat's repo. The command must succeed.
+fn ljos_cmd(
+    hab: &Habitat,
+    args: &[&str],
+    payload: &str,
+    extra: &[(&str, &str)],
+) -> std::process::Output {
+    let out = run_ljos(hab, args, payload, &hab.repo, extra);
     assert!(
         out.status.success(),
         "ljos hook failed\nstdout:\n{}\nstderr:\n{}\npayload:\n{payload}",
@@ -230,13 +240,24 @@ fn hook_in(
     fail_on_deny: bool,
     extra: &[(&str, &str)],
 ) -> std::process::Output {
+    let mut args = vec!["hook"];
+    if fail_on_deny {
+        args.push("--fail-on-deny");
+    }
+    run_ljos(hab, &args, payload, dir, extra)
+}
+
+fn run_ljos(
+    hab: &Habitat,
+    args: &[&str],
+    payload: &str,
+    dir: &Path,
+    extra: &[(&str, &str)],
+) -> std::process::Output {
     let path = format!("{}:/usr/bin:/bin", hab.bin.display());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
-    cmd.arg("hook");
-    if fail_on_deny {
-        cmd.arg("--fail-on-deny");
-    }
-    cmd.env_clear()
+    cmd.args(args)
+        .env_clear()
         .env("PATH", path)
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))
@@ -638,7 +659,7 @@ server.serve_forever()
 }
 
 #[test]
-fn a_force_push_asks_on_claude_codex_and_opencode() {
+fn an_ask_is_rendered_for_each_harness() {
     let (_dir, hab) = habitat();
     record_evidence(&hab.repo);
     let policyd = hab.bin.join("ljos-policyd");
@@ -648,24 +669,24 @@ fn a_force_push_asks_on_claude_codex_and_opencode() {
         "#!/bin/sh\nprintf 'deny\\tgit-force-push\\n'\nexit 2\n",
     );
     let cwd = hab.repo.clone();
+    let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
     let command = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": {"command": "git push --force origin main"}
     });
-    let cases = [
-        ("claude", "PreToolUse", None),
-        ("codex", "PreToolUse", Some("turn-1")),
-        ("opencode", "PreToolUse", None),
-    ];
-    for (name, event, turn) in cases {
-        let mut extra = command.clone();
-        if let Some(turn) = turn {
-            extra["turn_id"] = serde_json::json!(turn);
-        }
+    // Claude Code and opencode stop on permissionDecision ask. opencode's
+    // plugin throws before the tool runs; the payload it sends has no
+    // turn_id, so the seat answers in the ask shape.
+    for name in ["claude", "opencode"] {
         let out = ljos(
             &hab,
-            &claude(event, &format!("force-{name}"), &cwd, extra),
-            &[("POLICYD_BIN", policyd.to_str().unwrap())],
+            &claude(
+                "PreToolUse",
+                &format!("force-{name}"),
+                &cwd,
+                command.clone(),
+            ),
+            &env,
         );
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -678,7 +699,104 @@ fn a_force_push_asks_on_claude_codex_and_opencode() {
             "{name}: {text}"
         );
     }
-    let _ = policyd;
+    let plugin = include_str!("../assets/opencode/ljos.ts");
+    let plugin_v2 = include_str!("../assets/opencode/ljos-v2.ts");
+    for source in [plugin, plugin_v2] {
+        assert!(source.contains("verdict === \"ask\""));
+        assert!(source.contains("needs the person's approval"));
+    }
+    // Codex PreToolUse does not honour ask: the hook is marked failed and
+    // the push runs. The seat denies, and the reason says how to grant it.
+    let mut codex_body = command.clone();
+    codex_body["turn_id"] = serde_json::json!("turn-1");
+    let codex = ljos(
+        &hab,
+        &claude("PreToolUse", "force-codex", &cwd, codex_body),
+        &env,
+    );
+    let codex = String::from_utf8_lossy(&codex.stdout);
+    assert!(codex.contains("\"permissionDecision\":\"deny\""), "{codex}");
+    assert!(!codex.contains("\"permissionDecision\":\"ask\""), "{codex}");
+    assert!(codex.contains("ljos approve "), "{codex}");
+    assert!(codex.contains("ljos_request_approval"), "{codex}");
+    assert!(codex.contains("git-force-push"), "{codex}");
+    assert!(!codex.contains("leave it for them"), "{codex}");
+    // agy asks on decision ask.
+    let agy = ljos_cmd(
+        &hab,
+        &["hook", "--event", "PreToolUse"],
+        &serde_json::json!({
+            "conversationId": "force-agy",
+            "cwd": cwd,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "git push --force origin main"}
+            }
+        })
+        .to_string(),
+        &env,
+    );
+    let agy = String::from_utf8_lossy(&agy.stdout);
+    assert!(agy.contains("\"decision\":\"ask\""), "{agy}");
+    assert!(!agy.contains("\"decision\":\"deny\""), "{agy}");
+    assert!(agy.contains("git-force-push"), "{agy}");
+    // Cursor beforeShellExecution enforces permission ask.
+    let shell = ljos(
+        &hab,
+        &serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "force-cursor-shell",
+            "hook_event_name": "beforeShellExecution",
+            "command": "git push --force origin main",
+            "cwd": cwd,
+        })
+        .to_string(),
+        &env,
+    );
+    let shell = String::from_utf8_lossy(&shell.stdout);
+    assert!(shell.contains("\"permission\":\"ask\""), "{shell}");
+    assert!(!shell.contains("\"permission\":\"deny\""), "{shell}");
+    assert!(shell.contains("git-force-push"), "{shell}");
+    // Cursor preToolUse accepts ask and does not enforce it.
+    let tool = ljos(
+        &hab,
+        &serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "force-cursor-tool",
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": "git push --force origin main"},
+            "cwd": cwd,
+        })
+        .to_string(),
+        &env,
+    );
+    let tool = String::from_utf8_lossy(&tool.stdout);
+    assert!(tool.contains("\"permission\":\"deny\""), "{tool}");
+    assert!(!tool.contains("\"permission\":\"ask\""), "{tool}");
+    assert!(tool.contains("ljos approve "), "{tool}");
+    assert!(tool.contains("ljos_request_approval"), "{tool}");
+    assert!(!tool.contains("leave it for them"), "{tool}");
+    // Gemini honours decision deny (and, in current source, ask). The
+    // seat sends deny, including when the event is still BeforeTool.
+    let gemini = ljos_cmd(
+        &hab,
+        &["hook", "--runner", "gemini"],
+        &serde_json::json!({
+            "hook_event_name": "BeforeTool",
+            "session_id": "force-gemini",
+            "cwd": cwd,
+            "tool_name": "run_shell_command",
+            "tool_input": {"command": "git push --force origin main"}
+        })
+        .to_string(),
+        &env,
+    );
+    let gemini = String::from_utf8_lossy(&gemini.stdout);
+    assert!(gemini.contains("\"decision\":\"deny\""), "{gemini}");
+    assert!(!gemini.contains("\"ask\""), "{gemini}");
+    assert!(gemini.contains("git-force-push"), "{gemini}");
+    assert!(gemini.contains("cannot ask"), "{gemini}");
 }
 
 #[test]

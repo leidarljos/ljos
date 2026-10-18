@@ -4692,8 +4692,11 @@ pub enum HookShape {
     /// snake_case stdin; `permissionDecision` takes `deny` or `ask`.
     #[default]
     Asks,
-    /// snake_case stdin carrying `turn_id`; `deny` only, and an `ask` is
-    /// rejected as unsupported and the tool runs.
+    /// snake_case stdin carrying `turn_id`. Codex `PreToolUse` blocks on
+    /// `permissionDecision: deny` with a reason, on legacy `decision:
+    /// block`, and on exit 2 with a reason on stderr. `permissionDecision:
+    /// ask` is rejected as unsupported, the hook is marked failed, and the
+    /// tool runs, so an ask is rendered as that deny.
     DenyOnly,
     /// camelCase stdin (`hookEventName`, `toolInput`). Grok Build shows
     /// a permission prompt on `ask` (`decision` and `permissionDecision`).
@@ -4718,7 +4721,9 @@ pub enum HookShape {
     /// Every other Cursor event. Context reaches the model as
     /// `additional_context` only on `postToolUse`, `postToolUseFailure`
     /// and `sessionStart`. A `stop` is held with `followup_message`.
-    /// `preToolUse` takes `permission` but does not enforce an `ask`.
+    /// `preToolUse` takes `permission` but does not enforce an `ask`
+    /// (the schema accepts it and the command still runs), so an ask
+    /// there is a deny. `beforeShellExecution` is [`HookShape::CursorShell`].
     Cursor,
 }
 
@@ -8368,6 +8373,47 @@ pub fn came_due_since(due: &[Value], since: &str) -> usize {
         .count()
 }
 
+/// The reason already says how a person grants the command: reply
+/// `approve`, call `ljos_request_approval`, or run `ljos approve`.
+fn offers_approval(reason: &str) -> bool {
+    reason.contains("ljos approve ") || reason.contains("ljos_request_approval")
+}
+
+/// An ask on a runner that will not stop for one, written as a deny.
+/// When the reason already says how to grant the command, that sentence
+/// is the denial: a second sentence that says the refusal never lifts
+/// would contradict it. A bare ask tells the agent to stop and leave the
+/// command. `stuck` is that sentence, with its leading space. A cited
+/// push (`LJOS_CITE=`) says the same line does not pass again unchanged.
+fn denial_for_unasked(rule: &Rule, stuck: &str) -> String {
+    if offers_approval(&rule.reason) {
+        return format!("{} (seat rule `{}`)", rule.reason, rule.pattern);
+    }
+    let (lead, tail) = if rule.reason.contains("LJOS_CITE=") {
+        (
+            "this push needs a cited decision: ",
+            " The same line does not pass again unchanged.",
+        )
+    } else {
+        ("ask the person before running this: ", stuck)
+    };
+    format!(
+        "{lead}{} (seat rule `{}`).{tail}",
+        rule.reason, rule.pattern
+    )
+}
+
+/// What a runner that cannot ask is told when the ask carries no grant.
+const UNASKED_STUCK: &str = " This runner cannot ask and the rule does not lift on a yes in \
+     chat, so retrying returns this same refusal: stop, tell the person \
+     the exact command, and leave it for them to run.";
+
+/// The same refusal in Cursor's words for a `preToolUse` hook, which
+/// accepts `permission: ask` and does not enforce it.
+const CURSOR_UNASKED_STUCK: &str = " This hook cannot ask here, so retrying returns this same \
+     refusal: stop, tell the person the exact command, and leave it for \
+     them to run.";
+
 /// The answer a [`HookShape::Steps`] runner reads: always one JSON object.
 /// A tool gate's verdict is its `decision`, `ask` included, since that
 /// runner asks the person itself. No verdict is `allow`: an object with
@@ -8588,36 +8634,20 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
     let mut top = serde_json::Map::new();
     if let Some(r) = verdict {
         if call.event == "PreToolUse" || user_rules::mcp_event_denies(&call.event, r) {
-            // DenyOnly runs the tool on an `ask`, so the seat denies and
-            // names the command. CamelCase and Asks show the prompt.
-            let (decision, reason) =
-                if r.verdict == "ask" && !call.shape.asks() && !force_push_ask(r) {
-                    (
-                        "deny",
-                        format!(
-                            "{}{} (seat rule `{}`).{}",
-                            if r.reason.contains("LJOS_CITE=") {
-                                "this push needs a cited decision: "
-                            } else {
-                                "ask the person before running this: "
-                            },
-                            r.reason,
-                            r.pattern,
-                            if r.reason.contains("LJOS_CITE=") {
-                                " The same line does not pass again unchanged."
-                            } else {
-                                " This runner cannot ask and the rule does not lift on a yes in \
-                             chat, so retrying returns this same refusal: stop, tell the person \
-                             the exact command, and leave it for them to run."
-                            }
-                        ),
-                    )
-                } else {
-                    (
-                        r.verdict.as_str(),
-                        format!("{} (seat rule `{}`)", r.reason, r.pattern),
-                    )
-                };
+            // DenyOnly (Codex) and Context run the tool on an `ask`, so
+            // the seat denies and names the command. A force push is the
+            // same deny: Codex treats `permissionDecision: ask` as a
+            // failed hook and runs the push. CamelCase and Asks show the
+            // prompt. A reason that already offers `ljos approve` stays
+            // that offer.
+            let (decision, reason) = if r.verdict == "ask" && !call.shape.asks() {
+                ("deny", denial_for_unasked(r, UNASKED_STUCK))
+            } else {
+                (
+                    r.verdict.as_str(),
+                    format!("{} (seat rule `{}`)", r.reason, r.pattern),
+                )
+            };
             if call.shape == HookShape::Context {
                 // `block` is the one verb there; context rides along.
                 let mut out = serde_json::json!({ "decision": "block", "reason": reason });
@@ -8710,15 +8740,11 @@ fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Stri
         }
         "PreToolUse" => {
             let (permission, reason) = match verdict {
-                Some(r) if r.verdict == "ask" && !call.shape.asks() && !force_push_ask(r) => (
-                    "deny",
-                    format!(
-                        "ask the person before running this: {} (seat rule `{}`). This hook cannot \
-                         ask here, so retrying returns this same refusal: stop, tell the person the \
-                         exact command, and leave it for them to run.",
-                        r.reason, r.pattern
-                    ),
-                ),
+                // `preToolUse` does not enforce `ask`, including a force
+                // push. `beforeShellExecution` does, and that shape asks.
+                Some(r) if r.verdict == "ask" && !call.shape.asks() => {
+                    ("deny", denial_for_unasked(r, CURSOR_UNASKED_STUCK))
+                }
                 Some(r) => (
                     r.verdict.as_str(),
                     format!("{} (seat rule `{}`)", r.reason, r.pattern),
@@ -22893,16 +22919,6 @@ fn unjudged_why(token: &str) -> Option<String> {
     }
 }
 
-/// A force-push ask is the person's question, on a runner that otherwise
-/// turns `ask` into `deny`. A seat rule that merely asks about some other
-/// command stays a deny there.
-fn force_push_ask(rule: &Rule) -> bool {
-    rule.verdict == "ask"
-        && (rule.pattern == "git-force-push"
-            || rule.pattern == "built-in: dangerous push"
-            || rule.reason.starts_with("git-force-push:"))
-}
-
 /// git's `ljos-atoms` merge driver. `current` is `%A` and `path` is `%P`.
 /// The file becomes a fresh export of this machine's atoms.
 ///
@@ -32218,11 +32234,66 @@ mod tests {
             session: Some("codex-1".into()),
             shape: HookShape::DenyOnly,
         };
+        // Codex does not honour `ask`: the same force push is a deny.
+        // A bare ask, with no grant written yet, says the runner cannot
+        // ask. A reason that already offers `ljos approve` keeps that
+        // offer and does not tell the agent the refusal never lifts.
         let codex_answer = hook_output_ruled(&codex, "", Some(&rule));
         assert!(
-            codex_answer.contains("\"permissionDecision\":\"ask\""),
+            codex_answer.contains("\"permissionDecision\":\"deny\""),
             "{codex_answer}"
         );
+        assert!(
+            !codex_answer.contains("\"permissionDecision\":\"ask\""),
+            "{codex_answer}"
+        );
+        assert!(
+            codex_answer.contains("ask the person before running this"),
+            "{codex_answer}"
+        );
+        let mut offered = rule.clone();
+        offered.reason.push_str(
+            " Reply `approve oak-abcdef` in this conversation, call the ljos_request_approval \
+             MCP tool with id oak-abcdef, or run `ljos approve oak-abcdef`.",
+        );
+        let offered_answer = hook_output_ruled(&codex, "", Some(&offered));
+        assert!(
+            offered_answer.contains("\"permissionDecision\":\"deny\""),
+            "{offered_answer}"
+        );
+        assert!(
+            offered_answer.contains("ljos approve oak-abcdef"),
+            "{offered_answer}"
+        );
+        assert!(
+            !offered_answer.contains("leave it for them"),
+            "{offered_answer}"
+        );
+        let cursor = HookCall {
+            event: "PreToolUse".into(),
+            cue: "git push --force origin main".into(),
+            session: Some("cursor-1".into()),
+            shape: HookShape::Cursor,
+        };
+        let cursor_answer = hook_output_ruled(&cursor, "", Some(&offered));
+        assert!(
+            cursor_answer.contains("\"permission\":\"deny\""),
+            "{cursor_answer}"
+        );
+        assert!(
+            !cursor_answer.contains("\"permission\":\"ask\""),
+            "{cursor_answer}"
+        );
+        assert!(
+            cursor_answer.contains("ljos approve oak-abcdef"),
+            "{cursor_answer}"
+        );
+        assert!(
+            !cursor_answer.contains("leave it for them"),
+            "{cursor_answer}"
+        );
+        let bare_cursor = hook_output_ruled(&cursor, "", Some(&rule));
+        assert!(bare_cursor.contains("cannot ask here"), "{bare_cursor}");
     }
 
     /// `ljos_guard_check` refuses a force push that has no test evidence.
