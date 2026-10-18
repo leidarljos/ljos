@@ -25045,6 +25045,76 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
     out
 }
 
+/// Puts `PATH` back to the value it had when the guard was built.
+/// The caller holds [`test_env_lock`] for the whole life of the guard, so
+/// another test cannot observe the temporary value, and a panic still
+/// restores the previous one before the lock is released.
+#[cfg(test)]
+#[must_use = "PATH stays changed until this guard drops"]
+pub(crate) struct PathGuard {
+    prev: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.prev.take() {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_path(next: std::ffi::OsString) -> PathGuard {
+    let prev = std::env::var_os("PATH");
+    unsafe { std::env::set_var("PATH", &next) };
+    PathGuard { prev }
+}
+
+/// `dir` in front of the PATH this process already has. `cat` and the other
+/// real tools stay findable behind the fake directory. The caller holds
+/// [`test_env_lock`].
+#[cfg(test)]
+pub(crate) fn prepend_path(dir: &std::path::Path) -> PathGuard {
+    let mut next = std::ffi::OsString::from(dir);
+    next.push(":");
+    next.push(std::env::var_os("PATH").unwrap_or_default());
+    install_path(next)
+}
+
+/// Install `path` until the guard drops. The caller holds [`test_env_lock`].
+#[cfg(test)]
+pub(crate) fn set_path(path: impl AsRef<std::ffi::OsStr>) -> PathGuard {
+    install_path(path.as_ref().to_os_string())
+}
+
+/// The current PATH with every directory that contains one of `bins`
+/// removed, except a directory that also contains `cat` or `sh`. Coreutils
+/// stay findable when the hidden binary lives beside them. The caller holds
+/// [`test_env_lock`].
+#[cfg(test)]
+pub(crate) fn path_without(bins: &[&str]) -> std::ffi::OsString {
+    let raw = std::env::var_os("PATH").unwrap_or_default();
+    let mut out = std::ffi::OsString::new();
+    let mut any = false;
+    for dir in std::env::split_paths(&raw) {
+        let hides = bins.iter().any(|bin| dir.join(bin).is_file());
+        let core = dir.join("cat").is_file() || dir.join("sh").is_file();
+        if hides && !core {
+            continue;
+        }
+        if any {
+            out.push(":");
+        }
+        any = true;
+        out.push(dir.as_os_str());
+    }
+    out
+}
+
 /// Serialises every test that reads or writes the process environment.
 /// Each holder gets a private `XDG_RUNTIME_DIR`. The environment this test
 /// found is put back while the mutex is still held, so the next test cannot
@@ -25374,9 +25444,9 @@ mod tests {
             std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
+        let _bins = super::prepend_path(&bin);
         let keys = [
             "HOME",
-            "PATH",
             "LJOS_OFF",
             "POLICYD_BIN",
             "PACKSET_URL",
@@ -25386,14 +25456,7 @@ mod tests {
             .iter()
             .map(|k| ((*k).to_string(), std::env::var_os(k)))
             .collect();
-        let path = {
-            let mut next = std::ffi::OsString::from(&bin);
-            next.push(":");
-            next.push(std::env::var_os("PATH").unwrap_or_default());
-            next
-        };
         unsafe {
-            std::env::set_var("PATH", &path);
             std::env::set_var("POLICYD_BIN", &policyd);
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("PACKSET_PORT");
@@ -30108,17 +30171,7 @@ mod tests {
             "CHILDREN",
             "BALLOTS",
         ];
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                saved[0]
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-        );
+        let _bins = super::prepend_path(&bin);
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
@@ -30221,18 +30274,7 @@ mod tests {
         std::fs::write(&fake, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path_before = std::env::var_os("PATH");
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                path_before
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-        );
+        let _bins = super::prepend_path(&bin);
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::remove_var("ISSUE_ROOT");
@@ -30275,10 +30317,6 @@ mod tests {
         assert_eq!(workflow_close_refusal(&s), None);
         assert_eq!(workflow_sitting_block("probe-x999"), "");
 
-        match path_before {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
         for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
             std::env::remove_var(var);
         }
@@ -31408,6 +31446,13 @@ mod tests {
             let out = std::process::Command::new("vissue")
                 .arg("identity")
                 .current_dir(dir.path())
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("XDG_DATA_HOME", &data)
+                .env("XDG_CONFIG_HOME", &config)
+                .env_remove("VISSUE_ROOT")
+                .env_remove("ISSUE_ROOT")
+                .env_remove("VISSUE_CONFIG")
+                .env_remove("DEEDAR_URL")
                 .output()
                 .unwrap();
             let said = String::from_utf8_lossy(&out.stdout);
@@ -31981,6 +32026,7 @@ mod tests {
 
     #[test]
     fn a_bypass_is_logged_and_the_doctor_reads_it() {
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
         let rule = Rule {
@@ -32722,6 +32768,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// A non-zero exit is an error carrying what was said on stderr.
     #[test]
     fn a_refusal_is_an_error_not_an_answer() {
+        let _env = env_guard();
         let err = run_captured("false", &[] as &[&str]).unwrap_err();
         assert!(err.to_string().contains("false exited"), "{err}");
         let said = run_captured("sh", &["-c", "echo answered; echo aside >&2"]).unwrap();
@@ -33240,9 +33287,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_fed_verb_reads_its_stdin() {
+        let _env = env_guard();
         let said = run_fed("cat", &[] as &[&str], "one\ntwo\n").unwrap();
         assert_eq!(said.stdout, "one\ntwo\n");
         assert!(run_fed("sh", &["-c", "exit 2"], "").is_err());
+    }
+
+    #[test]
+    fn hiding_a_binary_keeps_the_directory_that_holds_cat() {
+        let _env = env_guard();
+        let hidden = super::path_without(&["vissue", "age"]);
+        assert!(
+            std::env::split_paths(&hidden).any(|dir| dir.join("cat").is_file()),
+            "cat stays findable"
+        );
+        assert!(
+            std::env::split_paths(&hidden).all(|dir| {
+                let hides = dir.join("vissue").is_file() || dir.join("age").is_file();
+                let core = dir.join("cat").is_file() || dir.join("sh").is_file();
+                !hides || core
+            }),
+            "a directory is left out only when it hides the binary and holds no coreutil"
+        );
     }
 
     #[test]
@@ -36327,12 +36393,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let old_issue_root = std::env::var_os("ISSUE_ROOT");
         let old_vissue_root = std::env::var_os("VISSUE_ROOT");
         let old_no_route = std::env::var_os("VISSUE_NO_ROUTE");
-        let old_path = std::env::var_os("PATH");
+        // The library read must not shell a vissue that happens to be installed.
+        // Its directory leaves PATH; a directory that also holds cat or sh stays.
+        let _bins = super::set_path(super::path_without(&["vissue"]));
         unsafe {
             std::env::set_var("ISSUE_ROOT", dir.path());
             std::env::set_var("VISSUE_ROOT", dir.path());
             std::env::set_var("VISSUE_NO_ROUTE", "1");
-            std::env::set_var("PATH", "/usr/bin");
         }
         let events = timeline_events("sample-k2p2", 12);
         unsafe {
@@ -36347,10 +36414,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             match old_no_route {
                 Some(v) => std::env::set_var("VISSUE_NO_ROUTE", v),
                 None => std::env::remove_var("VISSUE_NO_ROUTE"),
-            }
-            match old_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
             }
         }
         let events = events.expect("timeline_events should read the tracker library");
@@ -36629,6 +36692,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn the_doctor_names_every_habitat_and_the_pack_gates_health() {
+        // doctor looks up every habitat with which(), so it takes the same
+        // lock as the other PATH readers.
+        let _env = env_guard();
         let rows = doctor();
         let names: Vec<&str> = rows.iter().map(|h| h.name).collect();
         for want in [
@@ -37387,10 +37453,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let tracker = dir.path().join("tracker");
         std::fs::create_dir_all(&tracker).unwrap();
-        let _held = HoldEnv::set(&[
-            ("PATH", bin.to_str().unwrap()),
-            ("VISSUE_ROOT", tracker.to_str().unwrap()),
-        ]);
+        // The fakes stand in for deedar and vissue. Their directory is in
+        // front of PATH, and any other directory that holds those binaries
+        // but not cat or sh is left out. cat stays findable.
+        let hidden = super::path_without(&["deedar", "vissue"]);
+        let mut path = std::ffi::OsString::from(&bin);
+        path.push(":");
+        path.push(&hidden);
+        let _bins = super::set_path(&path);
+        let _held = HoldEnv::set(&[("VISSUE_ROOT", tracker.to_str().unwrap())]);
         let said = cite_stands("deed-file-self-minted").unwrap_err();
         assert!(said.contains("a deed alone does not stand"), "{said}");
         assert!(said.contains("another seat"), "{said}");
@@ -37965,22 +38036,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(calls.contains(&want), "{calls}");
     }
 
-    /// Run `f` with `dir` first on PATH, then put PATH back.
+    /// Run `f` with `dir` first on PATH. The previous PATH is put back when
+    /// the guard drops, including when `f` panics. The caller holds
+    /// [`env_guard`].
     fn with_fake_on_path<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
-        super::with_env_mutation(|| {
-            let old = std::env::var_os("PATH").unwrap_or_default();
-            let mut new = std::ffi::OsString::from(dir.as_os_str());
-            new.push(":");
-            new.push(&old);
-            unsafe {
-                std::env::set_var("PATH", &new);
-            }
-            let out = f();
-            unsafe {
-                std::env::set_var("PATH", old);
-            }
-            out
-        })
+        let _bins = super::prepend_path(dir);
+        f()
     }
 
     #[test]

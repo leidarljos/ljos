@@ -2736,14 +2736,9 @@ print(f"id={ident}")
         (dir, tracker, repo)
     }
 
-    fn arm(dir: &Path, tracker: &Path) {
-        let bin = dir.join("bin");
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut next = std::ffi::OsString::from(bin);
-        next.push(":");
-        next.push(path);
+    fn arm(dir: &Path, tracker: &Path) -> crate::PathGuard {
+        let bins = crate::prepend_path(&dir.join("bin"));
         unsafe {
-            std::env::set_var("PATH", next);
             std::env::set_var("VISSUE_ROOT", tracker);
             std::env::set_var("VISSUE_NO_ROUTE", "1");
             std::env::set_var("LJOS_TRACKER_GIT", "commit");
@@ -2755,6 +2750,7 @@ print(f"id={ident}")
             std::env::remove_var("LJOS_OFF");
             std::env::remove_var("LJOS_SESSION_ID");
         }
+        bins
     }
 
     fn payload(event: &str, session: &str, cwd: &Path, extra: Value) -> (String, crate::HookCall) {
@@ -3012,7 +3008,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         assert_redirect_claims(&repo, &tracker);
     }
 
@@ -3033,7 +3029,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "book-session-1";
         let (prompt_raw, prompt_call) = payload(
             "UserPromptSubmit",
@@ -3152,8 +3148,10 @@ print(f"id={ident}")
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
+        // Hide vissue, which lives outside the coreutils directories.
+        // cat and sh stay on PATH.
+        let _bins = crate::set_path(crate::path_without(&["vissue"]));
         unsafe {
-            std::env::set_var("PATH", "/usr/bin:/bin");
             std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
             std::env::set_var("LJOS_IN_HOOK", "1");
             std::env::set_var("PACKSET_URL", "off");
@@ -3200,7 +3198,7 @@ print(f"id={ident}")
             "LJOS_OFF",
         ]);
         let (dir, tracker, _repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-session-9");
         }
@@ -3254,7 +3252,7 @@ print(f"id={ident}")
             "LJOS_OFF",
         ]);
         let (dir, tracker, _repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SEAT", "Disk Saver");
             std::env::set_var("LJOS_SESSION_ID", "mcp-call-1");
@@ -3471,7 +3469,7 @@ print(f"id={ident}")
             "LJOS_SEAT",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("LJOS_HARNESS_SESSION");
@@ -3522,7 +3520,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-start-1");
         }
@@ -3559,7 +3557,7 @@ print(f"id={ident}")
             "LJOS_SEAT",
         ]);
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SEAT", "probe-seat");
             std::env::set_var("LJOS_HOLD", "book-holder");
@@ -3705,7 +3703,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let refused = serve_pack(|_| {
             (
                 400,
@@ -3830,7 +3828,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -3940,7 +3938,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         assert!(!marker.exists(), "a fresh home has not started warming");
         let atoms = Arc::new(Mutex::new(vec![
@@ -4035,7 +4033,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
         let pack = serve_pack({
             let atoms = Arc::clone(&atoms);
@@ -4096,7 +4094,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "unrun-commit";
         prompt_and_edit(&repo, session, "Add a readme line");
         let seed = head_sha_of(&repo);
@@ -4158,7 +4156,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -4314,7 +4312,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "01a14bc1-59ae-7d43-9a16-bc94c6a0ef56";
         let id = "exec_command_058e85yevw32";
         let other = "exec_command_q3kpac3wpztr";
@@ -4372,7 +4370,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = arm_lessons(dir.path());
         let session = "codex-exit-127";
         let id = "exec_command_n38zthdamfmc";
@@ -4437,7 +4435,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let atoms = arm_lessons(dir.path());
         let session = "codex-failures-only";
         let transcript = dir.path().join("rollout.jsonl");
@@ -4517,7 +4515,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "codex-commit";
         let seed = head_sha_of(&repo);
         let transcript = dir.path().join("rollout.jsonl");
@@ -4580,7 +4578,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "codex-stuck";
         let seed = head_sha_of(&repo);
         let (prompt, prompt_call) = payload(
@@ -4633,7 +4631,7 @@ print(f"id={ident}")
 
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         std::fs::write(&marker, "").unwrap();
@@ -4763,7 +4761,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let session = "agy-deed";
         let cwd = repo.to_str().unwrap();
         let (prompt, prompt_call) = payload(
@@ -4813,7 +4811,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, _tracker, repo) = scratch();
-        arm(dir.path(), &_tracker);
+        let _bins = arm(dir.path(), &_tracker);
         let session = "qpiw";
         prompt_and_edit(&repo, session, "Add a readme line");
         let sha = commit_file(&repo, "README.md", "hello from cloudflare\n");
@@ -4880,7 +4878,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let gone = dead_pid();
         for session in ["dead-a", "dead-b"] {
             prompt_and_edit(&repo, session, "Add a readme line");
@@ -4917,7 +4915,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let texts = Arc::new(Mutex::new(Vec::<String>::new()));
         let kept = serve_pack({
             let texts = Arc::clone(&texts);
@@ -4965,7 +4963,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let head = head_sha_of(&repo);
         let repo_key = repo.display().to_string();
         let sittings = 300;
