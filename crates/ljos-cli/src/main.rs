@@ -2515,9 +2515,8 @@ fn run_command() -> Result<()> {
                 && call.event == "Stop"
                 && !ljos_cli::stop_is_idle(&input);
             if verdict.is_none() && !agy_mid_loop {
-                let (extra, ids) = ljos_cli::hook_timed("bookkeep", || {
-                    ljos_cli::bookkeep::observe(&input, &call)
-                });
+                let (extra, ids) =
+                    ljos_cli::hook_timed("bookkeep", || ljos_cli::bookkeep::observe(&input, &call));
                 if !extra.is_empty() {
                     context = if context.is_empty() {
                         extra

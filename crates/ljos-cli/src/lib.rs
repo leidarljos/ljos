@@ -6200,8 +6200,8 @@ fn judged_with_local(
         })
     })
     .ok();
-    let left = std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS)
-        .saturating_sub(started.elapsed());
+    let left =
+        std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS).saturating_sub(started.elapsed());
     let judged = rx.recv_timeout(left).ok().flatten();
     (judged, Some(local))
 }
@@ -22202,9 +22202,10 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     };
     // Relative to the directory git runs in: an absolute path that reaches
     // the checkout through a symlink is outside it to git.
-    let file = path
-        .file_name()
-        .map_or_else(|| path.to_string_lossy().to_string(), |n| n.to_string_lossy().to_string());
+    let file = path.file_name().map_or_else(
+        || path.to_string_lossy().to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
     match git(&["rev-parse", "--is-inside-work-tree"]) {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
@@ -35889,7 +35890,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let took = started.elapsed();
         assert!(note.contains("Tag a release"), "{note:?}");
         assert!(
-            took < std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS + HOOK_RERANK_BUDGET_MS + 1000),
+            took < std::time::Duration::from_millis(
+                JEV_HOOK_BUDGET_MS + HOOK_RERANK_BUDGET_MS + 1000
+            ),
             "the prompt waited {took:?} on a judge"
         );
     }
