@@ -1355,13 +1355,7 @@ fn push_class(args: &[String]) -> PushClass {
 }
 
 fn is_force(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        a == "--force"
-            || a.starts_with("--force=")
-            || a.starts_with("--force-with-lease")
-            || (a.starts_with('+') && a.contains(':'))
-            || (a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|c| c == 'f'))
-    })
+    args.iter().any(|a| super::push_rewrites(a))
 }
 
 fn is_dry(args: &[String]) -> bool {
@@ -2897,6 +2891,24 @@ esac
             .expect("force still asks");
         assert_eq!(forced.verdict, "ask");
         assert_eq!(forced.pattern, "git-force-push");
+        assert!(
+            guard_verdict(
+                "git push --force-with-lease origin HEAD:main",
+                Some(dir.path()),
+                &[]
+            )
+            .is_none(),
+            "force-with-lease is an ordinary push"
+        );
+        assert!(
+            guard_verdict(
+                "git push --force-if-includes origin main",
+                Some(dir.path()),
+                &[]
+            )
+            .is_none(),
+            "force-if-includes is an ordinary push"
+        );
         assert!(
             !forced.reason.contains("git-push-evidence"),
             "{}",

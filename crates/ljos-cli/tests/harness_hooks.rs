@@ -213,10 +213,30 @@ print(f"id={ident}")
 }
 
 fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::Output {
+    let out = hook_in(hab, payload, &hab.repo, false, extra);
+    assert!(
+        out.status.success(),
+        "ljos hook failed\nstdout:\n{}\nstderr:\n{}\npayload:\n{payload}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+fn hook_in(
+    hab: &Habitat,
+    payload: &str,
+    dir: &Path,
+    fail_on_deny: bool,
+    extra: &[(&str, &str)],
+) -> std::process::Output {
     let path = format!("{}:/usr/bin:/bin", hab.bin.display());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
-    cmd.arg("hook")
-        .env_clear()
+    cmd.arg("hook");
+    if fail_on_deny {
+        cmd.arg("--fail-on-deny");
+    }
+    cmd.env_clear()
         .env("PATH", path)
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))
@@ -231,7 +251,7 @@ fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::O
         .env("LJOS_SEAT", "probe-seat")
         .env("LJOS_HOLD", "book-holder")
         .env("PACKSET_URL", "off")
-        .current_dir(&hab.repo)
+        .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -245,14 +265,7 @@ fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::O
         .unwrap()
         .write_all(payload.as_bytes())
         .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(
-        out.status.success(),
-        "ljos hook failed\nstdout:\n{}\nstderr:\n{}\npayload:\n{payload}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out
+    child.wait_with_output().unwrap()
 }
 
 fn claude(event: &str, session: &str, cwd: &Path, extra: serde_json::Value) -> String {
@@ -943,4 +956,85 @@ fn a_refused_commit_is_not_cited() {
     let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap();
     assert!(deeds.contains(&sha), "{deeds}");
     assert_eq!(deeds.lines().count(), 1, "{deeds}");
+}
+
+const NORMAL_GIT: &str = "git add .; git commit -m note; git push";
+
+fn child_repo(parent: &Path) -> PathBuf {
+    let child = parent.join("path/to/git/repo");
+    std::fs::create_dir_all(&child).unwrap();
+    git(&child, &["init", "-q"]);
+    git(&child, &["config", "user.email", "seat@example.invalid"]);
+    git(&child, &["config", "user.name", "seat"]);
+    git(&child, &["config", "commit.gpgsign", "false"]);
+    git(&child, &["config", "core.hooksPath", "/dev/null"]);
+    git(&child, &["branch", "-M", "main"]);
+    std::fs::write(child.join("README.md"), "child\n").unwrap();
+    git(&child, &["add", "README.md"]);
+    git(&child, &["commit", "-q", "-m", "seed"]);
+    child
+}
+
+fn pretool(cwd: &str, workdir: Option<&str>, command: &str) -> String {
+    let mut tool_input = serde_json::json!({ "command": command });
+    if let Some(workdir) = workdir {
+        tool_input["workdir"] = serde_json::json!(workdir);
+    }
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "workdir",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_input": tool_input,
+    })
+    .to_string()
+}
+
+fn assert_ordinary(out: &std::process::Output, payload: &str) {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "exit {}\nstdout:\n{stdout}\nstderr:\n{stderr}\npayload:\n{payload}",
+        out.status
+    );
+    let joined = format!("{stdout}\n{stderr}");
+    assert!(
+        !joined.contains("tool working directory"),
+        "a missing directory is not a seat rule\n{joined}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"deny\"")
+            && !stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+}
+
+/// A relative workdir resolves against the session directory, and a normal
+/// git command there is allowed.
+#[test]
+fn a_relative_workdir_resolves_and_a_normal_git_command_is_allowed() {
+    let (_dir, hab) = habitat();
+    let child = child_repo(&hab.repo);
+    let session = hab.repo.to_str().unwrap();
+    let forwarded = pretool(session, Some("path/to/git/repo"), NORMAL_GIT);
+    let out = hook_in(&hab, &forwarded, &hab.repo, true, &[]);
+    assert_ordinary(&out, &forwarded);
+    assert!(child.join(".git").is_dir());
+    let as_cwd = pretool("path/to/git/repo", None, NORMAL_GIT);
+    let out = hook_in(&hab, &as_cwd, &hab.repo, true, &[]);
+    assert_ordinary(&out, &as_cwd);
+}
+
+/// A workdir that does not exist is not a seat-rule deny of a normal command.
+#[test]
+fn a_missing_workdir_is_not_a_seat_rule_deny() {
+    let (_dir, hab) = habitat();
+    let session = hab.repo.to_str().unwrap();
+    let on_input = pretool(session, Some("/path/to/git/repo"), NORMAL_GIT);
+    let out = hook_in(&hab, &on_input, &hab.repo, true, &[]);
+    assert_ordinary(&out, &on_input);
+    let as_cwd = pretool("/path/to/git/repo", None, NORMAL_GIT);
+    let out = hook_in(&hab, &as_cwd, &hab.repo, true, &[]);
+    assert_ordinary(&out, &as_cwd);
 }

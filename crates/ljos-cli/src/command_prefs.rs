@@ -33,7 +33,9 @@ const TABLE: &[(&[&str], &str)] = &[
     (&["pip", "pip3"], r"re:(python3?\s+-m\s+)?pip3?\s+install\b"),
     (
         &["force-push", "force"],
-        r"re:git\s+push\b.*(--force\b|-f\b)",
+        // `--force` at a word end, so `--force-with-lease` and
+        // `--force-if-includes` stay ordinary pushes.
+        r"re:git\s+push\b.*(--force( |$)|-f( |$))",
     ),
     (&["push"], r"re:git\s+push\b.*\b(main|master)\b"),
     (&[".env"], r"re:.*>>?\s*\S*\.env\b"),
@@ -333,6 +335,16 @@ mod tests {
         assert!(!asks(
             "Never force push to shared branches",
             "git push origin main"
+        ));
+        assert!(asks("Never force push", "git push --force origin dev"));
+        assert!(asks("Never force push", "git push -f origin dev"));
+        assert!(!asks(
+            "Never force push",
+            "git push --force-with-lease origin HEAD:main"
+        ));
+        assert!(!asks(
+            "Never force push",
+            "git push --force-if-includes origin main"
         ));
         assert!(asks(
             "Never run terraform destroy",

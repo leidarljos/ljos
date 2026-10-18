@@ -4636,6 +4636,39 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
     Ok(directory)
 }
 
+/// Directory a tool command is judged in.
+///
+/// A relative workdir resolves against the session directory, as opencode's
+/// shell tool does with `path.resolve(directory, workdir)`. A directory that
+/// cannot be resolved is not a refusal: the session directory is used when
+/// it exists, and otherwise the process directory.
+#[must_use]
+pub fn command_directory(input: &str) -> Option<PathBuf> {
+    if let Ok(dir) = hook_directory(input) {
+        return Some(dir);
+    }
+    session_directory(input).or_else(|| std::env::current_dir().ok().filter(|path| path.is_dir()))
+}
+
+/// The payload's `cwd` or first workspace path, when that directory exists.
+/// A relative path is joined onto the process directory, which is the
+/// session directory when the hook was started there.
+fn session_directory(input: &str) -> Option<PathBuf> {
+    let value = serde_json::from_str::<Value>(input).ok()?;
+    let raw = value["cwd"]
+        .as_str()
+        .or_else(|| value["workspacePaths"][0].as_str())?;
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    std::fs::canonicalize(joined)
+        .ok()
+        .filter(|path| path.is_dir())
+}
+
 /// What the runner's hook hands the seat: the event, and the text worth
 /// asking the pack about. From a tool call, the command about to run; from
 /// a prompt, the prompt.
@@ -14895,15 +14928,13 @@ pub fn push_tier(args: &[String], facts: &PushFacts) -> PushTier {
     PushTier::Free
 }
 
-/// Force, deleting a remote branch, or publishing tags. Anything else,
-/// including `-u` and a plain refspec, is an ordinary branch push.
+/// Force, deleting a remote branch, or publishing tags. `--force-with-lease`
+/// and `--force-if-includes` are ordinary pushes: the remote refuses them
+/// when it holds commits the pusher has not seen, which is the line
+/// ljos-policyd's `force_push` draws. Anything else, including `-u` and a
+/// plain refspec, is an ordinary branch push.
 fn dangerous_push_reason(args: &[String]) -> Option<String> {
-    let force = args.iter().any(|a| {
-        a == "-f"
-            || a.starts_with("--force")
-            || short_force(a)
-            || (a.starts_with('+') && a.len() > 1)
-    });
+    let force = args.iter().any(|a| push_rewrites(a));
     if force {
         return Some("a force push rewrites what others may hold".into());
     }
@@ -14919,6 +14950,13 @@ fn dangerous_push_reason(args: &[String]) -> Option<String> {
         return Some("tags and mirrors publish releases".into());
     }
     None
+}
+
+/// `--force`, a short cluster containing `f` (`-f`, `-fu`), or a refspec
+/// that starts with `+`. `--force-with-lease` and `--force-if-includes`
+/// are not force. The same line in ljos-policyd is `force_push`.
+pub(crate) fn push_rewrites(arg: &str) -> bool {
+    arg == "--force" || short_force(arg) || (arg.starts_with('+') && arg.len() > 1)
 }
 
 /// `-fu` and `-uf`: git's short cluster that includes force. `-u` alone
@@ -23161,8 +23199,9 @@ pub fn policyd_reason(token: &str) -> String {
              `git clean -n` to list them, then remove the ones you mean by name"
         }
         "git-stash-clear" => {
-            "git stash clear drops every stash at once. Drop one with `git stash drop stash@{N}` \
-             after `git stash list`"
+            "git stash clear drops every stash at once. List them with `git stash list`, look at \
+             one with `git stash show -p`, or bring one back with `git stash apply`. Ask the \
+             person before a stash is dropped"
         }
         "git-discard-worktree" => {
             "this discards uncommitted changes across the whole tree. Restore the files you \
@@ -30710,10 +30749,26 @@ mod tests {
         );
         assert!(text.contains("code !== 0"), "a non-zero exit is a failure");
         assert!(
-            before.contains("cwd: output.args.workdir ?? directory"),
-            "the payload names the directory"
+            before.contains("cwd: directory"),
+            "cwd is the session directory"
+        );
+        assert!(
+            before.contains("workdir"),
+            "a tool workdir is forwarded on tool_input"
+        );
+        assert!(
+            !before.contains("output.args.workdir ?? directory"),
+            "cwd is the session directory\n{before}"
         );
         let after = &text[text.find("\"tool.execute.after\"").expect("an after hook")..];
+        assert!(
+            after.contains("cwd: directory"),
+            "the after hook keeps the session directory"
+        );
+        assert!(
+            !after.contains("args.workdir ?? directory"),
+            "the after hook keeps the session directory\n{after}"
+        );
         assert!(
             after.contains("input.args"),
             "after reads the args opencode puts on the input"
@@ -30769,6 +30824,11 @@ mod tests {
             "a failed gate refuses"
         );
         assert!(text.contains("cwd"), "the payload names the directory");
+        assert!(
+            !text.contains("workdir ?? cwd"),
+            "cwd stays the session directory"
+        );
+        assert!(text.contains("workdir"), "a tool workdir is forwarded");
         assert!(
             text.contains("commands.get"),
             "the after hook keeps the command the before hook saw"
@@ -31784,6 +31844,162 @@ mod tests {
         assert!(!identity.contains("user.name"), "{identity}");
         assert!(!identity.contains("GIT_AUTHOR"), "{identity}");
         assert!(!identity.contains("GIT_COMMITTER"), "{identity}");
+    }
+
+    /// Every command a guard reason recommends is allowed by that same gate.
+    /// `--force-with-lease` is the command the force-push reason names, and
+    /// it is an ordinary push. `--force` still asks.
+    #[test]
+    fn recommended_commands_are_not_refused_by_the_same_gate() {
+        let mut reasons = Vec::new();
+        for token in [
+            "git-force-push",
+            "git-reset-hard",
+            "git-clean-force",
+            "git-stash-clear",
+            "git-discard-worktree",
+            "rm-rf-outside-tmp",
+            "find-delete-outside-tmp",
+            "curl-pipe-shell",
+            "raw-disk",
+            "chmod-setuid",
+            "sudo",
+            "secret-in-argv",
+            "shell-secret-in-argv",
+            "python-missing-pep723",
+            "path-outside-workspace",
+            "python-dash-c",
+            "python-requires-uv",
+            "git-commit-identity",
+            "git-commit-message",
+            "git-commit-trailer",
+            "git-commit-signoff",
+            "git-push-evidence",
+            "git-merge-unready",
+            "git-remote-hidden",
+        ] {
+            reasons.push(policyd_reason(token));
+        }
+        reasons.extend(ask_pack::pack_reasons());
+        let mut commands = Vec::new();
+        for reason in &reasons {
+            let mut rest = reason.as_str();
+            while let Some(start) = rest.find('`') {
+                let after = &rest[start + 1..];
+                let Some(end) = after.find('`') else {
+                    break;
+                };
+                let span = after[..end].trim();
+                rest = &after[end + 1..];
+                let Some(first) = span.split_whitespace().next() else {
+                    continue;
+                };
+                if first.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && !first.contains(['=', ':'])
+                {
+                    commands.push(span.to_string());
+                }
+            }
+            if reason.contains("use --force-with-lease") {
+                commands.push("git push --force-with-lease origin HEAD:main".into());
+            }
+            if reason.contains("without --force") {
+                commands.push("git push origin HEAD:main".into());
+            }
+        }
+        assert!(
+            commands
+                .iter()
+                .any(|line| line.contains("--force-with-lease")),
+            "the force-push reason names --force-with-lease: {commands:?}"
+        );
+        let repo = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "seat@example.invalid"]);
+        git(&["config", "user.name", "seat"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        git(&["branch", "-M", "main"]);
+        std::fs::write(repo.path().join("README.md"), "seed\n").unwrap();
+        std::fs::write(repo.path().join("note.txt"), "land the note\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        let _g = env_guard();
+        let _env = HoldEnv::set(&[
+            ("XDG_DATA_HOME", data.path().to_str().unwrap()),
+            ("LJOS_CONFIG", ""),
+            ("LJOS_OFF", "0"),
+        ]);
+        super::with_config_home(home.path(), || {
+            let mut seen = std::collections::BTreeSet::new();
+            for template in &commands {
+                let line = template
+                    .replace("<test command>", "true")
+                    .replace("stash@{N}", "stash@{0}")
+                    .split_whitespace()
+                    .map(|word| match word {
+                        "FILE" => "note.txt",
+                        "TEXT" => "land",
+                        "REF" => "HEAD",
+                        other => other,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !seen.insert(line.clone()) {
+                    continue;
+                }
+                let ruled = gates::guard_verdict(&line, Some(repo.path()), &[]);
+                assert!(
+                    ruled.is_none(),
+                    "recommended `{line}` (from `{template}`) is refused: {ruled:?}"
+                );
+            }
+            let lease = guard_line("git push --force-with-lease origin HEAD:main", repo.path());
+            assert!(lease.is_none(), "{lease:?}");
+            let includes = guard_line("git push --force-if-includes origin HEAD:main", repo.path());
+            assert!(includes.is_none(), "{includes:?}");
+            let leased = guard_line(
+                "git push --force-with-lease=refs/heads/main origin main",
+                repo.path(),
+            );
+            assert!(leased.is_none(), "{leased:?}");
+            let forced = guard_line("git push --force origin HEAD:main", repo.path())
+                .expect("a force push still asks");
+            assert_eq!(forced.verdict, "ask");
+            assert_eq!(forced.pattern, "git-force-push");
+            assert!(
+                forced.reason.contains("--force-with-lease"),
+                "{}",
+                forced.reason
+            );
+            let both = guard_line(
+                "git push --force-with-lease --force origin HEAD:main",
+                repo.path(),
+            )
+            .expect("lease plus --force still asks");
+            assert_eq!(both.verdict, "ask");
+            let plus = guard_line("git push origin +main", repo.path()).expect("+refspec asks");
+            assert_eq!(plus.verdict, "ask");
+        });
+    }
+
+    fn guard_line(line: &str, cwd: &std::path::Path) -> Option<super::Rule> {
+        gates::guard_verdict(line, Some(cwd), &[])
     }
 
     /// The hook's verdict carries those words, and the runner is asked.
@@ -32953,8 +33169,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             push_tier(&args(&["--tags"]), &unread),
             PushTier::Person(_)
         ));
-        assert!(matches!(
+        assert_eq!(
             push_tier(&args(&["--force-with-lease"]), &unread),
+            PushTier::Free
+        );
+        assert_eq!(
+            push_tier(&args(&["--force-if-includes"]), &unread),
+            PushTier::Free
+        );
+        assert!(matches!(
+            push_tier(&args(&["--force-with-lease", "--force"]), &unread),
             PushTier::Person(_)
         ));
         assert!(matches!(
@@ -38242,6 +38466,31 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .to_string()
         )
         .is_err());
+    }
+
+    /// A relative workdir resolves against the session directory. A missing
+    /// workdir is the session directory, so the command is still judged.
+    #[test]
+    fn a_relative_workdir_resolves_against_the_session_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("path/to/git/repo");
+        std::fs::create_dir_all(&child).unwrap();
+        let relative = serde_json::json!({
+            "cwd": root.path(),
+            "tool_input": {"command": "git status", "workdir": "path/to/git/repo"}
+        });
+        assert_eq!(
+            command_directory(&relative.to_string()).unwrap(),
+            child.canonicalize().unwrap()
+        );
+        let missing = serde_json::json!({
+            "cwd": root.path(),
+            "tool_input": {"command": "git status", "workdir": "/path/to/git/repo"}
+        });
+        assert_eq!(
+            command_directory(&missing.to_string()).unwrap(),
+            root.path().canonicalize().unwrap()
+        );
     }
 
     /// A project whose board was split keeps new issues in `issues/<id>.org`.

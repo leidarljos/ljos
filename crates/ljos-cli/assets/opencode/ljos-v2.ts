@@ -123,16 +123,25 @@ export default Plugin.define({
     await ctx.tool.hook("execute.before", async (event: any) => {
       const seat = seatTool(event.tool)
       if (!seat) return
-      const command = (event.input as { command?: unknown })?.command
+      const input = event.input as { command?: unknown; workdir?: string } | undefined
+      const command = input?.command
+      const workdir = input?.workdir
       const key = blockKey(event.sessionID ?? event.session?.id, event.tool)
       if (typeof command === "string") commands.set(key, command)
       if (seat.bash && typeof command !== "string") return
+      // cwd is the session directory. A relative workdir is resolved against
+      // it, the way opencode's shell tool joins path.resolve(directory, workdir).
+      const tool_input = seat.bash
+        ? typeof workdir === "string" && workdir !== ""
+          ? { command, workdir }
+          : { command }
+        : (event.input ?? {})
       const a = await hook({
         session_id: event.sessionID ?? event.session?.id,
         hook_event_name: "PreToolUse",
         tool_name: seat.tool,
-        tool_input: seat.bash ? { command } : (event.input ?? {}),
-        cwd: (event.input as { workdir?: string })?.workdir ?? cwd,
+        tool_input,
+        cwd,
       })
       if (!seat.bash) return
       if (!a.ok) {
@@ -161,6 +170,7 @@ export default Plugin.define({
       let command = typeof args.command === "string" ? args.command : commands.get(key)
       commands.delete(key)
       if (seat.bash && typeof command !== "string") return
+      const workdir = args.workdir
       const output = event.output ?? {}
       const meta = output.metadata ?? {}
       const exit = meta.exit ?? meta.exitCode ?? meta.exit_code
@@ -170,12 +180,17 @@ export default Plugin.define({
       const tool_response: Record<string, unknown> = {}
       if (exit !== undefined && exit !== null) tool_response.exit_code = exit
       if (error) tool_response.error = error
+      const tool_input = seat.bash
+        ? typeof workdir === "string" && workdir !== ""
+          ? { command, workdir }
+          : { command }
+        : args
       await hook({
         session_id: event.sessionID ?? event.session?.id,
         hook_event_name: "PostToolUse",
         tool_name: seat.tool,
-        tool_input: seat.bash ? { command } : args,
-        cwd: args.workdir ?? cwd,
+        tool_input,
+        cwd,
         ...(verdict ? { permissionDecision: verdict } : {}),
         ...(Object.keys(tool_response).length ? { tool_response } : {}),
       })

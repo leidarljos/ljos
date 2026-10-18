@@ -1646,13 +1646,13 @@ fn lesson_sentence(words: &[String], issue: &str, shas: &[String], second: &str)
     let head = words.join(" ");
     let issue = issue.trim();
     let first = if issue.is_empty() {
-        // No ticket was filed. The lesson is the prompt and what went wrong,
-        // not a close of work that was never claimed.
+        // No ticket was filed. The lesson is a sentence about the work,
+        // then what went wrong.
         if shas.is_empty() {
             if head.is_empty() {
                 String::new()
             } else {
-                format!("{head}.")
+                format!("The session worked on {head}.")
             }
         } else if head.is_empty() {
             format!("Committed {}.", shas.join(" "))
@@ -3593,6 +3593,83 @@ print(f"id={ident}")
         assert!(note.contains("What this seat already knows"), "{note}");
         assert!(note.contains("slugify"), "{note}");
         assert!(note.contains("git-force-push"), "{note}");
+    }
+
+    /// A session that only met a force-push ask writes a sentence about that
+    /// ask. The prompt's words stay, and the lesson is not a keyword list.
+    #[test]
+    fn an_ask_only_session_lesson_is_a_sentence() {
+        let prompt = "git function slugify slug lowercases";
+        let ask =
+            "git-force-push: a force push rewrites history that others may already have pulled";
+        let keyword = "git function slugify slug lowercases. The guard asked about git-force-push.";
+        let text = lesson_text(prompt, "", &[], &[], &[ask.into()]);
+        assert_lesson(&text);
+        assert_ne!(text, keyword);
+        assert!(text.contains("worked"), "{text}");
+        assert!(text.contains("asked"), "{text}");
+        assert!(text.contains("slugify"), "{text}");
+        assert!(text.contains("lowercases"), "{text}");
+        assert!(
+            text.contains("The guard asked about git-force-push."),
+            "{text}"
+        );
+        assert!(!text.contains("closed"), "{text}");
+
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        arm(dir.path(), &tracker);
+        let atoms = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let pack = serve_pack({
+            let atoms = Arc::clone(&atoms);
+            move |req| {
+                let path = req.lines().next().unwrap_or("");
+                if path.contains("POST /v1/atoms") {
+                    let body = req
+                        .split_once("\r\n\r\n")
+                        .map(|(_, body)| body)
+                        .unwrap_or("");
+                    if let Ok(atom) = serde_json::from_str::<Value>(body) {
+                        atoms.lock().unwrap().push(atom);
+                    }
+                    return (
+                        200,
+                        r#"{"id":"atom-ask","kind":"lesson","origin":"agent-derived"}"#.into(),
+                    );
+                }
+                (200, "{}".into())
+            }
+        });
+        set_var("PACKSET_URL", &pack);
+        set_var("PACKSET_TIMEOUT_MS", "2000");
+        let session = "ask-only-sentence";
+        let (prompt_raw, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": prompt}),
+        );
+        let _ = observe(&prompt_raw, &prompt_call);
+        let (ask_raw, ask_call) = payload(
+            "PreToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}),
+        );
+        note_ask(&ask_raw, &ask_call, ask);
+        let (stop, stop_call) = payload("Stop", session, &repo, Value::Null);
+        let _ = observe(&stop, &stop_call);
+        let stored = atoms.lock().unwrap().clone();
+        let lesson = stored.last().expect("the lesson was posted");
+        let prose = lesson["text"].as_str().unwrap_or("");
+        assert_lesson(prose);
+        assert_ne!(prose, keyword);
+        assert!(prose.contains("worked"), "{prose}");
+        assert!(prose.contains("slugify"), "{prose}");
+        assert!(prose.contains("lowercases"), "{prose}");
+        assert!(prose.contains("git-force-push"), "{prose}");
+        assert!(!prose.contains("closed"), "{prose}");
     }
 
     /// A commit the guard only asked about never ran. The after hook still

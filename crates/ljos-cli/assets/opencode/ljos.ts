@@ -128,12 +128,20 @@ export const LjosSeat: Plugin = async ({ directory }) => {
     const command = output.args?.command
     if (typeof command === "string") commands.set(blockKey(input.sessionID, input.tool), command)
     if (seat.bash && typeof command !== "string") return
+    // cwd is the session directory. A relative workdir is resolved against
+    // it, the way opencode's shell tool joins path.resolve(directory, workdir).
+    const workdir = output.args?.workdir
+    const tool_input = seat.bash
+      ? typeof workdir === "string" && workdir !== ""
+        ? { command, workdir }
+        : { command }
+      : (output.args ?? {})
     const a = await hook({
       session_id: input.sessionID,
       hook_event_name: "PreToolUse",
       tool_name: seat.tool,
-      tool_input: seat.bash ? { command } : (output.args ?? {}),
-      cwd: output.args.workdir ?? directory,
+      tool_input,
+      cwd: directory,
     })
     if (!seat.bash) return
     if (!a.ok) {
@@ -164,6 +172,7 @@ export const LjosSeat: Plugin = async ({ directory }) => {
     let command = typeof args.command === "string" ? args.command : commands.get(key)
     commands.delete(key)
     if (seat.bash && typeof command !== "string") return
+    const workdir = args.workdir
     const verdict = blocked.get(key)
     if (verdict) blocked.delete(key)
     const meta = output?.metadata ?? {}
@@ -175,12 +184,17 @@ export const LjosSeat: Plugin = async ({ directory }) => {
     const tool_response: Record<string, unknown> = {}
     if (exit !== undefined && exit !== null) tool_response.exit_code = exit
     if (error) tool_response.error = error
+    const tool_input = seat.bash
+      ? typeof workdir === "string" && workdir !== ""
+        ? { command, workdir }
+        : { command }
+      : args
     await hook({
       session_id: input.sessionID,
       hook_event_name: "PostToolUse",
       tool_name: seat.tool,
-      tool_input: seat.bash ? { command } : args,
-      cwd: args.workdir ?? directory,
+      tool_input,
+      cwd: directory,
       ...(verdict ? { permissionDecision: verdict } : {}),
       ...(Object.keys(tool_response).length ? { tool_response } : {}),
     })

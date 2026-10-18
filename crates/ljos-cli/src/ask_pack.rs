@@ -182,6 +182,33 @@ pub fn ask_pack_switched_off(line: &str) -> Option<(Rule, String)> {
     Some((rule, format!("{ASK_PACK_ENV}={setting}")))
 }
 
+/// The pack's reasons, each as the hook prints it.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn pack_reasons() -> Vec<String> {
+    const PACK: &[&Ask] = &[
+        &DB_DROP,
+        &DB_RESET,
+        &DB_FLUSH,
+        &INFRA_DESTROY,
+        &CLUSTER_DELETE,
+        &CLOUD_DELETE,
+        &CONTAINER_PRUNE,
+        &PUBLISH,
+        &UNPUBLISH,
+        &SECRET_READ,
+        &SECRET_SEND,
+        &FILE_WIPE,
+        &CONFIG_DELETE,
+        &MIRROR_DELETE,
+        &STASH_DROP,
+        &PATH_HIJACK,
+    ];
+    PACK.iter()
+        .map(|ask| format!("{}: {}", ask.token, ask.said))
+        .collect()
+}
+
 /// [`ask_pack_verdict`] with the setting passed in.
 #[must_use]
 pub fn ask_pack_verdict_with(line: &str, setting: Option<&str>) -> Option<Rule> {
@@ -627,9 +654,10 @@ fn command_ask(words: &[String], seg: &str, via_xargs: bool) -> Option<&'static 
             let a = pos.first().copied().unwrap_or("");
             let b = pos.get(1).copied().unwrap_or("");
             match (a, b) {
-                ("system", "prune" | "reset") | ("volume", "prune" | "rm") => {
-                    Some(&CONTAINER_PRUNE)
-                }
+                ("system", "prune" | "reset") | ("volume", "prune") => Some(&CONTAINER_PRUNE),
+                // One volume named on the line is the form the refusal
+                // recommends. A substitution or `--all` is still a bulk delete.
+                ("volume", "rm") if bulk || has(args, &["--all"]) => Some(&CONTAINER_PRUNE),
                 ("image" | "container" | "network" | "builder" | "buildx", "prune") => {
                     Some(&CONTAINER_PRUNE)
                 }
@@ -1024,6 +1052,7 @@ mod tests {
             "docker compose up -d db",
             "docker compose down",
             "docker rm api-old",
+            "docker volume rm data",
             "docker rmi app:old",
             "docker system df",
             "docker pull acme/api:latest",
