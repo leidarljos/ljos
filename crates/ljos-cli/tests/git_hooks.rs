@@ -409,6 +409,15 @@ fn an_idle_sitting_is_finished_and_loses_its_prompt() {
         serde_json::from_str(&fs::read_to_string(&books[0]).unwrap()).unwrap();
     book["last_unix"] = serde_json::json!(10);
     book["prompt"] = serde_json::json!("old title about parsers");
+    book["prompt_unix"] = serde_json::json!(10);
+    if let Some(repos) = book
+        .get_mut("repos")
+        .and_then(|value| value.as_object_mut())
+    {
+        for row in repos.values_mut() {
+            row["last_unix"] = serde_json::json!(10);
+        }
+    }
     fs::write(&books[0], serde_json::to_string(&book).unwrap()).unwrap();
     let post = format!(
         r#"{{"hook_event_name":"PostToolUse","session_id":"seat:grokbot","cwd":"{}","tool_name":"Bash","tool_input":{{"command":"true"}}}}"#,
@@ -424,6 +433,126 @@ fn an_idle_sitting_is_finished_and_loses_its_prompt() {
         !prompt.contains("old title about parsers"),
         "the next sitting inherited the title: {book}"
     );
+}
+
+/// The seat's book still holds a prompt from another repository. The commit
+/// in this one is claimed under the commit subject.
+#[test]
+fn a_stale_prompt_for_another_repo_does_not_title_the_commit() {
+    let hab = Hab::new("repo");
+    let other = hab.root.join("scratch-notes");
+    fs::create_dir_all(&other).unwrap();
+    git_bare(&other, &["init", "-q", "-b", "main"]);
+    let payload = format!(
+        r#"{{"hook_event_name":"UserPromptSubmit","session_id":"seat:grokbot","cwd":"{}","prompt":"notes: add a second line"}}"#,
+        other.display()
+    );
+    hab.ljos_in(&other, &["hook"], Some(&payload), &[]);
+    install(&hab);
+    commit_file(&hab, "second.txt", "record the second reading");
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains("* STARTED [#C] record the second reading\n"),
+        "the claim did not take the commit subject:\n{org}"
+    );
+    assert!(
+        !org.contains("notes: add a second line"),
+        "the other repository's prompt titled the claim:\n{org}"
+    );
+}
+
+/// A prompt recorded for this checkout, in a sitting that is still open,
+/// still names the claim. The commit subject does not replace it.
+#[test]
+fn a_live_prompt_in_this_repo_still_titles_the_commit() {
+    let hab = Hab::new("repo");
+    let payload = format!(
+        r#"{{"hook_event_name":"UserPromptSubmit","session_id":"seat:grokbot","cwd":"{}","prompt":"retitle the readme"}}"#,
+        hab.repo.display()
+    );
+    hab.ljos_in(&hab.repo, &["hook"], Some(&payload), &[]);
+    install(&hab);
+    commit_file(&hab, "titled.txt", "unrelated subject line");
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains("* STARTED [#C] retitle the readme\n"),
+        "the current sitting's prompt lost to the commit subject:\n{org}"
+    );
+    assert!(
+        !org.contains("unrelated subject line"),
+        "the commit subject replaced the live prompt:\n{org}"
+    );
+}
+
+/// Repo A's row is hours old. The book's clock is fresh because this commit
+/// is in repo B. A's claim is finished.
+#[test]
+fn a_commit_in_one_repo_finishes_an_idle_row_in_another() {
+    let hab = Hab::new("repo-b");
+    let repo_a = hab.root.join("repo-a");
+    fs::create_dir_all(&repo_a).unwrap();
+    git_bare(&repo_a, &["init", "-q", "-b", "main"]);
+    let top_a = String::from_utf8(hab.git(&repo_a, &["rev-parse", "--show-toplevel"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let book_path = hab.run.join("ljos").join(format!(
+        "book-{}.json",
+        ljos_cli::session_tag("seat:grokbot")
+    ));
+    fs::create_dir_all(book_path.parent().unwrap()).unwrap();
+    let mut repos = serde_json::Map::new();
+    repos.insert(
+        top_a.clone(),
+        serde_json::json!({
+            "issue": "probe-a11e",
+            "title": "notes: add a second line",
+            "finished": false,
+            "last_unix": 10
+        }),
+    );
+    let book = serde_json::json!({
+        "prompt": "notes: add a second line",
+        "prompt_repo": top_a.clone(),
+        "prompt_unix": 10,
+        "last_unix": now,
+        "repos": repos
+    });
+    fs::write(&book_path, serde_json::to_string(&book).unwrap()).unwrap();
+    fs::create_dir_all(hab.tracker.join("Software/probe")).unwrap();
+    fs::write(
+        hab.tracker.join("Software/probe/issues.org"),
+        "* TODO [#C] notes: add a second line\n:PROPERTIES:\n:ID:         probe-a11e\n:END:\n",
+    )
+    .unwrap();
+    install(&hab);
+    commit_file(&hab, "fresh.txt", "record the second reading");
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains("* DONE [#C] notes: add a second line\n"),
+        "repo A's row was still open:\n{org}"
+    );
+    let log = vissue_log(&hab.tracker);
+    assert!(
+        log.contains("update probe-a11e -s DONE"),
+        "repo A was not finished:\n{log}"
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&book_path).unwrap()).unwrap();
+    let still_open = saved["repos"]
+        .as_object()
+        .into_iter()
+        .flat_map(|repos| repos.iter())
+        .any(|(key, row)| {
+            key == &top_a
+                && row["issue"].as_str() == Some("probe-a11e")
+                && row["finished"].as_bool() != Some(true)
+        });
+    assert!(!still_open, "repo A's row is still unfinished: {saved}");
 }
 
 #[test]

@@ -82,10 +82,20 @@ struct Book {
     prompt: String,
     #[serde(default)]
     repos: BTreeMap<String, RepoBook>,
-    /// Unix seconds of the last MCP call for this sitting. Zero means the
+    /// Unix seconds of the last call for this sitting. Zero means the
     /// sitting has not been touched, and an idle check does not finish it.
+    /// This is not a row's age: a commit in one repository refreshes it
+    /// while another repository's row stays idle.
     #[serde(default)]
     last_unix: u64,
+    /// Repository `prompt` was recorded for. A git-hook claim uses the
+    /// prompt as its title only when the commit is in this checkout and
+    /// the sitting is still open.
+    #[serde(default)]
+    prompt_repo: String,
+    /// Unix seconds when `prompt` was recorded. Zero means it was not stamped.
+    #[serde(default)]
+    prompt_unix: u64,
     /// Pid of the runner that last wrote this book. A later session finishes
     /// the claim when that pid is gone, which is how a timeout (the runner
     /// exits 124 before Stop) still closes.
@@ -142,6 +152,11 @@ struct RepoBook {
     /// own; the words come from the prompt payload.
     #[serde(default)]
     title: Option<String>,
+    /// Unix seconds of the last hook call that touched this repository.
+    /// Zero means the row has no clock of its own. The book's `last_unix`
+    /// is the last touch of whichever repository the seat used, not this one.
+    #[serde(default)]
+    last_unix: u64,
 }
 
 /// Whether the guard and the pack daemon should stay out of this process.
@@ -233,16 +248,24 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         super::hook_timed("finish_orphans", || finish_orphans(&session, deadline));
         super::hook_timed("refresh_landed_deeds", || refresh_landed_deeds(deadline));
     }
-    // A sitting that only commits never sees SessionStart. Close one whose
-    // last call is older than the window before this call stamps it again.
-    close_idle_sittings(unix_secs());
+    // A sitting that only commits never sees SessionStart. Close every row
+    // that has been idle, including one in another repository, before this
+    // call stamps the book again.
     let path = book_path(&session);
+    let repo_hint = {
+        let mut scout = load_book(&path);
+        repo_key(&mut scout, &value)
+    };
+    let hint = (!repo_hint.is_empty()).then_some(repo_hint.as_str());
+    close_idle_sittings(unix_secs(), Some(session.as_str()), hint);
     let mut book = load_book(&path);
     book.owner_pid = next_owner_pid(&call.event, book.owner_pid, hook_owner());
+    let mut prompt_set = false;
     if call.event == "UserPromptSubmit" {
         let prompt = collapse(&call.cue);
         if !prompt.is_empty() {
             book.prompt = prompt.chars().take(4000).collect();
+            prompt_set = true;
         }
     }
     // agy's first model call often runs before the transcript has the
@@ -251,10 +274,41 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         let prompt = collapse(&super::prompt_of(&value));
         if !prompt.is_empty() {
             book.prompt = prompt.chars().take(4000).collect();
+            prompt_set = true;
         }
     }
     let repo = repo_key(&mut book, &value);
-    remember_title(&mut book, &repo);
+    let now = unix_secs();
+    if prompt_set {
+        bind_prompt(&mut book, &repo, now);
+    }
+    // `ljos hook --git-commit` puts the commit subject in `prompt`. That
+    // subject titles the claim when this record has no live prompt for
+    // the checkout. A prompt from the current sitting in this repository
+    // still wins, and is left on the book for that sitting.
+    let git_hook = value
+        .get("ljos_git_hook")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let offered = super::prompt_of(&value);
+    let subject_title = git_hook && !prompt_live_for(&book, &repo, now);
+    if subject_title {
+        // An issue already open in this checkout keeps the title it was
+        // filed under. The subject is for the claim this commit opens.
+        let open = book
+            .repos
+            .get(&repo)
+            .is_some_and(|row| row.issue.is_some() && !row.finished);
+        if !open {
+            let subject = collapse(&offered);
+            if !subject.is_empty() && !repo.is_empty() {
+                book.repos.entry(repo.clone()).or_default().title =
+                    Some(subject.chars().take(4000).collect());
+            }
+        }
+    } else {
+        remember_title(&mut book, &repo);
+    }
     let commit = is_git_commit(&call.cue);
     // A clean PostToolUse is the commit that just ran. Record the starting
     // HEAD on every other call, including the ask that stopped the command,
@@ -287,7 +341,8 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         // when it writes a file inside this work tree, tracked or not.
         // A commit claims too, so a sitting that only commits still has a ticket.
         if is_edit(&value, &call.cue) || commit || writes_worktree(&repo, &call.cue) {
-            let _ = ensure_claim(&mut book, &repo);
+            let offered = subject_title.then_some(offered.as_str());
+            let _ = ensure_claim(&mut book, &repo, offered);
         }
         // The commit has not happened on the way in. Cite it on the way
         // out when the evidence says it landed, every new sha since the
@@ -314,7 +369,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     if landed && !repo.is_empty() {
         book.last_repo.clone_from(&repo);
     }
-    book.last_unix = unix_secs();
+    stamp_touch(&mut book, &repo, unix_secs());
     store_book(&path, &book);
     recall
 }
@@ -497,25 +552,45 @@ fn sitting_idle_from(raw: Option<&str>) -> Option<Duration> {
     }
 }
 
-/// Finish seat records idle longer than [`sitting_idle`], and drop the
-/// finished rows so the next call files its own claim.
-fn close_idle_sittings(now: u64) {
+/// Finish idle rows on the next hook call.
+///
+/// Each repository has its own clock. A fresh `last_unix` on the book,
+/// from a commit in one checkout, does not keep another checkout's row
+/// open. `session` and `current` name the book and repository this call
+/// is in. A row that predates the per-repository clock is finished when
+/// this call is in a different repository: the book's clock was refreshed
+/// by that other checkout, not by the row.
+pub(crate) fn sweep_idle_sittings(session: &str, current: &str) {
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let current = (!current.is_empty()).then_some(current);
+    close_idle_sittings(unix_secs(), Some(session), current);
+}
+
+/// Finish rows idle longer than [`sitting_idle`], and drop the finished
+/// ones so the next call in that repository files its own claim.
+fn close_idle_sittings(now: u64, session: Option<&str>, current: Option<&str>) {
     let Some(limit) = sitting_idle() else {
         return;
     };
+    let current_path = session.map(book_path);
     for path in book_files() {
         let mut book = load_book(&path);
-        if !book.repos.values().any(sitting_open) {
+        let here = current_path.as_ref().is_some_and(|want| want == &path);
+        let hint = if here { current } else { None };
+        let idle: Vec<String> = book
+            .repos
+            .iter()
+            .filter(|(repo, row)| row_is_idle(now, &book, repo, row, limit, hint))
+            .map(|(repo, _)| repo.clone())
+            .collect();
+        if idle.is_empty() {
             continue;
         }
-        if !idle_due(now, book.last_unix, limit) {
-            continue;
-        }
-        finish_open(&mut book);
+        finish_rows(&mut book, &idle);
         book.repos.retain(|_, row| !row.finished);
         book.cwd_repo
             .retain(|_, repo| book.repos.contains_key(repo));
-        book.prompt.clear();
+        release_spent_prompt(&mut book);
         store_book(&path, &book);
     }
 }
@@ -800,11 +875,14 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
     let path = book_path(&sitting_key());
     let mut book = load_book(&path);
-    book.last_unix = unix_secs();
+    let now = unix_secs();
+    book.last_unix = now;
     if book.prompt.trim().is_empty() {
         book.prompt = task.chars().take(4000).collect();
+        bind_prompt(&mut book, &place, now);
     }
     let row = book.repos.entry(place.clone()).or_default();
+    row.last_unix = now;
     row.issue = Some(issue_id.clone());
     row.finished = false;
     row.claim_failed = false;
@@ -1055,7 +1133,7 @@ fn git_toplevel(cwd: &Path) -> Option<String> {
     (!top.is_empty()).then(|| top.to_string())
 }
 
-fn ensure_claim(book: &mut Book, repo: &str) -> Result<(), String> {
+fn ensure_claim(book: &mut Book, repo: &str, offered: Option<&str>) -> Result<(), String> {
     let row = book.repos.entry(repo.to_string()).or_default();
     if row.claim_failed {
         return Ok(());
@@ -1068,7 +1146,12 @@ fn ensure_claim(book: &mut Book, repo: &str) -> Result<(), String> {
     }
     // A hold from another repository is a different ticket. This sitting
     // files its own claim for the repository the tool just wrote.
-    let title = title_from(&book.prompt, repo);
+    // A git hook passes the commit subject when the saved prompt is not
+    // this sitting's.
+    let title = match offered.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(subject) => title_from(subject, repo),
+        None => title_from(&book.prompt, repo),
+    };
     let project = project_for(repo);
     match file_and_claim(&project, &title) {
         Ok(issue) => {
@@ -1212,7 +1295,7 @@ pub(crate) fn cite_into_open_sitting(repo: &str) -> bool {
     // The failure notes and the baseline stay. A retry cites the new sha
     // on this issue; it does not finish the row or replace its start.
     let _ = cite_row(&mut book, &key, repo);
-    book.last_unix = unix_secs();
+    stamp_touch(&mut book, &key, unix_secs());
     store_book(&path, &book);
     true
 }
@@ -1377,11 +1460,7 @@ fn refresh_landed_deeds(deadline: std::time::Instant) {
             let Some(issue) = row.issue.clone() else {
                 continue;
             };
-            let heard = if !book.prompt.trim().is_empty() {
-                book.prompt.clone()
-            } else {
-                row.title.clone().unwrap_or_default()
-            };
+            let heard = heard_title(&book, &repo, row);
             let title = title_from(&heard, &repo);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
@@ -1571,11 +1650,18 @@ fn head_sha(repo: &str) -> Result<String, String> {
 
 fn finish_open(book: &mut Book) {
     let repos: Vec<String> = book.repos.keys().cloned().collect();
+    finish_rows(book, &repos);
+    book.prompt.clear();
+    book.prompt_repo.clear();
+    book.prompt_unix = 0;
+}
+
+fn finish_rows(book: &mut Book, repos: &[String]) {
     for repo in repos {
         let mut cached = false;
         let in_a_minute = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let _ = reconcile_deeds(book, &repo, in_a_minute, &mut Heads::new(), &mut cached);
-        let Some(row) = book.repos.get(&repo) else {
+        let _ = reconcile_deeds(book, repo, in_a_minute, &mut Heads::new(), &mut cached);
+        let Some(row) = book.repos.get(repo) else {
             continue;
         };
         let issue = row.issue.clone();
@@ -1584,19 +1670,15 @@ fn finish_open(book: &mut Book) {
         // A claim closes with a lesson. So does a sitting that only failed
         // or was asked: the next session otherwise has nothing to recall.
         if !row.lesson && (issue.is_some() || notes) {
-            let heard = if !book.prompt.trim().is_empty() {
-                book.prompt.clone()
-            } else {
-                row.title.clone().unwrap_or_default()
-            };
-            let title = title_from(&heard, &repo);
+            let heard = heard_title(book, repo, row);
+            let title = title_from(&heard, repo);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
             let label = issue.clone().unwrap_or_default();
             match write_lesson(&label, &title, &deeds, &failures, &asks) {
                 Ok(()) => {
-                    if let Some(row) = book.repos.get_mut(&repo) {
+                    if let Some(row) = book.repos.get_mut(repo) {
                         row.lesson = true;
                     }
                 }
@@ -1611,15 +1693,13 @@ fn finish_open(book: &mut Book) {
         }
         match close_issue(&issue) {
             Ok(()) => {
-                if let Some(row) = book.repos.get_mut(&repo) {
+                if let Some(row) = book.repos.get_mut(repo) {
                     row.finished = true;
                 }
             }
             Err(e) => log_line(&format!("finish: {e}")),
         }
     }
-    // The next sitting must not inherit this title.
-    book.prompt.clear();
 }
 
 /// The ticket is done, the claim is released, the tracker commit says
@@ -1657,11 +1737,14 @@ pub fn note_ask(raw: &str, call: &super::HookCall, reason: &str) {
     // The ask is the call that did not run. Remember HEAD now, because the
     // after hook is a later process and must not cite this commit.
     note_start(&mut book, &repo);
+    let now = unix_secs();
     let row = book.repos.entry(repo).or_default();
+    row.last_unix = now;
     let short: String = reason.chars().take(160).collect();
     if row.asks.len() < 4 && !row.asks.iter().any(|seen| seen == &short) {
         row.asks.push(short);
     }
+    book.last_unix = now;
     store_book(&path, &book);
 }
 
@@ -2013,6 +2096,142 @@ fn lesson_sentence(words: &[String], issue: &str, shas: &[String], second: &str)
 /// and the next session then has nothing to recall.
 fn lesson_prose_ok(text: &str) -> bool {
     packset_core::prose_refuse(text, packset_core::ProseRole::Atom).is_ok()
+}
+
+/// Record that `prompt` belongs to `repo`. A later git hook in another
+/// checkout can tell the words are not its title.
+fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
+    if repo.is_empty() || book.prompt.trim().is_empty() {
+        return;
+    }
+    book.prompt_repo = repo.to_string();
+    book.prompt_unix = now;
+}
+
+/// The prompt the lesson and the claim use for `repo`. The book's prompt
+/// is that text only when it was recorded for this checkout.
+fn heard_title(book: &Book, repo: &str, row: &RepoBook) -> String {
+    if prompt_belongs_to(book, repo) {
+        let prompt = book.prompt.trim();
+        if !prompt.is_empty() {
+            return prompt.to_string();
+        }
+    }
+    row.title.clone().unwrap_or_default()
+}
+
+/// Whether the saved prompt is the live one for `repo`. A git hook may
+/// title a claim with it. Another repository's prompt, or one from a
+/// sitting that has already gone idle, may not.
+fn prompt_live_for(book: &Book, repo: &str, now: u64) -> bool {
+    if !prompt_belongs_to(book, repo) {
+        return false;
+    }
+    let Some(limit) = sitting_idle() else {
+        return true;
+    };
+    let earlier = book.repos.iter().any(|(key, row)| {
+        same_checkout(key, repo) && row_is_idle(now, book, key, row, limit, Some(repo))
+    });
+    if earlier {
+        return false;
+    }
+    let open = book
+        .repos
+        .iter()
+        .any(|(key, row)| same_checkout(key, repo) && !row.finished && sitting_open(row));
+    if open {
+        return true;
+    }
+    // The prompt was recorded for this checkout and no claim is open.
+    // An old stamp is the previous sitting; a fresh one is this sitting,
+    // still waiting for its first claim.
+    let stamped = if book.prompt_unix > 0 {
+        book.prompt_unix
+    } else {
+        book.last_unix
+    };
+    !idle_due(now, stamped, limit)
+}
+
+fn prompt_belongs_to(book: &Book, repo: &str) -> bool {
+    let prompt = book.prompt.trim();
+    if prompt.is_empty() || repo.is_empty() {
+        return false;
+    }
+    let recorded = book.prompt_repo.trim();
+    if !recorded.is_empty() {
+        return same_checkout(recorded, repo);
+    }
+    book.repos.iter().any(|(key, row)| {
+        !row.finished
+            && same_checkout(key, repo)
+            && row
+                .title
+                .as_deref()
+                .is_some_and(|title| title.trim() == prompt)
+    })
+}
+
+/// Drop the prompt once the repository it belongs to no longer has an open row.
+fn release_spent_prompt(book: &mut Book) {
+    if book.prompt.trim().is_empty() {
+        return;
+    }
+    let recorded = book.prompt_repo.trim();
+    let still = if !recorded.is_empty() {
+        book.repos.keys().any(|repo| same_checkout(repo, recorded))
+    } else {
+        let prompt = book.prompt.trim();
+        book.repos.values().any(|row| {
+            !row.finished
+                && row
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.trim() == prompt)
+        })
+    };
+    if !still {
+        book.prompt.clear();
+        book.prompt_repo.clear();
+        book.prompt_unix = 0;
+    }
+}
+
+/// Whether `row` has been idle past `limit`. A row clock wins. A row with
+/// no clock of its own follows the book when that clock is idle, and is
+/// idle on a call in a different repository when the book clock is fresh:
+/// that fresh clock is the other repository's touch.
+fn row_is_idle(
+    now: u64,
+    book: &Book,
+    repo: &str,
+    row: &RepoBook,
+    limit: Duration,
+    current: Option<&str>,
+) -> bool {
+    if !sitting_open(row) {
+        return false;
+    }
+    if row.last_unix > 0 {
+        return idle_due(now, row.last_unix, limit);
+    }
+    if idle_due(now, book.last_unix, limit) {
+        return true;
+    }
+    matches!(
+        current,
+        Some(cur) if !cur.is_empty() && book.last_unix > 0 && !same_checkout(cur, repo)
+    )
+}
+
+fn stamp_touch(book: &mut Book, repo: &str, now: u64) {
+    if !repo.is_empty() {
+        if let Some(row) = book.repos.get_mut(repo) {
+            row.last_unix = now;
+        }
+    }
+    book.last_unix = now;
 }
 
 /// Keep the prompt on the repository row. The lesson and a later session
@@ -3453,6 +3672,101 @@ mod tests {
         assert_eq!(next_owner_pid("PreToolUse", 10, 99), 10);
         assert_eq!(next_owner_pid("Stop", 10, 99), 10);
         assert_eq!(next_owner_pid("PostToolUse", 0, 99), 99);
+    }
+
+    #[test]
+    fn an_old_row_idles_while_the_book_clock_is_fresh() {
+        let limit = Duration::from_secs(2 * 60 * 60);
+        let now = 1_000_000_u64;
+        let mut book = Book {
+            last_unix: now,
+            ..Book::default()
+        };
+        book.repos.insert(
+            "/repo-a".into(),
+            RepoBook {
+                issue: Some("probe-aaaa".into()),
+                last_unix: 10,
+                ..RepoBook::default()
+            },
+        );
+        book.repos.insert(
+            "/repo-b".into(),
+            RepoBook {
+                issue: Some("probe-bbbb".into()),
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        let idle = row_is_idle(
+            now,
+            &book,
+            "/repo-a",
+            book.repos.get("/repo-a").unwrap(),
+            limit,
+            Some("/repo-b"),
+        );
+        let fresh = row_is_idle(
+            now,
+            &book,
+            "/repo-b",
+            book.repos.get("/repo-b").unwrap(),
+            limit,
+            Some("/repo-b"),
+        );
+        assert!(idle, "repo A was last touched at 10");
+        assert!(!fresh, "repo B was touched with the book");
+
+        let unclocked = RepoBook {
+            issue: Some("probe-cccc".into()),
+            ..RepoBook::default()
+        };
+        assert!(
+            row_is_idle(now, &book, "/repo-c", &unclocked, limit, Some("/repo-b")),
+            "a row with no clock is not the checkout that refreshed the book"
+        );
+        assert!(
+            !row_is_idle(now, &book, "/repo-b", &unclocked, limit, Some("/repo-b")),
+            "the current checkout keeps the fresh book clock"
+        );
+    }
+
+    #[test]
+    fn a_prompt_for_another_repo_is_not_a_live_title() {
+        let _g = lock();
+        let _saved = Restore::new(&["LJOS_SITTING_IDLE"]);
+        unsafe { std::env::remove_var("LJOS_SITTING_IDLE") };
+        let now = 1_000_000_u64;
+        let mut book = Book {
+            prompt: "notes: add a second line".into(),
+            prompt_repo: "/other".into(),
+            prompt_unix: now,
+            last_unix: now,
+            ..Book::default()
+        };
+        assert!(
+            !prompt_live_for(&book, "/repo", now),
+            "the prompt belongs to /other"
+        );
+        book.prompt_repo = "/repo".into();
+        book.repos.insert(
+            "/repo".into(),
+            RepoBook {
+                issue: Some("probe-aaaa".into()),
+                title: Some(book.prompt.clone()),
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        assert!(
+            prompt_live_for(&book, "/repo", now),
+            "the current sitting in this checkout keeps its prompt"
+        );
+        book.repos.get_mut("/repo").unwrap().last_unix = 10;
+        assert!(
+            !prompt_live_for(&book, "/repo", now),
+            "an earlier sitting's prompt does not title the next claim"
+        );
     }
 
     #[test]

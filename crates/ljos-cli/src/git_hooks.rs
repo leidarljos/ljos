@@ -306,13 +306,17 @@ fn book_commit(hook: &str) -> Result<()> {
     // child git and ljos processes; this process keeps the environment it
     // was started with, so the rev-parse above still sees the checkout.
     let _children = HookChildren::enter();
+    // Finish idle rows in other checkouts before this commit is cited into
+    // an open sitting. That path returns without observe, which is the
+    // other place the idle sweep runs.
+    let session = crate::bookkeep::seat_session();
+    crate::bookkeep::sweep_idle_sittings(&session, &repo);
     // The commit already belongs to an open sitting in this checkout.
     // Booking it on the seat's own session would open a second book.
     if crate::bookkeep::cite_into_open_sitting(&repo) {
         remember_booked(&repo, &head);
         return Ok(());
     }
-    let session = crate::bookkeep::seat_session();
     let command = if subject.is_empty() {
         "git commit".to_string()
     } else {
@@ -326,6 +330,7 @@ fn book_commit(hook: &str) -> Result<()> {
         "tool_input": {"command": command},
         "tool_response": {"exit_code": 0},
         "prompt": subject,
+        "ljos_git_hook": true,
     })
     .to_string();
     let call = crate::HookCall {
