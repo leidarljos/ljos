@@ -27,7 +27,16 @@ html_static_path = ["_static"]
 html_favicon = "_static/favicon.svg"
 html_logo = "_static/mark.svg"
 html_title = "ljos"
+html_baseurl = "https://leidarljos.github.io/ljos/"
+html_copy_source = True
 html_css_files = ["custom.css"]
+
+# Preview card. docs/scripts/og_image.py paints this from the repo logo.
+_OG_IMAGE = "https://leidarljos.github.io/ljos/_static/og.png"
+_PAGE_DESCRIPTION = {
+    "search": "Search the ljos documentation.",
+    "genindex": "Index of the ljos documentation.",
+}
 
 html_context = {
     "source_type": "github",
@@ -44,6 +53,7 @@ html_theme_options = {
     "open_in_chatgpt": False,
     "open_in_claude": False,
     "github_url": "https://github.com/leidarljos/ljos",
+    "og_image_url": _OG_IMAGE,
     "nav_links": [
         {"title": "Get started", "url": "getting-started"},
         {"title": "How-to", "url": "howto"},
@@ -58,3 +68,23 @@ intersphinx_mapping: dict = {}
 
 copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
+
+
+def _social(app, pagename, templatename, context, doctree):
+    """Description and preview image on generated pages, and the index title."""
+    meta = context.get("meta")
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    if pagename == "index":
+        context["title"] = "ljos"
+    if not str(meta.get("description") or "").strip():
+        meta["description"] = _PAGE_DESCRIPTION.get(
+            pagename,
+            "Documentation for ljos, a seat over memory, a tracker, and a command guard.",
+        )
+    if not str(meta.get("cover") or "").strip():
+        meta["cover"] = _OG_IMAGE
+    context["meta"] = meta
+
+
+def setup(app):
+    app.connect("html-page-context", _social)

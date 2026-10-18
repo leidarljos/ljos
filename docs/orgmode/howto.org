@@ -1,4 +1,5 @@
 #+title: How-to
+#+description: How to wire ljos into a runner, write to another seat, sit an issue, and check the seat.
 #+options: toc:nil num:nil
 
 * Wire the seat into an agent runner
@@ -915,20 +916,19 @@ $ ljos-consensus settle --issue ID --susceptibility 0.8 --trust '[["alice","caro
 
 * Check the seat
 
+=ljos doctor= prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer.
+=ljos doctor --all= prints every row.
+The block is an example of that listing, not a transcript of one machine.
+On this tree =ljos doctor= read these versions from crates.io: ljos 0.30.0, vissue-cli 0.21.0, packset 0.15.1.
+=ljos --version= printed =ljos 0.30.0=.
+The rows are the shape when the binary on =PATH= is that version: no =behind= and no =ahead of= in front of =crates.io=.
+Paths stand in for those binaries.
+
 #+begin_src text
-$ ljos doctor
-ok	ljos	/path/to/ljos  0.18.0  crates.io (cached) 0.18.0
-ok	vissue	/path/to/vissue  0.18.0  crates.io (cached) 0.18.0
-ok	packsetd	/path/to/packsetd  0.11.0  crates.io (cached) 0.11.0
-ok	seat	<runner>, holding as sess-<hash> (from this conversation's record)
-ok	pack	http://127.0.0.1:PORT workspace seat
-ok	memory	520 live of 20000
-ok	host key	/path/to/host.key (32-byte seed)
-ok	deed store	size=150 root=<hash> ed25519 <hash>
-ok	tracker	vissue 0.18.0 root=/path/to/tracker prefix=Issues; 0 unpushed
-ok	claim graph	<hash>  claimed  task  <hash>  gen=2  ISSUE
-ok	runner mcp	<runner>: ljos registered
-ok	jev	on  jev-1.13.0  88 calls, 0 cached  $0.0035 of $4.00 this month
+$ ljos doctor --all
+ok	ljos	/path/to/ljos  0.30.0  crates.io 0.30.0
+ok	vissue	/path/to/vissue  0.21.0  crates.io 0.21.0
+ok	packsetd	/path/to/packsetd  0.15.1  crates.io 0.15.1
 #+end_src
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The

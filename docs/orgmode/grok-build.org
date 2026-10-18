@@ -47,7 +47,7 @@ added context to the model after the three tool events, =Stop= and
 =SubagentStop=. It drops it after a prompt or at the start of a session.
 
 The frozen file is
-[[file:../../crates/ljos-cli/assets/grok/ljos.json][crates/ljos-cli/assets/grok/ljos.json]].
+[[https://github.com/leidarljos/ljos/blob/main/crates/ljos-cli/assets/grok/ljos.json][crates/ljos-cli/assets/grok/ljos.json]].
 Its ={ljos}= is filled in at onboard. =PreToolUse= gets 10 seconds, the
 TCB check's budget, as do the two tool-result events; the prompt, =Stop=
 and =SubagentStop= get 15, and =PreCompact= and =SessionEnd= 5, Grok's

@@ -1,3 +1,6 @@
+:description: This crate is one habitat. The seat that sits on it is ljos. Citing a deed names it; the bytes stay in deedar. The ticket stays open until vissue closes it.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
 .. _in-the-seat-1:
 
 In the seat

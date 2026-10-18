@@ -48,6 +48,7 @@ prompt stdout, so the note is held until the first tool result. The
 The Model Context Protocol (MCP) server and the Heads-Up Display (HUD)
 use Tokio. =ljos onboard --harness grok= bumps
 =LJOS_MCP_GENERATION= in =~/.grok/config.toml= when the crate version
-moved, and Grok respawns the server. The changelog records a prompt
-hook median of 38 ms on the bench it names. That is the latency the seat
+moved, and Grok respawns the server. The [[https://github.com/leidarljos/ljos/blob/main/CHANGELOG.md][changelog]] records a prompt
+hook median of 38 ms over eight prompts, measured with
+=scripts/hook-bench.sh=. That is the latency the seat
 has measured.

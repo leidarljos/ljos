@@ -1,3 +1,9 @@
+:description: One seat over five habitats and argv law. It owns none of them. A seat is one agent, or one person, working a tracker. Five habitats answer five questions for it. Cards are what the human froze.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+ljos
+====
+
 .. raw:: html
 
    <div class="vi-hero">
@@ -40,10 +46,11 @@ content-addressed store, a Cap'n Proto snapshot. No model is required to
 run any of it, and any model or agent runner that can call a command or an
 MCP tool can sit in the seat.
 
-|image1|
+.. image:: _static/seat.svg
+   :width: 100.0%
 
 Install
-=======
+-------
 
 .. code:: console
 
@@ -58,15 +65,18 @@ writer ``packsetd``. ``packset-embed`` is the encoder for meaning-based search; 
 ``ljos-consensus``, which ``ljos consensus`` runs. ``ljos-policyd`` is the command
 check. Those are the binaries the tutorial calls. Each comes prebuilt from
 its GitHub release; ``cargo install`` takes the same names and builds from
-source.
+source with Rust 1.89 or newer. An older Rust fails on several crates and can
+install an ``ljos-policyd`` older than 0.3.0 without a word; ``ljos doctor`` marks
+that row ``no`` and names the fix.
 
-``doctor`` names each habitat and whether it answers. The seat works with the
+``doctor`` says whether ljos is ready and lists the habitats that need action;
+``doctor --all`` names each habitat and whether it answers. The seat works with the
 habitats it has; a missing one is reported, not guessed around. ``onboard``
 registers the server with an agent runner and installs the sitting protocol
 as its skill; ``ljos protocol`` prints that protocol for any other.
 
 First minute
-============
+------------
 
 .. code:: console
 
@@ -93,6 +103,3 @@ tracker in about ten minutes.
    reference
    explanation
    seat
-
-.. |image1| image:: _static/seat.svg
-   :width: 100.0%

@@ -1,3 +1,9 @@
+:description: The pack only helps a Grok session if it reaches the model.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+Grok Build
+==========
+
 The pack only helps a Grok session if it reaches the model.
 
 Grok discards ``UserPromptSubmit`` stdout. It passes ``PostToolUse``
@@ -13,7 +19,7 @@ to ssh. ``Stop`` still blocks the turn once if it picks with no ballot.
 rules; a deny blocks. Nothing needs a ``sync.sh``.
 
 Install
-=======
+-------
 
 .. code:: console
 
@@ -29,7 +35,7 @@ when the crate version moved, so Grok's config watcher respawns the
 server; a session restart is not required.
 
 Why these events
-================
+----------------
 
 ====================== ================================================================================================================================================= ====================================================
 Event                  What ``ljos hook`` does                                                                                                                           What Grok does with stdout
@@ -48,7 +54,7 @@ added context to the model after the three tool events, ``Stop`` and
 ``SubagentStop``. It drops it after a prompt or at the start of a session.
 
 The frozen file is
-`crates/ljos-cli/assets/grok/ljos.json <../../crates/ljos-cli/assets/grok/ljos.json>`__.
+`crates/ljos-cli/assets/grok/ljos.json <https://github.com/leidarljos/ljos/blob/main/crates/ljos-cli/assets/grok/ljos.json>`__.
 Its ``{ljos}`` is filled in at onboard. ``PreToolUse`` gets 10 seconds, the
 TCB check's budget, as do the two tool-result events; the prompt, ``Stop``
 and ``SubagentStop`` get 15, and ``PreCompact`` and ``SessionEnd`` 5, Grok's
@@ -62,7 +68,7 @@ that cannot ask (stdin carrying ``turn_id``) still gets the ask rewritten to
 a deny.
 
 A panel member is a supervised child
-====================================
+------------------------------------
 
 A child that exits is classified before it is started again.
 ``ljos supervise NAME --harness grok --exit crash --at SECONDS`` prints
@@ -74,7 +80,7 @@ crash, ``temporary`` never. Three restarts inside sixty seconds give up.
 The command prints the decision. It does not start the pane.
 
 Smoke
-=====
+-----
 
 .. code:: console
 
@@ -87,7 +93,7 @@ An allow prints nothing unless a prompt has already kept pack text.
 A TCB deny still blocks.
 
 Personas as Grok agents
-=======================
+-----------------------
 
 Grok spawns a subagent by its agent definition, a Markdown file with YAML
 front matter in ``~/.grok/agents``. ``ljos onboard --harness grok`` and
@@ -105,7 +111,7 @@ itself and starts its members with the table's ``headless`` argv. Grok's is
 ``grok --prompt-file ... --yolo --max-turns 6 --effort low --disallowed-tools Agent --cwd ...``.
 
 Status line
-===========
+-----------
 
 .. code:: toml
 
@@ -117,7 +123,7 @@ The row shows the seat, the issue this conversation has open and the
 claims due; each session's row is cached for fifteen seconds.
 
 The runners file
-================
+----------------
 
 .. code:: toml
 
