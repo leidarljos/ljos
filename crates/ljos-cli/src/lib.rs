@@ -7886,10 +7886,11 @@ fn hook_marker_fresh(key: &str, window: std::time::Duration) -> bool {
     }
 }
 
-/// How long the prompt hook waits for the reranked search. Runners cut a
-/// hook off at 10 to 20 s, and a loaded host has made the rerank alone take
-/// longer than that.
-pub const HOOK_RERANK_BUDGET_MS: u64 = 2500;
+/// How long the prompt hook waits for each stage of the reranked search:
+/// the fused pool, then the cross-encoder. Past a stage's budget the fused
+/// pool answers, so a loaded host or a cross-encoder still being fetched
+/// costs a prompt about a second, not the runner's cut-off.
+pub const HOOK_RERANK_BUDGET_MS: u64 = 1000;
 
 /// How many fused hits packset's cross-encoder reorders (its
 /// `RERANK_DEPTH`). Its first stage returns this many when asked to
@@ -35888,7 +35889,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let took = started.elapsed();
         assert!(note.contains("Tag a release"), "{note:?}");
         assert!(
-            took < std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS + 1000),
+            took < std::time::Duration::from_millis(JEV_HOOK_BUDGET_MS + HOOK_RERANK_BUDGET_MS + 1000),
             "the prompt waited {took:?} on a judge"
         );
     }
