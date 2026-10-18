@@ -2939,7 +2939,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         assert_redirect_claims(&repo, &tracker);
     }
 
@@ -3850,7 +3850,7 @@ print(f"id={ident}")
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, repo) = scratch();
-        arm(dir.path(), &tracker);
+        let _bins = arm(dir.path(), &tracker);
         let marker = dir.path().join("run/ljos/encoder-warming");
         assert!(!marker.exists(), "a fresh home has not started warming");
         let atoms = Arc::new(Mutex::new(vec![
