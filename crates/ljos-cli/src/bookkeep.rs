@@ -3663,6 +3663,10 @@ print(f"id={ident}")
             git(root, &["config", "user.email", "seat@example.invalid"]);
             git(root, &["config", "user.name", "seat"]);
             git(root, &["config", "core.hooksPath", "/dev/null"]);
+            // The host signs every commit, and that signer takes a lock the
+            // whole machine shares. A transcript budget must not include it.
+            git(root, &["config", "commit.gpgsign", "false"]);
+            git(root, &["config", "core.fsmonitor", "false"]);
         }
         std::fs::write(repo.join("README.md"), "seed\n").unwrap();
         git(&repo, &["add", "README.md"]);
