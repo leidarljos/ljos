@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 from pathlib import Path
 
 _DOCS = Path(__file__).resolve().parent
@@ -70,6 +72,43 @@ copybutton_prompt_text = r"\$ "
 copybutton_prompt_is_regexp = True
 
 
+# Org page titles. The clipped h1 uses these. The visible headings stay the
+# sections the org file already had, so the sidebar and the breadcrumb do not move.
+_PAGE_TITLE = {
+    "index": "ljos",
+    "getting-started": "Getting started",
+    "howto": "How-to",
+    "grok-build": "Grok Build",
+    "integration": "Integration",
+    "architecture": "Architecture",
+    "reference": "Reference",
+    "explanation": "Explanation",
+    "seat": "In the seat",
+}
+_OPEN_HEADING = re.compile(r"<h([1-6])((?:\s[^>]*)?)>", re.IGNORECASE)
+_CLOSE_HEADING = re.compile(r"</h([1-6])>", re.IGNORECASE)
+
+
+def _one_heading(body: str, title: str) -> str:
+    """One h1 for the page, with the old sections shifted down a level."""
+    if len(_OPEN_HEADING.findall(body)) <= 1:
+        return body
+
+    def open_tag(match: re.Match[str]) -> str:
+        level = int(match.group(1))
+        attrs = match.group(2) or ""
+        marker = f"ll-h{level}"
+        if re.search(r"\bclass=", attrs):
+            attrs = re.sub(r'\bclass="', f'class="{marker} ', attrs, count=1)
+        else:
+            attrs += f' class="{marker}"'
+        return f"<h{level + 1}{attrs}>"
+
+    shifted = _OPEN_HEADING.sub(open_tag, body)
+    shifted = _CLOSE_HEADING.sub(lambda match: f"</h{int(match.group(1)) + 1}>", shifted)
+    return f'<h1 class="ll-page-title">{html.escape(title)}</h1>\n' + shifted
+
+
 def _social(app, pagename, templatename, context, doctree):
     """Description and preview image on generated pages, and the index title."""
     meta = context.get("meta")
@@ -84,6 +123,10 @@ def _social(app, pagename, templatename, context, doctree):
     if not str(meta.get("cover") or "").strip():
         meta["cover"] = _OG_IMAGE
     context["meta"] = meta
+    body = context.get("body")
+    title = _PAGE_TITLE.get(pagename)
+    if isinstance(body, str) and title:
+        context["body"] = _one_heading(body, title)
 
 
 def setup(app):

@@ -1,11 +1,8 @@
 :description: The ljos command line, the hooks that book commits, the user rules, and the environment the seat reads.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-Reference
-=========
-
 Command line
-------------
+============
 
 +-------------------------------------------------------------------------------------------------------------------------------------------+---------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Verb                                                                                                                                      | Habitat                   | Does                                                                                                                                                                                   |
@@ -253,7 +250,7 @@ Without ``XDG_RUNTIME_DIR``, the hud socket and seat records go in
 ``~/.cache/ljos/run`` when that name is another user's or a symlink.
 
 User rules
-----------
+==========
 
 ``ljos prefer --user TEXT --why REASON`` writes one user rule.
 The file is ``$XDG_CONFIG_HOME/ljos/user-rules.json``, or ``~/.config/ljos/user-rules.json`` when that directory is unset.
@@ -267,7 +264,7 @@ Every seat on this machine reads it. The row does not decay and it is not review
 Without ``--user``, both commands keep writing the seat pack.
 
 Git hooks
----------
+=========
 
 ``ljos git-hooks install`` writes a stub for every standard git hook and sets the global ``core.hooksPath`` to that directory.
 The directory is ``$LJOS_GIT_HOOKS`` when that is set, otherwise ``$XDG_DATA_HOME/ljos/git-hooks``, otherwise ``~/.local/share/ljos/git-hooks``.
@@ -303,7 +300,7 @@ A reinstall rewrites the hook scripts and leaves that file alone.
 ``examples/ljos.toml`` shows the table.
 
 MCP tools
----------
+=========
 
 The seat serves these over the Model Context Protocol (MCP).
 
@@ -330,7 +327,7 @@ run instead. A tool that fails answers with ``isError`` set and the reason
 as text, so the model reads it as a tool result.
 
 Environment
------------
+===========
 
 =========================================================== ================================================================================================================================================================================
 Variable                                                    Read by
@@ -455,7 +452,7 @@ Event                  The hook does
 ====================== ===============================================================================================================================================================================================================================================================================================================================================================================
 
 What a rule reads
------------------
+=================
 
 A rule is tried on every command a line runs, the first and the rest. The
 line is split on ``&&``, ``\vert\vert``, ``;``, ``\vert``, ``&`` and new lines
@@ -480,7 +477,7 @@ rule stops an agent's mistakes; it is not a sandbox. For a push that
 must never happen, protect the branch on the forge.
 
 Push checks
------------
+===========
 
 An asked ``git push`` (a seat rule ``git push*`` with verdict ``ask``) is checked
 by where it goes; a deny stays a deny. The forge says whose the remote
@@ -508,7 +505,7 @@ else ``origin``, read in the directory a ``cd`` or ``git -C`` before the push
 names.
 
 Sync files
-----------
+==========
 
 =============================================== ==================================================================================================================
 File                                            Contents
@@ -518,7 +515,7 @@ File                                            Contents
 =============================================== ==================================================================================================================
 
 Jev settings
-------------
+============
 
 ``~/.config/ljos/jev.toml``. The file is absent or ``enabled = false``: Jev is off.
 
@@ -558,7 +555,7 @@ Path                                   Contents
 The four routes are ``prompt``, ``ballot``, ``audit`` and ``review``. ``backend = jev`` posts to ``endpoint`` (TypeSafe's API, or OpenRouter at ``https://openrouter.ai/api/alpha/decisions`` with model ``typesafe/jev-1.13``). ``backend = chat`` posts one JSON-mode completion to ``endpoint`` plus ``/chat/completions`` and must set ``usd_per_mtok_in``. With ``backend = command``, the request stays on the machine. TypeSafe's terms say they will not train on customer data. They keep a perpetual licence to derive telemetry from inputs. Zero data retention needs an enterprise agreement and is off by default. This seat does not train on Jev's answers. A judge ballot is a trust row with ``to`` ``judge:MODEL``, and ``learn`` updates it.
 
 The learning rules
-------------------
+==================
 
 ``learn`` adds the outcome to each voter's record of hits and misses. A
 voter's accuracy is read off its record and shrunk toward the panel's
@@ -653,7 +650,7 @@ gives that voter. The most reliable voter weighs one, and no weight
 falls below 0.01.
 
 Crates
-------
+======
 
 ================== =========================================================================
 Crate              Carries
