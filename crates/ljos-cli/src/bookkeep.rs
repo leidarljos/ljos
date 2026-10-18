@@ -291,6 +291,11 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         }
     }
     let repo = repo_key(&mut book, &value);
+    // Stop and SessionEnd close what the sitting opened. In a checkout the
+    // book has no row for, they open nothing: an MCP server that answered
+    // only guard checks used to leave a row with no issue at its exit.
+    let ending_elsewhere = matches!(call.event.as_str(), "Stop" | "SessionEnd")
+        && !book.repos.contains_key(&repo);
     let now = unix_secs();
     if prompt_set {
         bind_prompt(&mut book, &repo, now);
@@ -319,7 +324,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
                     Some(subject.chars().take(4000).collect());
             }
         }
-    } else {
+    } else if !ending_elsewhere {
         remember_title(&mut book, &repo);
     }
     let commit = is_git_commit(&call.cue);
@@ -341,7 +346,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     // A commit that did not land must not become the baseline, and a
     // failed one must not finish the sitting or replace the start already
     // recorded. note_start writes the sha only when this row has none.
-    if !landed {
+    if !landed && !ending_elsewhere {
         note_start(&mut book, &repo);
     }
     if call.event == "PostToolUseFailure"
@@ -4572,6 +4577,28 @@ print(f"id={ident}")
             "~/notes.txt",
             false,
         );
+    }
+
+    #[test]
+    fn an_ending_sitting_opens_no_row_in_a_checkout_it_never_worked_in() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        // The shape an MCP server leaves at exit after answering only
+        // guard checks: SessionEnd on the seat's book, which holds no row.
+        let session = "seat:probe-guard";
+        for event in ["Stop", "SessionEnd"] {
+            let (raw, call) = payload(event, session, &repo, Value::Null);
+            let _ = observe(&raw, &call);
+        }
+        let book = load_book(&book_path(session));
+        assert!(
+            book.repos.is_empty(),
+            "no row with a null issue: {:?}",
+            book.repos.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(creates(&tracker), 0);
     }
 
     #[test]
