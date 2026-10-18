@@ -214,10 +214,10 @@ pub fn normalize_input(runner: &str, input: &str) -> String {
         "amp" => {
             // Amp pipes the tool's arguments alone and names the tool in
             // the environment; Bash takes `cmd`.
-            let tool = std::env::var("AGENT_TOOL_NAME").unwrap_or_else(|_| "Bash".into());
+            let tool = crate::process_env::var("AGENT_TOOL_NAME").unwrap_or_else(|_| "Bash".into());
             out.insert("hook_event_name".into(), json!("PreToolUse"));
             out.insert("tool_name".into(), json!(tool));
-            if let Ok(t) = std::env::var("AMP_THREAD_ID") {
+            if let Ok(t) = crate::process_env::var("AMP_THREAD_ID") {
                 put(&mut out, "session_id", Some(&t));
             }
             put(&mut out, "cwd", v["cwd"].as_str());
@@ -544,7 +544,7 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> an
         Some(text) => text,
         None => match std::env::current_exe() {
             Ok(exe) => {
-                let mut cmd = std::process::Command::new(exe);
+                let mut cmd = crate::process_env::command(exe);
                 cmd.arg("hook").arg("--limit").arg(limit.to_string());
                 if let Some(e) = event {
                     cmd.arg("--event").arg(e);
@@ -579,9 +579,11 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
     if sid.is_empty() {
         return None;
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
+    let state = crate::process_env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/state")))?;
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| Path::new(&h).join(".local/state"))
+        })?;
     let mark = state.join("ljos/openhands-started").join(&sid);
     if mark.exists() {
         return None;
@@ -1159,7 +1161,7 @@ mod tests {
 
     #[cfg(unix)]
     fn sh(script: &str) -> std::process::Command {
-        let mut cmd = std::process::Command::new("sh");
+        let mut cmd = crate::process_env::command("sh");
         cmd.arg("-c").arg(script);
         cmd
     }
@@ -1221,7 +1223,7 @@ mod tests {
         }
         allows_unhealthy(&inner("exit 3", 30_000), "exited with status 3");
         let missing = run_inner(
-            std::process::Command::new("/nonexistent/ljos"),
+            crate::process_env::command("/nonexistent/ljos"),
             "{}",
             "PreToolUse",
             std::time::Duration::from_secs(1),
@@ -1267,10 +1269,10 @@ mod tests {
         impl Drop for RestoreEnv {
             fn drop(&mut self) {
                 for (k, v) in &self.0 {
-                    unsafe {
+                    {
                         match v {
-                            Some(v) => std::env::set_var(k, v),
-                            None => std::env::remove_var(k),
+                            Some(v) => crate::process_env::set_var(k, v),
+                            None => crate::process_env::remove_var(k),
                         }
                     }
                 }
@@ -1278,16 +1280,16 @@ mod tests {
         }
         let saved = RestoreEnv(
             keys.iter()
-                .map(|k| ((*k).to_string(), std::env::var_os(k)))
+                .map(|k| ((*k).to_string(), crate::process_env::var_os(k)))
                 .collect(),
         );
         let data = dir.join("data");
-        unsafe {
-            std::env::set_var("HOME", &dir);
-            std::env::set_var("XDG_DATA_HOME", &data);
-            std::env::set_var("LJOS_OFF", "0");
-            std::env::set_var("POLICYD_BIN", dir.join("does-not-run"));
-            std::env::set_var("PACKSET_WORKSPACE", "early-guard");
+        {
+            crate::process_env::set_var("HOME", &dir);
+            crate::process_env::set_var("XDG_DATA_HOME", &data);
+            crate::process_env::set_var("LJOS_OFF", "0");
+            crate::process_env::set_var("POLICYD_BIN", dir.join("does-not-run"));
+            crate::process_env::set_var("PACKSET_WORKSPACE", "early-guard");
         }
         let force = json!({"tool_input": {"command": "git push --force origin main"}}).to_string();
         let started = std::time::Instant::now();

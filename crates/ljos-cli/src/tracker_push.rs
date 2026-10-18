@@ -558,7 +558,7 @@ fn branch_name(dir: &Path) -> Option<String> {
 
 fn git(dir: &Path, args: &[&str]) -> Output {
     use std::os::unix::process::ExitStatusExt;
-    std::process::Command::new("git")
+    crate::process_env::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -708,7 +708,7 @@ fn attr_present(text: &str, line: &str) -> bool {
 }
 
 fn driver_command() -> String {
-    match std::env::var("LJOS_ATOMS_DRIVER") {
+    match crate::process_env::var("LJOS_ATOMS_DRIVER") {
         Ok(over) if !over.trim().is_empty() => over,
         _ => "ljos merge-atoms %A %P".to_string(),
     }
@@ -797,7 +797,7 @@ fn work_tree_of(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn work_tree_cwd() -> Result<PathBuf, String> {
-    let out = std::process::Command::new("git")
+    let out = crate::process_env::command("git")
         .args(["rev-parse", "--show-toplevel"])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
@@ -1076,7 +1076,7 @@ note from b
         let a = dir.path().join("a");
         let b = dir.path().join("b");
         let run = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -1152,23 +1152,28 @@ note from b
         run(&b, &["add", "issues.org"]);
         run(&b, &["commit", "-q", "-m", "from b"]);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let overlay = crate::process_env::overlay_snapshot();
         let left = {
             let barrier = barrier.clone();
             let a = a.clone();
+            let overlay = overlay.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                push_checkout(&a)
+                crate::process_env::with_overlay(overlay, || push_checkout(&a))
             })
         };
-        let right = std::thread::spawn(move || {
-            barrier.wait();
-            push_checkout(&b)
-        });
+        let right = {
+            let overlay = overlay.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                crate::process_env::with_overlay(overlay, || push_checkout(&b))
+            })
+        };
         let left = left.join().unwrap();
         let right = right.join().unwrap();
         assert!(left.is_ok(), "clone a: {left:?}");
         assert!(right.is_ok(), "clone b: {right:?}");
-        let shown = std::process::Command::new("git")
+        let shown = crate::process_env::command("git")
             .arg("-C")
             .arg(&origin)
             .args(["show", "HEAD:issues.org"])
@@ -1206,12 +1211,12 @@ body b
     #[test]
     fn prepare_writes_the_attributes_and_the_driver_once() {
         let _lock = crate::test_env_lock();
-        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::remove_var("LJOS_ATOMS_DRIVER") };
+        let previous = crate::process_env::var_os("LJOS_ATOMS_DRIVER");
+        crate::process_env::remove_var("LJOS_ATOMS_DRIVER");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -1247,7 +1252,7 @@ body b
             1,
             "{attrs}"
         );
-        let driver = std::process::Command::new("git")
+        let driver = crate::process_env::command("git")
             .arg("-C")
             .arg(root)
             .args(["config", "--local", "--get", "merge.ljos-atoms.driver"])
@@ -1257,7 +1262,7 @@ body b
             String::from_utf8_lossy(&driver.stdout).trim(),
             "ljos merge-atoms %A %P"
         );
-        let name = std::process::Command::new("git")
+        let name = crate::process_env::command("git")
             .arg("-C")
             .arg(root)
             .args(["config", "--local", "--get", "merge.ljos-atoms.name"])
@@ -1267,17 +1272,17 @@ body b
             String::from_utf8_lossy(&name.stdout).trim(),
             "re-export local atoms"
         );
-        let count = std::process::Command::new("git")
+        let count = crate::process_env::command("git")
             .arg("-C")
             .arg(root)
             .args(["rev-list", "--count", "HEAD"])
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
-        unsafe {
+        {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => crate::process_env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => crate::process_env::remove_var("LJOS_ATOMS_DRIVER"),
             }
         }
     }
@@ -1286,7 +1291,7 @@ body b
     fn the_atoms_driver_stops_before_the_pack_when_the_tracker_has_no_scope() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let out = std::process::Command::new("git")
+        let out = crate::process_env::command("git")
             .arg("-C")
             .arg(root)
             .args(["init", "-q", "-b", "main"])
@@ -1325,10 +1330,10 @@ body b
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
-        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        let previous = crate::process_env::var_os("LJOS_ATOMS_DRIVER");
+        crate::process_env::set_var("LJOS_ATOMS_DRIVER", &driver);
         let run = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -1409,26 +1414,29 @@ body b
             run(clone, &["commit", "-q", "-m", id]);
         }
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let holder = crate::process_env::current_holder();
+        let overlay = crate::process_env::overlay_snapshot();
         let mut joins = Vec::new();
         for clone in clones {
             let barrier = barrier.clone();
+            let overlay = overlay.clone();
             joins.push(std::thread::spawn(move || {
                 barrier.wait();
-                push_checkout(&clone)
+                crate::process_env::bind_helper(holder, overlay, || push_checkout(&clone))
             }));
         }
         let results: Vec<_> = joins.into_iter().map(|j| j.join().unwrap()).collect();
-        unsafe {
+        {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => crate::process_env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => crate::process_env::remove_var("LJOS_ATOMS_DRIVER"),
             }
         }
         for (i, result) in results.iter().enumerate() {
             assert!(result.is_ok(), "clone {i}: {result:?}");
         }
         let shown = |spec: &str| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(&origin)
                 .args(["show", &format!("HEAD:{spec}")])
@@ -1462,7 +1470,7 @@ body b
                 ("core.hooksPath", "/dev/null"),
                 ("commit.gpgsign", "false"),
             ] {
-                let out = std::process::Command::new("git")
+                let out = crate::process_env::command("git")
                     .arg("-C")
                     .arg(dir)
                     .args(["config", key, value])
@@ -1498,10 +1506,10 @@ body b
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
-        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        let previous = crate::process_env::var_os("LJOS_ATOMS_DRIVER");
+        crate::process_env::set_var("LJOS_ATOMS_DRIVER", &driver);
         let run = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -1570,14 +1578,14 @@ body b
         run(&b, &["add", ".ljos/atoms"]);
         run(&b, &["commit", "-q", "-m", "from b"]);
         let pushed = push_checkout(&b);
-        unsafe {
+        {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => crate::process_env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => crate::process_env::remove_var("LJOS_ATOMS_DRIVER"),
             }
         }
         assert!(pushed.is_ok(), "{pushed:?}");
-        let body = std::process::Command::new("git")
+        let body = crate::process_env::command("git")
             .arg("-C")
             .arg(&origin)
             .args(["show", &format!("HEAD:{digest}")])
@@ -1587,7 +1595,7 @@ body b
         assert!(text.contains("re-exported"), "{text}");
         assert!(text.contains(&digest), "{text}");
         assert!(!text.contains("side-"), "{text}");
-        let parents = std::process::Command::new("git")
+        let parents = crate::process_env::command("git")
             .arg("-C")
             .arg(&origin)
             .args(["rev-list", "--parents", "-n", "1", "HEAD"])

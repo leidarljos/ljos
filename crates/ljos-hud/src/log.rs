@@ -9,7 +9,7 @@ pub const LOG_ENV: &str = "LJOS_HUD_LOG";
 
 /// Default and override path for the HUD log.
 pub fn path() -> PathBuf {
-    if let Ok(raw) = std::env::var(LOG_ENV) {
+    if let Ok(raw) = crate::process_env::var(LOG_ENV) {
         let t = raw.trim();
         if !t.is_empty() {
             return PathBuf::from(t);

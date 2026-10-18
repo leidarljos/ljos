@@ -17,7 +17,7 @@ pub const MENU_QUIT: &str = "Quit the HUD";
 /// `LJOS_HUD_TRAY=0` is the one way off.
 #[must_use]
 pub fn enabled() -> bool {
-    match std::env::var("LJOS_HUD_TRAY") {
+    match crate::process_env::var("LJOS_HUD_TRAY") {
         Ok(v) => v.trim() != "0",
         Err(_) => true,
     }

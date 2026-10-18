@@ -65,10 +65,7 @@ pub fn run_with(cli: HudCli) -> anyhow::Result<i32> {
         return Ok(0);
     }
     if let Some(path) = cli.socket.as_ref() {
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(summon::SOCKET_ENV, path);
-        }
+        crate::process_env::set_var(summon::SOCKET_ENV, path);
     }
     if let Some(action) = cli.summon_action() {
         match summon::plan_summon_cli(action, summon::send_command(action)) {
@@ -140,10 +137,7 @@ mod tests {
         let _guard = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("none.sock");
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(summon::SOCKET_ENV, &path);
-        }
+        crate::process_env::set_var(summon::SOCKET_ENV, &path);
         let code = run_with(HudCli {
             socket: None,
             foreground: true,
@@ -154,9 +148,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(code, 0);
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var(summon::SOCKET_ENV);
-        }
+        crate::process_env::remove_var(summon::SOCKET_ENV);
     }
 }

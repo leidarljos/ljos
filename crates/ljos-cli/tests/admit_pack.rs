@@ -88,7 +88,7 @@ impl Drop for Daemon {
 }
 
 fn packsetd_bin() -> PathBuf {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = ljos_cli::process_env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("packsetd");
         if candidate.is_file() {
@@ -211,13 +211,13 @@ impl SeatEnv {
         keys.push("XDG_RUNTIME_DIR");
         let saved = keys
             .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
+            .map(|key| (key, ljos_cli::process_env::var_os(key)))
             .collect();
-        unsafe {
+        {
             for (key, value) in pairs {
-                std::env::set_var(key, value);
+                ljos_cli::process_env::set_var(key, value);
             }
-            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+            ljos_cli::process_env::set_var("XDG_RUNTIME_DIR", runtime.path());
         }
         Self {
             saved,
@@ -229,10 +229,10 @@ impl SeatEnv {
 impl Drop for SeatEnv {
     fn drop(&mut self) {
         for (key, value) in &self.saved {
-            unsafe {
+            {
                 match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
+                    Some(value) => ljos_cli::process_env::set_var(key, value),
+                    None => ljos_cli::process_env::remove_var(key),
                 }
             }
         }

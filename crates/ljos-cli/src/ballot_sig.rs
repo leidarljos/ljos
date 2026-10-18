@@ -112,13 +112,15 @@ pub const SIGNING_SINCE: i64 = 1_791_984_778;
 /// Seats that share one HOME still get one key each.
 #[must_use]
 pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
+    if let Some(p) = crate::process_env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
+    let base = crate::process_env::var_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+        })?;
     let name: String = seat
         .trim()
         .chars()
@@ -169,9 +171,9 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
 /// or the ballot is not committed yet.
 #[must_use]
 pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
+    let root = crate::process_env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
     let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
+        let out = crate::process_env::command("git")
             .arg("-C")
             .arg(&root)
             .args(args)
@@ -252,7 +254,7 @@ pub fn verifies(issue: &str, note: &SigNote) -> bool {
 
 /// The tracker root the pins live at.
 fn pin_path() -> Option<PathBuf> {
-    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
+    let root = crate::process_env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
     Some(PathBuf::from(root).join(PIN_FILE))
 }
 
@@ -339,19 +341,19 @@ pub fn export_hook_session(id: Option<&str>) {
         let id = id.map(str::trim).filter(|s| !s.is_empty()).map(field);
         HOOK_SESSION.with(|c| *c.borrow_mut() = id.clone());
         if let Some(id) = id {
-            if std::env::var("LJOS_HARNESS_SESSION")
+            if crate::process_env::var("LJOS_HARNESS_SESSION")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .is_none()
             {
-                std::env::set_var("LJOS_HARNESS_SESSION", id);
+                crate::process_env::set_var("LJOS_HARNESS_SESSION", id);
             }
         }
     });
 }
 
 fn env_token(key: &str) -> Option<String> {
-    let v = std::env::var(key).ok()?;
+    let v = crate::process_env::var(key).ok()?;
     let v = v.trim();
     if v.is_empty() {
         return None;
@@ -495,7 +497,7 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
                 let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
                 std::fs::write(&p, text)?;
                 if let Some(root) = p.parent() {
-                    let _ = std::process::Command::new("git")
+                    let _ = crate::process_env::command("git")
                         .arg("-C")
                         .arg(root)
                         .args(["add", PIN_FILE])
@@ -729,7 +731,7 @@ pub fn notes_of(v: &Value) -> Vec<String> {
 /// (`LJOS_UNSIGNED_BALLOTS=allow`), for a tracker from before signing.
 #[must_use]
 pub fn unsigned_allowed() -> bool {
-    std::env::var("LJOS_UNSIGNED_BALLOTS").is_ok_and(|v| v == "allow")
+    crate::process_env::var("LJOS_UNSIGNED_BALLOTS").is_ok_and(|v| v == "allow")
 }
 
 #[cfg(test)]

@@ -79,7 +79,7 @@ pub fn place_overlay() -> bool {
 }
 
 fn sway_sock() -> Option<PathBuf> {
-    let raw = std::env::var("SWAYSOCK").ok()?;
+    let raw = crate::process_env::var("SWAYSOCK").ok()?;
     let t = raw.trim();
     if t.is_empty() {
         return None;
@@ -274,15 +274,9 @@ mod tests {
     #[test]
     fn empty_swaysock_is_unavailable() {
         let _lock = crate::env_lock();
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("SWAYSOCK", "");
-        }
+        crate::process_env::set_var("SWAYSOCK", "");
         assert!(!sway_available());
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("SWAYSOCK");
-        }
+        crate::process_env::remove_var("SWAYSOCK");
         // Unset may still be unavailable; empty was the case under test.
     }
 

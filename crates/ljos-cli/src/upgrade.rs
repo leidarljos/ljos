@@ -82,7 +82,7 @@ fn latest() -> Result<String> {
 }
 
 fn run_ok(cmd: &str, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new(cmd)
+    let out = crate::process_env::command(cmd)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
@@ -121,11 +121,11 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
     let base = format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}");
     // The cache directory, on the home filesystem: a temporary directory
     // can be a quota'd tmpfs that is already full.
-    let work = std::env::var_os("XDG_CACHE_HOME")
+    let work = crate::process_env::var_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
+        .or_else(|| crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(crate::process_env::temp_dir)
         .join("ljos")
         .join(format!("upgrade-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);

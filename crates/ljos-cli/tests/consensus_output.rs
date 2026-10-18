@@ -36,7 +36,7 @@ fn consensus(dir: &Path, home: &Path, args: &[&str]) -> Output {
     let path = format!(
         "{}:{}",
         dir.display(),
-        std::env::var("PATH").unwrap_or_default()
+        ljos_cli::process_env::var("PATH").unwrap_or_default()
     );
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("consensus")

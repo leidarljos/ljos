@@ -24,7 +24,7 @@ impl Drop for Daemon {
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = ljos_cli::process_env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())

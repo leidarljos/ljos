@@ -46,9 +46,9 @@ impl Report {
 pub fn install(home: &Path, exe: &Path, xdg_data: Option<&Path>) -> io::Result<Report> {
     let data = xdg_data
         .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+        .or_else(|| crate::process_env::var_os("XDG_DATA_HOME").map(PathBuf::from))
         .unwrap_or_else(|| home.join(".local/share"));
-    let config = std::env::var_os("XDG_CONFIG_HOME")
+    let config = crate::process_env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"));
     let mut report = Report::default();
@@ -85,7 +85,7 @@ pub fn install(home: &Path, exe: &Path, xdg_data: Option<&Path>) -> io::Result<R
 
 /// CLI: install using this process executable.
 pub fn run_cli() -> io::Result<Report> {
-    let home = std::env::var_os("HOME")
+    let home = crate::process_env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME unset"))?;
     let exe = std::env::current_exe()?;
@@ -134,10 +134,7 @@ mod tests {
         fs::write(&exe, b"x").unwrap();
         let data = root.join("share");
         let config = root.join("config");
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-        }
+        crate::process_env::set_var("XDG_CONFIG_HOME", &config);
         let report = install(root, &exe, Some(&data)).unwrap();
         assert!(report.wrote.iter().any(|p| p.ends_with("ljos-hud.desktop")));
         assert!(report.wrote.iter().any(|p| p.ends_with("sway-hud.conf")));

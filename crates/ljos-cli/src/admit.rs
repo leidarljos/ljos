@@ -63,16 +63,18 @@ fn proposal_cache() -> &'static Mutex<BTreeMap<String, bool>> {
 }
 
 fn proposals_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::process_env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state"))
+        })
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("proposals.jsonl")
 }
 
 fn http_timeout() -> std::time::Duration {
-    std::env::var("PACKSET_TIMEOUT_MS")
+    crate::process_env::var("PACKSET_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
@@ -389,7 +391,7 @@ fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Re
         "id": id,
         "fields": {"origin": ORIGIN_AGENT},
     });
-    match packset_client::authorize(ureq::post(&url))
+    match crate::authorize_pack(ureq::post(&url))
         .timeout(http_timeout())
         .send_json(body)
     {
@@ -411,7 +413,7 @@ fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Re
 fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result<Value> {
     let url = format!("{}/v1/proposals/accept", client.base());
     let body = serde_json::json!({"workspace": workspace, "id": id});
-    match packset_client::authorize(ureq::post(&url))
+    match crate::authorize_pack(ureq::post(&url))
         .timeout(http_timeout())
         .send_json(body)
     {

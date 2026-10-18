@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -69,7 +69,7 @@ fn local() -> Local {
 
 fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
+        Some(rest) => crate::process_env::var_os("HOME")
             .map_or_else(|| PathBuf::from(path), |h| PathBuf::from(h).join(rest)),
         None => PathBuf::from(path),
     }
@@ -92,17 +92,19 @@ pub fn host() -> String {
 }
 
 fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
+    crate::process_env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"))
         .join("ljos")
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+    crate::process_env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state"))
+        })
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
         .join("sync")
@@ -126,7 +128,7 @@ pub fn public_key() -> Result<String> {
         if let Some(dir) = key.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let made = Command::new("age-keygen")
+        let made = crate::process_env::command("age-keygen")
             .arg("-o")
             .arg(&key)
             .stdin(Stdio::null())
@@ -139,7 +141,7 @@ pub fn public_key() -> Result<String> {
             );
         }
     }
-    let out = Command::new("age-keygen")
+    let out = crate::process_env::command("age-keygen")
         .arg("-y")
         .arg(&key)
         .output()
@@ -231,7 +233,7 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     if recipients.is_empty() {
         bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
     }
-    let mut cmd = Command::new("age");
+    let mut cmd = crate::process_env::command("age");
     for r in recipients {
         cmd.arg("-r").arg(r);
     }
@@ -261,7 +263,7 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
 /// Open a sealed log with this machine's identity; none when this machine
 /// is not one of its recipients.
 fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
-    let out = Command::new("age")
+    let out = crate::process_env::command("age")
         .arg("-d")
         .arg("-i")
         .arg(identity)
@@ -552,7 +554,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
 /// The scope of the repository that holds an issue, when it declares one.
 #[must_use]
 pub fn scope_for_issue(issue: &str) -> Option<String> {
-    let hit = vissue_core::Layout::resolve(None, None)
+    let hit = crate::tracker_layout()
         .and_then(vissue_core::Router::load)
         .and_then(|router| router.find_by_id(issue))
         .ok()?;
@@ -569,12 +571,12 @@ pub fn scope_for_issue(issue: &str) -> Option<String> {
 
 /// The tracker repository this seat writes, its root directory.
 fn tracker_root() -> Result<PathBuf> {
-    let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
+    let layout = crate::tracker_layout().map_err(anyhow::Error::from)?;
     Ok(layout.root().to_path_buf())
 }
 
 fn git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("git")
+    crate::process_env::command("git")
         .arg("-C")
         .arg(root)
         .args(args)
@@ -835,7 +837,11 @@ fn user_rules_sync_off_value(value: Option<&str>) -> bool {
 }
 
 fn user_rules_sync_off() -> bool {
-    user_rules_sync_off_value(std::env::var("LJOS_USER_RULES_SYNC").ok().as_deref())
+    user_rules_sync_off_value(
+        crate::process_env::var("LJOS_USER_RULES_SYNC")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Tracker checkouts that carry user rules. A guessed working directory is
@@ -848,7 +854,7 @@ pub fn user_rule_trackers() -> Vec<PathBuf> {
     if user_rules_sync_off() {
         return Vec::new();
     }
-    if let Some(one) = std::env::var("LJOS_USER_RULES_TRACKER")
+    if let Some(one) = crate::process_env::var("LJOS_USER_RULES_TRACKER")
         .ok()
         .filter(|path| !path.trim().is_empty())
     {
@@ -858,8 +864,8 @@ pub fn user_rule_trackers() -> Vec<PathBuf> {
     if !listed.is_empty() {
         return listed.iter().map(|path| expand(path)).collect();
     }
-    if let Some(root) = std::env::var_os("ISSUE_ROOT")
-        .or_else(|| std::env::var_os("VISSUE_ROOT"))
+    if let Some(root) = crate::process_env::var_os("ISSUE_ROOT")
+        .or_else(|| crate::process_env::var_os("VISSUE_ROOT"))
         .filter(|root| !root.is_empty())
     {
         return vec![PathBuf::from(root)];
@@ -880,7 +886,7 @@ fn seat_tracker() -> Option<PathBuf> {
     struct Seat {
         root: Option<String>,
     }
-    let path = std::env::var_os("VISSUE_CONFIG")
+    let path = crate::process_env::var_os("VISSUE_CONFIG")
         .filter(|raw| !raw.is_empty())
         .map(PathBuf::from)
         .or_else(|| Some(config_dir().parent()?.join("vissue").join("config.toml")))?;
@@ -950,7 +956,7 @@ fn git_within(
             args.first().copied().unwrap_or("")
         );
     }
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process_env::command("git");
     cmd.arg("-C")
         .arg(root)
         .args(args)
@@ -1199,7 +1205,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -1237,7 +1243,7 @@ mod tests {
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("local");
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -1285,7 +1291,7 @@ mod tests {
             said.contains("pushed pending commits"),
             "an unchanged atom log must still push: {said}"
         );
-        let remote_log = std::process::Command::new("git")
+        let remote_log = crate::process_env::command("git")
             .arg("-C")
             .arg(&remote)
             .args(["log", "--format=%s"])
@@ -1385,13 +1391,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = |name: &str| {
             let path = dir.path().join(name);
-            let made = Command::new("age-keygen")
+            let made = crate::process_env::command("age-keygen")
                 .arg("-o")
                 .arg(&path)
                 .output()
                 .unwrap();
             assert!(made.status.success(), "age-keygen must be installed");
-            let public = Command::new("age-keygen")
+            let public = crate::process_env::command("age-keygen")
                 .arg("-y")
                 .arg(&path)
                 .output()

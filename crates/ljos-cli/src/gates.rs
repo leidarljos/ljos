@@ -101,7 +101,7 @@ fn record_in(cwd: &Path, cmd: &[String]) -> Result<String> {
             "evidence: this repository has no commit yet. Commit first, then run `ljos evidence record -- {want}`"
         )
     })?;
-    let status = Command::new(&cmd[0])
+    let status = crate::process_env::command(&cmd[0])
         .args(&cmd[1..])
         .current_dir(&root)
         .status()
@@ -794,7 +794,7 @@ fn config_layers(root: &Path) -> Vec<PathBuf> {
         }
     }
     paths.push(root.join("ljos.toml"));
-    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
+    if let Some(path) = crate::process_env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
         paths.push(PathBuf::from(path));
     }
     paths.push(root.join(".ljos").join("gates.toml"));
@@ -814,7 +814,7 @@ fn configured_seat() -> Option<String> {
     if let Some(name) = LAYER_SEAT.with(|slot| slot.borrow().clone()) {
         return clean_seat(&name);
     }
-    std::env::var("LJOS_SEAT")
+    crate::process_env::var("LJOS_SEAT")
         .ok()
         .and_then(|name| clean_seat(&name))
 }
@@ -1019,7 +1019,7 @@ fn git_config(cwd: &Path, key: &str) -> Option<String> {
 }
 
 fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::process_env::command("git")
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -1039,7 +1039,7 @@ fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {
-    Command::new("git")
+    crate::process_env::command("git")
         .arg("-C")
         .arg(cwd)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
@@ -1962,7 +1962,7 @@ fn gh_program() -> PathBuf {
 }
 
 fn gh_json(cwd: &Path, args: &[String]) -> Result<Value, String> {
-    let mut cmd = Command::new(gh_program());
+    let mut cmd = crate::process_env::command(gh_program());
     cmd.current_dir(cwd).args(args);
     let out = run_out(&mut cmd, super::guard_timeout())?;
     if !out.status.success() {
@@ -2145,7 +2145,7 @@ fn env_val(env: &[(String, String)], key: &str) -> Option<String> {
         .rev()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
-        .or_else(|| std::env::var(key).ok())
+        .or_else(|| crate::process_env::var(key).ok())
 }
 
 fn join_dir(base: &Path, dir: &str) -> PathBuf {
@@ -2310,7 +2310,7 @@ mod tests {
     const AUTHOR_EMAIL: &str = "ada@example.com";
 
     fn git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::process_env::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -2558,6 +2558,7 @@ esac
 
     #[test]
     fn ordinary_commands_are_not_blocked() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         for line in ["ls", "cargo test --workspace", "git status", "git diff"] {
             let rows = answers(line, dir.path(), &[]);
@@ -2571,6 +2572,7 @@ esac
 
     #[test]
     fn a_clean_commit_is_allowed_and_a_bad_one_is_refused_on_every_harness() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         let allow = answers("git commit -m \"note the seat\"", dir.path(), &[]);
         assert_allows(&allow);
@@ -2585,6 +2587,7 @@ esac
 
     #[test]
     fn commit_identity_trailers_signoff_and_wrappers_say_what_passes() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         let cwd = dir.path();
         let foreign = "GIT_AUTHOR_NAME=rig GIT_AUTHOR_EMAIL=rig@example.invalid GIT_COMMITTER_NAME=rig GIT_COMMITTER_EMAIL=rig@example.invalid git commit -m \"note the seat\"";
@@ -2675,6 +2678,7 @@ esac
 
     #[test]
     fn evidence_is_stored_only_for_the_configured_command_and_a_passing_run() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         seed(dir.path());
         gates(dir.path(), "test = \"true\"\n");
@@ -2703,6 +2707,7 @@ esac
 
     #[test]
     fn a_plain_push_with_evidence_is_allowed_and_without_it_is_refused() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         seed(dir.path());
         gates(dir.path(), "test = \"true\"\n");
@@ -2747,6 +2752,7 @@ esac
 
     #[test]
     fn a_merge_is_allowed_only_when_ci_is_green_and_bugbot_is_answered() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let _hold = stub_gh(&green_view(sha), &threads(true, false), "[]");
@@ -2773,6 +2779,7 @@ esac
 
     #[test]
     fn a_local_merge_pushed_to_a_protected_branch_checks_the_published_sha() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2807,6 +2814,7 @@ esac
 
     #[test]
     fn pushing_a_merge_commit_uses_the_head_sha() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2832,6 +2840,7 @@ esac
 
     #[test]
     fn a_push_of_another_branch_does_not_review_the_checkout_merge() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2883,6 +2892,7 @@ esac
 
     #[test]
     fn a_plain_push_without_a_test_command_is_allowed_and_a_force_push_asks() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         seed(dir.path());
         let plain = guard_verdict("git push origin main", Some(dir.path()), &[]);
@@ -2930,6 +2940,7 @@ esac
 
     #[test]
     fn identity_comes_from_config_layers_and_the_example_is_not_the_default() {
+        let _env = crate::test_env_lock();
         let dir = repo();
         let cwd = dir.path();
         let home = tempfile::tempdir().unwrap();

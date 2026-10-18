@@ -10,6 +10,7 @@ pub mod graph;
 pub mod install_desktop;
 pub mod log;
 pub mod place;
+mod process_env;
 pub mod summon;
 pub mod theme;
 pub mod tray;
@@ -25,7 +26,7 @@ pub use summon::{parse_request, sanitize_token, SummonAction, SummonRequest};
 #[cfg(test)]
 #[must_use = "the environment is restored when this guard drops"]
 pub(crate) struct EnvLock {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _hold: crate::process_env::Hold,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     runtime: tempfile::TempDir,
 }
@@ -36,20 +37,14 @@ impl Drop for EnvLock {
         let keep: std::collections::HashSet<std::ffi::OsString> =
             self.snapshot.iter().map(|(key, _)| key.clone()).collect();
         for (key, value) in &self.snapshot {
-            #[allow(unused_unsafe)]
-            unsafe {
-                std::env::set_var(key, value);
-            }
+            crate::process_env::set_var(key, value);
         }
-        let added: Vec<std::ffi::OsString> = std::env::vars_os()
+        let added: Vec<std::ffi::OsString> = crate::process_env::vars_os()
             .map(|(key, _)| key)
             .filter(|key| !keep.contains(key))
             .collect();
         for key in added {
-            #[allow(unused_unsafe)]
-            unsafe {
-                std::env::remove_var(key);
-            }
+            crate::process_env::remove_var(key);
         }
         let _ = self.runtime.path();
     }
@@ -57,18 +52,12 @@ impl Drop for EnvLock {
 
 #[cfg(test)]
 pub(crate) fn env_lock() -> EnvLock {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let snapshot: Vec<_> = std::env::vars_os().collect();
+    let hold = crate::process_env::hold();
+    let snapshot: Vec<_> = crate::process_env::vars_os().collect();
     let runtime = tempfile::tempdir().expect("private runtime dir");
-    #[allow(unused_unsafe)]
-    unsafe {
-        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
-    }
+    crate::process_env::set_var("XDG_RUNTIME_DIR", runtime.path());
     EnvLock {
-        _guard: guard,
+        _hold: hold,
         snapshot,
         runtime,
     }

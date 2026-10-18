@@ -39,7 +39,7 @@ fn the_seat_named_on_the_command_line_holds_the_claim() {
     let path = format!(
         "{}:{}",
         dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
+        ljos_cli::process_env::var("PATH").unwrap_or_default()
     );
     let ljos = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))

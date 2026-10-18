@@ -169,7 +169,7 @@ pub fn run(tool: &str, argv: &[String]) -> Result<Ran> {
     let Some((bin, rest)) = argv.split_first() else {
         bail!("{tool}: an empty verb");
     };
-    let out = std::process::Command::new(bin)
+    let out = crate::process_env::command(bin)
         .args(rest)
         .stdin(std::process::Stdio::null())
         .output()
@@ -197,7 +197,7 @@ pub fn answers(argv: &[String]) -> bool {
     let Some((bin, rest)) = argv.split_first() else {
         return false;
     };
-    std::process::Command::new(bin)
+    crate::process_env::command(bin)
         .args(rest)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -319,7 +319,10 @@ pub fn wait_ready(tool: &Tool, vars: &Vars) {
 /// which others answer.
 #[must_use]
 pub fn doctor_state(declared: &[Tool]) -> (bool, String) {
-    let here = available(declared, std::env::var("LJOS_PANE_TOOL").ok().as_deref());
+    let here = available(
+        declared,
+        crate::process_env::var("LJOS_PANE_TOOL").ok().as_deref(),
+    );
     match here.split_first() {
         Some((first, [])) => (true, format!("{} opens persona panes", first.name)),
         Some((first, rest)) => (

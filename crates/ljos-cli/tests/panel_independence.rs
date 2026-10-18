@@ -167,7 +167,7 @@ printf '%s' "$2" > "$d/$id.prompt"
         let path = format!(
             "{}:{}",
             self.bin.display(),
-            std::env::var("PATH").unwrap_or_default()
+            ljos_cli::process_env::var("PATH").unwrap_or_default()
         );
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
@@ -521,7 +521,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
             format!(
                 "{}:{}",
                 world.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
+                ljos_cli::process_env::var("PATH").unwrap_or_default()
             ),
         )
         .env("HOME", &world.home)
@@ -550,7 +550,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
             format!(
                 "{}:{}",
                 world.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
+                ljos_cli::process_env::var("PATH").unwrap_or_default()
             ),
         )
         .env("HOME", &world.home)

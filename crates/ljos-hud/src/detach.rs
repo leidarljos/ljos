@@ -121,16 +121,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hud.sock");
         let _listener = UnixListener::bind(&path).unwrap();
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(crate::summon::SOCKET_ENV, path.to_str().unwrap());
-        }
+        crate::process_env::set_var(crate::summon::SOCKET_ENV, path.to_str().unwrap());
         let code = start_detached(&base()).unwrap();
         assert_eq!(code, 0);
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var(crate::summon::SOCKET_ENV);
-        }
+        crate::process_env::remove_var(crate::summon::SOCKET_ENV);
         drop(_listener);
     }
 }

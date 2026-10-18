@@ -165,10 +165,11 @@ pub fn facts(transcript: &str, kept: &BTreeSet<String>) -> Vec<String> {
 }
 
 fn ledger() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
+    let base = crate::process_env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
+            crate::process_env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local/state"))
         })?;
     Some(base.join("ljos").join("extracted"))
 }
@@ -186,7 +187,7 @@ pub fn kept() -> BTreeSet<String> {
 /// write each new fact as an agent-derived lesson, and return how many were
 /// written. Quiet on every failure: a hook must not stop a runner ending.
 pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
-    if std::env::var("LJOS_EXTRACT").is_ok_and(|v| v == "off") {
+    if crate::process_env::var("LJOS_EXTRACT").is_ok_and(|v| v == "off") {
         return 0;
     }
     let Ok(v) = serde_json::from_str::<Value>(input) else {
@@ -204,7 +205,7 @@ pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
     let tail = &bytes[bytes.len().saturating_sub(MAX_TRANSCRIPT_BYTES)..];
     let text = String::from_utf8_lossy(tail);
     let found = facts(&text, &kept());
-    if std::env::var_os("LJOS_EXTRACT_DEBUG").is_some() {
+    if crate::process_env::var_os("LJOS_EXTRACT_DEBUG").is_some() {
         eprintln!("ljos extract: {} facts from {path}", found.len());
     }
     let mut written = 0;
@@ -220,7 +221,7 @@ pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
                 keys.push(normal(&f));
             }
             Err(e) => {
-                if std::env::var_os("LJOS_EXTRACT_DEBUG").is_some() {
+                if crate::process_env::var_os("LJOS_EXTRACT_DEBUG").is_some() {
                     eprintln!("ljos extract: {f:?} not written: {e:#}");
                 }
             }

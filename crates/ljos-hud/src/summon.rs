@@ -138,7 +138,7 @@ pub fn sanitize_token(raw: &str) -> Option<String> {
 
 /// Read `XDG_ACTIVATION_TOKEN` without unsetting it.
 pub fn peek_env_token() -> Option<String> {
-    std::env::var("XDG_ACTIVATION_TOKEN")
+    crate::process_env::var("XDG_ACTIVATION_TOKEN")
         .ok()
         .as_deref()
         .and_then(sanitize_token)
@@ -146,12 +146,9 @@ pub fn peek_env_token() -> Option<String> {
 
 /// Read `XDG_ACTIVATION_TOKEN` and unset it and `DESKTOP_STARTUP_ID`.
 pub fn take_env_token() -> Option<String> {
-    let raw = std::env::var("XDG_ACTIVATION_TOKEN").ok();
-    #[allow(unused_unsafe)]
-    unsafe {
-        std::env::remove_var("XDG_ACTIVATION_TOKEN");
-        std::env::remove_var("DESKTOP_STARTUP_ID");
-    }
+    let raw = crate::process_env::var("XDG_ACTIVATION_TOKEN").ok();
+    crate::process_env::remove_var("XDG_ACTIVATION_TOKEN");
+    crate::process_env::remove_var("DESKTOP_STARTUP_ID");
     raw.as_deref().and_then(sanitize_token)
 }
 
@@ -166,19 +163,19 @@ pub fn command_word(action: SummonAction) -> &'static str {
 
 /// Default path: `$XDG_RUNTIME_DIR/ljos/hud.sock`, or the env override.
 pub fn default_socket_path() -> PathBuf {
-    if let Ok(raw) = std::env::var(SOCKET_ENV) {
+    if let Ok(raw) = crate::process_env::var(SOCKET_ENV) {
         let t = raw.trim();
         if !t.is_empty() {
             return PathBuf::from(t);
         }
     }
-    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+    if let Ok(runtime) = crate::process_env::var("XDG_RUNTIME_DIR") {
         let t = runtime.trim();
         if !t.is_empty() {
             return Path::new(t).join("ljos").join("hud.sock");
         }
     }
-    std::env::var_os("HOME")
+    crate::process_env::var_os("HOME")
         .map(|h| PathBuf::from(h).join(".ljos/run/hud.sock"))
         .unwrap_or_else(|| PathBuf::from("/tmp/ljos-hud.sock"))
 }
@@ -480,39 +477,34 @@ mod tests {
     #[test]
     fn take_env_token_unsets_activation_vars() {
         let _guard = crate::env_lock();
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-xyz");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
-        }
+        crate::process_env::set_var("XDG_ACTIVATION_TOKEN", "tok-xyz");
+        crate::process_env::set_var("DESKTOP_STARTUP_ID", "startup");
         let tok = take_env_token();
         assert_eq!(tok.as_deref(), Some("tok-xyz"));
-        assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
-        assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
+        assert!(crate::process_env::var("XDG_ACTIVATION_TOKEN").is_err());
+        assert!(crate::process_env::var("DESKTOP_STARTUP_ID").is_err());
     }
 
     #[test]
     fn peek_env_token_leaves_activation_vars() {
         let _guard = crate::env_lock();
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-peek");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
-        }
+        crate::process_env::set_var("XDG_ACTIVATION_TOKEN", "tok-peek");
+        crate::process_env::set_var("DESKTOP_STARTUP_ID", "startup");
         assert_eq!(peek_env_token().as_deref(), Some("tok-peek"));
         assert_eq!(
-            std::env::var("XDG_ACTIVATION_TOKEN").ok().as_deref(),
+            crate::process_env::var("XDG_ACTIVATION_TOKEN")
+                .ok()
+                .as_deref(),
             Some("tok-peek")
         );
         assert_eq!(
-            std::env::var("DESKTOP_STARTUP_ID").ok().as_deref(),
+            crate::process_env::var("DESKTOP_STARTUP_ID")
+                .ok()
+                .as_deref(),
             Some("startup")
         );
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var("XDG_ACTIVATION_TOKEN");
-            std::env::remove_var("DESKTOP_STARTUP_ID");
-        }
+        crate::process_env::remove_var("XDG_ACTIVATION_TOKEN");
+        crate::process_env::remove_var("DESKTOP_STARTUP_ID");
     }
 
     #[cfg(unix)]
@@ -521,24 +513,20 @@ mod tests {
         let _guard = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("miss-show.sock");
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(SOCKET_ENV, &path);
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-keep");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
-        }
+        crate::process_env::set_var(SOCKET_ENV, &path);
+        crate::process_env::set_var("XDG_ACTIVATION_TOKEN", "tok-keep");
+        crate::process_env::set_var("DESKTOP_STARTUP_ID", "startup");
         let err = send_command(SummonAction::Show).unwrap_err();
         assert!(is_summon_miss(&err));
         assert_eq!(
-            std::env::var("XDG_ACTIVATION_TOKEN").ok().as_deref(),
+            crate::process_env::var("XDG_ACTIVATION_TOKEN")
+                .ok()
+                .as_deref(),
             Some("tok-keep")
         );
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var(SOCKET_ENV);
-            std::env::remove_var("XDG_ACTIVATION_TOKEN");
-            std::env::remove_var("DESKTOP_STARTUP_ID");
-        }
+        crate::process_env::remove_var(SOCKET_ENV);
+        crate::process_env::remove_var("XDG_ACTIVATION_TOKEN");
+        crate::process_env::remove_var("DESKTOP_STARTUP_ID");
     }
 
     #[cfg(unix)]
@@ -547,20 +535,14 @@ mod tests {
         let _guard = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("miss-hide.sock");
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var(SOCKET_ENV, &path);
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-hide");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
-        }
+        crate::process_env::set_var(SOCKET_ENV, &path);
+        crate::process_env::set_var("XDG_ACTIVATION_TOKEN", "tok-hide");
+        crate::process_env::set_var("DESKTOP_STARTUP_ID", "startup");
         let err = send_command(SummonAction::Hide).unwrap_err();
         assert!(is_summon_miss(&err));
-        assert!(std::env::var("XDG_ACTIVATION_TOKEN").is_err());
-        assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var(SOCKET_ENV);
-        }
+        assert!(crate::process_env::var("XDG_ACTIVATION_TOKEN").is_err());
+        assert!(crate::process_env::var("DESKTOP_STARTUP_ID").is_err());
+        crate::process_env::remove_var(SOCKET_ENV);
     }
 
     #[test]
@@ -588,10 +570,7 @@ mod tests {
     #[test]
     fn default_path_ends_with_hud_sock() {
         let _guard = crate::env_lock();
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::remove_var(SOCKET_ENV);
-        }
+        crate::process_env::remove_var(SOCKET_ENV);
         let path = default_socket_path();
         assert_eq!(path.file_name().unwrap(), "hud.sock");
     }

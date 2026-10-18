@@ -28,6 +28,7 @@ pub mod memories;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
+pub mod process_env;
 pub mod reap;
 pub mod runner_hooks;
 pub mod sync;
@@ -1016,7 +1017,7 @@ skills = "~/.kilocode/skills"
 "#;
 
 fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
+    crate::process_env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME unset; onboard needs a home directory")
 }
@@ -1032,7 +1033,7 @@ fn expand(path: &str) -> PathBuf {
 /// Where the runners are described: `$XDG_CONFIG_HOME/ljos/harnesses.toml`.
 #[must_use]
 pub fn harnesses_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
+    crate::process_env::var_os("XDG_CONFIG_HOME")
         .filter(|r| !r.is_empty())
         .map(PathBuf::from)
         .or_else(|| home().ok().map(|h| h.join(".config")))
@@ -1168,7 +1169,8 @@ fn server_path() -> Result<PathBuf> {
         .filter(|p| p.is_file());
     match beside {
         Some(p) => Ok(p),
-        None => which::which("ljos-mcp").context("ljos-mcp not on PATH; install it beside ljos"),
+        None => crate::process_env::which("ljos-mcp")
+            .context("ljos-mcp not on PATH; install it beside ljos"),
     }
 }
 
@@ -1180,7 +1182,7 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
     use std::os::unix::process::CommandExt as _;
     match server_path() {
         Ok(path) => {
-            let e = std::process::Command::new(&path).args(args).exec();
+            let e = crate::process_env::command(&path).args(args).exec();
             anyhow::Error::new(e).context(format!("start {}", path.display()))
         }
         Err(e) => e,
@@ -1258,7 +1260,7 @@ fn omitted_actor_name(name: &str) -> bool {
 /// conversation's.
 fn own_seat(name: &str) -> bool {
     let n = name.trim();
-    std::env::var("LJOS_SEAT")
+    crate::process_env::var("LJOS_SEAT")
         .ok()
         .is_some_and(|s| s.trim() == n)
         || whoami().seat == n
@@ -1268,7 +1270,7 @@ fn own_seat(name: &str) -> bool {
 /// runner stamped, one occupancy name and the keys it came from. No
 /// product list.
 fn session_actor() -> Option<(String, String)> {
-    let mut parts: Vec<(String, String)> = std::env::vars()
+    let mut parts: Vec<(String, String)> = crate::process_env::vars()
         .filter(|(k, v)| runner_session_var(k, v))
         .collect();
     if parts.is_empty() {
@@ -1417,12 +1419,14 @@ pub fn conversation_tag(pid: u32) -> String {
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
 fn runtime_dir() -> PathBuf {
-    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
+    if let Some(run) = crate::process_env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
     let dir = runtime_fallback(
-        &std::env::temp_dir(),
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        &crate::process_env::temp_dir(),
+        crate::process_env::var_os("HOME")
+            .map(PathBuf::from)
+            .as_deref(),
         euid(),
     );
     if !dir.exists() {
@@ -1509,8 +1513,8 @@ pub fn mcp_forward_with_requests(
     mut request: impl FnMut(&str, Value) -> std::result::Result<Value, Value>,
 ) -> Result<Value> {
     use std::io::{BufRead, Write};
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(program)
+    use std::process::Stdio;
+    let mut child = crate::process_env::command(program)
         .env(marker, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1563,7 +1567,7 @@ pub fn mcp_forward_with_requests(
 /// every `*_SESSION_ID` but the login's, sorted so two processes with the
 /// same variables agree on the first.
 fn stamped_sessions() -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = std::env::vars()
+    let mut found: Vec<(String, String)> = crate::process_env::vars()
         .filter(|(k, v)| runner_session_var(k, v))
         .map(|(k, v)| (k, v.trim().to_string()))
         .collect();
@@ -1969,8 +1973,8 @@ fn own_ancestry() -> Vec<(u32, String)> {
 /// Consent is the person's, so the verbs that grant it refuse here.
 #[must_use]
 pub fn under_a_runner() -> bool {
-    if std::env::vars().any(|(k, v)| runner_session_var(&k, &v))
-        || std::env::var_os("CLAUDECODE").is_some()
+    if crate::process_env::vars().any(|(k, v)| runner_session_var(&k, &v))
+        || crate::process_env::var_os("CLAUDECODE").is_some()
     {
         return true;
     }
@@ -2220,7 +2224,7 @@ fn seat_from_tree_records() -> Option<Seat> {
 }
 
 fn named_var(key: &str) -> Option<String> {
-    std::env::var(key)
+    crate::process_env::var(key)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty() && !omitted_actor_name(v))
@@ -2346,7 +2350,7 @@ pub fn whoami() -> Seat {
 #[must_use]
 pub fn tracker_known_seats() -> std::collections::BTreeSet<String> {
     let mut seats = std::collections::BTreeSet::new();
-    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+    let Ok(layout) = tracker_layout() else {
         return seats;
     };
     collect_configured_seats(layout.root(), &mut seats);
@@ -2452,7 +2456,7 @@ fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
 /// Append `slug` to the tracker's `seats` list when that list is missing
 /// or empty.
 fn register_seat(slug: &str) -> Result<(), String> {
-    let layout = vissue_core::Layout::resolve(None, None).map_err(|e| e.to_string())?;
+    let layout = tracker_layout().map_err(|e| e.to_string())?;
     let path = layout.root().join("vissue.toml");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let mut value: toml::Value = if text.trim().is_empty() {
@@ -2560,7 +2564,7 @@ fn seat_from_runner_env() -> Option<Seat> {
 
 /// The person at the terminal, when no program is the seat.
 fn login_user() -> String {
-    std::env::var("USER")
+    crate::process_env::var("USER")
         .ok()
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
@@ -2605,9 +2609,11 @@ pub fn ballot_seat(verb: &str) -> Result<String> {
 /// an audit can tell when a seat last asked its memory. Best effort: a
 /// log that cannot be written never fails the call.
 pub fn log_recall(verb: &str, what: &str) {
-    let dir = std::env::var_os("XDG_STATE_HOME")
+    let dir = crate::process_env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state"))
+        })
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos");
     log_recall_in(&dir, verb, what);
@@ -3152,7 +3158,7 @@ fn ljos_path() -> Result<PathBuf> {
     if beside.is_file() {
         return Ok(beside);
     }
-    which::which("ljos").context("ljos not on PATH")
+    crate::process_env::which("ljos").context("ljos not on PATH")
 }
 
 /// The grok hooks file with `{ljos}` filled in.
@@ -3319,7 +3325,7 @@ pub const GUARD_SHIMMED: [&str; 3] = ["rm", "git", "find"];
 /// `~/.local/share/ljos/guard-bin`.
 #[must_use]
 pub fn guard_bin_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
+    crate::process_env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map_or_else(|| expand("~/.local/share"), PathBuf::from)
         .join("ljos")
@@ -3996,7 +4002,7 @@ fn is_seat_hook(h: &Value) -> bool {
 
 /// The command the runner's hook runs.
 fn hook_command() -> String {
-    which::which("ljos").map_or_else(
+    crate::process_env::which("ljos").map_or_else(
         |_| "ljos hook".to_string(),
         |p| format!("{} hook", p.display()),
     )
@@ -6384,12 +6390,12 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
     let raw = (|| -> Option<Vec<(Hit, DenseSignal)>> {
         let client = pack().ok()?;
         let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-        let ms = std::env::var("PACKSET_TIMEOUT_MS")
+        let ms = crate::process_env::var("PACKSET_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
-        let body: Value = packset_client::authorize(ureq::get(&url))
+        let body: Value = authorize_pack(ureq::get(&url))
             .query("workspace", &client.workspace())
             .query("q", cue)
             .query("limit", &limit.to_string())
@@ -6699,7 +6705,7 @@ pub fn start_decision_panel(
     session: Option<&str>,
     cwd: Option<&str>,
 ) -> Result<String> {
-    if std::env::var_os("LJOS_PANEL_CHILD").is_some() {
+    if crate::process_env::var_os("LJOS_PANEL_CHILD").is_some() {
         return Ok(decision_hold());
     }
     let key: String = prompt.chars().take(80).collect();
@@ -6716,7 +6722,7 @@ pub fn start_decision_panel(
     let prompt_file = dir.join(format!("panel-prompt-{stamp}.txt"));
     let log = dir.join(format!("panel-open-{stamp}.log"));
     std::fs::write(&prompt_file, prompt)?;
-    let bin = std::env::var("LJOS_PANEL_BIN").unwrap_or_else(|_| {
+    let bin = crate::process_env::var("LJOS_PANEL_BIN").unwrap_or_else(|_| {
         std::env::current_exe()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "ljos".into())
@@ -6754,8 +6760,8 @@ pub(crate) fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
         .open(log)
         .with_context(|| format!("log {}", log.display()))?;
     let err = file.try_clone()?;
-    if which::which("setsid").is_ok() {
-        let mut cmd = std::process::Command::new("setsid");
+    if crate::process_env::which("setsid").is_ok() {
+        let mut cmd = crate::process_env::command("setsid");
         cmd.arg("--fork").arg(bin).args(args);
         cmd.stdin(std::process::Stdio::null())
             .stdout(file)
@@ -6764,7 +6770,7 @@ pub(crate) fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
             .with_context(|| format!("setsid --fork {bin}"))?;
         return Ok(());
     }
-    let mut cmd = std::process::Command::new(bin);
+    let mut cmd = crate::process_env::command(bin);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(file)
@@ -6780,9 +6786,9 @@ pub(crate) fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
 /// `LJOS_MEMBER_BIN` is the test stand-in.
 #[must_use]
 pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -> Vec<String> {
-    let stand_in = std::env::var("LJOS_MEMBER_BIN").ok();
+    let stand_in = crate::process_env::var("LJOS_MEMBER_BIN").ok();
     if stand_in.is_none() {
-        let runner = std::env::var("LJOS_PANEL_RUNNER")
+        let runner = crate::process_env::var("LJOS_PANEL_RUNNER")
             .ok()
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| whoami().seat);
@@ -6835,8 +6841,8 @@ pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -
 /// parallelism clamped to [1, 4]. Set to 0 to disable concurrency limits.
 #[must_use]
 pub fn panel_concurrency() -> usize {
-    std::env::var("LJOS_PANEL_CONCURRENCY")
-        .or_else(|_| std::env::var("LJOS_MAX_PARALLEL"))
+    crate::process_env::var("LJOS_PANEL_CONCURRENCY")
+        .or_else(|_| crate::process_env::var("LJOS_MAX_PARALLEL"))
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or_else(|| {
@@ -6945,7 +6951,11 @@ fn decision_issue_for(prompt: &str) -> Result<String> {
 fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     let project = parent
         .and_then(|id| id.rsplit_once('-').map(|(p, _)| p.to_string()))
-        .or_else(|| std::env::var("LJOS_PROJECT").ok().filter(|p| !p.is_empty()));
+        .or_else(|| {
+            crate::process_env::var("LJOS_PROJECT")
+                .ok()
+                .filter(|p| !p.is_empty())
+        });
     let Some(project) = project else {
         bail!("no held issue and LJOS_PROJECT is unset, so no decision was filed");
     };
@@ -6974,11 +6984,13 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     argv.push("--tags".into());
     argv.push("decision,panel".into());
     argv.push(title);
-    let out = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
-        .args(&argv)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("vissue create")?;
+    let out = crate::process_env::command(
+        crate::process_env::which("vissue").context("vissue not on PATH")?,
+    )
+    .args(&argv)
+    .stdin(std::process::Stdio::null())
+    .output()
+    .context("vissue create")?;
     if !out.status.success() {
         bail!(
             "vissue create: {}",
@@ -7006,12 +7018,12 @@ fn spawn_member(argv: &[String], log: &Path) -> Result<std::process::Child> {
         .append(true)
         .open(log)?;
     let err = file.try_clone()?;
-    let mut cmd = if which::which("setsid").is_ok() {
-        let mut c = std::process::Command::new("setsid");
+    let mut cmd = if crate::process_env::which("setsid").is_ok() {
+        let mut c = crate::process_env::command("setsid");
         c.args(argv);
         c
     } else {
-        let mut c = std::process::Command::new(&argv[0]);
+        let mut c = crate::process_env::command(&argv[0]);
         c.args(&argv[1..]);
         c
     };
@@ -7333,7 +7345,7 @@ pub const WORK_NUDGE_EVERY: u64 = 40;
 
 /// A seat setting: the process environment, else `~/.config/ljos/env`.
 fn seat_setting(key: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(key) {
+    if let Ok(v) = crate::process_env::var(key) {
         return Some(v);
     }
     let text = std::fs::read_to_string(home().ok()?.join(".config/ljos/env")).ok()?;
@@ -7568,7 +7580,7 @@ pub fn held_issue() -> Option<String> {
     if let Some(node) = held_from_records(&holders) {
         return Some(node);
     }
-    if std::env::var_os("LJOS_IN_HOOK").is_some() {
+    if crate::process_env::var_os("LJOS_IN_HOOK").is_some() {
         return None;
     }
     holders.iter().find_map(|holder| {
@@ -7685,7 +7697,7 @@ fn take_warm_turn(marker: &Path) -> bool {
 #[must_use]
 pub fn warm_command(exe: &Path) -> std::process::Command {
     use std::process::Stdio;
-    let mut command = std::process::Command::new(exe);
+    let mut command = crate::process_env::command(exe);
     command
         .args(["search", "-n", "1", "--rerank", "the pack is open"])
         .env_remove("LJOS_IN_HOOK")
@@ -7896,40 +7908,28 @@ const RERANK_POOL: u32 = 20;
 pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<Vec<Hit>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let cue = cue.to_string();
+    let overlay = crate::process_env::overlay_snapshot();
+    // The worker is not joined: a hook that hits the budget leaves it
+    // running. It keeps the caller's environment edits, which live on the
+    // calling thread. It does not skip the process lock: a worker that
+    // outlives the caller must not write the process environment after
+    // the caller has released that lock.
     std::thread::spawn(move || {
-        let _ = tx.send(packset_search_opts(&cue, limit, true));
+        crate::process_env::with_overlay(overlay, || {
+            let _ = tx.send(packset_search_opts(&cue, limit, true));
+        });
     });
     rx.recv_timeout(std::time::Duration::from_millis(ms))
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
 }
 
-thread_local! {
-    static ENV_MUT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-fn env_mutation_lock() -> std::sync::MutexGuard<'static, ()> {
-    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    GATE.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// Hold the process environment still while `f` runs.
 /// A nested call on this thread does not take the lock again, so a pack
 /// read inside a bounded request cannot deadlock on it. The environment
-/// is process-global, so two threads must not edit it at once.
+/// is process-global, so two threads must not edit it at once. The lock is
+/// the one every read takes.
 pub(crate) fn with_env_mutation<R>(f: impl FnOnce() -> R) -> R {
-    struct Leave;
-    impl Drop for Leave {
-        fn drop(&mut self) {
-            ENV_MUT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
-        }
-    }
-    if ENV_MUT_DEPTH.with(|depth| depth.get()) > 0 {
-        return f();
-    }
-    let _gate = env_mutation_lock();
-    ENV_MUT_DEPTH.with(|depth| depth.set(depth.get() + 1));
-    let _leave = Leave;
+    let _hold = crate::process_env::hold();
     f()
 }
 
@@ -7937,17 +7937,17 @@ pub(crate) fn with_env_mutation<R>(f: impl FnOnce() -> R) -> R {
 /// back whatever it was.
 fn with_pack_timeout<R>(ms: u64, f: impl FnOnce() -> R) -> R {
     with_env_mutation(|| {
-        let before = std::env::var_os("PACKSET_TIMEOUT_MS");
+        let before = crate::process_env::var_os("PACKSET_TIMEOUT_MS");
         // SAFETY: the hook reads and sets this on one thread, before and after
         // the one request it bounds. The mutation lock keeps another thread
         // from observing the temporary value.
-        unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", ms.to_string()) };
+        crate::process_env::set_var("PACKSET_TIMEOUT_MS", ms.to_string());
         struct Put(Option<std::ffi::OsString>);
         impl Drop for Put {
             fn drop(&mut self) {
                 match self.0.take() {
-                    Some(v) => unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", v) },
-                    None => unsafe { std::env::remove_var("PACKSET_TIMEOUT_MS") },
+                    Some(v) => crate::process_env::set_var("PACKSET_TIMEOUT_MS", v),
+                    None => crate::process_env::remove_var("PACKSET_TIMEOUT_MS"),
                 }
             }
         }
@@ -8814,9 +8814,9 @@ fn harness_rows() -> Vec<Habitat> {
 /// exits 0 and its output names `ljos_sitting`.
 fn probe_lists_ljos(argv: &[String]) -> std::result::Result<(), String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let (bin, args) = argv.split_first().ok_or("empty probe")?;
-    let mut child = Command::new(expand(bin))
+    let mut child = crate::process_env::command(expand(bin))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -8906,10 +8906,12 @@ fn pack_step(dry: bool) -> Step {
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`.
 fn data_base() -> Option<PathBuf> {
-    std::env::var_os("XDG_DATA_HOME")
+    crate::process_env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| {
+            crate::process_env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+        })
 }
 
 /// `$XDG_CONFIG_HOME`, else `~/.config`.
@@ -8924,10 +8926,10 @@ fn config_base() -> Option<PathBuf> {
         return Some(path);
     }
     resolve_config_base(
-        std::env::var_os("XDG_CONFIG_HOME")
+        crate::process_env::var_os("XDG_CONFIG_HOME")
             .as_deref()
             .map(Path::new),
-        std::env::var_os("HOME").as_deref().map(Path::new),
+        crate::process_env::var_os("HOME").as_deref().map(Path::new),
     )
 }
 
@@ -8983,7 +8985,9 @@ pub(crate) fn isolated_config_home() -> &'static Path {
 }
 
 fn named_env(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+    crate::process_env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// The deed store deedar uses when `DEEDAR_URL` is unset:
@@ -9176,7 +9180,7 @@ fn host_key_step(dry: bool) -> Step {
             ok,
         };
     }
-    if std::env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some_and(|r| r == "off") {
+    if crate::process_env::var_os("DEEDAR_HOST_SIGNING_KEY").is_some_and(|r| r == "off") {
         return Step {
             what: "host key".into(),
             detail: "DEEDAR_HOST_SIGNING_KEY=off; handovers go out unsigned on purpose".into(),
@@ -9274,7 +9278,7 @@ fn host_accept_detail(said: std::result::Result<String, String>) -> (String, boo
 
 /// `$XDG_CONFIG_HOME/deedar/host.key`, whether or not it exists.
 fn default_host_key_path() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
+    let config = crate::process_env::var_os("XDG_CONFIG_HOME")
         .filter(|r| !r.is_empty())
         .map(PathBuf::from)
         .or_else(|| home().ok().map(|h| h.join(".config")))?;
@@ -9284,7 +9288,9 @@ fn default_host_key_path() -> Option<PathBuf> {
 /// The host key `deedar` will sign with: `DEEDAR_HOST_SIGNING_KEY`, else
 /// `~/.config/deedar/host.key` when it exists. `off` is no key on purpose.
 fn host_key_path() -> Option<PathBuf> {
-    if let Some(raw) = std::env::var_os("DEEDAR_HOST_SIGNING_KEY").filter(|r| !r.is_empty()) {
+    if let Some(raw) =
+        crate::process_env::var_os("DEEDAR_HOST_SIGNING_KEY").filter(|r| !r.is_empty())
+    {
         return (raw != "off").then(|| PathBuf::from(raw));
     }
     let path = default_host_key_path()?;
@@ -9372,14 +9378,14 @@ pub fn expand_leading_tilde(raw: &str, home: &str) -> Option<String> {
 /// directory, and every child `vissue` inherits the same relative root.
 pub fn normalize_tracker_env() {
     with_env_mutation(|| {
-        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        let Some(home) = crate::process_env::var_os("HOME").filter(|h| !h.is_empty()) else {
             return;
         };
         let home = home.to_string_lossy().to_string();
         for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
-            if let Ok(raw) = std::env::var(var) {
+            if let Ok(raw) = crate::process_env::var(var) {
                 if let Some(expanded) = expand_leading_tilde(&raw, &home) {
-                    std::env::set_var(var, expanded);
+                    crate::process_env::set_var(var, expanded);
                 }
             }
         }
@@ -9421,10 +9427,10 @@ pub fn load_seat_env() {
                 continue;
             };
             let k = k.trim();
-            if k.is_empty() || std::env::var_os(k).is_some() {
+            if k.is_empty() || crate::process_env::var_os(k).is_some() {
                 continue;
             }
-            std::env::set_var(k, v.trim());
+            crate::process_env::set_var(k, v.trim());
         }
     });
 }
@@ -9521,15 +9527,15 @@ pub fn pick_pack_port(
 /// packset commands this seat runs use it too.
 fn scope_pack_port() -> Result<()> {
     with_env_mutation(|| {
-        if std::env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
+        if crate::process_env::var("PACKSET_URL").is_ok_and(|u| !u.is_empty()) {
             return Ok(());
         }
-        let named = std::env::var("PACKSET_PORT")
-            .or_else(|_| std::env::var("GROK_MEM_PORT"))
+        let named = crate::process_env::var("PACKSET_PORT")
+            .or_else(|_| crate::process_env::var("GROK_MEM_PORT"))
             .ok()
             .and_then(|raw| raw.trim().parse::<u16>().ok());
         if let Some(port) = pick_pack_port(named, euid(), listener_uid)? {
-            std::env::set_var("PACKSET_PORT", port.to_string());
+            crate::process_env::set_var("PACKSET_PORT", port.to_string());
         }
         Ok(())
     })
@@ -9539,7 +9545,7 @@ fn scope_pack_port() -> Result<()> {
 /// stays inside the hook's budget. [`wake_writer`] runs `packset ensure`;
 /// the agent is not told to.
 fn wake_for_recall() {
-    let ms: u64 = if std::env::var_os("LJOS_IN_HOOK").is_some() {
+    let ms: u64 = if crate::process_env::var_os("LJOS_IN_HOOK").is_some() {
         800
     } else {
         2_000
@@ -9596,7 +9602,7 @@ const BUSY_TRIES: u32 = 3;
 /// How long one pack request may take: `PACKSET_TIMEOUT_MS`, else thirty
 /// seconds, as the pack client reads it. The status line sets 300.
 fn pack_timeout() -> std::time::Duration {
-    std::env::var("PACKSET_TIMEOUT_MS")
+    crate::process_env::var("PACKSET_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
@@ -9614,10 +9620,10 @@ fn ensure_writer() -> Result<()> {
     if bookkeep::guard_suspended() {
         return Ok(());
     }
-    if std::env::var("PACKSET_URL").ok().as_deref() == Some("off") {
+    if crate::process_env::var("PACKSET_URL").ok().as_deref() == Some("off") {
         return Ok(());
     }
-    if std::env::var("PACKSET_URL")
+    if crate::process_env::var("PACKSET_URL")
         .ok()
         .is_some_and(|url| !url.is_empty())
     {
@@ -9656,7 +9662,7 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
 /// Outside a hook the listing may take 30s.
 #[must_use]
 pub fn atoms_timeout() -> std::time::Duration {
-    if std::env::var_os("LJOS_IN_HOOK").is_some() {
+    if crate::process_env::var_os("LJOS_IN_HOOK").is_some() {
         std::time::Duration::from_secs(2)
     } else {
         std::time::Duration::from_secs(30)
@@ -9684,7 +9690,7 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
     let mut tries = 0;
     let answered = loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let got = packset_client::authorize(ureq::get(&url))
+        let got = authorize_pack(ureq::get(&url))
             .query("workspace", workspace)
             .query("embedding", "omit")
             .timeout(left.max(std::time::Duration::from_millis(1)))
@@ -9710,16 +9716,155 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
     Ok(serde_json::from_value(atoms)?)
 }
 
+/// The pack home this thread names: `PACKSET_HOME`, then the older names,
+/// then `$XDG_DATA_HOME/packset` or `~/.local/share/packset`. An existing
+/// `~/.grokinside/memory` wins while the new directory is missing or empty,
+/// which is how packsetd chooses.
+fn pack_home() -> Option<PathBuf> {
+    for key in ["PACKSET_HOME", "GROKINSIDE_HOME", "GROK_INSIDE_MEMORY_HOME"] {
+        if let Some(value) = crate::process_env::var_os(key).filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(value));
+        }
+    }
+    let current = xdg_pack_home()?;
+    let legacy = crate::process_env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| PathBuf::from(home).join(".grokinside").join("memory"));
+    if legacy
+        .as_ref()
+        .is_some_and(|old| pack_dir_vacant(&current) && old.is_dir())
+    {
+        legacy
+    } else {
+        Some(current)
+    }
+}
+
+fn xdg_pack_home() -> Option<PathBuf> {
+    let xdg = crate::process_env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
+    let base = xdg.or_else(|| {
+        crate::process_env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(".local").join("share"))
+    })?;
+    Some(base.join("packset"))
+}
+
+/// Absent, or an empty directory. An empty new home must not hide the old pack.
+fn pack_dir_vacant(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => !path.exists(),
+    }
+}
+
+/// Where this thread's pack token file is: `PACKSET_TOKEN_FILE`, else
+/// `token` under [`pack_home`].
+pub(crate) fn seat_token_path() -> Option<PathBuf> {
+    if let Some(file) = crate::process_env::var_os("PACKSET_TOKEN_FILE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(file));
+    }
+    pack_home().map(|home| home.join("token"))
+}
+
+/// The bearer token for this thread: `PACKSET_TOKEN`, else the first line of
+/// [`seat_token_path`]. `packset_client::token` reads the process, so a test
+/// that points `PACKSET_HOME` at a scratch directory would otherwise send
+/// the login's token.
+pub(crate) fn seat_token() -> Option<String> {
+    if let Ok(token) = crate::process_env::var("PACKSET_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    let text = std::fs::read_to_string(seat_token_path()?).ok()?;
+    let token = text.lines().next()?.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// `request` with this thread's pack token, withheld when every listener on
+/// the loopback port belongs to another user. That is the check
+/// `packset_client::authorize` makes, applied to the token this thread sees.
+pub(crate) fn authorize_pack(request: ureq::Request) -> ureq::Request {
+    if foreign_pack_listener(request.url()) {
+        return request;
+    }
+    match seat_token() {
+        Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+        None => request,
+    }
+}
+
+fn loopback_port(url: &str) -> Option<u16> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.contains(']') => (host, port.parse().ok()?),
+        _ => (authority, 80),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]").then_some(port)
+}
+
+/// Every listening socket on `port` belongs to someone else. No listener, or
+/// a table that cannot be read, is not foreign: the token goes as before.
+fn foreign_pack_listener(url: &str) -> bool {
+    let Some(port) = loopback_port(url) else {
+        return false;
+    };
+    let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect();
+    let want = format!(":{port:04X}");
+    let mut owners: Vec<u32> = Vec::new();
+    for table in &tables {
+        for row in table.lines().skip(1) {
+            let cols: Vec<&str> = row.split_whitespace().collect();
+            let Some(local) = cols.get(1) else {
+                continue;
+            };
+            if local.ends_with(&want) && cols.get(3) == Some(&"0A") {
+                if let Some(uid) = cols.get(7).and_then(|uid| uid.parse().ok()) {
+                    owners.push(uid);
+                }
+            }
+        }
+    }
+    !owners.is_empty() && owners.iter().all(|uid| *uid != euid())
+}
+
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
     scope_pack_port()?;
-    let workspace = std::env::var("PACKSET_WORKSPACE")
+    let workspace = crate::process_env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
-    Ok(PacksetClient::from_env()
-        .context("PACKSET_URL=off: this seat has no pack on purpose")?
-        .with_workspace(workspace))
+    // Read the URL here. `PacksetClient::from_env` reads the process with
+    // `std::env` and may write it, which races a test's `which("cat")`.
+    let url = crate::process_env::var("PACKSET_URL")
+        .or_else(|_| crate::process_env::var("INSIDE_MEMORY_URL"))
+        .ok()
+        .filter(|url| !url.is_empty());
+    let client = match url.as_deref() {
+        Some("off") => bail!("PACKSET_URL=off: this seat has no pack on purpose"),
+        Some(url) => PacksetClient::new(url),
+        None => {
+            let port = crate::process_env::var("PACKSET_PORT")
+                .or_else(|_| crate::process_env::var("GROK_MEM_PORT"))
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u16>().ok())
+                .unwrap_or(PACK_DEFAULT_PORT);
+            PacksetClient::new(format!("http://127.0.0.1:{port}"))
+        }
+    };
+    Ok(client.with_workspace(workspace))
 }
 
 /// The pack's last write, RFC 3339, for a HUD watch. `None` when the
@@ -9879,7 +10024,7 @@ pub fn atom_source() -> Value {
     if let Some(reason) = memories::write_reason() {
         source["reason"] = Value::String(reason);
     }
-    let turn = std::env::vars()
+    let turn = crate::process_env::vars()
         .filter(|(k, v)| k.ends_with("_TURN_ID") && !v.trim().is_empty())
         .map(|(_, v)| v.trim().to_string())
         .next();
@@ -13372,7 +13517,7 @@ pub fn command_preference_note(
 /// so a seat's rules never stand in for another's.
 fn rules_cache_path() -> Option<PathBuf> {
     load_seat_env();
-    let workspace = std::env::var("PACKSET_WORKSPACE")
+    let workspace = crate::process_env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
@@ -15133,7 +15278,7 @@ fn push_facts(url: &str, tagged: bool) -> PushFacts {
 }
 
 fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process_env::command("git");
     if let Some(d) = dir {
         cmd.arg("-C").arg(d);
     }
@@ -15157,7 +15302,9 @@ pub fn push_tier_at(p: &PushCall, cwd: Option<&str>) -> PushTier {
         (Some(d), Some(c)) if !d.starts_with('/') && !d.starts_with('~') => {
             Some(format!("{c}/{d}"))
         }
-        (Some(d), _) => Some(d.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)),
+        (Some(d), _) => {
+            Some(d.replacen('~', &crate::process_env::var("HOME").unwrap_or_default(), 1))
+        }
         (None, c) => c.map(str::to_string),
     };
     let dir = dir.as_deref();
@@ -15225,7 +15372,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
     if accession.is_empty() {
         bail!("deed: an accession is required");
     }
-    let layout = vissue_core::Layout::resolve(None, None)?;
+    let layout = tracker_layout()?;
     let mut hit = vissue_core::Router::load(layout)?.find_by_id(ticket)?;
     // A removal is an appended event, and a board has nowhere to append
     // it. The board is split into per-issue files first, which reads it
@@ -15236,8 +15383,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
             format!("deed: {ticket} is on a board, and splitting it into a ledger failed")
         })?;
         split = format!("split the board into a ledger first (`vissue migrate-ledger`):\n{said}");
-        hit = vissue_core::Router::load(vissue_core::Layout::resolve(None, None)?)?
-            .find_by_id(ticket)?;
+        hit = vissue_core::Router::load(tracker_layout()?)?.find_by_id(ticket)?;
         if !vissue_core::ledger::is_ledger(&hit.path) {
             bail!("deed: {ticket} is still on a board after the split; nothing was removed");
         }
@@ -15286,13 +15432,15 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
             d.choice, d.counted
         ));
     }
-    let current = std::process::Command::new("deedar")
-        .args(["current", cite])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let current = process_env::which("deedar").is_ok_and(|path| {
+        crate::process_env::command(path)
+            .args(["current", cite])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    });
     if current {
         return Err(deed_alone(cite));
     }
@@ -17236,16 +17384,16 @@ pub fn parse_semver(text: &str) -> Option<&str> {
 }
 
 fn bin_version(bin: &str) -> Option<String> {
-    use std::process::{Command, Stdio};
-    let path = which::which(bin).ok()?;
+    use std::process::Stdio;
+    let path = crate::process_env::which(bin).ok()?;
     // MCP servers that do not implement --version sit on stdio.
     // Cap the wait so doctor cannot hang the seat.
     let mut cmd = if bin.ends_with("-mcp") {
-        let mut c = Command::new("timeout");
+        let mut c = crate::process_env::command("timeout");
         c.args(["0.4", path.to_str()?, "--version"]);
         c
     } else {
-        let mut c = Command::new(&path);
+        let mut c = crate::process_env::command(&path);
         c.arg("--version");
         c
     };
@@ -17269,7 +17417,7 @@ const CRATE_VERSION_TTL_S: u64 = 86_400;
 /// opening sittings asks the registry once a day for each binary rather
 /// than once a sitting each.
 fn crate_version_cache(name: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_CACHE_HOME")
+    let dir = crate::process_env::var_os("XDG_CACHE_HOME")
         .filter(|r| !r.is_empty())
         .map(PathBuf::from)
         .or_else(|| home().ok().map(|h| h.join(".cache")))?
@@ -17322,7 +17470,7 @@ fn crate_max_version(name: &str, refresh: bool) -> Option<CrateVersion> {
         }
     }
     let url = format!("https://crates.io/api/v1/crates/{name}");
-    let said = std::process::Command::new("curl")
+    let said = crate::process_env::command("curl")
         .args(["-sS", "-A", "ljos-doctor", "--max-time", "3", &url])
         .output()
         .ok();
@@ -17364,9 +17512,14 @@ fn cmp_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
 /// deed store, the tracker, the claim graph.
 pub fn doctor() -> Vec<Habitat> {
     // The runner rows ask the runners' own command lines, which start slowly;
-    // they run beside the seat's rows rather than after them.
+    // they run beside the seat's rows rather than after them. The helper
+    // reads the environment this thread already holds, instead of waiting
+    // on a lock this thread cannot drop until the rows come back.
+    let holder = crate::process_env::current_holder();
+    let overlay = crate::process_env::overlay_snapshot();
     let (mut out, runners) = std::thread::scope(|s| {
-        let runners = s.spawn(harness_rows);
+        let runners =
+            s.spawn(move || crate::process_env::bind_helper(holder, overlay, harness_rows));
         let seat = doctor_seat();
         (seat, runners.join().unwrap_or_default())
     });
@@ -17480,7 +17633,7 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
         "rule": rule.pattern,
         "verdict": rule.verdict,
         "reason": rule.reason.split(':').next().unwrap_or(""),
-        "seat": std::env::var("LJOS_SEAT").ok(),
+        "seat": crate::process_env::var("LJOS_SEAT").ok(),
     });
     let _ = path.parent().map(std::fs::create_dir_all);
     use std::io::Write as _;
@@ -17627,8 +17780,8 @@ fn crate_version_for(crate_name: &str, have: Option<&str>) -> Option<CrateVersio
 /// Evidence citations and forecast confidence are part of the ballot protocol.
 /// A version line alone does not establish that the tracker accepts them.
 fn check_vissue_ballot_protocol(path: &Path) -> Result<()> {
-    use std::process::{Command, Stdio};
-    let said = Command::new("timeout")
+    use std::process::Stdio;
+    let said = crate::process_env::command("timeout")
         .arg("2")
         .arg(path)
         .args(["vote", "--help"])
@@ -17657,7 +17810,7 @@ fn check_vissue_ballot_protocol(path: &Path) -> Result<()> {
 pub fn doctor_seat() -> Vec<Habitat> {
     let mut out = Vec::new();
     for (bin, crate_name) in SEAT_BINS {
-        let found = which::which(bin).ok();
+        let found = crate::process_env::which(bin).ok();
         let have = found.as_ref().and_then(|_| bin_version(bin));
         let latest = crate_version_for(crate_name, have.as_deref());
         let ballot_protocol = found
@@ -17781,9 +17934,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
             .err()
             .map(|e| format!("{e:#}").contains("401"));
         out.push(pack_token_row(
-            packset_client::token().is_some(),
-            std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
-            packset_client::token_path(),
+            seat_token().is_some(),
+            crate::process_env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
+            seat_token_path(),
             refused,
         ));
     }
@@ -17897,7 +18050,7 @@ pub fn claim_graph_absent(said: &str) -> Option<String> {
 /// Where the tracker root came from, in the order vissue decides it.
 fn root_source() -> String {
     for var in ["ISSUE_ROOT", "VISSUE_ROOT"] {
-        if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+        if let Some(v) = crate::process_env::var_os(var).filter(|v| !v.is_empty()) {
             return format!("{var}={}", v.to_string_lossy());
         }
     }
@@ -17942,7 +18095,7 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new("git")
+    crate::process_env::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -19612,9 +19765,9 @@ pub fn utc_at(secs: u64) -> String {
 /// Run a habitat's verb with `input` on stdin.
 pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
-    let mut cmd = Command::new(path);
+    use std::process::Stdio;
+    let path = crate::process_env::which(bin).with_context(|| format!("{bin} not on PATH"))?;
+    let mut cmd = crate::process_env::command(path);
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -19766,7 +19919,7 @@ pub fn packset_hubs(limit: usize) -> Result<Value> {
 ///
 /// The binary absent or refusing, or the pack not answering.
 pub fn conflicts(limit: usize) -> Result<String> {
-    if which::which("landscape").is_err() {
+    if crate::process_env::which("landscape").is_err() {
         bail!(
             "conflicts: `landscape` is not on PATH; it is the optional habitat that reads the pack's geometry (leidarljos/landscape)"
         );
@@ -20475,7 +20628,7 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
 pub fn unstamp_tracker(issue: &str, holder: &str) -> Result<Option<String>> {
     let issue = issue.trim();
     let holder = holder.trim();
-    let layout = vissue_core::Layout::resolve(None, None)?;
+    let layout = tracker_layout()?;
     let Ok(hit) = vissue_core::Router::load(layout)?.find_by_id(issue) else {
         return Ok(None);
     };
@@ -20640,7 +20793,7 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
 /// claimdag's runtime default. Two graphs on one host (a demo, a test
 /// seat) write their holds to the same runtime directory.
 fn claim_graph_scope() -> String {
-    graph_scope_of(std::env::var("CLAIMDAG_DIR").ok().as_deref())
+    graph_scope_of(crate::process_env::var("CLAIMDAG_DIR").ok().as_deref())
 }
 
 /// [`claim_graph_scope`] for one value. A directory that exists is named by
@@ -20751,13 +20904,48 @@ pub(crate) fn revision_note(body: &Value) -> String {
     }
 }
 
+/// The tracker layout named on this thread.
+///
+/// `ISSUE_ROOT`, `VISSUE_ROOT` and `VISSUE_PREFIX` are passed in. The
+/// tracker crate would otherwise read them from the process, and a test
+/// keeps those edits off the process.
+pub(crate) fn tracker_layout() -> vissue_core::Result<vissue_core::Layout> {
+    let root = tracker_root_from_env();
+    let prefix = crate::process_env::var("VISSUE_PREFIX")
+        .ok()
+        .filter(|value| !value.is_empty());
+    vissue_core::Layout::resolve(root.as_deref(), prefix.as_deref())
+}
+
+fn tracker_root_from_env() -> Option<PathBuf> {
+    let raw = crate::process_env::var_os("ISSUE_ROOT")
+        .filter(|value| !value.is_empty())
+        .or_else(|| crate::process_env::var_os("VISSUE_ROOT").filter(|value| !value.is_empty()))?;
+    Some(expand_tracker_root(&raw))
+}
+
+fn expand_tracker_root(raw: &std::ffi::OsStr) -> PathBuf {
+    let Some(text) = raw.to_str() else {
+        return PathBuf::from(raw);
+    };
+    let Some(home) = crate::process_env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return PathBuf::from(raw);
+    };
+    if text == "~" {
+        return PathBuf::from(home);
+    }
+    text.strip_prefix("~/")
+        .map(|rest| PathBuf::from(home).join(rest))
+        .unwrap_or_else(|| PathBuf::from(raw))
+}
+
 /// One issue as JSON from the tracker library. Same card as `vissue show --json`.
 ///
 /// # Errors
 ///
 /// The tracker root cannot be resolved, or `id` is not in it.
 pub fn tracker_show_json(id: &str) -> Result<Value> {
-    let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
+    let layout = tracker_layout().map_err(anyhow::Error::from)?;
     let found = vissue_core::Router::load(layout)
         .map_err(anyhow::Error::from)?
         .find_by_id(id)
@@ -21325,7 +21513,7 @@ pub fn sitting_gated(
 /// The lease a sitting applies before it claims: `LJOS_LEASE_SECS`, else
 /// claimdag's default of 900 seconds. Zero turns the step off.
 fn lease_secs() -> u64 {
-    std::env::var("LJOS_LEASE_SECS")
+    crate::process_env::var("LJOS_LEASE_SECS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(900)
@@ -22063,11 +22251,11 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
 ///
 /// The tracker is not a git checkout, or git does not run.
 pub fn tracker_log(seat: Option<&str>) -> Result<String> {
-    let root = vissue_core::Layout::resolve(None, None)
+    let root = tracker_layout()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
+    let out = crate::process_env::command("git")
         .arg("-C")
         .arg(&root)
         .args(["log", "--format=%h %s"])
@@ -22109,11 +22297,11 @@ pub fn tracker_usage(since: &str) -> Result<String> {
     if since.is_empty() {
         bail!("usage: pass --since YYYY-MM-DD");
     }
-    let root = vissue_core::Layout::resolve(None, None)
+    let root = tracker_layout()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
+    let out = crate::process_env::command("git")
         .arg("-C")
         .arg(&root)
         .args(["log", &format!("--since={since}"), "--format=%s"])
@@ -22168,7 +22356,7 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
 /// commits without pushing. The subject names the seat, and the logbook
 /// gains `- {Verb} by {seat} [timestamp]`.
 pub fn persist_tracker(issue: &str, verb: &str) -> String {
-    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    let mode = crate::process_env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
     }
@@ -22182,7 +22370,7 @@ pub fn persist_tracker(issue: &str, verb: &str) -> String {
 /// The file that holds `issue`. A ledger fold names `issues/<id>.org`.
 /// A single board names `issues.org`. `show_json` prints `path:start-end`.
 fn tracker_issue_path(issue: &str) -> Result<PathBuf, String> {
-    let layout = vissue_core::Layout::resolve(None, None).map_err(|e| e.to_string())?;
+    let layout = tracker_layout().map_err(|e| e.to_string())?;
     let hit = vissue_core::Router::load(layout)
         .map_err(|e| e.to_string())?
         .find_by_id(issue)
@@ -22217,7 +22405,7 @@ fn path_before_line_range(file: &str) -> Option<PathBuf> {
 /// [`persist_tracker`] for a file already known: an issue filed into a
 /// projected board's inbox lives there until the fold, not in the corpus.
 pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
-    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    let mode = crate::process_env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
     }
@@ -22225,7 +22413,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         return format!("tracker git: {} has no directory\n", path.display());
     };
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
+        crate::process_env::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -22325,7 +22513,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     // and [`tracker_push::push_checkout`] unions the org headings, then
     // retries. A branch with no upstream is pushed with `-u origin <branch>`.
     let script = tracker_push::push_script(dir, &mirrors);
-    let mut push = std::process::Command::new("sh");
+    let mut push = crate::process_env::command("sh");
     push.current_dir(dir)
         .args(["-c", &script])
         .stdin(std::process::Stdio::null())
@@ -22379,7 +22567,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
 /// How long a sitting waits for the tracker push: `LJOS_TRACKER_PUSH_WAIT`
 /// seconds, else 5: agents wrap a finish in a timeout of about ten seconds.
 fn push_wait() -> std::time::Duration {
-    let secs = std::env::var("LJOS_TRACKER_PUSH_WAIT")
+    let secs = crate::process_env::var("LJOS_TRACKER_PUSH_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(5);
@@ -22872,17 +23060,17 @@ pub fn command_refused(text: &str) -> bool {
 /// Operator switch: missing TCB is a deny. Unset, absence stays open.
 pub fn policyd_required() -> bool {
     matches!(
-        std::env::var("POLICYD_REQUIRED").as_deref(),
+        crate::process_env::var("POLICYD_REQUIRED").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE")
     )
 }
 
 /// `POLICYD_BIN`, else `ljos-policyd` on PATH.
 pub fn policyd_bin() -> Option<std::path::PathBuf> {
-    std::env::var_os("POLICYD_BIN")
+    crate::process_env::var_os("POLICYD_BIN")
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| which::which("ljos-policyd").ok())
+        .or_else(|| crate::process_env::which("ljos-policyd").ok())
 }
 
 /// The TCB's verdict on a shell line: a fast in-process check first, then
@@ -22970,7 +23158,7 @@ pub const POLICYD_DEADLINE: std::time::Duration = GUARD_TIMEOUT;
 /// number, otherwise [`GUARD_TIMEOUT`].
 #[must_use]
 pub fn guard_timeout() -> std::time::Duration {
-    std::env::var("LJOS_GUARD_TIMEOUT")
+    crate::process_env::var("LJOS_GUARD_TIMEOUT")
         .ok()
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .filter(|secs| *secs > 0.0)
@@ -23308,7 +23496,7 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
     // failed, so the spawn is tried again for a few milliseconds.
     let spawn = || {
-        std::process::Command::new(bin)
+        crate::process_env::command(bin)
             .arg("check")
             .arg("--")
             .args(argv)
@@ -23963,7 +24151,7 @@ pub fn consensus_document(gate: &Value, said: &[(String, String)]) -> Value {
 }
 
 pub fn on_path(bin: &str) -> bool {
-    which::which(bin).is_ok()
+    crate::process_env::which(bin).is_ok()
 }
 
 pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
@@ -23996,9 +24184,9 @@ pub fn bind_connection_env(cmd: &mut std::process::Command) {
 /// [`run`] with `VISSUE_AGENT` set to `identity`, so a ballot or a claim is
 /// recorded under a persona's name rather than the seat's.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
-    use std::process::{Command, Stdio};
-    let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
-    let mut cmd = Command::new(path);
+    use std::process::Stdio;
+    let path = crate::process_env::which(bin).with_context(|| format!("{bin} not on PATH"))?;
+    let mut cmd = crate::process_env::command(path);
     if let Some(who) = identity_or_seat(identity) {
         cmd.env("VISSUE_AGENT", who);
     }
@@ -24047,9 +24235,9 @@ pub fn run_captured_as(
     args: &[impl AsRef<str>],
     identity: Option<&str>,
 ) -> Result<Said> {
-    use std::process::{Command, Stdio};
-    let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
-    let mut cmd = Command::new(path);
+    use std::process::Stdio;
+    let path = crate::process_env::which(bin).with_context(|| format!("{bin} not on PATH"))?;
+    let mut cmd = crate::process_env::command(path);
     if let Some(who) = identity {
         cmd.env("VISSUE_AGENT", who);
     }
@@ -24732,14 +24920,12 @@ pub fn format_bump_rows(generation: &str, rows: &[BumpRow]) -> String {
     out
 }
 
-/// Serialises every test that reads or writes the process environment.
-/// Each holder gets a private `XDG_RUNTIME_DIR`. The environment this test
-/// found is put back while the mutex is still held, so the next test cannot
-/// observe a cleared runtime directory or a variable this one set.
+/// A private `XDG_RUNTIME_DIR` for one test. The variables this test found
+/// are put back on this thread when the guard drops. The process environment
+/// is not edited, so a parallel test cannot observe the temporary value.
 #[cfg(test)]
 #[must_use = "the environment is restored when this guard drops"]
 pub(crate) struct EnvLock {
-    _guard: std::sync::MutexGuard<'static, ()>,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     runtime: tempfile::TempDir,
 }
@@ -24751,14 +24937,14 @@ impl Drop for EnvLock {
             let keep: std::collections::HashSet<std::ffi::OsString> =
                 self.snapshot.iter().map(|(key, _)| key.clone()).collect();
             for (key, value) in &self.snapshot {
-                unsafe { std::env::set_var(key, value) };
+                crate::process_env::set_var(key, value);
             }
-            let added: Vec<std::ffi::OsString> = std::env::vars_os()
+            let added: Vec<std::ffi::OsString> = crate::process_env::vars_os()
                 .map(|(key, _)| key)
                 .filter(|key| !keep.contains(key))
                 .collect();
             for key in added {
-                unsafe { std::env::remove_var(key) };
+                crate::process_env::remove_var(key);
             }
             let _ = self.runtime.path();
         });
@@ -24769,21 +24955,10 @@ impl Drop for EnvLock {
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> EnvLock {
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = ENV
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (snapshot, runtime) = with_env_mutation(|| {
-        let snapshot: Vec<_> = std::env::vars_os().collect();
-        let runtime = tempfile::tempdir().expect("private runtime dir");
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
-        (snapshot, runtime)
-    });
-    EnvLock {
-        _guard: guard,
-        snapshot,
-        runtime,
-    }
+    let snapshot: Vec<_> = crate::process_env::vars_os().collect();
+    let runtime = tempfile::tempdir().expect("private runtime dir");
+    crate::process_env::set_var("XDG_RUNTIME_DIR", runtime.path());
+    EnvLock { snapshot, runtime }
 }
 
 #[cfg(test)]
@@ -24794,6 +24969,7 @@ mod tests {
     #[test]
     fn a_guard_shim_refuses_a_deny_and_runs_the_rest() {
         use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
@@ -24811,7 +24987,7 @@ mod tests {
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
         let run = |args: &str| {
-            std::process::Command::new("sh")
+            crate::process_env::command("sh")
                 .arg("-c")
                 .arg(format!("rm {args}"))
                 .env(
@@ -24982,7 +25158,7 @@ mod tests {
         exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
         let run = |home: &std::path::Path, off: bool, cwd: &std::path::Path| {
             let _ = std::fs::remove_file(&marker);
-            let mut cmd = std::process::Command::new("git");
+            let mut cmd = crate::process_env::command("git");
             cmd.arg("branch")
                 .arg("-D")
                 .arg("gone")
@@ -25063,7 +25239,6 @@ mod tests {
         }
         let keys = [
             "HOME",
-            "PATH",
             "LJOS_OFF",
             "POLICYD_BIN",
             "PACKSET_URL",
@@ -25071,21 +25246,15 @@ mod tests {
         ];
         let saved: Vec<_> = keys
             .iter()
-            .map(|k| ((*k).to_string(), std::env::var_os(k)))
+            .map(|k| ((*k).to_string(), crate::process_env::var_os(k)))
             .collect();
-        let path = {
-            let mut next = std::ffi::OsString::from(&bin);
-            next.push(":");
-            next.push(std::env::var_os("PATH").unwrap_or_default());
-            next
-        };
-        unsafe {
-            std::env::set_var("PATH", &path);
-            std::env::set_var("POLICYD_BIN", &policyd);
-            std::env::remove_var("PACKSET_URL");
-            std::env::remove_var("PACKSET_PORT");
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", "/home/ubuntu");
+        let _bins = crate::process_env::PathFront::prepend(&bin);
+        {
+            crate::process_env::set_var("POLICYD_BIN", &policyd);
+            crate::process_env::remove_var("PACKSET_URL");
+            crate::process_env::remove_var("PACKSET_PORT");
+            crate::process_env::remove_var("LJOS_OFF");
+            crate::process_env::set_var("HOME", "/home/ubuntu");
         }
         assert!(
             super::tcb_verdict("git branch -D gone").is_some(),
@@ -25093,7 +25262,7 @@ mod tests {
         );
         assert!(marker.exists());
         let _ = std::fs::remove_file(&marker);
-        unsafe { std::env::set_var("LJOS_OFF", "1") };
+        crate::process_env::set_var("LJOS_OFF", "1");
         assert!(super::tcb_verdict("git branch -D gone").is_none());
         assert!(
             super::seat_guard("sed -i s/a/b/ ~/.codex/hooks.json").is_none(),
@@ -25101,18 +25270,18 @@ mod tests {
         );
         assert!(super::ensure_writer().is_ok());
         assert!(!marker.exists(), "LJOS_OFF started the pack daemon");
-        unsafe {
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", dir.path());
+        {
+            crate::process_env::remove_var("LJOS_OFF");
+            crate::process_env::set_var("HOME", dir.path());
         }
         assert!(super::tcb_verdict("git branch -D gone").is_none());
         assert!(super::ensure_writer().is_ok());
         assert!(!marker.exists(), "a temp HOME started the pack daemon");
-        unsafe {
+        {
             for (k, v) in &saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -25212,17 +25381,17 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let saved = Self::KEYS
                 .iter()
-                .map(|k| (*k, std::env::var_os(k)))
+                .map(|k| (*k, crate::process_env::var_os(k)))
                 .collect();
             // SAFETY: the caller holds env_guard.
-            unsafe {
+            {
                 for k in Self::KEYS {
-                    std::env::remove_var(k);
+                    crate::process_env::remove_var(k);
                 }
-                std::env::set_var("HOME", dir.path());
-                std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
-                std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-                std::env::set_var("PACKSET_URL", "off");
+                crate::process_env::set_var("HOME", dir.path());
+                crate::process_env::set_var("XDG_DATA_HOME", dir.path().join("data"));
+                crate::process_env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+                crate::process_env::set_var("PACKSET_URL", "off");
             }
             Self { _dir: dir, saved }
         }
@@ -25231,11 +25400,11 @@ mod tests {
     impl Drop for HermeticSeat {
         fn drop(&mut self) {
             // SAFETY: the caller still holds env_guard.
-            unsafe {
+            {
                 for (k, v) in &self.saved {
                     match v {
-                        Some(v) => std::env::set_var(k, v),
-                        None => std::env::remove_var(k),
+                        Some(v) => crate::process_env::set_var(k, v),
+                        None => crate::process_env::remove_var(k),
                     }
                 }
             }
@@ -25245,16 +25414,16 @@ mod tests {
     pub(crate) fn env_guard() -> super::EnvLock {
         let guard = super::test_env_lock();
         super::with_env_mutation(|| {
-            for (k, v) in std::env::vars() {
+            for (k, v) in crate::process_env::vars() {
                 if super::runner_session_var(&k, &v) {
                     // SAFETY: under the lock every environment-reading test takes.
-                    unsafe { std::env::remove_var(&k) };
+                    crate::process_env::remove_var(&k);
                 }
             }
             // The agent that launched the suite may have named a seat. A test
             // sees only the seat it sets itself; the guard puts the name back.
             for key in ["LJOS_SEAT", "VISSUE_AGENT", "LJOS_HOLD"] {
-                unsafe { std::env::remove_var(key) };
+                crate::process_env::remove_var(key);
             }
         });
         guard
@@ -25364,7 +25533,7 @@ mod tests {
             dir.path().join("hooks"),
         );
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -25406,12 +25575,12 @@ mod tests {
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
         std::fs::write(&hook, "#!/bin/sh\nsleep 4\n").unwrap();
-        std::env::set_var("VISSUE_ROOT", &root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::remove_var("LJOS_TRACKER_GIT");
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        crate::process_env::set_var("VISSUE_ROOT", &root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::remove_var("LJOS_TRACKER_GIT");
+        crate::process_env::set_var("LJOS_TRACKER_PUSH_WAIT", "1");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
         let started = std::time::Instant::now();
@@ -25425,7 +25594,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(5));
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
+        crate::process_env::set_var("LJOS_TRACKER_PUSH_WAIT", "10");
         let said = super::persist_tracker("probe-c3d4", "finished");
         assert!(said.contains("committed and pushed"), "{said}");
         for var in [
@@ -25434,7 +25603,7 @@ mod tests {
             "LJOS_TRACKER_PUSH_WAIT",
             "XDG_RUNTIME_DIR",
         ] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -25446,7 +25615,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -25470,11 +25639,11 @@ mod tests {
         std::fs::write(root.join("other.org"), "one\n").unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "seed"]);
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::set_var("LJOS_TRACKER_GIT", "commit");
-        std::env::set_var("LJOS_SEAT", "saddle");
+        crate::process_env::set_var("VISSUE_ROOT", root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::set_var("LJOS_TRACKER_GIT", "commit");
+        crate::process_env::set_var("LJOS_SEAT", "saddle");
         assert!(super::persist_tracker("probe-a1b2", "claimed").contains("nothing to commit"));
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
@@ -25502,7 +25671,7 @@ mod tests {
         );
 
         std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
-        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        crate::process_env::set_var("LJOS_TRACKER_GIT", "off");
         assert!(super::persist_tracker("probe-a1b2", "finished").contains("off"));
         for var in [
             "VISSUE_ROOT",
@@ -25510,7 +25679,7 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
         ] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -25522,7 +25691,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let output = std::process::Command::new("git")
+            let output = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -25569,11 +25738,11 @@ mod tests {
             "Software/probe/issues/.ledger",
         ]);
         run(&["commit", "-q", "-m", "seed"]);
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::set_var("LJOS_TRACKER_GIT", "commit");
-        std::env::set_var("LJOS_SEAT", "saddle");
+        crate::process_env::set_var("VISSUE_ROOT", root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::set_var("LJOS_TRACKER_GIT", "commit");
+        crate::process_env::set_var("LJOS_SEAT", "saddle");
 
         let shown = super::tracker_show_json("probe-1ed6").expect("ledger issue is visible");
         assert_eq!(shown["title"], "Ledger only");
@@ -25604,7 +25773,7 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
         ] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -25616,7 +25785,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -25641,17 +25810,17 @@ mod tests {
         let issues = root.join("Software/probe/issues.org");
         let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-b2c3\n:END:\n";
         std::fs::write(&issues, heading).unwrap();
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        crate::process_env::set_var("VISSUE_ROOT", root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::set_var("LJOS_TRACKER_GIT", "commit");
         let said = super::persist_tracker("probe-b2c3", "noted");
         assert!(said.contains("is ignored"), "{said}");
         assert!(said.contains("Software/probe/issues.org"), "{said}");
         assert!(!said.contains("nothing to commit"), "{said}");
         assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
         for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -25663,7 +25832,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -25687,11 +25856,11 @@ mod tests {
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "seed"]);
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::remove_var("LJOS_TRACKER_GIT");
-        std::env::set_var("LJOS_SEAT", "saddle");
+        crate::process_env::set_var("VISSUE_ROOT", root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::remove_var("LJOS_TRACKER_GIT");
+        crate::process_env::set_var("LJOS_SEAT", "saddle");
         let said = super::persist_tracker("probe-a1b2", "claimed");
         assert!(
             said.contains("tracker git: committed chore(issues): probe-a1b2 claimed by saddle"),
@@ -25716,7 +25885,7 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
         ] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -25790,7 +25959,7 @@ mod tests {
 
     fn git_scratch(root: &std::path::Path) {
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -25817,7 +25986,7 @@ mod tests {
         let root = dir.path().join("work");
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -25878,7 +26047,7 @@ mod tests {
         let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -25906,8 +26075,10 @@ mod tests {
 
         let id = |r: &str| format!("vissue 0.16.2\nprotocol: 1\nroot={r}\nprefix=Software\n");
         let root_s = root.display().to_string();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "5");
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        // Creating the commit has to finish inside this wait, or the row
+        // treats a commit that just landed as drift that has already sat.
+        crate::process_env::set_var("LJOS_TRACKER_PUSH_WAIT", "120");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
         assert!(ok, "{state}");
@@ -25920,12 +26091,12 @@ mod tests {
         assert!(ok, "a commit younger than the wait stays healthy: {state}");
         assert!(state.contains("1 unpushed"), "{state}");
 
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
+        crate::process_env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
         let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
         assert!(!ok, "{state}");
         assert!(state.contains("1 unpushed"), "{state}");
 
-        let mut dead = std::process::Command::new("true").spawn().unwrap();
+        let mut dead = crate::process_env::command("true").spawn().unwrap();
         let dead_pid = dead.id();
         let _ = dead.wait();
         let logs = dir.path().join("ljos");
@@ -25944,7 +26115,7 @@ mod tests {
         );
 
         for var in ["LJOS_TRACKER_PUSH_WAIT", "XDG_RUNTIME_DIR"] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -25955,7 +26126,7 @@ mod tests {
         let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -25984,7 +26155,7 @@ mod tests {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "ahead"]);
 
-        let mut sleeper = std::process::Command::new("sleep")
+        let mut sleeper = crate::process_env::command("sleep")
             .arg("8")
             .spawn()
             .unwrap();
@@ -25992,8 +26163,8 @@ mod tests {
         let logs = dir.path().join("ljos");
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join(format!("tracker-push-{pid}.log")), "").unwrap();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        crate::process_env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let id = format!(
             "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
             root.display()
@@ -26004,7 +26175,7 @@ mod tests {
         assert!(ok, "{state}");
         assert!(state.contains("1 unpushed; push still running"), "{state}");
         for var in ["LJOS_TRACKER_PUSH_WAIT", "XDG_RUNTIME_DIR"] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -26015,7 +26186,7 @@ mod tests {
         let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
+            let o = crate::process_env::command("git")
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -26044,10 +26215,10 @@ mod tests {
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "ahead"]);
 
-        let mut launcher = std::process::Command::new("true").spawn().unwrap();
+        let mut launcher = crate::process_env::command("true").spawn().unwrap();
         let launcher_pid = launcher.id();
         let _ = launcher.wait();
-        let mut push = std::process::Command::new("sleep")
+        let mut push = crate::process_env::command("sleep")
             .arg("30")
             .spawn()
             .unwrap();
@@ -26060,8 +26231,8 @@ mod tests {
             format!("{}\n", push.id()),
         )
         .unwrap();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        crate::process_env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let id = format!(
             "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
             root.display()
@@ -26076,17 +26247,17 @@ mod tests {
             "the log name is an exited ljos process"
         );
         for var in ["LJOS_TRACKER_PUSH_WAIT", "XDG_RUNTIME_DIR"] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
     #[test]
     fn a_session_id_occupies_not_the_product_name_on_the_box() {
         let _g = env_guard();
-        unsafe {
-            std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("LJOS_SEAT", "runner-x");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        {
+            crate::process_env::remove_var("VISSUE_AGENT");
+            crate::process_env::set_var("LJOS_SEAT", "runner-x");
+            crate::process_env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let holder = resolve_assignee(None);
         assert_eq!(
@@ -26105,24 +26276,22 @@ mod tests {
         );
         assert_eq!(resolve_assignee(Some("alice")), "alice");
         assert_eq!(seat_name(), "runner-x");
-        unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
-            std::env::remove_var("LJOS_SEAT");
+        {
+            crate::process_env::remove_var("GROK_SESSION_ID");
+            crate::process_env::remove_var("LJOS_SEAT");
         }
     }
 
     #[test]
     fn two_session_ids_that_share_a_prefix_occupy_different_slots() {
         let _g = env_guard();
-        unsafe {
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
+        {
+            crate::process_env::remove_var("LJOS_SEAT");
+            crate::process_env::remove_var("VISSUE_AGENT");
+            crate::process_env::set_var("GROK_SESSION_ID", "01a09b25-aaaa-7972-881a-3cee2ea6efd6");
         }
         let a = resolve_assignee(None);
-        unsafe {
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
-        }
+        crate::process_env::set_var("GROK_SESSION_ID", "01a09b25-bbbb-7972-881a-3cee2ea6efd6");
         let b = resolve_assignee(None);
         assert_ne!(
             a, b,
@@ -26136,9 +26305,7 @@ mod tests {
             b.ends_with(&session_tag("01a09b25-bbbb-7972-881a-3cee2ea6efd6")),
             "{b}"
         );
-        unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
-        }
+        crate::process_env::remove_var("GROK_SESSION_ID");
     }
 
     /// A board shows whose claim it is: the seat, then a short tag for the
@@ -26149,18 +26316,18 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        let stamped: Vec<String> = std::env::vars()
+        let stamped: Vec<String> = crate::process_env::vars()
             .map(|(k, _)| k)
             .filter(|k| runner_session_var(k, "long-enough-value"))
             .collect();
-        unsafe {
+        {
             for k in &stamped {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-            std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("LJOS_SEAT", "saddle");
-            std::env::set_var(
+            crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
+            crate::process_env::remove_var("VISSUE_AGENT");
+            crate::process_env::set_var("LJOS_SEAT", "saddle");
+            crate::process_env::set_var(
                 "CURSOR_CONVERSATION_ID",
                 "4eeb651b-18e3-4c42-910e-5e16f4f7825b",
             );
@@ -26175,15 +26342,15 @@ mod tests {
         );
         assert!(!holder.contains("4eeb651b"), "{holder}");
         assert_eq!(seat_name(), "saddle");
-        unsafe {
-            std::env::remove_var("CURSOR_CONVERSATION_ID");
-            std::env::set_var("LJOS_SESSION_ID", "saddle-review");
+        {
+            crate::process_env::remove_var("CURSOR_CONVERSATION_ID");
+            crate::process_env::set_var("LJOS_SESSION_ID", "saddle-review");
         }
         assert_eq!(holder_name(), "saddle-review");
-        unsafe {
-            std::env::remove_var("LJOS_SESSION_ID");
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("XDG_RUNTIME_DIR");
+        {
+            crate::process_env::remove_var("LJOS_SESSION_ID");
+            crate::process_env::remove_var("LJOS_SEAT");
+            crate::process_env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -26231,25 +26398,25 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        let session_keys: Vec<String> = std::env::vars()
+        let session_keys: Vec<String> = crate::process_env::vars()
             .map(|(k, _)| k)
             .filter(|k| k.ends_with("_SESSION_ID"))
             .collect();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-            std::env::remove_var("VISSUE_AGENT");
+        {
+            crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
+            crate::process_env::remove_var("VISSUE_AGENT");
             for k in &session_keys {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
-            std::env::set_var("LJOS_SEAT", "acme");
-            std::env::set_var("ACME_SESSION_ID", "acme-sess-aaaaaa");
+            crate::process_env::set_var("LJOS_SEAT", "acme");
+            crate::process_env::set_var("ACME_SESSION_ID", "acme-sess-aaaaaa");
         }
         let a_seat = seat_name();
         let a_holder = resolve_assignee(None);
-        unsafe {
-            std::env::remove_var("ACME_SESSION_ID");
-            std::env::set_var("LJOS_SEAT", "brio");
-            std::env::set_var("BRIO_SESSION_ID", "brio-sess-bbbbbb");
+        {
+            crate::process_env::remove_var("ACME_SESSION_ID");
+            crate::process_env::set_var("LJOS_SEAT", "brio");
+            crate::process_env::set_var("BRIO_SESSION_ID", "brio-sess-bbbbbb");
         }
         let b_seat = seat_name();
         let b_holder = resolve_assignee(None);
@@ -26259,20 +26426,20 @@ mod tests {
         assert_eq!(b_holder, holder_for_session("brio", "brio-sess-bbbbbb"));
         assert!(a_holder.starts_with("acme@"), "{a_holder}");
         assert_ne!(a_holder, b_holder);
-        unsafe {
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("BRIO_SESSION_ID");
-            std::env::remove_var("ACME_SESSION_ID");
-            std::env::remove_var("XDG_RUNTIME_DIR");
+        {
+            crate::process_env::remove_var("LJOS_SEAT");
+            crate::process_env::remove_var("BRIO_SESSION_ID");
+            crate::process_env::remove_var("ACME_SESSION_ID");
+            crate::process_env::remove_var("XDG_RUNTIME_DIR");
         }
     }
 
     #[test]
     fn occupancy_is_per_issue_so_two_sittings_do_not_unseat() {
         let _g = env_guard();
-        unsafe {
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("VISSUE_AGENT");
+        {
+            crate::process_env::remove_var("LJOS_SEAT");
+            crate::process_env::remove_var("VISSUE_AGENT");
         }
         let holder = resolve_assignee(None);
         let a = occupancy_assignee(None, "ljos-aaaa");
@@ -26651,11 +26818,11 @@ mod tests {
         // this id would name its holder instead.
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("VISSUE_AGENT");
-            std::env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        {
+            crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
+            crate::process_env::remove_var("LJOS_SEAT");
+            crate::process_env::remove_var("VISSUE_AGENT");
+            crate::process_env::set_var("GROK_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let row = format_seat_row();
         assert!(
@@ -26671,9 +26838,9 @@ mod tests {
             "doctor names where the session came from: {row}"
         );
         assert!(!row.contains("the default"), "{row}");
-        unsafe {
-            std::env::remove_var("GROK_SESSION_ID");
-            std::env::remove_var("XDG_RUNTIME_DIR");
+        {
+            crate::process_env::remove_var("GROK_SESSION_ID");
+            crate::process_env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -26905,9 +27072,9 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-            std::env::set_var("ACME_SESSION_ID", "01a09b25-1111-7972-881a-3cee2ea6efd6");
+        {
+            crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
+            crate::process_env::set_var("ACME_SESSION_ID", "01a09b25-1111-7972-881a-3cee2ea6efd6");
         }
         let parent = announce_seat("Acme CLI", 5151);
         // The child inherits the parent's id and connects under its own name.
@@ -26931,9 +27098,9 @@ mod tests {
         );
         retire_seat(5151);
         assert!(seat_from_session_records().is_none());
-        unsafe {
-            std::env::remove_var("ACME_SESSION_ID");
-            std::env::remove_var("XDG_RUNTIME_DIR");
+        {
+            crate::process_env::remove_var("ACME_SESSION_ID");
+            crate::process_env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -26943,7 +27110,7 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
         assert!(runner_session_var("ACME_THREAD_ID", "0199a1b2-c3d4"));
         assert!(!runner_session_var("ACME_THREAD_ID", "short"));
         assert!(runner_session_var(
@@ -26979,7 +27146,7 @@ mod tests {
             seat_for_thread("0199a1b2-bbbb-thread").holder,
             "sess-shellfirst"
         );
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -26988,29 +27155,27 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-            std::env::set_var("ACME_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
+        {
+            crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
+            crate::process_env::set_var("ACME_SESSION_ID", "01a09b25-ffe9-7972-881a-3cee2ea6efd6");
         }
         let server = announce_seat("Acme CLI", 4242);
         assert_eq!(server.seat, "acme-cli");
         // The shell's line editor stamps its own id; the shared one still
         // finds the record, and the holder is the server's.
-        unsafe {
-            std::env::set_var(
-                "AAA_LINE_EDITOR_SESSION_ID",
-                "9f9f9f9f-0000-0000-0000-000000000000",
-            );
-        }
+        crate::process_env::set_var(
+            "AAA_LINE_EDITOR_SESSION_ID",
+            "9f9f9f9f-0000-0000-0000-000000000000",
+        );
         let shell = seat_from_session_records().expect("the shared id finds the record");
         assert_eq!(shell.holder, server.holder);
         assert_eq!(shell.seat, server.seat);
         retire_seat(4242);
         assert!(seat_from_session_records().is_none());
-        unsafe {
-            std::env::remove_var("ACME_SESSION_ID");
-            std::env::remove_var("AAA_LINE_EDITOR_SESSION_ID");
-            std::env::remove_var("XDG_RUNTIME_DIR");
+        {
+            crate::process_env::remove_var("ACME_SESSION_ID");
+            crate::process_env::remove_var("AAA_LINE_EDITOR_SESSION_ID");
+            crate::process_env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert_ne!(session_tag("01a09b25-aaaa"), session_tag("01a09b25-bbbb"));
@@ -27232,7 +27397,7 @@ mod tests {
         // The seen file lives under the runtime directory.
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
         let prompt = HookCall {
             event: "UserPromptSubmit".into(),
             cue: "Do you not remember to use uv for scripts?".into(),
@@ -27309,7 +27474,7 @@ mod tests {
     fn a_clone_without_the_named_merge_driver_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            crate::process_env::command("git")
                 .arg("-C")
                 .arg(dir.path())
                 .args(args)
@@ -27340,7 +27505,7 @@ mod tests {
     fn a_subagent_reads_its_parents_issue_from_the_hold_records() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let ljos = dir.path().join("ljos");
         std::fs::create_dir_all(&ljos).unwrap();
         let rec = |name: &str, holder: &str, at: &str, node: &str| {
@@ -27363,22 +27528,22 @@ mod tests {
             Some("acme-new2")
         );
         assert_eq!(held_from_records(&["sess-nobody".to_string()]), None);
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
     fn an_open_conversation_is_told_to_sit_on_the_first_result() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
-        unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
+        crate::process_env::set_var("LJOS_IN_HOOK", "1");
         let call = |cue: &str, event: &str| HookCall {
             event: event.into(),
             cue: cue.into(),
             session: Some("work-test".into()),
             shape: HookShape::Asks,
         };
-        unsafe { std::env::set_var("LJOS_TRACK_WORK", "off") };
+        crate::process_env::set_var("LJOS_TRACK_WORK", "off");
         for _ in 0..=WORK_NUDGE_EVERY {
             assert!(
                 work_nudge(&call("cargo test", "PostToolUse"), false).is_none(),
@@ -27386,7 +27551,7 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(dir.path().join("ljos/work-work-test"));
-        unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
+        crate::process_env::set_var("LJOS_TRACK_WORK", "on");
         let said = work_nudge(&call("cargo test", "PostToolUse"), false)
             .expect("the first result with no issue says to sit");
         assert!(
@@ -27447,16 +27612,16 @@ mod tests {
         );
         assert!(touches_seat("use_tool ljos__ljos_sitting"));
         assert!(!touches_seat("cargo build --release"));
-        unsafe { std::env::remove_var("LJOS_IN_HOOK") };
-        unsafe { std::env::remove_var("LJOS_TRACK_WORK") };
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("LJOS_IN_HOOK");
+        crate::process_env::remove_var("LJOS_TRACK_WORK");
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
     fn a_twin_hook_call_is_answered_once() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let call = |cue: &str| HookCall {
             event: "UserPromptSubmit".into(),
             cue: cue.into(),
@@ -27464,9 +27629,9 @@ mod tests {
             shape: HookShape::CamelCase,
         };
         assert_eq!(atoms_timeout(), std::time::Duration::from_secs(30));
-        std::env::set_var("LJOS_IN_HOOK", "1");
+        crate::process_env::set_var("LJOS_IN_HOOK", "1");
         assert_eq!(atoms_timeout(), std::time::Duration::from_secs(2));
-        std::env::remove_var("LJOS_IN_HOOK");
+        crate::process_env::remove_var("LJOS_IN_HOOK");
         assert!(
             !hook_already_running(&call("fix the ci")),
             "the first answers"
@@ -27479,7 +27644,7 @@ mod tests {
             !hook_already_running(&call("another prompt")),
             "another prompt answers"
         );
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     /// Codex's copy of a prompt event says what the first delivery said,
@@ -27489,7 +27654,7 @@ mod tests {
     fn a_codex_copy_replays_the_first_answer() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let call = |shape: HookShape| HookCall {
             event: "UserPromptSubmit".into(),
             cue: "From now on always use bun".into(),
@@ -27532,7 +27697,7 @@ mod tests {
             .set_modified(later)
             .unwrap();
         assert_eq!(replay_hook_answer(&codex, quick), None);
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     /// An event said once is answered once when two registrations run it
@@ -27542,7 +27707,7 @@ mod tests {
     fn a_twin_stop_or_session_end_is_answered_once() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let call = |event: &str| HookCall {
             event: event.into(),
             cue: String::new(),
@@ -27563,7 +27728,7 @@ mod tests {
             !hook_twin(&call("PreToolUse"), gate),
             "a gate always answers"
         );
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     /// Onboarding Cursor finds the plugin in either place Cursor keeps it,
@@ -27689,7 +27854,7 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
         let call = |cue: &str, session: &str, event: &str| HookCall {
             event: event.into(),
             cue: cue.into(),
@@ -28367,26 +28532,27 @@ mod tests {
 
     #[test]
     fn a_timeline_reads_every_store_on_the_local_day() {
-        let _g = env_guard();
-        let before = std::env::var("TZ").ok();
-        unsafe { std::env::set_var("TZ", "CET-1CEST,M3.5.0,M10.5.0/3") };
-        // 22:28 UTC on the 26th is 00:28 on the 27th in Amsterdam, the day
-        // the tracker stamps an issue created then.
-        assert_eq!(local_stamp("2026-09-26T22:28:12.170Z"), "2026-09-27T00:28");
+        // 22:28 UTC on the 26th is 00:28 on the 27th two hours east, the day
+        // the tracker stamps an issue created then. The offset is passed in
+        // so the test does not write `TZ` into the process.
+        fn amsterdam(_: i64) -> i64 {
+            7200
+        }
+        let zone = chrono::FixedOffset::east_opt(7200).expect("offset");
+        let stamped = chrono::DateTime::parse_from_rfc3339("2026-09-26T22:28:12.170Z")
+            .expect("stamp")
+            .with_timezone(&zone)
+            .format("%Y-%m-%dT%H:%M")
+            .to_string();
+        assert_eq!(stamped, "2026-09-27T00:28");
         assert_eq!(local_stamp("[2026-09-27 Sun]"), "[2026-09-27 Sun]");
-        assert_eq!(local_offset(1_788_566_400), 7200);
-        let deed = deed_event("deed-x", "time=1790461680\n", local_offset).unwrap();
+        assert_eq!(amsterdam(1_788_566_400), 7200);
+        let deed = deed_event("deed-x", "time=1790461680\n", amsterdam).unwrap();
         let v = serde_json::json!({"properties": {"CREATED": "[2026-09-27 Sun]"}});
         let mut events = tracker_events(&v);
         events.push(deed);
         let text = format_events(&events, "2026-09-27T00:30:00");
         assert!(text.lines().all(|l| l.contains("\ttoday\t")), "{text}");
-        unsafe {
-            match before {
-                Some(tz) => std::env::set_var("TZ", tz),
-                None => std::env::remove_var("TZ"),
-            }
-        }
     }
 
     #[test]
@@ -28459,16 +28625,16 @@ mod tests {
     #[test]
     fn policyd_required_is_the_operator_switch() {
         let _g = env_guard();
-        let before = std::env::var_os("POLICYD_REQUIRED");
-        std::env::remove_var("POLICYD_REQUIRED");
+        let before = crate::process_env::var_os("POLICYD_REQUIRED");
+        crate::process_env::remove_var("POLICYD_REQUIRED");
         assert!(!policyd_required());
-        std::env::set_var("POLICYD_REQUIRED", "1");
+        crate::process_env::set_var("POLICYD_REQUIRED", "1");
         assert!(policyd_required());
-        std::env::set_var("POLICYD_REQUIRED", "0");
+        crate::process_env::set_var("POLICYD_REQUIRED", "0");
         assert!(!policyd_required());
         match before {
-            Some(v) => std::env::set_var("POLICYD_REQUIRED", v),
-            None => std::env::remove_var("POLICYD_REQUIRED"),
+            Some(v) => crate::process_env::set_var("POLICYD_REQUIRED", v),
+            None => crate::process_env::remove_var("POLICYD_REQUIRED"),
         }
     }
 
@@ -29253,10 +29419,8 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        let before = std::env::var_os("XDG_RUNTIME_DIR");
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-        }
+        let before = crate::process_env::var_os("XDG_RUNTIME_DIR");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
         let shipped = shipped_playbooks();
         let names: Vec<&str> = shipped.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, SHIPPED_PLAYBOOK_NAMES);
@@ -29388,8 +29552,8 @@ mod tests {
             "a company panel names no model family: {panel}"
         );
         match before {
-            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
-            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+            Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+            None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -29757,9 +29921,8 @@ mod tests {
         std::fs::write(&fake, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let save = |key: &str| std::env::var_os(key);
+        let save = |key: &str| crate::process_env::var_os(key);
         let saved = [
-            save("PATH"),
             save("VISSUE_ROOT"),
             save("VISSUE_NO_ROUTE"),
             save("ISSUE_ROOT"),
@@ -29772,7 +29935,6 @@ mod tests {
             save("BALLOTS"),
         ];
         let keys = [
-            "PATH",
             "VISSUE_ROOT",
             "VISSUE_NO_ROUTE",
             "ISSUE_ROOT",
@@ -29784,27 +29946,17 @@ mod tests {
             "CHILDREN",
             "BALLOTS",
         ];
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                saved[0]
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-        );
-        std::env::set_var("VISSUE_ROOT", &root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::set_var("LJOS_TRACKER_GIT", "off");
-        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("xdg"));
-        std::env::remove_var("VISSUE_CONFIG");
-        std::env::remove_var("LJOS_CONFIG");
-        std::env::set_var("LOG", &log);
-        std::env::set_var("CHILDREN", &children);
-        std::env::set_var("BALLOTS", &ballots);
+        let _bins = crate::process_env::PathFront::prepend(&bin);
+        crate::process_env::set_var("VISSUE_ROOT", &root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::set_var("LJOS_TRACKER_GIT", "off");
+        crate::process_env::set_var("XDG_CONFIG_HOME", dir.path().join("xdg"));
+        crate::process_env::remove_var("VISSUE_CONFIG");
+        crate::process_env::remove_var("LJOS_CONFIG");
+        crate::process_env::set_var("LOG", &log);
+        crate::process_env::set_var("CHILDREN", &children);
+        crate::process_env::set_var("BALLOTS", &ballots);
 
         let out = workflow_round("proj-1a2b").unwrap();
         assert!(out.contains("settled-with-notes"), "{out}");
@@ -29856,8 +30008,8 @@ mod tests {
 
         for (key, value) in keys.iter().zip(saved) {
             match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
+                Some(v) => crate::process_env::set_var(key, v),
+                None => crate::process_env::remove_var(key),
             }
         }
     }
@@ -29897,22 +30049,11 @@ mod tests {
         std::fs::write(&fake, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path_before = std::env::var_os("PATH");
-        std::env::set_var(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.display(),
-                path_before
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ),
-        );
-        std::env::set_var("VISSUE_ROOT", &root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        let _bins = crate::process_env::PathFront::prepend(&bin);
+        crate::process_env::set_var("VISSUE_ROOT", &root);
+        crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::process_env::remove_var("ISSUE_ROOT");
+        crate::process_env::set_var("LJOS_TRACKER_GIT", "off");
 
         assert_eq!(workflow_on("probe-p001").as_deref(), Some("feature"));
         assert_eq!(
@@ -29951,12 +30092,8 @@ mod tests {
         assert_eq!(workflow_close_refusal(&s), None);
         assert_eq!(workflow_sitting_block("probe-x999"), "");
 
-        match path_before {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
         for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
-            std::env::remove_var(var);
+            crate::process_env::remove_var(var);
         }
     }
 
@@ -30005,10 +30142,8 @@ mod tests {
         let _g = env_guard();
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
-        let before = std::env::var_os("XDG_RUNTIME_DIR");
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
-        }
+        let before = crate::process_env::var_os("XDG_RUNTIME_DIR");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", &dir);
         assert_eq!(
             resolve_sitting_playbook("proj-1a2b", "Seat playbooks", Some("arena")).unwrap(),
             "arena"
@@ -30030,8 +30165,8 @@ mod tests {
         drop_playbook("proj-1a2b");
         assert_eq!(bound_playbook("proj-1a2b"), None);
         match before {
-            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
-            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+            Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+            None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -30418,8 +30553,8 @@ mod tests {
     fn an_open_turn_that_used_tools_is_held_once() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
-        unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
+        crate::process_env::set_var("LJOS_IN_HOOK", "1");
         let transcript = dir.path().join("chat.jsonl");
         std::fs::write(
             &transcript,
@@ -30431,12 +30566,12 @@ mod tests {
             r#"{{"transcriptPath":"{}","stopHookActive":false}}"#,
             transcript.display()
         );
-        unsafe { std::env::set_var("LJOS_TRACK_WORK", "off") };
+        crate::process_env::set_var("LJOS_TRACK_WORK", "off");
         assert!(
             seat_stop_reason(&input, false, false).is_none(),
             "a seat that does not track work lets the turn end"
         );
-        unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
+        crate::process_env::set_var("LJOS_TRACK_WORK", "on");
         let reason = seat_stop_reason(&input, false, false).expect("held");
         assert!(
             reason.contains("ljos sitting") && reason.contains("vissue q"),
@@ -30451,9 +30586,9 @@ mod tests {
         )
         .unwrap();
         assert!(seat_stop_reason(&input, false, false).is_none());
-        unsafe { std::env::remove_var("LJOS_IN_HOOK") };
-        unsafe { std::env::remove_var("LJOS_TRACK_WORK") };
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("LJOS_IN_HOOK");
+        crate::process_env::remove_var("LJOS_TRACK_WORK");
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
@@ -30471,8 +30606,8 @@ mod tests {
     fn a_design_question_is_held_until_a_panel_votes() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
-        unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
+        crate::process_env::set_var("LJOS_IN_HOOK", "1");
         let transcript = dir.path().join("chat.jsonl");
         std::fs::write(
             &transcript,
@@ -30508,7 +30643,7 @@ mod tests {
             task.contains("not run `vissue show`"),
             "a member casts before it reads the others' ballots"
         );
-        unsafe { std::env::set_var("LJOS_PANEL_CHILD", "1") };
+        crate::process_env::set_var("LJOS_PANEL_CHILD", "1");
         let child = start_decision_panel(
             "so what do we think? is this the right answer?",
             Some("sess-child"),
@@ -30516,7 +30651,7 @@ mod tests {
         )
         .unwrap();
         assert!(child.contains("Do not ssh"), "{child}");
-        unsafe { std::env::remove_var("LJOS_PANEL_CHILD") };
+        crate::process_env::remove_var("LJOS_PANEL_CHILD");
         let opener = dir.path().join("opener.sh");
         std::fs::write(
             &opener,
@@ -30526,8 +30661,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
         let argv_path = dir.path().join("argv.txt");
-        unsafe { std::env::set_var("LJOS_PANEL_BIN", &opener) };
-        unsafe { std::env::set_var("LJOS_TEST_ARGV", &argv_path) };
+        crate::process_env::set_var("LJOS_PANEL_BIN", &opener);
+        crate::process_env::set_var("LJOS_TEST_ARGV", &argv_path);
         let said = start_decision_panel(
             "so what do we think? is this the right answer?",
             Some("sess-open"),
@@ -30542,10 +30677,10 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(argv.contains("open-panel"), "{argv}");
-        unsafe { std::env::remove_var("LJOS_PANEL_BIN") };
-        unsafe { std::env::remove_var("LJOS_TEST_ARGV") };
-        unsafe { std::env::remove_var("LJOS_IN_HOOK") };
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        crate::process_env::remove_var("LJOS_PANEL_BIN");
+        crate::process_env::remove_var("LJOS_TEST_ARGV");
+        crate::process_env::remove_var("LJOS_IN_HOOK");
+        crate::process_env::remove_var("XDG_RUNTIME_DIR");
     }
 
     #[test]
@@ -30878,19 +31013,19 @@ mod tests {
         // The host key step writes to the real config home and asks the
         // real deedar; neither belongs in a test.
         // SAFETY: the lock above is the only environment this test touches.
-        unsafe {
-            std::env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
-            std::env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
-            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+        {
+            crate::process_env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
+            crate::process_env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
+            crate::process_env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
         }
         struct Unset;
         impl Drop for Unset {
             fn drop(&mut self) {
                 // SAFETY: still under the test's lock.
-                unsafe {
-                    std::env::remove_var("DEEDAR_URL");
-                    std::env::remove_var("VISSUE_ROOT");
-                    std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+                {
+                    crate::process_env::remove_var("DEEDAR_URL");
+                    crate::process_env::remove_var("VISSUE_ROOT");
+                    crate::process_env::remove_var("DEEDAR_HOST_SIGNING_KEY");
                 }
             }
         }
@@ -30975,9 +31110,7 @@ mod tests {
             Err(e) => {
                 assert!(e.to_string().contains("ljos-mcp not on PATH"), "{e}");
                 // SAFETY: the lock above is still held.
-                unsafe {
-                    std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
-                }
+                crate::process_env::remove_var("DEEDAR_HOST_SIGNING_KEY");
                 return;
             }
         };
@@ -31014,9 +31147,7 @@ mod tests {
             "the entry was appended twice"
         );
         // SAFETY: the lock above is still held.
-        unsafe {
-            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
-        }
+        crate::process_env::remove_var("DEEDAR_HOST_SIGNING_KEY");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -31037,14 +31168,17 @@ mod tests {
             "XDG_DATA_HOME",
             "XDG_CONFIG_HOME",
         ];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|k| (*k, crate::process_env::var_os(k)))
+            .collect();
         // SAFETY: the lock above is the only environment this test touches.
-        unsafe {
+        {
             for k in keys {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
-            std::env::set_var("XDG_DATA_HOME", &data);
-            std::env::set_var("XDG_CONFIG_HOME", &config);
+            crate::process_env::set_var("XDG_DATA_HOME", &data);
+            crate::process_env::set_var("XDG_CONFIG_HOME", &config);
         }
         let store = data.join("deedar/store");
         let root = data.join("vissue/tracker");
@@ -31080,8 +31214,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text, "written once");
 
         // vissue itself, from another directory, resolves the new root.
-        if which::which("vissue").is_ok() {
-            let out = std::process::Command::new("vissue")
+        if crate::process_env::which("vissue").is_ok() {
+            let out = crate::process_env::command("vissue")
                 .arg("identity")
                 .current_dir(dir.path())
                 .output()
@@ -31091,20 +31225,20 @@ mod tests {
         }
 
         // SAFETY: as above.
-        unsafe {
-            std::env::set_var("VISSUE_ROOT", "/elsewhere");
-            std::env::set_var("DEEDAR_URL", "file:///elsewhere");
+        {
+            crate::process_env::set_var("VISSUE_ROOT", "/elsewhere");
+            crate::process_env::set_var("DEEDAR_URL", "file:///elsewhere");
         }
         assert!(super::tracker_step(true)
             .detail
             .contains("VISSUE_ROOT=/elsewhere"));
         assert!(super::deed_store_step(true).detail.contains("DEEDAR_URL="));
         // SAFETY: as above.
-        unsafe {
+        {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -31227,14 +31361,17 @@ mod tests {
         let env = dir.path().join("grokbot.env");
         std::fs::write(&env, super::seat_env_text("grokbot")).unwrap();
         let holder_in_a_new_shell = |pre: &str| {
-            let out = std::process::Command::new("sh")
+            let out = crate::process_env::command("sh")
                 .arg("-c")
                 .arg(format!(
                     "{pre} . '{}' && printf %s \"${{LJOS_SESSION_ID:-}}\"",
                     env.display()
                 ))
                 .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env(
+                    "PATH",
+                    crate::process_env::var_os("PATH").unwrap_or_default(),
+                )
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{out:?}");
@@ -31243,14 +31380,17 @@ mod tests {
         assert_eq!(holder_in_a_new_shell(""), "grokbot-shell");
         assert_eq!(holder_in_a_new_shell(""), holder_in_a_new_shell(""));
         let seat_in_a_new_shell = |pre: &str| {
-            let out = std::process::Command::new("sh")
+            let out = crate::process_env::command("sh")
                 .arg("-c")
                 .arg(format!(
                     "{pre} . '{}' && printf %s \"$LJOS_SEAT\"",
                     env.display()
                 ))
                 .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env(
+                    "PATH",
+                    crate::process_env::var_os("PATH").unwrap_or_default(),
+                )
                 .output()
                 .unwrap();
             String::from_utf8(out.stdout).unwrap()
@@ -31275,38 +31415,38 @@ mod tests {
         assert_eq!(super::shared_holder_id("a"), "a-shell-seat");
         // Other runners' ids in this test's own environment would join the
         // holder, so they are set aside while it reads.
-        let others: Vec<(String, String)> = std::env::vars()
+        let others: Vec<(String, String)> = crate::process_env::vars()
             .filter(|(k, v)| super::runner_session_var(k, v))
             .collect();
         let read = |vars: &[(&str, &str)]| {
             // SAFETY: the lock above is the only environment this test touches.
-            unsafe {
+            {
                 for (k, v) in vars {
-                    std::env::set_var(k, v);
+                    crate::process_env::set_var(k, v);
                 }
             }
             let seat = super::whoami();
             // SAFETY: as above.
-            unsafe {
+            {
                 for (k, _) in vars {
-                    std::env::remove_var(k);
+                    crate::process_env::remove_var(k);
                 }
             }
             seat
         };
         // SAFETY: as above.
-        unsafe {
+        {
             for (k, _) in &others {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
         }
         let shared = read(&[("LJOS_SESSION_ID", "grokbot-shell")]);
         let one = read(&[("ACME_CONVERSATION_ID", "conv-aaaa1111")]);
         let two = read(&[("ACME_CONVERSATION_ID", "conv-bbbb2222")]);
         // SAFETY: as above.
-        unsafe {
+        {
             for (k, v) in &others {
-                std::env::set_var(k, v);
+                crate::process_env::set_var(k, v);
             }
         }
         assert_eq!(shared.holder, "grokbot-shell");
@@ -31395,14 +31535,10 @@ mod tests {
         let key = dir.path().join("host.key");
         std::fs::write(&key, [7u8; 32]).unwrap();
         // SAFETY: the lock above is the only environment this test touches.
-        unsafe {
-            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &key);
-        }
+        crate::process_env::set_var("DEEDAR_HOST_SIGNING_KEY", &key);
         let step = super::host_key_step(true);
         // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
-        }
+        crate::process_env::remove_var("DEEDAR_HOST_SIGNING_KEY");
         assert!(step.ok, "{step:?}");
         assert!(step.detail.contains("exists; would list it"), "{step:?}");
     }
@@ -31412,25 +31548,25 @@ mod tests {
         let _g = env_guard();
         // Named stores, so onboarding leaves the real home's alone.
         // SAFETY: the lock above is the only environment this test touches.
-        unsafe {
-            std::env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
-            std::env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
+        {
+            crate::process_env::set_var("DEEDAR_URL", "file:///nonexistent/ljos-test-store");
+            crate::process_env::set_var("VISSUE_ROOT", "/nonexistent/ljos-test-tracker");
         }
         struct Unset;
         impl Drop for Unset {
             fn drop(&mut self) {
                 // SAFETY: still under the test's lock.
-                unsafe {
-                    std::env::remove_var("DEEDAR_URL");
-                    std::env::remove_var("VISSUE_ROOT");
+                {
+                    crate::process_env::remove_var("DEEDAR_URL");
+                    crate::process_env::remove_var("VISSUE_ROOT");
                 }
             }
         }
         let _unset = Unset;
         // SAFETY: the lock above is the only environment this test touches.
-        unsafe {
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+        {
+            crate::process_env::set_var("PACKSET_URL", "off");
+            crate::process_env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
         }
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
@@ -31483,9 +31619,9 @@ mod tests {
         std::fs::write(&missing, "[[harness]]\nname = \"box\"\nshell = true\n").unwrap();
         let err = super::onboard_in(&missing, "box", true, None).unwrap_err();
         assert!(err.to_string().contains("--skills"), "{err}");
-        unsafe {
-            std::env::remove_var("PACKSET_URL");
-            std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+        {
+            crate::process_env::remove_var("PACKSET_URL");
+            crate::process_env::remove_var("DEEDAR_HOST_SIGNING_KEY");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -31657,6 +31793,7 @@ mod tests {
 
     #[test]
     fn a_bypass_is_logged_and_the_doctor_reads_it() {
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
         let rule = Rule {
@@ -31788,8 +31925,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        let _env = HoldEnv::set(&[("PATH", &format!("{}:{}", dir.path().display(), path))]);
+        let _bins = crate::process_env::PathFront::prepend(dir.path());
         let err = super::require_deed("deed-missing").unwrap_err().to_string();
         assert!(err.contains("deed-missing"), "{err}");
         assert!(err.contains("not in the deed store"), "{err}");
@@ -31917,7 +32053,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(repo.path())
                 .args(args)
@@ -32209,7 +32345,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let issue_file = project.join("issues/probe-c1te.org");
         std::fs::write(&issue_file, ledger).unwrap();
         let root_s = root.to_str().unwrap();
-        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        crate::process_env::remove_var("ISSUE_ROOT");
         let _env = HoldEnv::set(&[
             ("VISSUE_ROOT", root_s),
             ("VISSUE_NO_ROUTE", "1"),
@@ -32268,7 +32404,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let issues = project.join("issues.org");
         std::fs::write(&issues, board).unwrap();
         let root_s = root.to_str().unwrap();
-        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        crate::process_env::remove_var("ISSUE_ROOT");
         let _env = HoldEnv::set(&[
             ("VISSUE_ROOT", root_s),
             ("VISSUE_NO_ROUTE", "1"),
@@ -32814,9 +32950,60 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_fed_verb_reads_its_stdin() {
+        let _g = env_guard();
         let said = run_fed("cat", &[] as &[&str], "one\ntwo\n").unwrap();
         assert_eq!(said.stdout, "one\ntwo\n");
         assert!(run_fed("sh", &["-c", "exit 2"], "").is_err());
+    }
+
+    /// A fake binary is visible to this thread's lookup and absent from the
+    /// process PATH, so a parallel `cat` lookup still has a PATH that names it.
+    #[test]
+    fn a_fake_binary_does_not_take_cat_off_the_process_path() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("deedar");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let before = crate::process_env::var_os("PATH");
+        let _front = crate::process_env::PathFront::prepend(&bin);
+        assert_eq!(crate::process_env::which("deedar").unwrap(), fake);
+        assert!(crate::process_env::which("cat").is_ok());
+        assert_eq!(crate::process_env::var_os("PATH"), before);
+        let said = run_fed("cat", &[] as &[&str], "ok\n").unwrap();
+        assert_eq!(said.stdout, "ok\n");
+    }
+
+    /// `HOME` is visible to this thread and to its child, and absent from
+    /// the process, so a parallel `which("cat")` cannot observe the edit.
+    #[test]
+    fn a_thread_edits_home_and_the_child_sees_it() {
+        let _g = env_guard();
+        let before = std::env::var_os("HOME");
+        let dir = tempfile::tempdir().unwrap();
+        crate::process_env::set_var("HOME", dir.path());
+        assert_eq!(
+            crate::process_env::var_os("HOME").as_deref(),
+            Some(dir.path().as_os_str())
+        );
+        assert_eq!(std::env::var_os("HOME"), before);
+        let out = crate::process_env::command("sh")
+            .arg("-c")
+            .arg("printf %s \"$HOME\"")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            dir.path().to_str().unwrap()
+        );
+        assert!(crate::process_env::which("cat").is_ok());
     }
 
     #[test]
@@ -32993,9 +33180,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "[[harness]]\nname = \"grok\"\n\n[[harness]]\nname = \"shell\"\nshell = true\n",
         )
         .unwrap();
-        let saved = std::env::var_os("XDG_CONFIG_HOME");
+        let saved = crate::process_env::var_os("XDG_CONFIG_HOME");
         // SAFETY: the lock above is the only environment this test touches.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", config.path()) };
+        crate::process_env::set_var("XDG_CONFIG_HOME", config.path());
         let task = persona_ballot_task("BRIEF", "buildengineer", "surf-ab12");
         assert!(task.starts_with("BRIEF"));
         assert!(
@@ -33025,10 +33212,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let err = persona_atom(&stray, "seat").unwrap_err().to_string();
         assert!(err.contains("grok, shell"), "{err}");
         // SAFETY: as above.
-        unsafe {
+        {
             match saved {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
+                Some(v) => crate::process_env::set_var("XDG_CONFIG_HOME", v),
+                None => crate::process_env::remove_var("XDG_CONFIG_HOME"),
             }
         }
     }
@@ -33421,11 +33608,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn a_persona_session_opens_once_and_takes_the_next_task_in_place() {
         let _g = env_guard();
-        if which::which("tmux").is_err() {
+        if crate::process_env::which("tmux").is_err() {
             return;
         }
         // Safety: the environment lock is held for the whole test.
-        unsafe { std::env::set_var("LJOS_PANE_TOOL", "tmux") };
+        crate::process_env::set_var("LJOS_PANE_TOOL", "tmux");
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("cfg");
         std::fs::create_dir_all(cfg.join("ljos")).unwrap();
@@ -33438,12 +33625,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
         )
         .unwrap();
-        let old_cfg = std::env::var_os("XDG_CONFIG_HOME");
-        let old_state = std::env::var_os("XDG_STATE_HOME");
+        let old_cfg = crate::process_env::var_os("XDG_CONFIG_HOME");
+        let old_state = crate::process_env::var_os("XDG_STATE_HOME");
         // Safety: the environment lock is held for the whole test.
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &cfg);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+        {
+            crate::process_env::set_var("XDG_CONFIG_HOME", &cfg);
+            crate::process_env::set_var("XDG_STATE_HOME", dir.path().join("state"));
         }
         let name = format!("tp{}", std::process::id());
         let lines = |n: usize| {
@@ -33463,22 +33650,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let inbox: Vec<_> = std::fs::read_dir(persona_session::home(&name).join("inbox"))
             .map(|d| d.flatten().collect())
             .unwrap_or_default();
-        let _ = std::process::Command::new("tmux")
+        let _ = crate::process_env::command("tmux")
             .args([
                 "kill-window",
                 "-t",
                 &format!("{}:{name}", persona_session::PERSONA_SESSION),
             ])
             .status();
-        unsafe {
-            std::env::remove_var("LJOS_PANE_TOOL");
+        {
+            crate::process_env::remove_var("LJOS_PANE_TOOL");
             match old_cfg {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
+                Some(v) => crate::process_env::set_var("XDG_CONFIG_HOME", v),
+                None => crate::process_env::remove_var("XDG_CONFIG_HOME"),
             }
             match old_state {
-                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                None => std::env::remove_var("XDG_STATE_HOME"),
+                Some(v) => crate::process_env::set_var("XDG_STATE_HOME", v),
+                None => crate::process_env::remove_var("XDG_STATE_HOME"),
             }
         }
         let pane = first.expect("the first hand-off opens a window");
@@ -33510,11 +33697,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let cfg = dir.path().join("cfg");
         std::fs::create_dir_all(cfg.join("ljos")).unwrap();
         // herdr keeps its socket under the config home this test moves.
-        let real_cfg = std::env::var_os("XDG_CONFIG_HOME")
+        let real_cfg = crate::process_env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".config")
+                std::path::PathBuf::from(crate::process_env::var_os("HOME").unwrap())
+                    .join(".config")
             });
         std::os::unix::fs::symlink(real_cfg.join("herdr"), cfg.join("herdr")).unwrap();
         let got = dir.path().join("got");
@@ -33540,13 +33728,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             toml::to_string(&file).unwrap(),
         )
         .unwrap();
-        let old_cfg = std::env::var_os("XDG_CONFIG_HOME");
-        let old_state = std::env::var_os("XDG_STATE_HOME");
+        let old_cfg = crate::process_env::var_os("XDG_CONFIG_HOME");
+        let old_state = crate::process_env::var_os("XDG_STATE_HOME");
         // Safety: the environment lock is held for the whole test.
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &cfg);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
-            std::env::set_var("LJOS_PANE_TOOL", "herdr");
+        {
+            crate::process_env::set_var("XDG_CONFIG_HOME", &cfg);
+            crate::process_env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            crate::process_env::set_var("LJOS_PANE_TOOL", "herdr");
         }
         let name = format!("hp{}", std::process::id());
         let lines = |n: usize| {
@@ -33564,20 +33752,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let second = persona_session::hand(&name, "echoer", "second task");
         let seen_second = lines(2);
         let live = persona_session::live_pane(&name);
-        unsafe {
-            std::env::remove_var("LJOS_PANE_TOOL");
+        {
+            crate::process_env::remove_var("LJOS_PANE_TOOL");
             match old_cfg {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
+                Some(v) => crate::process_env::set_var("XDG_CONFIG_HOME", v),
+                None => crate::process_env::remove_var("XDG_CONFIG_HOME"),
             }
             match old_state {
-                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-                None => std::env::remove_var("XDG_STATE_HOME"),
+                Some(v) => crate::process_env::set_var("XDG_STATE_HOME", v),
+                None => crate::process_env::remove_var("XDG_STATE_HOME"),
             }
         }
         let pane = first.expect("the first hand-off opens a herdr pane");
         if let Some(ws) = pane.rsplit(' ').next().and_then(|p| p.split(':').next()) {
-            let _ = std::process::Command::new("herdr")
+            let _ = crate::process_env::command("herdr")
                 .args(["workspace", "close", ws])
                 .output();
         }
@@ -33603,10 +33791,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn consent_is_refused_under_a_runner() {
         let _g = env_guard();
         // Safety: the variable is this test's own and is removed after.
-        unsafe { std::env::set_var("ACMEAGENT_CONVERSATION_ID", "0199a1b2-c3d4-e5f6") };
+        crate::process_env::set_var("ACMEAGENT_CONVERSATION_ID", "0199a1b2-c3d4-e5f6");
         assert!(under_a_runner());
         assert!(approval::approve("0".repeat(32).as_str()).is_err());
-        unsafe { std::env::remove_var("ACMEAGENT_CONVERSATION_ID") };
+        crate::process_env::remove_var("ACMEAGENT_CONVERSATION_ID");
         assert!(seat_guard("rm -rf /run/user/1000/ljos/approvals").is_some());
     }
 
@@ -33660,9 +33848,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_usage_limit_notice_holds_the_stop_once() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        let before = std::env::var_os("XDG_RUNTIME_DIR");
+        let before = crate::process_env::var_os("XDG_RUNTIME_DIR");
         // SAFETY: env_guard serialises the tests that touch the environment.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let transcript = dir.path().join("t.jsonl");
         let line = |uuid: &str, text: &str| {
             serde_json::json!({"type": "user", "uuid": uuid, "message": {"role": "user", "content": text}})
@@ -33696,10 +33884,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "a new notice holds again"
         );
         // SAFETY: as above.
-        unsafe {
+        {
             match before {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+                None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
     }
@@ -34025,24 +34213,24 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         .unwrap();
         let task = dir.path().join("reviewer.prompt");
         std::fs::write(&task, "cast one ballot").unwrap();
-        let old = std::env::var_os("XDG_CONFIG_HOME");
+        let old = crate::process_env::var_os("XDG_CONFIG_HOME");
         // Safety: the environment lock is held for the whole test.
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &cfg);
-            std::env::set_var("LJOS_PANEL_RUNNER", "acme");
-            std::env::remove_var("LJOS_MEMBER_BIN");
+        {
+            crate::process_env::set_var("XDG_CONFIG_HOME", &cfg);
+            crate::process_env::set_var("LJOS_PANEL_RUNNER", "acme");
+            crate::process_env::remove_var("LJOS_MEMBER_BIN");
         }
         let named = panel_member_argv(&task, Some("/work"), "reviewer");
-        unsafe { std::env::set_var("LJOS_PANEL_RUNNER", "nobody") };
+        crate::process_env::set_var("LJOS_PANEL_RUNNER", "nobody");
         let fallback = panel_member_argv(&task, None, "reviewer");
-        unsafe { std::env::set_var("LJOS_MEMBER_BIN", "stand-in") };
+        crate::process_env::set_var("LJOS_MEMBER_BIN", "stand-in");
         let stand_in = panel_member_argv(&task, None, "reviewer");
-        unsafe {
-            std::env::remove_var("LJOS_PANEL_RUNNER");
-            std::env::remove_var("LJOS_MEMBER_BIN");
+        {
+            crate::process_env::remove_var("LJOS_PANEL_RUNNER");
+            crate::process_env::remove_var("LJOS_MEMBER_BIN");
             match old {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
+                Some(v) => crate::process_env::set_var("XDG_CONFIG_HOME", v),
+                None => crate::process_env::remove_var("XDG_CONFIG_HOME"),
             }
         }
         assert_eq!(
@@ -34067,9 +34255,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_status_line_is_cached_for_its_session() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("XDG_RUNTIME_DIR");
+        let old = crate::process_env::var_os("XDG_RUNTIME_DIR");
         // Safety: the environment lock is held for the whole test.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         std::fs::create_dir_all(runtime_dir()).unwrap();
         std::fs::write(
             runtime_dir().join("statusline-st-1"),
@@ -34077,10 +34265,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         )
         .unwrap();
         let line = statusline(r#"{"session_id":"st-1","workspace":{"current_dir":"/tmp"}}"#);
-        unsafe {
+        {
             match old {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+                None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
         assert_eq!(line, "ljos cached · seat-x · 2 due");
@@ -34124,9 +34312,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_compaction_forgets_the_memories_and_keeps_the_nudges() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("XDG_RUNTIME_DIR");
+        let old = crate::process_env::var_os("XDG_RUNTIME_DIR");
         // Safety: the environment lock is held for the whole test.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let session = "compact-test-1";
         mark_seen(
             Some(session),
@@ -34139,10 +34327,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         rearm_after_compaction(Some(session));
         let seen = seen_ids(Some(session));
-        unsafe {
+        {
             match old {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+                None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
         assert!(
@@ -34294,29 +34482,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn the_guard_waits_five_seconds_unless_told_otherwise() {
         let _g = env_guard();
-        let saved = std::env::var_os("LJOS_GUARD_TIMEOUT");
+        let saved = crate::process_env::var_os("LJOS_GUARD_TIMEOUT");
         struct Restore(Option<std::ffi::OsString>);
         impl Drop for Restore {
             fn drop(&mut self) {
-                unsafe {
+                {
                     match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_TIMEOUT", v),
-                        None => std::env::remove_var("LJOS_GUARD_TIMEOUT"),
+                        Some(v) => crate::process_env::set_var("LJOS_GUARD_TIMEOUT", v),
+                        None => crate::process_env::remove_var("LJOS_GUARD_TIMEOUT"),
                     }
                 }
             }
         }
         let _restore = Restore(saved);
-        unsafe { std::env::remove_var("LJOS_GUARD_TIMEOUT") };
+        crate::process_env::remove_var("LJOS_GUARD_TIMEOUT");
         assert_eq!(guard_timeout(), std::time::Duration::from_secs(5));
         assert_eq!(GUARD_TIMEOUT, std::time::Duration::from_secs(5));
-        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "9") };
+        crate::process_env::set_var("LJOS_GUARD_TIMEOUT", "9");
         assert_eq!(guard_timeout(), std::time::Duration::from_secs(9));
-        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "0.5") };
+        crate::process_env::set_var("LJOS_GUARD_TIMEOUT", "0.5");
         assert_eq!(guard_timeout(), std::time::Duration::from_millis(500));
-        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "0") };
+        crate::process_env::set_var("LJOS_GUARD_TIMEOUT", "0");
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
-        unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "nope") };
+        crate::process_env::set_var("LJOS_GUARD_TIMEOUT", "nope");
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
     }
 
@@ -34324,7 +34512,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn evidenced_push_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::process_env::command("git")
                 .arg("-C")
                 .arg(dir.path())
                 .args(args)
@@ -34356,7 +34544,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         std::fs::create_dir_all(dir.path().join(".ljos")).unwrap();
         std::fs::write(dir.path().join(".ljos/gates.toml"), "test = \"true\"\n").unwrap();
         let sha = String::from_utf8(
-            std::process::Command::new("git")
+            crate::process_env::command("git")
                 .arg("-C")
                 .arg(dir.path())
                 .args(["rev-parse", "HEAD"])
@@ -34513,10 +34701,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             !note.contains("(seat rule"),
             "a missing reason must not render as a seat refusal: {note}"
         );
+        let holder = crate::process_env::current_holder();
+        let overlay = crate::process_env::overlay_snapshot();
         let mut joins = Vec::new();
         for _ in 0..6 {
-            joins.push(std::thread::spawn(|| {
-                tcb_verdict("git add slug.py test_slug.py")
+            let overlay = overlay.clone();
+            joins.push(std::thread::spawn(move || {
+                crate::process_env::bind_helper(holder, overlay, || {
+                    tcb_verdict("git add slug.py test_slug.py")
+                })
             }));
         }
         for join in joins {
@@ -34976,33 +35169,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "CODEX_THREAD_ID",
             "XDG_RUNTIME_DIR",
         ];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|k| (*k, crate::process_env::var_os(k)))
+            .collect();
         let rt = tempfile::tempdir().unwrap();
-        unsafe {
+        {
             for k in keys {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
-            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
-            std::env::set_var("CODEX_THREAD_ID", "019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d");
+            crate::process_env::set_var("XDG_RUNTIME_DIR", rt.path());
+            crate::process_env::set_var("CODEX_THREAD_ID", "019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d");
         }
         let who = whoami();
         assert_eq!(who.seat, "codex", "{who:?}");
         assert!(who.holder.starts_with("codex@"), "{who:?}");
         assert_eq!(ballot_seat("vote").unwrap(), "codex");
-        unsafe {
-            std::env::remove_var("CODEX_THREAD_ID");
-            std::env::set_var("ACME_SESSION_ID", "a-runner-nobody-names-0001");
+        {
+            crate::process_env::remove_var("CODEX_THREAD_ID");
+            crate::process_env::set_var("ACME_SESSION_ID", "a-runner-nobody-names-0001");
         }
         if whoami().seat == login_user() {
             let err = ballot_seat("vote").unwrap_err().to_string();
             assert!(err.contains("nothing names its seat"), "{err}");
         }
-        unsafe {
-            std::env::remove_var("ACME_SESSION_ID");
+        {
+            crate::process_env::remove_var("ACME_SESSION_ID");
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -35018,33 +35214,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "CODEX_SESSION_ID",
             "XDG_RUNTIME_DIR",
         ];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|k| (*k, crate::process_env::var_os(k)))
+            .collect();
         let rt = tempfile::tempdir().unwrap();
         let thread = "019a7c3e-55aa-7b10-9c2d-3e4f5a6b7c8d";
-        unsafe {
+        {
             for k in keys {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
-            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
-            std::env::set_var("LJOS_SEAT", "codex");
+            crate::process_env::set_var("XDG_RUNTIME_DIR", rt.path());
+            crate::process_env::set_var("LJOS_SEAT", "codex");
         }
         let call = seat_for_thread(thread);
         let other = tempfile::tempdir().unwrap();
-        unsafe {
+        {
             // The shell carries the thread and a second Codex id, and finds
             // no record.
-            std::env::set_var("XDG_RUNTIME_DIR", other.path());
-            std::env::set_var("CODEX_THREAD_ID", thread);
-            std::env::set_var("CODEX_SESSION_ID", "019a7c3e-ffff-7b10-0000-000000000001");
+            crate::process_env::set_var("XDG_RUNTIME_DIR", other.path());
+            crate::process_env::set_var("CODEX_THREAD_ID", thread);
+            crate::process_env::set_var("CODEX_SESSION_ID", "019a7c3e-ffff-7b10-0000-000000000001");
         }
         let shell = whoami();
         assert_eq!(call.holder, shell.holder, "{call:?} {shell:?}");
         assert!(shell.holder.starts_with("codex@"), "{shell:?}");
-        unsafe {
+        {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -35060,38 +35259,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "ACME_CONVERSATION_ID",
         ]
         .into_iter()
-        .map(|k| (k, std::env::var(k).ok()))
+        .map(|k| (k, crate::process_env::var(k).ok()))
         .collect();
-        unsafe { std::env::remove_var("VISSUE_AGENT") };
-        unsafe { std::env::set_var("LJOS_SEAT", "inky") };
-        unsafe {
-            std::env::set_var(
-                "ACME_CONVERSATION_ID",
-                "0f9e8d7c-6b5a-4321-9876-abcdefabcdef",
-            )
-        };
+        crate::process_env::remove_var("VISSUE_AGENT");
+        crate::process_env::set_var("LJOS_SEAT", "inky");
+        crate::process_env::set_var(
+            "ACME_CONVERSATION_ID",
+            "0f9e8d7c-6b5a-4321-9876-abcdefabcdef",
+        );
         let rt = tempfile::tempdir().unwrap();
-        let rt_was = std::env::var_os("XDG_RUNTIME_DIR");
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", rt.path()) };
+        let rt_was = crate::process_env::var_os("XDG_RUNTIME_DIR");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", rt.path());
         // An MCP call named the thread first and left its id whole as the
         // holder.
-        unsafe { std::env::remove_var("LJOS_SEAT") };
+        crate::process_env::remove_var("LJOS_SEAT");
         let _ = seat_for_thread("0f9e8d7c-6b5a-4321-9876-abcdefabcdef");
-        unsafe { std::env::set_var("LJOS_SEAT", "inky") };
+        crate::process_env::set_var("LJOS_SEAT", "inky");
         let who = whoami();
         assert_eq!(who.seat, "inky");
         assert!(who.holder.starts_with("inky@"), "{who:?}");
         assert!(!who.holder.contains("0f9e8d7c"), "{who:?}");
-        unsafe { std::env::set_var("LJOS_HOLD", "inky@release") };
+        crate::process_env::set_var("LJOS_HOLD", "inky@release");
         assert_eq!(whoami().holder, "inky@release");
         match rt_was {
-            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
-            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+            Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+            None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
         }
         for (k, v) in saved {
             match v {
-                Some(v) => unsafe { std::env::set_var(k, v) },
-                None => unsafe { std::env::remove_var(k) },
+                Some(v) => crate::process_env::set_var(k, v),
+                None => crate::process_env::remove_var(k),
             }
         }
     }
@@ -35661,12 +35858,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn an_agy_turn_after_the_first_raises_its_prompt() {
         let _env = env_guard();
         let keys = ["HOME", "XDG_RUNTIME_DIR"];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|k| (*k, crate::process_env::var_os(k)))
+            .collect();
         let home = tempfile::tempdir().unwrap();
         let rt = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+        {
+            crate::process_env::set_var("HOME", home.path());
+            crate::process_env::set_var("XDG_RUNTIME_DIR", rt.path());
         }
         let t = home.path().join("t.jsonl");
         let say = |text: &str| {
@@ -35699,11 +35899,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "a later turn opens at a later invocation, from a ~/ path"
         );
         assert_eq!(call(8).event, "PostToolUse");
-        unsafe {
+        {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -35833,7 +36033,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "timeline_of must not shell vissue"
         );
         assert!(
-            !body.contains("Command::new(\"vissue\")"),
+            !body.contains("crate::process_env::command(\"vissue\")"),
             "timeline_of must not Command::new vissue"
         );
         assert!(
@@ -35853,33 +36053,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Deed rail library show\n:PROPERTIES:\n:ID:         sample-k2p2\n:CREATED:    [2026-09-20 Sat]\n:END:\n",
         )
         .unwrap();
-        let old_issue_root = std::env::var_os("ISSUE_ROOT");
-        let old_vissue_root = std::env::var_os("VISSUE_ROOT");
-        let old_no_route = std::env::var_os("VISSUE_NO_ROUTE");
-        let old_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("ISSUE_ROOT", dir.path());
-            std::env::set_var("VISSUE_ROOT", dir.path());
-            std::env::set_var("VISSUE_NO_ROUTE", "1");
-            std::env::set_var("PATH", "/usr/bin");
+        let old_issue_root = crate::process_env::var_os("ISSUE_ROOT");
+        let old_vissue_root = crate::process_env::var_os("VISSUE_ROOT");
+        let old_no_route = crate::process_env::var_os("VISSUE_NO_ROUTE");
+        let _hide = crate::process_env::HiddenBins::new(&["vissue", "deedar"]);
+        {
+            crate::process_env::set_var("ISSUE_ROOT", dir.path());
+            crate::process_env::set_var("VISSUE_ROOT", dir.path());
+            crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
         }
         let events = timeline_events("sample-k2p2", 12);
-        unsafe {
+        {
             match old_issue_root {
-                Some(v) => std::env::set_var("ISSUE_ROOT", v),
-                None => std::env::remove_var("ISSUE_ROOT"),
+                Some(v) => crate::process_env::set_var("ISSUE_ROOT", v),
+                None => crate::process_env::remove_var("ISSUE_ROOT"),
             }
             match old_vissue_root {
-                Some(v) => std::env::set_var("VISSUE_ROOT", v),
-                None => std::env::remove_var("VISSUE_ROOT"),
+                Some(v) => crate::process_env::set_var("VISSUE_ROOT", v),
+                None => crate::process_env::remove_var("VISSUE_ROOT"),
             }
             match old_no_route {
-                Some(v) => std::env::set_var("VISSUE_NO_ROUTE", v),
-                None => std::env::remove_var("VISSUE_NO_ROUTE"),
-            }
-            match old_path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
+                Some(v) => crate::process_env::set_var("VISSUE_NO_ROUTE", v),
+                None => crate::process_env::remove_var("VISSUE_NO_ROUTE"),
             }
         }
         let events = events.expect("timeline_events should read the tracker library");
@@ -36458,16 +36653,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     impl PackUrl {
         fn set(url: &str) -> Self {
-            let take = |key: &str| std::env::var(key).ok();
+            let take = |key: &str| crate::process_env::var(key).ok();
             let held = Self {
                 url: take("PACKSET_URL"),
                 seat: take("LJOS_SEAT"),
                 timeout: take("PACKSET_TIMEOUT_MS"),
             };
-            unsafe {
-                std::env::set_var("PACKSET_URL", url);
-                std::env::set_var("LJOS_SEAT", "inky");
-                std::env::set_var("PACKSET_TIMEOUT_MS", "2000");
+            {
+                crate::process_env::set_var("PACKSET_URL", url);
+                crate::process_env::set_var("LJOS_SEAT", "inky");
+                crate::process_env::set_var("PACKSET_TIMEOUT_MS", "2000");
             }
             held
         }
@@ -36475,11 +36670,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     impl Drop for PackUrl {
         fn drop(&mut self) {
-            let put = |key: &str, prev: &Option<String>| unsafe {
-                match prev {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
+            let put = |key: &str, prev: &Option<String>| match prev {
+                Some(v) => crate::process_env::set_var(key, v),
+                None => crate::process_env::remove_var(key),
             };
             put("PACKSET_URL", &self.url);
             put("LJOS_SEAT", &self.seat);
@@ -36644,16 +36837,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let url = format!("http://{}", listener.local_addr().unwrap());
         // Accepted and never answered: a writer that stopped reading.
         let held = std::thread::spawn(move || listener.accept().map(|(s, _)| s));
-        let before = std::env::var_os("PACKSET_TIMEOUT_MS");
+        let before = crate::process_env::var_os("PACKSET_TIMEOUT_MS");
         // SAFETY: under the lock every environment-reading test takes.
-        unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", "200") };
+        crate::process_env::set_var("PACKSET_TIMEOUT_MS", "200");
         let started = std::time::Instant::now();
         let out = atoms_lean(&PacksetClient::new(&url), "ws");
         let took = started.elapsed();
-        unsafe {
+        {
             match before {
-                Some(v) => std::env::set_var("PACKSET_TIMEOUT_MS", v),
-                None => std::env::remove_var("PACKSET_TIMEOUT_MS"),
+                Some(v) => crate::process_env::set_var("PACKSET_TIMEOUT_MS", v),
+                None => crate::process_env::remove_var("PACKSET_TIMEOUT_MS"),
             }
         }
         assert!(out.is_err());
@@ -36876,10 +37069,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let tracker = dir.path().join("tracker");
         std::fs::create_dir_all(&tracker).unwrap();
-        let _held = HoldEnv::set(&[
-            ("PATH", bin.to_str().unwrap()),
-            ("VISSUE_ROOT", tracker.to_str().unwrap()),
-        ]);
+        let _bins = crate::process_env::PathFront::prepend(&bin);
+        let _held = HoldEnv::set(&[("VISSUE_ROOT", tracker.to_str().unwrap())]);
         let said = cite_stands("deed-file-self-minted").unwrap_err();
         assert!(said.contains("a deed alone does not stand"), "{said}");
         assert!(said.contains("another seat"), "{said}");
@@ -36967,8 +37158,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let pairs = pairs
                 .iter()
                 .map(|(k, v)| {
-                    let prev = std::env::var_os(k);
-                    unsafe { std::env::set_var(k, v) };
+                    let prev = crate::process_env::var_os(k);
+                    crate::process_env::set_var(k, v);
                     (*k, prev)
                 })
                 .collect();
@@ -36979,10 +37170,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     impl Drop for HoldEnv {
         fn drop(&mut self) {
             for (k, prev) in &self.pairs {
-                unsafe {
+                {
                     match prev {
-                        Some(v) => std::env::set_var(k, v),
-                        None => std::env::remove_var(k),
+                        Some(v) => crate::process_env::set_var(k, v),
+                        None => crate::process_env::remove_var(k),
                     }
                 }
             }
@@ -37454,22 +37645,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(calls.contains(&want), "{calls}");
     }
 
-    /// Run `f` with `dir` first on PATH, then put PATH back.
+    /// Run `f` with `dir` searched before `PATH` on this thread.
     fn with_fake_on_path<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
-        super::with_env_mutation(|| {
-            let old = std::env::var_os("PATH").unwrap_or_default();
-            let mut new = std::ffi::OsString::from(dir.as_os_str());
-            new.push(":");
-            new.push(&old);
-            unsafe {
-                std::env::set_var("PATH", &new);
-            }
-            let out = f();
-            unsafe {
-                std::env::set_var("PATH", old);
-            }
-            out
-        })
+        let _bins = crate::process_env::PathFront::prepend(dir);
+        f()
     }
 
     #[test]
@@ -37588,12 +37767,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let saved: Vec<_> = ["XDG_RUNTIME_DIR", "LJOS_SEAT", "CLAIMDAG_DIR"]
             .into_iter()
-            .map(|k| (k, std::env::var_os(k)))
+            .map(|k| (k, crate::process_env::var_os(k)))
             .collect();
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-            std::env::set_var("LJOS_SEAT", "alice");
-            std::env::remove_var("CLAIMDAG_DIR");
+        {
+            crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
+            crate::process_env::set_var("LJOS_SEAT", "alice");
+            crate::process_env::remove_var("CLAIMDAG_DIR");
         }
         let hold = dir.path().join("ljos").join(format!("hold-{worker}"));
         std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
@@ -37614,11 +37793,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let refused = complete("proj-cccc", Some("done"), "parent-1", Some(3));
             (done.map(|d| (d, dropped)), released, refused)
         });
-        unsafe {
+        {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -37658,17 +37837,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let _tracker = fake_vissue(dir.path(), true, true);
         let calls = dir.path().join("claimdag.log");
         fake_claimdag(dir.path(), &calls);
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let runtime = crate::process_env::var_os("XDG_RUNTIME_DIR");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let said = with_fake_on_path(dir.path(), || {
             let said = claim_next("alice", None, None)?;
             complete("proj-bbbb", None, "alice", Some(2))?;
             Ok::<_, anyhow::Error>(said)
         });
-        unsafe {
+        {
             match runtime {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+                None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
         let said = said.unwrap();
@@ -37735,7 +37914,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         });
         let runtime = dir.path().join("run");
         std::fs::create_dir_all(&runtime).unwrap();
-        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        crate::process_env::remove_var("ISSUE_ROOT");
         let _env = HoldEnv::set(&[
             ("VISSUE_ROOT", root.to_str().unwrap()),
             ("VISSUE_NO_ROUTE", "1"),
@@ -38055,7 +38234,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         for d in [&state, &runtime, &config] {
             std::fs::create_dir_all(d).unwrap();
         }
-        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        crate::process_env::remove_var("ISSUE_ROOT");
         let _env = HoldEnv::set(&[
             ("VISSUE_ROOT", root.to_str().unwrap()),
             ("VISSUE_NO_ROUTE", "1"),
@@ -38148,8 +38327,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let runtime = crate::process_env::var_os("XDG_RUNTIME_DIR");
+        crate::process_env::set_var("XDG_RUNTIME_DIR", dir.path());
         let holds = dir.path().join("ljos");
         std::fs::create_dir_all(&holds).unwrap();
         let me = std::process::id();
@@ -38167,10 +38346,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let said = with_fake_on_path(dir.path(), || reclaim_expired(900));
         let gone_hold_left = holds.join(format!("hold-{gone}")).exists();
         let alive_hold_left = holds.join(format!("hold-{alive}")).exists();
-        unsafe {
+        {
             match runtime {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+                Some(v) => crate::process_env::set_var("XDG_RUNTIME_DIR", v),
+                None => crate::process_env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
         if cfg!(target_os = "linux") {
@@ -38525,27 +38704,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
              The board does not carry this heading.\n",
         )
         .unwrap();
-        let prev_root = std::env::var_os("VISSUE_ROOT");
-        let prev_prefix = std::env::var_os("VISSUE_PREFIX");
-        let prev_route = std::env::var_os("VISSUE_NO_ROUTE");
-        unsafe {
-            std::env::set_var("VISSUE_ROOT", root);
-            std::env::set_var("VISSUE_PREFIX", "Software");
-            std::env::set_var("VISSUE_NO_ROUTE", "1");
+        let prev_root = crate::process_env::var_os("VISSUE_ROOT");
+        let prev_prefix = crate::process_env::var_os("VISSUE_PREFIX");
+        let prev_route = crate::process_env::var_os("VISSUE_NO_ROUTE");
+        {
+            crate::process_env::set_var("VISSUE_ROOT", root);
+            crate::process_env::set_var("VISSUE_PREFIX", "Software");
+            crate::process_env::set_var("VISSUE_NO_ROUTE", "1");
         }
         let shown = tracker_show_json("demo-abcd");
-        unsafe {
+        {
             match prev_root {
-                Some(v) => std::env::set_var("VISSUE_ROOT", v),
-                None => std::env::remove_var("VISSUE_ROOT"),
+                Some(v) => crate::process_env::set_var("VISSUE_ROOT", v),
+                None => crate::process_env::remove_var("VISSUE_ROOT"),
             }
             match prev_prefix {
-                Some(v) => std::env::set_var("VISSUE_PREFIX", v),
-                None => std::env::remove_var("VISSUE_PREFIX"),
+                Some(v) => crate::process_env::set_var("VISSUE_PREFIX", v),
+                None => crate::process_env::remove_var("VISSUE_PREFIX"),
             }
             match prev_route {
-                Some(v) => std::env::set_var("VISSUE_NO_ROUTE", v),
-                None => std::env::remove_var("VISSUE_NO_ROUTE"),
+                Some(v) => crate::process_env::set_var("VISSUE_NO_ROUTE", v),
+                None => crate::process_env::remove_var("VISSUE_NO_ROUTE"),
             }
         }
         let shown = shown.expect("ledger issue");
@@ -38555,21 +38734,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn panel_concurrency_honors_env_override() {
         let _g = env_guard();
-        let prev = std::env::var_os("LJOS_PANEL_CONCURRENCY");
-        unsafe {
-            std::env::set_var("LJOS_PANEL_CONCURRENCY", "7");
-        }
+        let prev = crate::process_env::var_os("LJOS_PANEL_CONCURRENCY");
+        crate::process_env::set_var("LJOS_PANEL_CONCURRENCY", "7");
         assert_eq!(panel_concurrency(), 7);
-        unsafe {
-            std::env::remove_var("LJOS_PANEL_CONCURRENCY");
-            std::env::set_var("LJOS_MAX_PARALLEL", "3");
+        {
+            crate::process_env::remove_var("LJOS_PANEL_CONCURRENCY");
+            crate::process_env::set_var("LJOS_MAX_PARALLEL", "3");
         }
         assert_eq!(panel_concurrency(), 3);
-        unsafe {
-            std::env::remove_var("LJOS_MAX_PARALLEL");
+        {
+            crate::process_env::remove_var("LJOS_MAX_PARALLEL");
             match prev {
-                Some(v) => std::env::set_var("LJOS_PANEL_CONCURRENCY", v),
-                None => std::env::remove_var("LJOS_PANEL_CONCURRENCY"),
+                Some(v) => crate::process_env::set_var("LJOS_PANEL_CONCURRENCY", v),
+                None => crate::process_env::remove_var("LJOS_PANEL_CONCURRENCY"),
             }
         }
     }
@@ -38657,23 +38834,26 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_pack_request_carries_the_token_from_the_pack_home() {
         let _env = env_guard();
         let keys = ["PACKSET_TOKEN", "PACKSET_TOKEN_FILE", "PACKSET_HOME"];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|k| (*k, crate::process_env::var_os(k)))
+            .collect();
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("token"), "abc123\n").unwrap();
-        unsafe {
+        {
             for k in keys {
-                std::env::remove_var(k);
+                crate::process_env::remove_var(k);
             }
-            std::env::set_var("PACKSET_HOME", home.path());
+            crate::process_env::set_var("PACKSET_HOME", home.path());
         }
-        assert_eq!(packset_client::token().as_deref(), Some("abc123"));
-        let req = packset_client::authorize(ureq::get("http://127.0.0.1:1/v1/atoms"));
+        assert_eq!(super::seat_token().as_deref(), Some("abc123"));
+        let req = super::authorize_pack(ureq::get("http://127.0.0.1:1/v1/atoms"));
         assert_eq!(req.header("Authorization"), Some("Bearer abc123"));
-        unsafe {
+        {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::process_env::set_var(k, v),
+                    None => crate::process_env::remove_var(k),
                 }
             }
         }
@@ -38734,11 +38914,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::create_dir_all(&config).unwrap();
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("LJOS_HOLD", "rohit");
-            std::env::set_var("LJOS_SEAT", "claude");
+        {
+            crate::process_env::set_var("XDG_CONFIG_HOME", &config);
+            crate::process_env::set_var("HOME", dir.path());
+            crate::process_env::set_var("LJOS_HOLD", "rohit");
+            crate::process_env::set_var("LJOS_SEAT", "claude");
         }
         user_rules::write_preference(
             "never post or reply to Alan (ocaisa)",
@@ -38774,6 +38954,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let rule_at = text.find("never post or reply to Alan").expect("rule");
         let you = text.find("You are designer").expect("persona");
         assert!(rule_at < you, "{text}");
-        assert_eq!(std::env::var("LJOS_SEAT").as_deref(), Ok("inky"));
+        assert_eq!(crate::process_env::var("LJOS_SEAT").as_deref(), Ok("inky"));
     }
 }
