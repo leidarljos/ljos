@@ -157,6 +157,19 @@ struct RepoBook {
     /// is the last touch of whichever repository the seat used, not this one.
     #[serde(default)]
     last_unix: u64,
+    /// The issue is one a commit named, not one this sitting filed. The
+    /// sweep hands it back with a release instead of closing it: the
+    /// commit cited work on someone's open ticket, it did not accept it.
+    #[serde(default)]
+    named: bool,
+    /// Other open issues this row's commits named while it held `issue`.
+    /// The sweep releases each of them too.
+    #[serde(default)]
+    also: Vec<String>,
+    /// Shas already cited on an issue in `also`, so they are not cited on
+    /// `issue` as well.
+    #[serde(default)]
+    elsewhere: Vec<String>,
 }
 
 /// Whether the guard and the pack daemon should stay out of this process.
@@ -1226,11 +1239,12 @@ fn cite_row(book: &mut Book, row_key: &str, git_repo: &str) -> Result<(), String
         return Ok(());
     };
     for sha in commits_since(git_repo, start.as_deref(), &head) {
-        if book
-            .repos
-            .get(row_key)
-            .is_some_and(|row| row.deeds.iter().any(|seen| seen == &sha))
-        {
+        if book.repos.get(row_key).is_some_and(|row| {
+            row.deeds
+                .iter()
+                .chain(&row.elsewhere)
+                .any(|seen| seen == &sha)
+        }) {
             continue;
         }
         match cite_deed(&issue, &sha) {
@@ -1685,13 +1699,29 @@ fn finish_rows(book: &mut Book, repos: &[String]) {
                 Err(e) => log_line(&format!("lesson: {e}")),
             }
         }
+        let also = book
+            .repos
+            .get_mut(repo)
+            .map(|row| std::mem::take(&mut row.also))
+            .unwrap_or_default();
+        for other in &also {
+            if let Err(e) = hand_back(other) {
+                log_line(&format!("finish: {e}"));
+            }
+        }
         let Some(issue) = issue else {
             continue;
         };
         if finished {
             continue;
         }
-        match close_issue(&issue) {
+        let named = book.repos.get(repo).is_some_and(|row| row.named);
+        let done = if named {
+            hand_back(&issue)
+        } else {
+            close_issue(&issue)
+        };
+        match done {
             Ok(()) => {
                 if let Some(row) = book.repos.get_mut(repo) {
                     row.finished = true;
@@ -1717,6 +1747,155 @@ fn close_issue(issue: &str) -> Result<(), String> {
         return Err(line.trim().to_string());
     }
     Ok(())
+}
+
+/// Release a claim the git hook took on an issue a commit named. The
+/// issue goes back to the state it had before the claim, as `ljos release`
+/// leaves it, and stays open: naming a ticket in a commit is not accepting
+/// the work on it.
+fn hand_back(issue: &str) -> Result<(), String> {
+    let assignee = super::resolve_assignee(None);
+    if which::which("claimdag").is_ok() {
+        if let Err(e) = super::release(issue, &assignee) {
+            log_line(&format!("release: {e:#}"));
+            if let Err(e) = super::unstamp_tracker(issue, &assignee, true) {
+                log_line(&format!("release: {e:#}"));
+            }
+        }
+    } else if let Err(e) = super::unstamp_tracker(issue, &assignee, true) {
+        log_line(&format!("release: {e:#}"));
+    }
+    let line = super::persist_tracker(issue, "released");
+    if line.contains("could not") || line.contains("refused") {
+        return Err(line.trim().to_string());
+    }
+    Ok(())
+}
+
+/// The most ids a commit message is checked for. Each one is a tracker read.
+const NAMED_IDS_MAX: usize = 8;
+
+/// The first id in `message` that names an issue the tracker holds and
+/// has not closed: `ljos-policyd-32fx: ...` in a subject, `Fixes ljos-xsor`
+/// in a body. A word shaped like an id (`fix-hook`) that the tracker does
+/// not know is not one, and a DONE or CANCELLED issue is not reopened.
+#[must_use]
+pub fn named_open_issue(message: &str) -> Option<String> {
+    named_open_issue_with(message, |id| {
+        super::issue_record(id).ok().and_then(|v| {
+            (v["id"].as_str() == Some(id)).then(|| v["state"].as_str().unwrap_or("").to_string())
+        })
+    })
+}
+
+/// [`named_open_issue`] with the tracker read passed in: `state` gives the
+/// issue's state, `None` when the tracker does not hold it.
+fn named_open_issue_with(message: &str, state: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for raw in message.split_whitespace() {
+        let token = raw.trim_matches(|c: char| {
+            matches!(
+                c,
+                ',' | '.'
+                    | ':'
+                    | ';'
+                    | '!'
+                    | '?'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '#'
+            )
+        });
+        if !is_issue_id(token) || seen.iter().any(|s| s == token) {
+            continue;
+        }
+        if seen.len() >= NAMED_IDS_MAX {
+            break;
+        }
+        seen.push(token.to_string());
+        if !matches!(state(token).as_deref(), Some("DONE" | "CANCELLED") | None) {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// Book the commit at `head` in `repo` on `issue`, an open issue its
+/// message named, instead of filing a new one. The sitting that already
+/// holds the checkout keeps its row; otherwise the seat's book does. The
+/// claim is taken unless that row already holds the issue, and the deed is
+/// cited on the issue. A row holding another issue keeps it, and the named
+/// one is released with it at the end of the sitting.
+pub(crate) fn book_named_commit(repo: &str, head: &str, issue: &str) {
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let (path, key) =
+        open_row_for_repo(repo).unwrap_or_else(|| (book_path(&sitting_key()), repo.to_string()));
+    let mut book = load_book(&path);
+    let now = unix_secs();
+    let row = book.repos.entry(key.clone()).or_default();
+    let open = row.issue.clone().filter(|_| !row.finished);
+    let holds = open.as_deref() == Some(issue);
+    let held_also = row.also.iter().any(|other| other == issue);
+    if !holds && !held_also {
+        match claim_existing(issue) {
+            Ok(()) => {
+                let line = super::persist_tracker(issue, "claimed");
+                if line.contains("could not") || line.contains("refused") {
+                    log_line(line.trim());
+                }
+            }
+            Err(e) => log_line(&format!("claim: {issue}: {e}")),
+        }
+    }
+    let cited = cite_deed(issue, head);
+    if let Err(e) = &cited {
+        log_line(&format!("deed: {e}"));
+    }
+    let row = book.repos.entry(key.clone()).or_default();
+    match open {
+        Some(ref held) if held == issue => {
+            if cited.is_ok() && !row.deeds.iter().any(|seen| seen == head) {
+                row.deeds.push(head.to_string());
+            }
+        }
+        Some(_) => {
+            if !held_also {
+                row.also.push(issue.to_string());
+            }
+            if !row.elsewhere.iter().any(|seen| seen == head) {
+                row.elsewhere.push(head.to_string());
+            }
+        }
+        None => {
+            *row = RepoBook {
+                issue: Some(issue.to_string()),
+                named: true,
+                deeds: if cited.is_ok() {
+                    vec![head.to_string()]
+                } else {
+                    Vec::new()
+                },
+                start_sha: Some(head.to_string()),
+                recall: recall_line(issue),
+                ..RepoBook::default()
+            };
+        }
+    }
+    book.last_unix = now;
+    if !repo.is_empty() {
+        book.last_repo = repo.to_string();
+    }
+    stamp_touch(&mut book, &key, now);
+    store_book(&path, &book);
 }
 
 /// Remember a guard ask on this repository. The book file is the only
@@ -3606,6 +3785,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_commit_names_the_first_open_issue_the_tracker_holds() {
+        let state = |id: &str| match id {
+            "ljos-policyd-32fx" | "ljos-xsor" => Some("TODO".to_string()),
+            "ljos-cjd8" => Some("STARTED".to_string()),
+            "ljos-done" => Some("DONE".to_string()),
+            _ => None,
+        };
+        let pick = |m: &str| named_open_issue_with(m, state);
+        assert_eq!(
+            pick("ljos-policyd-32fx: claim the named id").as_deref(),
+            Some("ljos-policyd-32fx")
+        );
+        assert_eq!(
+            pick("tidy the hook\n\nFixes ljos-xsor.").as_deref(),
+            Some("ljos-xsor")
+        );
+        assert_eq!(pick("(ljos-cjd8) reopen").as_deref(), Some("ljos-cjd8"));
+        assert_eq!(
+            pick("fix-hook: ljos-done then ljos-xsor").as_deref(),
+            Some("ljos-xsor")
+        );
+        assert!(pick("fix-hook: ljos-done and ljos-gone").is_none());
+        assert!(pick("no id here").is_none());
     }
 
     #[test]

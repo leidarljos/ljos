@@ -132,3 +132,101 @@ fn release_reopens_and_complete_keeps_the_state() {
     );
     assert!(other.contains("stays claimed by inky@main"), "{other}");
 }
+
+/// `ljos finish` without `--close` ends the sitting the way a release
+/// does: the claim goes, and the issue is back to the state before the
+/// claim, so nothing reads STARTED with nobody on it (ljos-cjd8). A finish
+/// with `--close` keeps the state for the DONE that follows.
+#[test]
+fn finish_without_close_reopens_and_finish_with_close_does_not() {
+    const FINISH_ORG: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* STARTED [#C] finished open\n:PROPERTIES:\n:ID:         proj-eeee\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: saddle@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] finished closed\n:PROPERTIES:\n:ID:         proj-ffff\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: saddle@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("calls.log");
+    let log_s = log.display();
+    script(
+        dir.path(),
+        "claimdag",
+        &format!(
+            "#!/bin/sh\necho \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  release) echo gen=3 ;;\n  complete) echo done ;;\nesac\nexit 0\n"
+        ),
+    );
+    script(
+        dir.path(),
+        "vissue",
+        &format!("#!/bin/sh\necho \"vissue $*\" >> '{log_s}'\nexit 0\n"),
+    );
+    let tracker = dir.path().join("tracker");
+    let file = tracker.join("Software/proj/issues.org");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, FINISH_ORG).unwrap();
+    let home = dir.path().join("home");
+    let runtime = dir.path().join("run");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let ljos = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_STATE_HOME", home.join(".state"))
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("VISSUE_ROOT", &tracker)
+            .env("LJOS_SEAT", "saddle")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ljos {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let open = ljos(&[
+        "finish",
+        "proj-eeee",
+        "--assignee",
+        "saddle@main",
+        "--gen",
+        "2",
+    ]);
+    let closed = ljos(&[
+        "finish",
+        "proj-ffff",
+        "--assignee",
+        "saddle@main",
+        "--gen",
+        "2",
+        "--close",
+    ]);
+    let org = std::fs::read_to_string(&file).unwrap();
+    for id in ["proj-eeee", "proj-ffff"] {
+        assert!(
+            !heading(&org, id).contains(":CLAIMED_BY:"),
+            "{id} still claimed:\n{org}"
+        );
+    }
+    assert!(
+        heading(&org, "proj-eeee").starts_with("\n* TODO"),
+        "a finish without --close hands the issue back:\n{org}"
+    );
+    assert!(
+        open.contains("no longer claimed by saddle@main; back to TODO"),
+        "{open}"
+    );
+    assert!(open.contains("stays open and nobody holds it"), "{open}");
+    assert!(
+        closed.contains("no longer claimed by saddle@main; its state stays"),
+        "{closed}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("vissue update proj-ffff -s DONE"), "{calls}");
+}

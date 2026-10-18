@@ -18082,6 +18082,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(runners);
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
+    out.push(git_hooks::doctor_row());
     out.push(policy_row());
     out.push(bypass_row());
     out.push(panes_row());
@@ -19170,7 +19171,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         "warn"
     } else if row.ok {
         "ok"
-    } else if OPTIONAL_ROWS.contains(&row.name) || optional_bin(row.name) {
+    } else if OPTIONAL_ROWS.contains(&row.name)
+        || optional_bin(row.name)
+        || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))
+    {
         "info"
     } else if WARN_ROWS.contains(&row.name) {
         "warn"
@@ -22241,6 +22245,25 @@ pub fn complete(
     assignee: &str,
     gen: Option<u64>,
 ) -> Result<String> {
+    complete_as(node, status, assignee, gen, false)
+}
+
+/// [`complete`], and with `reopen` the tracker issue goes back to the
+/// state it had before the claim, as a release puts it ([`unstamp_tracker`]).
+/// `ljos finish` without `--close` passes it: the sitting ends, the claim
+/// graph frees the node and the tracker drops the claim, and an issue kept
+/// STARTED then reads as taken by nobody and leaves every ready list.
+///
+/// # Errors
+///
+/// As [`complete`].
+pub fn complete_as(
+    node: &str,
+    status: Option<&str>,
+    assignee: &str,
+    gen: Option<u64>,
+    reopen: bool,
+) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     let gen_s = live_gen(&id, gen)?.to_string();
@@ -22277,7 +22300,7 @@ pub fn complete(
                     node,
                     &id,
                     &hold.assignee,
-                    false,
+                    reopen,
                 ));
             }
             let holder = run_captured("claimdag", &["get", id.as_str()])
@@ -22305,7 +22328,7 @@ pub fn complete(
                     drop_hold(holder);
                     drop_playbook(node);
                     let stamped = tracker.as_deref().unwrap_or(assignee);
-                    return Ok(with_unstamp(said.stdout, node, &id, stamped, false));
+                    return Ok(with_unstamp(said.stdout, node, &id, stamped, reopen));
                 }
             }
             bail!(
@@ -22317,7 +22340,7 @@ pub fn complete(
     };
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(with_unstamp(said.stdout, node, &id, assignee, false))
+    Ok(with_unstamp(said.stdout, node, &id, assignee, reopen))
 }
 
 /// The bare seat a holder name stands for: no `:node` scope, no `@host`
@@ -22583,7 +22606,11 @@ pub fn finish(
         }
         None => "no --lesson given to finish; a lesson taken earlier with `ljos remember` stands, otherwise pass --lesson in two sentences\n".into(),
     };
-    let completed = match complete(issue, Some(status), assignee, gen) {
+    // A finish that does not close hands the issue back the way a release
+    // does: the claim is gone either way, and an issue left STARTED under
+    // nobody drops out of every ready list. A close sets DONE below.
+    let reopen = !(close && status.eq_ignore_ascii_case("done"));
+    let completed = match complete_as(issue, Some(status), assignee, gen, reopen) {
         Ok(done) => done,
         Err(e) => {
             bail!("finish: the session node for {issue} was not completed: {e:#}\n{lesson_lines}")
@@ -22660,7 +22687,7 @@ pub fn finish(
         out.push_str(&format!("closed the ticket {issue}\n"));
     } else {
         out.push_str(&format!(
-            "the ticket {issue} keeps its state; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
+            "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
         ));
     }
     out.push_str(&persist_tracker(issue, "finished"));

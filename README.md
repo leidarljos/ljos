@@ -318,7 +318,9 @@ to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
 
 Citing a deed names it; the bytes stay in deedar. A finish does not close the
 ticket, and completing a node does not either. `finish --close` closes it,
-when the work is accepted.
+when the work is accepted. Without `--close`, a finish drops the claim and
+puts the ticket back to the state it had before the claim, as `ljos release`
+does, so no ticket is left STARTED with nobody holding it.
 
 ```
 ljos sitting vissue-xxxx --playbook sit        # doctor, cards, due, island, playbook, recall, timeline, claim

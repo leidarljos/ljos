@@ -885,6 +885,96 @@ fn a_hyphenated_project_is_created_claimed_and_cited() {
     }
 }
 
+/// An issue already in the tracker, in `state`, under project `probe`.
+fn seed_issue(hab: &Hab, id: &str, state: &str) {
+    let dir = hab.tracker.join("Software/probe");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("issues.org");
+    let mut org = fs::read_to_string(&file).unwrap_or_else(|_| {
+        "#+TITLE: probe issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n".to_string()
+    });
+    org.push_str(&format!(
+        "* {state} [#C] seeded {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n"
+    ));
+    fs::write(&file, org).unwrap();
+}
+
+/// A commit whose subject or body names an open issue is claimed and cited
+/// on that issue. Nothing new is filed.
+#[test]
+fn a_commit_naming_an_open_issue_books_that_issue() {
+    for (message, id) in [
+        ("probe-32fx: book the named issue", "probe-32fx"),
+        ("tidy the hook\n\nFixes probe-xsor.", "probe-xsor"),
+        (
+            "ljos-policyd-c0jc: a hyphenated project",
+            "ljos-policyd-c0jc",
+        ),
+    ] {
+        let hab = Hab::new("repo");
+        if id.starts_with("ljos-policyd-") {
+            let dir = hab.tracker.join("Software/ljos-policyd");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("issues.org"),
+                format!(
+                    "#+TITLE: ljos-policyd issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+                     * TODO [#C] seeded {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n"
+                ),
+            )
+            .unwrap();
+        } else {
+            seed_issue(&hab, id, "TODO");
+        }
+        install(&hab);
+        let sha = commit_file(&hab, "named.txt", message);
+        let log = vissue_log(&hab.tracker);
+        assert!(
+            !log.contains("create"),
+            "{message:?} filed a new issue:\n{log}"
+        );
+        assert!(log.contains(&format!("claim {id}")), "{message:?}:\n{log}");
+        let org: String = ["probe", "ljos-policyd"]
+            .iter()
+            .map(|p| {
+                fs::read_to_string(hab.tracker.join(format!("Software/{p}/issues.org")))
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            org.contains(&format!("deed-file-commit-{sha}")),
+            "{message:?}:\n{org}"
+        );
+        assert!(org.contains("* STARTED"), "{message:?}:\n{org}");
+        let books = book_files(&hab);
+        assert_eq!(books.len(), 1, "{books:?}");
+        let book: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&books[0]).unwrap()).unwrap();
+        let row = book["repos"]
+            .as_object()
+            .and_then(|repos| repos.values().next())
+            .unwrap_or(&serde_json::Value::Null);
+        assert_eq!(row["issue"], id, "{book}");
+        assert_eq!(row["named"], true, "{book}");
+    }
+}
+
+/// An id-shaped word the tracker does not hold, or an issue already closed,
+/// is not a named issue: the commit files its own.
+#[test]
+fn a_commit_naming_no_open_issue_files_one() {
+    let hab = Hab::new("repo");
+    seed_issue(&hab, "probe-done", "DONE");
+    install(&hab);
+    let sha = commit_file(&hab, "unnamed.txt", "fix-hook: probe-done and probe-gone");
+    let log = vissue_log(&hab.tracker);
+    assert!(log.contains("create"), "{log}");
+    assert!(!log.contains("claim probe-done"), "{log}");
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(org.contains("* DONE [#C] seeded probe-done"), "{org}");
+    assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+}
+
 fn shellish(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }

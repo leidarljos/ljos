@@ -180,6 +180,57 @@ pub fn status() -> String {
     format!("hooks: {hooks}\ncore.hooksPath: {configured}\n")
 }
 
+/// The start of the doctor's `git hooks` state when `core.hooksPath` is
+/// unset. That row is `info`: a seat that has not onboarded books no
+/// commits, and nothing else is wrong.
+pub const HOOKS_UNSET: &str = "core.hooksPath is unset";
+
+/// The doctor's `git hooks` row: whether the global `core.hooksPath`
+/// names the hooks `ljos onboard` installs, and whether they are there.
+/// A path that names another directory books a commit only if that
+/// directory runs ljos, and an env file or a note that names it drifts
+/// from what onboard wrote, so the row says which path is set and which
+/// one onboard installs.
+#[must_use]
+pub fn doctor_row() -> crate::Habitat {
+    let dir = hooks_dir();
+    let installed = HOOK_NAMES.iter().all(|name| dir.join(name).is_file());
+    let (ok, state) = hooks_state(&dir, global_hooks_path(&[]).as_deref(), installed);
+    crate::Habitat {
+        name: "git hooks",
+        state,
+        ok,
+    }
+}
+
+/// [`doctor_row`]'s verdict for the onboard hooks at `dir`, the global
+/// `core.hooksPath` git reports, and whether every stub is in `dir`.
+#[must_use]
+pub fn hooks_state(dir: &Path, configured: Option<&str>, installed: bool) -> (bool, String) {
+    let ours = dir.display().to_string();
+    match configured.map(str::trim).filter(|path| !path.is_empty()) {
+        None => (
+            false,
+            format!(
+                "{HOOKS_UNSET}, so commits are not booked; `ljos git-hooks install` points it at {ours}"
+            ),
+        ),
+        Some(path) if !same_dir(Path::new(path), dir) => (
+            false,
+            format!(
+                "core.hooksPath is {path}, not {ours}, the hooks `ljos onboard` installs; `ljos git-hooks install` points it back"
+            ),
+        ),
+        Some(_) if !installed => (
+            false,
+            format!(
+                "core.hooksPath is {ours}, but some hook stubs are missing there; `ljos git-hooks install` writes them"
+            ),
+        ),
+        Some(_) => (true, format!("core.hooksPath is {ours}; commits are booked")),
+    }
+}
+
 fn hooks_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("LJOS_GIT_HOOKS").filter(|value| !value.is_empty()) {
         return PathBuf::from(dir);
@@ -311,6 +362,18 @@ fn book_commit(hook: &str) -> Result<()> {
     // other place the idle sweep runs.
     let session = crate::bookkeep::seat_session();
     crate::bookkeep::sweep_idle_sittings(&session, &repo);
+    // A subject or body that names an open issue (`ljos-policyd-32fx: ...`,
+    // `Fixes ljos-xsor`) books the commit on that issue. A new issue is
+    // filed only when the message names none the tracker holds open.
+    let message = git_line(&["log", "-1", "--format=%B"]).unwrap_or_default();
+    if let Some(issue) = crate::bookkeep::named_open_issue(&message) {
+        crate::bookkeep::book_named_commit(&repo, &head, &issue);
+        remember_booked(&repo, &head);
+        if let Some(line) = crate::bookkeep::commit_recall_line(&session, &repo, &subject) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     // The commit already belongs to an open sitting in this checkout.
     // Booking it on the seat's own session would open a second book.
     if crate::bookkeep::cite_into_open_sitting(&repo) {
@@ -683,6 +746,34 @@ mod tests {
         cmd.get_envs()
             .find(|(name, _)| *name == OsStr::new(key))
             .map(|(_, value)| value)
+    }
+
+    #[test]
+    fn the_doctor_names_a_hooks_path_that_is_not_the_onboard_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = dir.path().join("ljos").join("git-hooks");
+        std::fs::create_dir_all(&ours).unwrap();
+        let other = dir.path().join("leidarljos").join("git-hooks");
+        std::fs::create_dir_all(&other).unwrap();
+        let ours_s = ours.display().to_string();
+        let other_s = other.display().to_string();
+
+        let (ok, state) = super::hooks_state(&ours, None, true);
+        assert!(!ok);
+        assert!(state.starts_with(super::HOOKS_UNSET), "{state}");
+
+        let (ok, state) = super::hooks_state(&ours, Some(&other_s), true);
+        assert!(!ok);
+        assert!(
+            state.contains(&other_s) && state.contains(&ours_s),
+            "{state}"
+        );
+
+        let (ok, state) = super::hooks_state(&ours, Some(&ours_s), false);
+        assert!(!ok, "{state}");
+
+        let (ok, state) = super::hooks_state(&ours, Some(&ours_s), true);
+        assert!(ok, "{state}");
     }
 
     #[test]

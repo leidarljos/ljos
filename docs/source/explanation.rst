@@ -94,7 +94,8 @@ The contracts
 
 -  Citing a deed names it; the bytes stay in deedar.
 -  A finish closes the sitting. The ticket closes only with ``ljos finish ISSUE --close``, when the work is accepted. The claim graph is
-   session state; the tracker decides when work is done.
+   session state; the tracker decides when work is done. Without ``--close``, a finish drops the claim and puts the ticket back to the
+   state it had before the claim, as ``ljos release`` does, so no ticket is left STARTED with nobody holding it.
 -  Cards are read-only. The seat writes to the pack; a person writes the
    cards.
 -  The pack is written only by ``remember``, ``prefer``, ``trust``, ``learn``,
