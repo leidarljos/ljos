@@ -995,6 +995,44 @@ fn a_git_hook_under_exec_daemon_books_the_seat() {
     assert!(!dlog.contains("exec-daemon"), "{dlog}");
 }
 
+/// With `LJOS_SEAT` exported, a git hook holds under the holder `ljos seat`
+/// prints (`SEAT@TAG`), the name `ljos claim` takes in the same shell. The
+/// hook used to hold under the bare seat, so one conversation held its
+/// issues under two names.
+#[test]
+fn a_git_hook_holds_under_the_seat_holder() {
+    let hab = Hab::new("repo");
+    let extra = [
+        ("LJOS_SEAT", "ljosbot"),
+        ("CURSOR_CONVERSATION_ID", "conv-holder-0001"),
+    ];
+    let seat = hab.ljos_in(&hab.repo, &["seat"], None, &extra);
+    let said = String::from_utf8(seat.stdout).unwrap();
+    let holder = said
+        .lines()
+        .find_map(|line| line.strip_prefix("holder\t"))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    assert!(holder.starts_with("ljosbot@"), "{said}");
+    let out = under_exec_daemon(&hab, &extra);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let vlog = vissue_log(&hab.tracker);
+    assert!(
+        vlog.lines()
+            .any(|line| line.starts_with("claim ")
+                && line.ends_with(&format!("VISSUE_AGENT={holder}"))),
+        "the hook did not claim as {holder}:\n{vlog}\n{err}"
+    );
+    assert!(
+        !vlog
+            .lines()
+            .any(|line| line.starts_with("claim ") && line.ends_with("VISSUE_AGENT=ljosbot")),
+        "the hook claimed under the bare seat:\n{vlog}"
+    );
+}
+
 /// No `LJOS_SEAT` and no conversation id: the process tree is not a seat,
 /// so the hook books nothing.
 #[test]

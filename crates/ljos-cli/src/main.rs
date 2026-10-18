@@ -1592,7 +1592,7 @@ fn run_command() -> Result<()> {
                     let short: String = id.chars().take(8).collect();
                     println!("noted in memory (id {short})");
                 }
-                Err(e) => println!("the note was not kept in memory: {e:#}"),
+                Err(e) => print!("{}", ljos_cli::note_memory_warning(&issue, &e)),
             }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");

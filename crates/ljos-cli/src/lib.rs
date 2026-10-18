@@ -2655,7 +2655,7 @@ pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> boo
 /// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn holder_name() -> String {
-    hook_actor().unwrap_or_else(|| whoami().holder)
+    hook_holder().unwrap_or_else(|| whoami().holder)
 }
 
 /// Resolve an `--assignee` / MCP field for a claim. Empty, a pronoun
@@ -2762,20 +2762,22 @@ pub fn seat_for_agent(id: &str) -> String {
 }
 
 thread_local! {
-    static HOOK_ACTOR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static HOOK_ACTOR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
-/// While this guard is alive, [`holder_name`] and [`seat_name`] are `seat`.
-/// The process environment is not changed. Dropping it restores the
-/// previous name, so a git hook can pass the resolved seat into the claim,
-/// the deed and the tracker record without consulting the process tree.
+/// While this guard is alive, [`seat_name`] is `seat` and [`holder_name`]
+/// is the holder [`hook_holder_for`] gives for it. The process environment
+/// is not changed. Dropping it restores the previous names, so a git hook
+/// can pass the resolved seat into the claim, the deed and the tracker
+/// record without consulting the process tree.
 pub(crate) struct HookActor {
-    previous: Option<String>,
+    previous: Option<(String, String)>,
 }
 
 impl HookActor {
     pub(crate) fn enter(seat: &str) -> Self {
-        let previous = HOOK_ACTOR.with(|slot| slot.replace(Some(seat.to_string())));
+        let holder = hook_holder_for(seat, &resolve_seat());
+        let previous = HOOK_ACTOR.with(|slot| slot.replace(Some((seat.to_string(), holder))));
         Self { previous }
     }
 }
@@ -2787,8 +2789,51 @@ impl Drop for HookActor {
     }
 }
 
+/// The seat a git hook resolved, while its [`HookActor`] is alive.
 pub(crate) fn hook_actor() -> Option<String> {
-    HOOK_ACTOR.with(|slot| slot.borrow().clone())
+    HOOK_ACTOR.with(|slot| slot.borrow().as_ref().map(|(seat, _)| seat.clone()))
+}
+
+fn hook_holder() -> Option<String> {
+    HOOK_ACTOR.with(|slot| slot.borrow().as_ref().map(|(_, holder)| holder.clone()))
+}
+
+/// The holder a git hook books under for `seat`: the holder
+/// [`resolve_seat`] gives when it names the same seat, so a commit and
+/// `ljos claim` in one conversation hold under one name (`SEAT@TAG`).
+/// A holder taken from the process tree is not used; the hook then holds
+/// under the bare seat, which [`same_holder`] still matches.
+#[must_use]
+pub fn hook_holder_for(seat: &str, resolved: &Seat) -> String {
+    let seat = seat.trim();
+    let holder = resolved.holder.trim();
+    let tagged = holder
+        .split_once('@')
+        .is_some_and(|(name, tag)| name == seat && !tag.is_empty());
+    if resolved.seat.trim() == seat && (holder == seat || tagged) {
+        holder.to_string()
+    } else {
+        seat.to_string()
+    }
+}
+
+/// Whether two holder names are one holder: the same name, or a seat's
+/// bare name and that seat's `SEAT@TAG`. Git hooks in ljos 0.30 and earlier recorded
+/// the bare seat where `ljos claim` recorded `SEAT@TAG`, and tracker rows
+/// and hold records from then still carry the bare name.
+#[must_use]
+pub fn same_holder(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let bare_of = |bare: &str, tagged: &str| {
+        !bare.contains('@')
+            && tagged
+                .split_once('@')
+                .is_some_and(|(name, tag)| name == bare && !tag.is_empty())
+    };
+    a == b || bare_of(a, b) || bare_of(b, a)
 }
 
 /// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
@@ -9171,6 +9216,20 @@ pub fn format_steps(steps: &[Step]) -> String {
         .collect()
 }
 
+/// The doctor's `runner env` row. A file an older ljos wrote is stale,
+/// not missing: the text this ljos writes changed, and `ljos onboard`
+/// rewrites it.
+fn runner_env_state(name: &str, env_path: &Path, ready: bool, exists: bool) -> String {
+    match (ready, exists) {
+        (true, _) => format!("{name}: source {}", env_path.display()),
+        (false, true) => format!(
+            "{name}: {} is stale, an older ljos wrote it; ljos onboard --harness {name}",
+            env_path.display()
+        ),
+        (false, false) => format!("{name}: no seat env; ljos onboard --harness {name}"),
+    }
+}
+
 /// The runner rows for `doctor`, one pair per runner the file names.
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
@@ -9219,15 +9278,11 @@ fn harness_rows() -> Vec<Habitat> {
             .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t == skill_text()));
         if h.shell {
             let env_path = env_path_for(&path, h);
-            let ready =
-                std::fs::read_to_string(&env_path).is_ok_and(|t| t == seat_env_text(&h.name));
+            let written = std::fs::read_to_string(&env_path).ok();
+            let ready = written.as_deref() == Some(seat_env_text(&h.name).as_str());
             rows.push(Habitat {
                 name: "runner env",
-                state: if ready {
-                    format!("{}: source {}", h.name, env_path.display())
-                } else {
-                    format!("{}: no seat env; ljos onboard --harness {}", h.name, h.name)
-                },
+                state: runner_env_state(&h.name, &env_path, ready, written.is_some()),
                 ok: ready,
             });
         } else {
@@ -10618,6 +10673,20 @@ pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
     let client = pack()?;
     let atom = progress_note_atom(issue, text, &client.workspace())?;
     with_writer(|| admit::write_agent(&client, atom.clone()).context("note: POST /v1/atoms failed"))
+}
+
+/// The line `ljos note` prints when the pack refuses its memory copy.
+/// The note is already on the issue's logbook, so the refusal is a
+/// warning and the command still succeeds. The pack's prose gate refuses
+/// an agent's sentence past its word limit, and it has no kind or flag
+/// that admits one; a weak model writes such notes, and the ticket keeps
+/// them.
+#[must_use]
+pub fn note_memory_warning(issue: &str, err: &anyhow::Error) -> String {
+    let issue = issue.trim();
+    format!(
+        "warning: memory kept no copy of the note ({err:#}). The note is on {issue}'s logbook; `ljos recall {issue}` reads it\n"
+    )
 }
 
 /// The atom [`packset_write_note`] posts. Kind `summary` is one packset stores.
@@ -20938,16 +21007,26 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                         // This seat's own conversation, and it is gone: a
                         // runner that exited without finishing. The seat
                         // owns its conversations, so the sitting takes the
-                        // node over rather than waiting on nobody.
-                        Some(h) if h.seat == seat_name() && !hold_alive(&h) => {
+                        // node over rather than waiting on nobody. The same
+                        // holder under its other form (a bare seat a git
+                        // hook recorded) is this conversation too.
+                        Some(h)
+                            if h.seat == seat_name()
+                                && (!hold_alive(&h) || same_holder(&h.assignee, assignee)) =>
+                        {
                             run_captured("claimdag", &["release", &id, "--actor", &holder])?;
                             drop_hold(&holder);
                             let said =
                                 run_captured("claimdag", &["claim", &id, "--assignee", &actor])?;
                             write_hold(&actor, assignee, node);
+                            let why = if hold_alive(&h) {
+                                "the same holder under its other name"
+                            } else {
+                                "this seat's conversation, gone"
+                            };
                             with_tracker(
                                 format!(
-                                    "took over from {}, this seat's conversation, gone (held since {})\n{}",
+                                    "took over from {}, {why} (held since {})\n{}",
                                     h.assignee, h.since, said.stdout
                                 ),
                                 node,
@@ -21083,37 +21162,73 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
     let said = match run_captured("claimdag", &["release", &id, "--actor", &actor]) {
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
-            let Some((holder, hold)) = same_seat_hold(&id, &actor) else {
+            if let Some((holder, hold)) = same_seat_hold(&id, &actor) {
+                let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
+                drop_hold(&holder);
+                drop_playbook(node);
+                return Ok(with_unstamp(
+                    format!("{}{}", same_seat_note(node, "released", &hold), said.stdout),
+                    node,
+                    &id,
+                    &hold.assignee,
+                    true,
+                ));
+            }
+            // The tracker or a hold record names this seat under its other
+            // form (a git hook recorded the bare seat, `ljos claim` the
+            // `SEAT@TAG`): hand it back under the name that holds it.
+            let Some(holder) = run_captured("claimdag", &["get", id.as_str()])
+                .ok()
+                .and_then(|g| holder_of(&g.stdout))
+            else {
                 return Err(e);
             };
+            let hold = read_hold(&holder);
+            let tracker = tracker_show_json(node).ok().and_then(|v| {
+                v["claimed_by"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+            let named: Vec<String> = hold
+                .as_ref()
+                .map(|h| h.assignee.clone())
+                .into_iter()
+                .chain(tracker.clone())
+                .collect();
+            if !named.iter().any(|n| same_holder(n, assignee)) {
+                return Err(e);
+            }
             let said = run_captured("claimdag", &["release", &id, "--actor", &holder])?;
             drop_hold(&holder);
             drop_playbook(node);
-            return Ok(with_unstamp(
-                format!("{}{}", same_seat_note(node, "released", &hold), said.stdout),
-                node,
-                &id,
-                &hold.assignee,
-            ));
+            let stamped = tracker.as_deref().unwrap_or(assignee);
+            return Ok(with_unstamp(said.stdout, node, &id, stamped, true));
         }
         Err(e) => return Err(e),
     };
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(with_unstamp(said.stdout, node, &id, assignee))
+    Ok(with_unstamp(said.stdout, node, &id, assignee, true))
 }
 
-/// Drop the tracker's claim on `issue` when `holder` holds it, and keep
-/// the issue's state. The claim graph frees a node on release and on
-/// completion; the tracker kept `CLAIMED_BY`, so `ljos claims` listed
-/// every finished sitting as still held. A claim another name took since
-/// is left alone and said so. `None` when the tracker does not know the
-/// issue or nobody holds it.
+/// Drop the tracker's claim on `issue` when `holder` holds it. The claim
+/// graph frees a node on release and on completion; the tracker kept
+/// `CLAIMED_BY`, so `ljos claims` listed every finished sitting as still
+/// held. A claim another name took since is left alone and said so; the
+/// bare seat and its `SEAT@TAG` are one name ([`same_holder`]). `None`
+/// when the tracker does not know the issue or nobody holds it.
+///
+/// With `reopen` (a release, not a completion), an issue the claim moved
+/// to STARTED goes back to the state it had before: the `from` of the
+/// newest logbook flip into STARTED, else TODO. A release that left it
+/// STARTED with nobody on it hid it from every ready list.
 ///
 /// # Errors
 ///
 /// The tracker not loading or not writing.
-pub fn unstamp_tracker(issue: &str, holder: &str) -> Result<Option<String>> {
+pub fn unstamp_tracker(issue: &str, holder: &str, reopen: bool) -> Result<Option<String>> {
     let issue = issue.trim();
     let holder = holder.trim();
     let layout = vissue_core::Layout::resolve(None, None)?;
@@ -21125,16 +21240,31 @@ pub fn unstamp_tracker(issue: &str, holder: &str) -> Result<Option<String>> {
         let Some(h) = doc.headings.iter_mut().find(|h| h.id == issue) else {
             return Ok(None);
         };
-        match h.claimed_by().map(str::to_string) {
-            None => Ok(None),
-            Some(who) if who != holder => Ok(Some(format!(
-                "tracker: {issue} stays claimed by {who}, not {holder}"
-            ))),
-            Some(_) => {
-                h.release_claim();
+        let back = if reopen { state_before_claim(h) } else { None };
+        match (h.claimed_by().map(str::to_string), back) {
+            (None, Some(to)) => {
+                h.record_state_change(&to);
                 doc.write()?;
                 Ok(Some(format!(
-                    "tracker: {issue} no longer claimed by {holder}; its state stays"
+                    "tracker: {issue} back to {to}; nobody held it"
+                )))
+            }
+            (None, None) => Ok(None),
+            (Some(who), _) if !same_holder(&who, holder) => Ok(Some(format!(
+                "tracker: {issue} stays claimed by {who}, not {holder}"
+            ))),
+            (Some(who), back) => {
+                h.release_claim();
+                if let Some(to) = back {
+                    h.record_state_change(&to);
+                    doc.write()?;
+                    return Ok(Some(format!(
+                        "tracker: {issue} no longer claimed by {who}; back to {to}"
+                    )));
+                }
+                doc.write()?;
+                Ok(Some(format!(
+                    "tracker: {issue} no longer claimed by {who}; its state stays"
                 )))
             }
         }
@@ -21142,15 +21272,32 @@ pub fn unstamp_tracker(issue: &str, holder: &str) -> Result<Option<String>> {
     Ok(said)
 }
 
+/// The state a released issue goes back to: `None` unless it is STARTED.
+/// The newest logbook flip into STARTED names the state before the claim;
+/// a terminal one, or no flip at all, is TODO, so the issue is ready again.
+fn state_before_claim(h: &vissue_core::IssueHeading) -> Option<String> {
+    if h.state != "STARTED" {
+        return None;
+    }
+    let before = h
+        .logbook
+        .iter()
+        .find(|e| e.to_state.as_deref() == Some("STARTED"))
+        .and_then(|e| e.from_state.clone())
+        .filter(|s| !s.is_empty() && s != "STARTED" && s != "DONE" && s != "CANCELLED");
+    Some(before.unwrap_or_else(|| "TODO".to_string()))
+}
+
 /// What the claim graph said, then the tracker's line when the node is an
 /// issue the holder had stamped. A tracker that does not write is a line,
-/// not a failure: the claim graph already moved.
-fn with_unstamp(said: String, node: &str, id: &str, holder: &str) -> String {
+/// not a failure: the claim graph already moved. `reopen` is a release:
+/// see [`unstamp_tracker`].
+fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) -> String {
     let mut out = said;
     if id == node.trim() {
         return out;
     }
-    let line = match unstamp_tracker(node, holder) {
+    let line = match unstamp_tracker(node, holder, reopen) {
         Ok(Some(line)) => line,
         Ok(None) => return out,
         Err(e) => format!(
@@ -22130,6 +22277,7 @@ pub fn complete(
                     node,
                     &id,
                     &hold.assignee,
+                    false,
                 ));
             }
             let holder = run_captured("claimdag", &["get", id.as_str()])
@@ -22157,7 +22305,7 @@ pub fn complete(
                     drop_hold(holder);
                     drop_playbook(node);
                     let stamped = tracker.as_deref().unwrap_or(assignee);
-                    return Ok(with_unstamp(said.stdout, node, &id, stamped));
+                    return Ok(with_unstamp(said.stdout, node, &id, stamped, false));
                 }
             }
             bail!(
@@ -22169,7 +22317,7 @@ pub fn complete(
     };
     drop_hold(&actor);
     drop_playbook(node);
-    Ok(with_unstamp(said.stdout, node, &id, assignee))
+    Ok(with_unstamp(said.stdout, node, &id, assignee, false))
 }
 
 /// The bare seat a holder name stands for: no `:node` scope, no `@host`
@@ -33304,6 +33452,72 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             &weak,
         );
         assert_eq!(kept[0]["id"], "a", "a weak island does not reorder");
+    }
+
+    #[test]
+    fn a_hook_holds_under_the_resolved_holder_of_its_seat() {
+        let session = super::Seat {
+            seat: "ljosbot".into(),
+            holder: "ljosbot@xouw4equ05".into(),
+            source: "LJOS_SEAT; session CURSOR_CONVERSATION_ID".into(),
+        };
+        assert_eq!(
+            super::hook_holder_for("ljosbot", &session),
+            "ljosbot@xouw4equ05"
+        );
+        let whole = super::Seat::whole("grokbot-ea713788", "CURSOR_CONVERSATION_ID");
+        assert_eq!(
+            super::hook_holder_for("grokbot-ea713788", &whole),
+            "grokbot-ea713788"
+        );
+        let tree = super::Seat {
+            seat: "ljosbot".into(),
+            holder: "ljosbot-k3z".into(),
+            source: "the process tree".into(),
+        };
+        assert_eq!(super::hook_holder_for("ljosbot", &tree), "ljosbot");
+        assert_eq!(super::hook_holder_for("inky", &session), "inky");
+    }
+
+    #[test]
+    fn a_bare_seat_and_its_tagged_holder_are_one_holder() {
+        assert!(super::same_holder("ljosbot", "ljosbot@xouw4equ05"));
+        assert!(super::same_holder("ljosbot@xouw4equ05", "ljosbot"));
+        assert!(super::same_holder(" ljosbot@a ", "ljosbot@a"));
+        assert!(!super::same_holder("ljosbot@a", "ljosbot@b"));
+        assert!(!super::same_holder("ljosbot", "inky@a"));
+        assert!(!super::same_holder("ljos", "ljosbot@a"));
+        assert!(!super::same_holder("", "ljosbot@a"));
+        assert!(!super::same_holder("ljosbot", "ljosbot@"));
+    }
+
+    #[test]
+    fn a_refused_note_is_a_warning_that_names_the_logbook() {
+        let e = anyhow::anyhow!("400: atom sentence 1 is very hard to read");
+        let line = super::note_memory_warning(" proj-aaaa ", &e);
+        assert!(line.starts_with("warning: memory kept no copy"), "{line}");
+        assert!(line.contains("very hard to read"), "{line}");
+        assert!(line.contains("proj-aaaa's logbook"), "{line}");
+    }
+
+    #[test]
+    fn a_long_note_sentence_has_no_kind_that_skips_the_prose_gate() {
+        let long = "this single sentence keeps going well past the limit the pack sets for a memory because a weak model wrote it in one breath with no stop anywhere along the way to its end";
+        let mut atom = super::progress_note_atom("probe-0001", long, "ws").unwrap();
+        super::admit::stamp_origin(&mut atom, super::admit::ORIGIN_AGENT);
+        let mut map = atom.as_object().cloned().unwrap();
+        assert!(packset_core::record::validate(&mut map).is_err());
+    }
+
+    #[test]
+    fn a_stale_runner_env_is_not_called_missing() {
+        let path = std::path::Path::new("/h/.config/ljos/grokbot.env");
+        assert!(super::runner_env_state("grokbot", path, true, true).contains("source /h/"));
+        let stale = super::runner_env_state("grokbot", path, false, true);
+        assert!(stale.contains("is stale"), "{stale}");
+        assert!(stale.contains("ljos onboard --harness grokbot"), "{stale}");
+        let none = super::runner_env_state("grokbot", path, false, false);
+        assert!(none.contains("no seat env"), "{none}");
     }
 
     #[test]
