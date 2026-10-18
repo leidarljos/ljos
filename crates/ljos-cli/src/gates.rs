@@ -2327,7 +2327,24 @@ mod tests {
         );
     }
 
-    fn repo() -> tempfile::TempDir {
+    /// The checkout, and the environment lock. Gate tests read the process
+    /// home: a temp home suspends the guard. Another test sets that home
+    /// for its own case, so this lock is held until the checkout is dropped.
+    struct Held {
+        _env: crate::EnvLock,
+        dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for Held {
+        type Target = tempfile::TempDir;
+
+        fn deref(&self) -> &Self::Target {
+            &self.dir
+        }
+    }
+
+    fn repo() -> Held {
+        let env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q", "-b", "main"]);
         git(dir.path(), &["config", "user.name", AUTHOR_NAME]);
@@ -2342,7 +2359,7 @@ mod tests {
                 "https://example.com/acme/widgets.git",
             ],
         );
-        dir
+        Held { _env: env, dir }
     }
 
     fn seed(dir: &Path) {
