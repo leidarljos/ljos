@@ -2249,13 +2249,14 @@ fn run_command() -> Result<()> {
             if on_tool {
                 let _ = ljos_cli::take_guard_note();
             }
-            let cwd = ljos_cli::hook_directory(input.trim());
+            let cwd = ljos_cli::command_directory(input.trim());
             let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
                 .then(|| ljos_cli::user_rules::guard_payload(&input))
                 .flatten();
             // The static guard includes the commit, push, and merge gates,
-            // in the directory the tool would run in.
-            let dir = cwd.as_ref().ok().map(std::path::PathBuf::as_path);
+            // in the directory the tool would run in. A directory that
+            // cannot be resolved is not a refusal.
+            let dir = cwd.as_deref();
             let fast = on_tool
                 .then(|| ljos_cli::static_guard_in(&call.cue, dir))
                 .flatten()
@@ -2279,22 +2280,14 @@ fn run_command() -> Result<()> {
             };
             // An ordinary branch push is allowed. Force, a +refspec, a
             // remote-branch delete and a tag push ask by default.
-            let gated = if let Err(error) = &cwd {
-                Some(ljos_cli::Rule {
-                    pattern: "tool working directory".into(),
-                    verdict: "deny".into(),
-                    reason: format!("Cannot resolve the command directory: {error:#}"),
-                })
-            } else {
-                ljos_cli::redirect_seat_verb(
-                    ljos_cli::gate_push(
-                        ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
-                        &call.cue,
-                        cwd.as_ref().ok().and_then(|p| p.to_str()),
-                    ),
+            let gated = ljos_cli::redirect_seat_verb(
+                ljos_cli::gate_push(
+                    ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),
                     &call.cue,
-                )
-            };
+                    cwd.as_ref().and_then(|p| p.to_str()),
+                ),
+                &call.cue,
+            );
             // A seat rule that denies this push still denies it. Otherwise
             // the policyd ask (a force push) is the verdict, then the gate.
             let verdict = if gated.as_ref().is_some_and(|rule| rule.verdict == "deny") {
@@ -2490,7 +2483,7 @@ fn run_command() -> Result<()> {
                         let line = ljos_cli::start_decision_panel(
                             &call.cue,
                             call.session.as_deref(),
-                            cwd.as_ref().ok().and_then(|p| p.to_str()),
+                            cwd.as_ref().and_then(|p| p.to_str()),
                         )
                         .unwrap_or_else(|e| {
                             format!("{}\npanel did not open: {e:#}", ljos_cli::decision_hold())
