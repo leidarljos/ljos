@@ -8,17 +8,17 @@ use ljos_cli::{
     forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
     format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat, format_steps,
-    format_write_ack, graded, habit, habits, handover, healthy, hook_note, identity_or_seat,
-    island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen,
-    now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
-    packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
-    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
-    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about, run,
-    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, whoami, with_discount,
-    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    format_write_ack, graded, grokbot_seat_name, habit, habits, handover, healthy, hook_note,
+    identity_or_seat, island_entities, join, learn_anchors, learn_and_write, learn_reading,
+    learn_shared, mark_seen, now_utc, on_path, onboard_to, pack, packset_consolidate,
+    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
+    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
+    post_hook_stdout, predictions_of, prompt_hook_stdout, read_campaign, receive, release,
+    remember_findings, rows_about, run, run_as, run_captured, session_end, settle_discount,
+    sitting_gated, stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num,
+    trust_from_pack, uncite_deed, whoami, with_discount, withdraw_prediction, write_outcome,
+    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
+    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA, POLICY_TCB, PROTOCOL,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -859,6 +859,20 @@ enum Cmd {
         /// gemini, windsurf, factory, kiro, cline, qwen or crush.
         #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
         runner: Option<String>,
+        /// Book the commit git just created. The hook scripts pass this. No stdin.
+        #[arg(long, conflicts_with_all = ["prompt", "runner", "fail_on_deny"])]
+        git_commit: bool,
+        /// Which git hook called `--git-commit`: `post-commit` or `post-rewrite`.
+        #[arg(long, requires = "git_commit")]
+        git_hook: Option<String>,
+        /// Print the SessionStart brief on stderr once for this conversation.
+        #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit"])]
+        brief_once: bool,
+    },
+    /// Install, remove, or show the global git hooks that book commits.
+    GitHooks {
+        /// `install`, `uninstall`, or `status`.
+        action: String,
     },
     /// What the push gate decides on the issue, from seat ballots alone,
     /// then the weighted settle over every ballot as advice: shares, who
@@ -2086,13 +2100,26 @@ fn run_command() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::GitHooks { action } => ljos_cli::git_hooks::run(&action)?,
         Cmd::Hook {
             limit,
             event,
             prompt,
             fail_on_deny,
             runner,
+            git_commit,
+            git_hook,
+            brief_once,
         } => {
+            if git_commit {
+                return ljos_cli::git_hooks::run_git_commit(
+                    git_hook.as_deref().unwrap_or("post-commit"),
+                );
+            }
+            if brief_once {
+                ljos_cli::bookkeep::print_brief_once();
+                return Ok(());
+            }
             use std::io::Read;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input)?;
@@ -2756,7 +2783,13 @@ fn run_command() -> Result<()> {
             }));
         }
         Cmd::Protocol => print!("{PROTOCOL}"),
-        Cmd::Seat => print!("{}", format_seat(&whoami())),
+        Cmd::Seat => {
+            if let Some(name) = grokbot_seat_name() {
+                println!("{name}");
+            } else {
+                print!("{}", format_seat(&whoami()));
+            }
+        }
         Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
         Cmd::Onboard {
             harness,

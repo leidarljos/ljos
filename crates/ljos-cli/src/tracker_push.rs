@@ -558,20 +558,20 @@ fn branch_name(dir: &Path) -> Option<String> {
 
 fn git(dir: &Path, args: &[&str]) -> Output {
     use std::os::unix::process::ExitStatusExt;
-    std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap_or_else(|e| Output {
-            status: std::process::ExitStatus::from_raw(1),
-            stdout: Vec::new(),
-            stderr: e.to_string().into_bytes(),
-        })
+        .stdin(std::process::Stdio::null());
+    crate::git_hooks::hook_child_env(&mut cmd);
+    cmd.output().unwrap_or_else(|e| Output {
+        status: std::process::ExitStatus::from_raw(1),
+        stdout: Vec::new(),
+        stderr: e.to_string().into_bytes(),
+    })
 }
 
 fn output_text(out: &Output) -> String {

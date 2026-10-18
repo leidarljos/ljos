@@ -21,6 +21,7 @@ pub mod command_prefs;
 pub mod converge;
 pub mod extract;
 pub mod gates;
+pub mod git_hooks;
 pub mod hud;
 pub mod jev;
 pub mod mail;
@@ -2709,6 +2710,64 @@ pub fn format_seat_row() -> String {
     )
 }
 
+/// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
+/// that is not listed becomes `grokbot-` plus its first eight characters,
+/// never the raw id.
+#[must_use]
+pub fn seat_for_agent(id: &str) -> String {
+    mapped_seat(&seats_file(), id).unwrap_or_else(|| fallback_seat(id))
+}
+
+/// `ljos seat` when this process carries `CURSOR_CONVERSATION_ID`: the
+/// mapped name alone, so a shell can export it. `None` when the variable
+/// is unset, and the command then prints the usual seat, holder and source.
+#[must_use]
+pub fn grokbot_seat_name() -> Option<String> {
+    let id = std::env::var("CURSOR_CONVERSATION_ID").ok()?;
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(seat_for_agent(id))
+}
+
+fn fallback_seat(id: &str) -> String {
+    let prefix: String = id.chars().take(8).collect();
+    format!("grokbot-{prefix}")
+}
+
+fn seats_file() -> PathBuf {
+    if let Some(path) = std::env::var_os("LJOS_SEATS").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("ljos").join("seats.toml")
+}
+
+fn mapped_seat(path: &Path, id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    match table.get(id)? {
+        toml::Value::String(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {
@@ -3297,9 +3356,36 @@ fn seat_env_text(name: &str) -> String {
          {}\n\
          {}\n",
         shared_holder_id(name),
-        keep_seat_assignment(name),
+        seat_lines(name),
         session_assignment(name),
         GUARD_PATH_LINES
+    )
+}
+
+/// Grok Bot has no prompt hook. The conversation id is looked up in
+/// `seats.toml` by `ljos seat`. Any other shell runner keeps an exported
+/// seat and otherwise uses its harness name.
+fn seat_lines(name: &str) -> String {
+    if name != "grokbot" {
+        return keep_seat_assignment(name);
+    }
+    format!(
+        "# Seat names live in ${{XDG_CONFIG_HOME:-$HOME/.config}}/ljos/seats.toml, read by `ljos seat`.\n\
+         # An unknown conversation id becomes grokbot-<first 8 characters>, never the raw id.\n\
+         if [ -z \"${{LJOS_SHELL_SESSION:-}}\" ]; then\n\
+         \texport LJOS_SHELL_SESSION=$$\n\
+         fi\n\
+         if [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
+         \t_ljos_named=$(ljos seat 2>/dev/null || true)\n\
+         \tcase \"$_ljos_named\" in\n\
+         \t\t\"\"|*[!A-Za-z0-9_-]*) LJOS_SEAT=grokbot-$(printf %.8s \"$CURSOR_CONVERSATION_ID\") ;;\n\
+         \t\t*) LJOS_SEAT=$_ljos_named ;;\n\
+         \tesac\n\
+         \texport LJOS_SEAT\n\
+         \tunset _ljos_named\n\
+         fi\n\
+         {}",
+        keep_seat_assignment(name)
     )
 }
 
@@ -3365,6 +3451,16 @@ under_temp() {
 if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)" || under_temp "$(pwd -P)"; then
   exec "$real" "$@"
 fi
+# The first git of a conversation is the session start this runner never
+# hooks. The brief is held claims, recall and unread mail, on stderr, once.
+# Bound the wait: a slow seat must not hold the command. A failure allows it.
+if [ "$me" = git ] && command -v ljos >/dev/null 2>&1; then
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 0.3 ljos hook --event SessionStart --brief-once >&2 || true
+  else
+    ljos hook --event SessionStart --brief-once >&2 || true
+  fi
+fi
 if command -v ljos-policyd >/dev/null 2>&1; then
   verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
   case $verdict in
@@ -3401,9 +3497,10 @@ fi
 exec "$real" "$@"
 "#;
 
-/// Write the guard shims into [`guard_bin_dir`].
-fn guard_step(dry: bool) -> Step {
-    let dir = guard_bin_dir();
+/// Write the guard shims into [`guard_bin_dir`], or into `guard_dir` when
+/// the caller names one.
+fn guard_step(dry: bool, guard_dir: Option<&Path>) -> Step {
+    let dir = guard_dir.map_or_else(guard_bin_dir, PathBuf::from);
     let current = GUARD_SHIMMED
         .iter()
         .all(|c| std::fs::read_to_string(dir.join(c)).is_ok_and(|t| t == GUARD_SHIM));
@@ -3446,6 +3543,44 @@ fn guard_step(dry: bool) -> Step {
         Err(e) => Step {
             what: "guard".into(),
             detail: format!("{}: {e}", dir.display()),
+            ok: false,
+        },
+    }
+}
+
+/// Where a test installs the grokbot hooks and guard shims without
+/// changing the process environment. `git_env` is the child `git config`
+/// environment (`GIT_CONFIG_GLOBAL`, `HOME`, and the XDG dirs).
+#[derive(Clone, Copy)]
+pub(crate) struct OnboardPlace<'a> {
+    pub hooks_dir: &'a Path,
+    pub guard_dir: &'a Path,
+    pub git_env: &'a [(&'a str, &'a str)],
+}
+
+/// Grok Bot commits through git, with no prompt hook to book them.
+/// `onboard --harness grokbot` installs the global hooks.
+fn git_hooks_step(dry: bool, place: Option<OnboardPlace<'_>>) -> Step {
+    if dry {
+        return Step {
+            what: "git-hooks".into(),
+            detail: "would install git hooks that book commits".into(),
+            ok: true,
+        };
+    }
+    let installed = match place {
+        Some(place) => git_hooks::install_at(place.hooks_dir, place.git_env),
+        None => git_hooks::install(),
+    };
+    match installed {
+        Ok(dir) => Step {
+            what: "git-hooks".into(),
+            detail: format!("installed git hooks in {}", dir.display()),
+            ok: true,
+        },
+        Err(e) => Step {
+            what: "git-hooks".into(),
+            detail: format!("git hooks: {e:#}"),
             ok: false,
         },
     }
@@ -3543,7 +3678,13 @@ fn env_step(path: &Path, name: &str, dry: bool) -> Step {
     }
 }
 
-fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Result<Vec<Step>> {
+fn shell_steps(
+    file: &Path,
+    h: &Harness,
+    dry: bool,
+    shipped: Option<Step>,
+    place: Option<OnboardPlace<'_>>,
+) -> Result<Vec<Step>> {
     let Some(dir) = &h.skills else {
         bail!(
             "onboard: {} is a shell runner and needs a skills directory; pass --skills DIR",
@@ -3553,7 +3694,10 @@ fn shell_steps(file: &Path, h: &Harness, dry: bool, shipped: Option<Step>) -> Re
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
     steps.push(env_step(&env_path_for(file, h), &h.name, dry));
-    steps.push(guard_step(dry));
+    steps.push(guard_step(dry, place.map(|place| place.guard_dir)));
+    if h.name == "grokbot" {
+        steps.push(git_hooks_step(dry, place));
+    }
     steps.extend([
         deed_store_step(dry),
         tracker_step(dry),
@@ -3568,6 +3712,16 @@ pub fn onboard_in(
     harness: &str,
     dry: bool,
     skills: Option<&Path>,
+) -> Result<Vec<Step>> {
+    onboard_in_at(file, harness, dry, skills, None)
+}
+
+pub(crate) fn onboard_in_at(
+    file: &Path,
+    harness: &str,
+    dry: bool,
+    skills: Option<&Path>,
+    place: Option<OnboardPlace<'_>>,
 ) -> Result<Vec<Step>> {
     if harness == "json" {
         return Ok(vec![Step {
@@ -3650,7 +3804,7 @@ pub fn onboard_in(
         h.skills = Some(dir.display().to_string());
     }
     if h.shell {
-        return shell_steps(file, &h, dry, shipped_step);
+        return shell_steps(file, &h, dry, shipped_step, place);
     }
     let h = &h;
     let server = server_path()?;
@@ -5052,42 +5206,75 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         .or_else(|| v["conversation_id"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let raw = v["hook_event_name"]
+    let from_payload = v["hook_event_name"]
         .as_str()
         .or_else(|| v["hookEventName"].as_str())
-        .unwrap_or("PreToolUse");
-    let event = normalize_hook_event(raw).to_string();
-    let cue = if let Some(p) = v["prompt"].as_str() {
-        p.to_string()
-    } else if let Some(p) = v["extra"]["user_message"].as_str() {
-        p.to_string()
-    } else if let Some(c) = input["command"].as_str().or_else(|| v["command"].as_str()) {
-        c.to_string()
-    } else if let Some(path) = input["file_path"]
-        .as_str()
-        .or_else(|| input["notebook_path"].as_str())
-    {
-        // A file tool's input is the file's text, not a command line: the
-        // cue is the tool and the path it writes, for the seat's guard.
-        let tool = v["tool_name"]
-            .as_str()
-            .or_else(|| v["toolName"].as_str())
-            .unwrap_or("Edit");
-        format!("{tool} {path}")
-    } else if let Some(map) = input.as_object() {
-        map.values()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" ")
-    } else {
-        String::new()
-    };
+        .filter(|name| !name.is_empty());
+    let raw = from_payload.or(event).unwrap_or("PreToolUse");
+    let event_name = normalize_hook_event(raw).to_string();
+    let cue = cue_for(&v, input, &event_name);
     HookCall {
-        event,
+        event: event_name,
         cue,
         session,
         shape,
     }
+}
+
+/// The text the seat judges. A tool event takes the command first: a runner
+/// that also sends `prompt` on `PostToolUse` would otherwise hide
+/// `tool_input.command`, and a commit would be recorded as the baseline
+/// instead of a deed. A prompt event still reads the prompt.
+fn cue_for(v: &Value, input: &Value, event: &str) -> String {
+    let text = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+    };
+    let command = text(input["command"].as_str().or_else(|| v["command"].as_str()));
+    let prompt = text(
+        v["prompt"]
+            .as_str()
+            .or_else(|| v["extra"]["user_message"].as_str()),
+    );
+    let file = input["file_path"]
+        .as_str()
+        .or_else(|| input["notebook_path"].as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let tool = v["tool_name"]
+                .as_str()
+                .or_else(|| v["toolName"].as_str())
+                .unwrap_or("Edit");
+            format!("{tool} {path}")
+        });
+    let joined = input.as_object().map(|map| {
+        map.values()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let tool = matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure");
+    if tool {
+        if let Some(command) = command {
+            return command;
+        }
+        if let Some(file) = file {
+            return file;
+        }
+        if let Some(prompt) = prompt {
+            return prompt;
+        }
+    } else if let Some(prompt) = prompt {
+        return prompt;
+    } else if let Some(command) = command {
+        return command;
+    } else if let Some(file) = file {
+        return file;
+    }
+    joined.unwrap_or_default()
 }
 
 /// Where the ids already injected in a session are kept: the runtime
@@ -18252,13 +18439,13 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
+        .stdin(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    cmd.output().ok()
 }
 
 fn git_ok_stdout(dir: &Path, args: &[&str]) -> Option<String> {
@@ -19928,6 +20115,7 @@ pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said>
     for a in args {
         cmd.arg(a.as_ref());
     }
+    git_hooks::hook_child_env(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -22535,12 +22723,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         return format!("tracker git: {} has no directory\n", path.display());
     };
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
             .arg(dir)
             .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        cmd.output()
     };
     // Relative to the directory git runs in: an absolute path that reaches
     // the checkout through a symlink is outside it to git.
@@ -22656,6 +22845,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     if let Ok(err) = err {
         push.stderr(err);
     }
+    git_hooks::hook_child_env(&mut push);
     let mut child = match push.spawn() {
         Ok(c) => c,
         Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
@@ -24319,6 +24509,7 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
     for a in args {
         cmd.arg(a.as_ref());
     }
+    git_hooks::hook_child_env(&mut cmd);
     let st = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -24370,6 +24561,7 @@ pub fn run_captured_as(
     for a in args {
         cmd.arg(a.as_ref());
     }
+    git_hooks::hook_child_env(&mut cmd);
     let out = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -28923,6 +29115,36 @@ mod tests {
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
 
+    /// A PostToolUse payload can carry the person's prompt beside the
+    /// command. The command is what ran. Reading the prompt hides a commit,
+    /// and the sitting then stores that HEAD as the baseline.
+    #[test]
+    fn a_tool_event_reads_the_command_ahead_of_a_prompt_field() {
+        let call = hook_call(
+            r#"{"hook_event_name":"PostToolUse","prompt":"please commit the readme","tool_name":"Bash","tool_input":{"command":"git commit -m readme"}}"#,
+        );
+        assert_eq!(call.event, "PostToolUse");
+        assert_eq!(call.cue, "git commit -m readme");
+        let prompt = hook_call(
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"please commit the readme","tool_input":{"command":"git commit -m readme"}}"#,
+        );
+        assert_eq!(prompt.event, "UserPromptSubmit");
+        assert_eq!(prompt.cue, "please commit the readme");
+    }
+
+    #[test]
+    fn an_unknown_agent_id_is_a_grokbot_prefix_not_the_raw_id() {
+        let id = "bc-1234abcd-rest";
+        assert_eq!(fallback_seat(id), "grokbot-bc-1234a");
+        assert_ne!(fallback_seat(id), id);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seats.toml");
+        std::fs::write(&path, format!("{id:?} = \"rgoswami\"\n")).unwrap();
+        assert_eq!(mapped_seat(&path, id).as_deref(), Some("rgoswami"));
+        assert_eq!(mapped_seat(&path, "other-id-9999"), None);
+        assert_eq!(mapped_seat(&dir.path().join("missing.toml"), id), None);
+    }
+
     /// A hook call is read from the runner's JSON or from plain text, and
     /// the answer is the runner's shape only when there is something to say.
     #[test]
@@ -31803,9 +32025,40 @@ mod tests {
         }
         let _scratch = tempfile::tempdir().unwrap();
         let dir = _scratch.path().to_path_buf();
+        let home = dir.join("home");
+        let share = dir.join("share");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&home).unwrap();
+        // Git hooks install writes core.hooksPath. The dirs and the git
+        // environment go to the child `git config`, not this process.
+        let gitconfig = dir.join("gitconfig");
+        let hooks = share.join("ljos").join("git-hooks");
+        let guard = share.join("ljos").join("guard-bin");
+        let git_env = [
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", share.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+            ("GIT_CONFIG_GLOBAL", gitconfig.to_str().unwrap()),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        let kept: Vec<_> = [
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+        let place = super::OnboardPlace {
+            hooks_dir: &hooks,
+            guard_dir: &guard,
+            git_env: &git_env,
+        };
         let file = dir.join("harnesses.toml");
         let skills = dir.join("given");
-        let dry = super::onboard_in(&file, "grokbot", true, Some(&skills)).unwrap();
+        let dry = super::onboard_in_at(&file, "grokbot", true, Some(&skills), Some(place)).unwrap();
         assert!(dry.iter().all(|s| s.ok), "{dry:?}");
         assert!(dry
             .iter()
@@ -31818,7 +32071,8 @@ mod tests {
             .all(|s| s.what != "hook" && !s.what.contains("mcp")));
         assert!(!skills.exists(), "a dry run wrote the skill");
 
-        let steps = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
+        let steps =
+            super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
         assert!(steps.iter().all(|s| s.ok), "{steps:?}");
         let skill = std::fs::read_to_string(skills.join("ljos/SKILL.md")).unwrap();
         assert!(skill.starts_with("---\nname: ljos\n"));
@@ -31828,6 +32082,8 @@ mod tests {
             env.contains("export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n"),
             "{env}"
         );
+        assert!(env.contains("ljos seat"), "{env}");
+        assert!(env.contains("seats.toml"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
@@ -31841,7 +32097,17 @@ mod tests {
         );
         assert!(saved.contains(&skills.display().to_string()), "{saved}");
         assert!(!saved.contains("json_pointer"), "{saved}");
-        let again = super::onboard_in(&file, "grokbot", false, Some(&skills)).unwrap();
+        let recorded = std::fs::read_to_string(&gitconfig).unwrap_or_default();
+        assert!(
+            recorded.contains(&hooks.display().to_string()),
+            "hooks were not recorded in the scratch gitconfig: {recorded}"
+        );
+        assert!(
+            guard.join("git").is_file(),
+            "guard shims were not written under the scratch data dir"
+        );
+        let again =
+            super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
         assert!(again
             .iter()
             .any(|s| s.what == "skill" && s.detail.contains("is current")));
@@ -31852,6 +32118,9 @@ mod tests {
         std::fs::write(&missing, "[[harness]]\nname = \"box\"\nshell = true\n").unwrap();
         let err = super::onboard_in(&missing, "box", true, None).unwrap_err();
         assert!(err.to_string().contains("--skills"), "{err}");
+        for (key, value) in kept {
+            assert_eq!(std::env::var_os(key), value, "{key}");
+        }
         unsafe {
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
