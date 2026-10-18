@@ -5875,35 +5875,65 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
     }
 }
 
-/// Atoms that share the prompt's words, while the encoder is still loading.
-/// The same subject, horizon and seen filters as a search. Empty when none
-/// of them bear on the prompt.
+/// Atoms that bear on the prompt, while the encoder is still loading.
+///
+/// A search would wait for the model, so this ranks the atoms already
+/// stored. BM25 admits a rare word the subject test would call too thin
+/// for a long prompt (`kebab` in a task that also says `test` and
+/// `pytest`). The subject test still admits a short cue or two shared
+/// words, including a match that lives only in the atom's `source`.
+/// Empty when none of them bear on the prompt.
 fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
     let atoms = session_atoms(1_500).ok()?;
     let seen = seen_ids(call.session.as_deref());
-    let mut hits: Vec<Hit> = atoms
+    let rows: Vec<(Hit, String)> = atoms
         .iter()
-        .filter_map(atom_as_hit)
-        .filter(|h| {
-            !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                && names_the_subject(&h.text, cue)
-                && shown_on_prompt(h)
-                && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+        .filter_map(|atom| {
+            let hit = atom_as_hit(atom)?;
+            if UNREVIEWED_KINDS.contains(&hit.kind.as_str())
+                || !shown_on_prompt(&hit)
+                || hit.id.as_ref().is_some_and(|id| seen.contains(id))
+            {
+                return None;
+            }
+            Some((hit, recall_body(atom)))
         })
         .collect();
-    if hits.is_empty() {
+    if rows.is_empty() {
         return None;
     }
+    let docs: Vec<Vec<String>> = rows.iter().map(|(_, body)| prompt_words(body)).collect();
+    let df = document_frequency(&docs);
+    let mut scored: Vec<(usize, f64)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, body))| {
+            let mut score = bm25_distinctive(&docs, &df, i, cue);
+            if names_the_subject(body, cue) {
+                score = score.max(1.0);
+            }
+            (score > 0.0).then_some((i, score))
+        })
+        .collect();
+    if scored.is_empty() {
+        return None;
+    }
+    let top = scored
+        .iter()
+        .fold(0.0_f64, |top, (_, score)| top.max(*score));
+    scored.retain(|(_, score)| *score >= top * HOOK_SCORE_FLOOR);
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(limit.min(HOOK_MAX_MEMORIES));
+    let mut hits: Vec<Hit> = scored.into_iter().map(|(i, _)| rows[i].0.clone()).collect();
     hits.sort_by_key(|h| h.kind != "preference");
     let split = hits.iter().filter(|h| h.kind == "preference").count();
     hits[split..].sort_by_key(|h| h.ts.clone().unwrap_or_default());
-    let hits: Vec<Hit> = hits
-        .into_iter()
-        .take(limit.min(HOOK_MAX_MEMORIES))
-        .collect();
     let now = now_utc();
     let lines: Vec<String> = hits.iter().map(|h| hit_line(h, &now)).collect();
     let ids: Vec<String> = hits.iter().filter_map(|h| h.id.clone()).collect();
+    if lines.is_empty() {
+        return None;
+    }
     Some((
         format!(
             "What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):\n{}",
@@ -5911,6 +5941,85 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
         ),
         ids,
     ))
+}
+
+/// The text a cold prompt is matched on: the claim, plus the title, rule
+/// and command kept in `source`. The prose gate shortens the claim; the
+/// words a later prompt uses can survive only in `source`.
+fn recall_body(atom: &Value) -> String {
+    let mut text = atom
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let Some(source) = atom.get("source").and_then(Value::as_object) else {
+        return text;
+    };
+    for key in ["title", "rule", "command"] {
+        if let Some(value) = source
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            text.push('\n');
+            text.push_str(value);
+        }
+    }
+    text
+}
+
+/// How many atoms contain each word, once per atom.
+fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String, usize> {
+    let mut df = std::collections::HashMap::new();
+    for doc in docs {
+        let mut words = doc.clone();
+        words.sort();
+        words.dedup();
+        for word in words {
+            *df.entry(word).or_default() += 1;
+        }
+    }
+    df
+}
+
+/// BM25 over the words of `cue` that are rare in `docs`.
+///
+/// A word in one atom always counts, including when the pack holds only
+/// that atom. A word in half the atoms or more does not: `test` then
+/// matches everything and ranks nothing. `k1` and `b` are the usual
+/// BM25 constants.
+fn bm25_distinctive(
+    docs: &[Vec<String>],
+    df: &std::collections::HashMap<String, usize>,
+    index: usize,
+    cue: &str,
+) -> f64 {
+    let query = prompt_words(cue);
+    if query.is_empty() || docs.is_empty() {
+        return 0.0;
+    }
+    let n = docs.len();
+    let avgdl = docs.iter().map(Vec::len).sum::<usize>() as f64 / n as f64;
+    let avgdl = avgdl.max(1.0);
+    let doc = &docs[index];
+    let dl = doc.len() as f64;
+    const K1: f64 = 1.2;
+    const B: f64 = 0.75;
+    let mut score = 0.0;
+    for term in &query {
+        let docs_with = df.get(term).copied().unwrap_or(0);
+        if docs_with == 0 || (docs_with != 1 && docs_with * 2 >= n) {
+            continue;
+        }
+        let freq = doc.iter().filter(|word| *word == term).count() as f64;
+        if freq == 0.0 {
+            continue;
+        }
+        let idf = ((n as f64 - docs_with as f64 + 0.5) / (docs_with as f64 + 0.5) + 1.0).ln();
+        let norm = freq * (K1 + 1.0) / (freq + K1 * (1.0 - B + B * dl / avgdl));
+        score += idf * norm;
+    }
+    score
 }
 
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
@@ -5962,11 +6071,15 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         pending.push(key);
     }
     // While the encoder loads, a search waits on it past the hook's
-    // deadline and the answer is lost. A lexical pass over the atoms
-    // already on disk still answers this prompt. With nothing to show,
-    // the prompt hears that memory is starting, once a session.
-    if encoder_warming() {
-        if let Some((text, mut ids)) = lexical_recall(call, cue, limit) {
+    // deadline and the answer is lost. Rank the atoms already stored
+    // before starting that load: the warm-up search holds a pack worker
+    // until the model answers, and the listing behind it would time out.
+    // With nothing to show, the prompt hears that memory is starting,
+    // once a session.
+    if encoder_is_cold() {
+        let recalled = lexical_recall(call, cue, limit);
+        start_encoder_warm();
+        if let Some((text, mut ids)) = recalled {
             ids.extend(pending);
             let out = if nudge.is_empty() {
                 text
@@ -7668,21 +7781,38 @@ pub fn warm_command(exe: &Path) -> std::process::Command {
     command
 }
 
-/// Whether the pack's encoder is still loading. When it is, a warm-up
-/// starts in the background, at most one per [`ENCODER_WARM_EVERY`]. The
-/// status call has half a second; a pack that does not answer in that time
-/// is not called cold, and the search goes on as before.
-pub fn encoder_warming() -> bool {
-    let cold = with_pack_timeout(500, || {
+/// Whether the pack's encoder has not answered yet. The status call has
+/// half a second; a pack that does not answer in that time is not called
+/// cold, and the search goes on as before. This does not start a warm-up.
+fn encoder_is_cold() -> bool {
+    with_pack_timeout(500, || {
         pack()
             .ok()
             .and_then(|client| client.status(None).ok())
             .is_some_and(|status| encoder_cold(&status))
-    });
-    if cold && take_warm_turn(&runtime_dir().join("encoder-warming")) {
+    })
+}
+
+/// Start one warm-up in the background, at most one per
+/// [`ENCODER_WARM_EVERY`]. The search runs in its own process group, so
+/// the caller does not wait and a runner that kills the hook does not
+/// kill the load.
+fn start_encoder_warm() {
+    if take_warm_turn(&runtime_dir().join("encoder-warming")) {
+        // The unit-test binary is this process. Spawning it re-enters the harness.
+        #[cfg(not(test))]
         if let Ok(exe) = std::env::current_exe() {
             let _ = warm_command(&exe).spawn();
         }
+    }
+}
+
+/// Whether the pack's encoder is still loading. When it is, a warm-up
+/// starts in the background, at most one per [`ENCODER_WARM_EVERY`].
+pub fn encoder_warming() -> bool {
+    let cold = encoder_is_cold();
+    if cold {
+        start_encoder_warm();
     }
     cold
 }
@@ -13627,6 +13757,15 @@ fn carried_lines(segs: &[String], bodies: &[Heredoc]) -> Vec<String> {
         .map(|(_, v)| v.clone());
     let mut out = Vec::new();
     for seg in segs {
+        // An assignment is not a script. `export PATH="$HOME/.local/bin:$PATH"`
+        // binds PATH to a value that still says `$PATH`. Walking that
+        // expanded assignment as a new line binds it again, one depth per
+        // walk, until the line is refused as nested. The shell runs the
+        // assignment once. A later segment that uses the name is expanded
+        // below, and a `$(...)` in the value is already in `substitutions`.
+        if assignment_segment(seg) {
+            continue;
+        }
         let expanded = expand_names(seg, &names, ifs.as_deref());
         let seg = expanded.clone().unwrap_or_else(|| seg.clone());
         if let Some(run) = looked_up_head(&seg) {
@@ -13665,6 +13804,17 @@ fn carried_lines(segs: &[String], bodies: &[Heredoc]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether `seg` is only assignments, optionally behind `export`.
+fn assignment_segment(seg: &str) -> bool {
+    let words = shell_words(seg);
+    let bare = if words.first().is_some_and(|w| w == "export") {
+        &words[1..]
+    } else {
+        &words[..]
+    };
+    !bare.is_empty() && bare.iter().all(|w| is_name_value(w))
 }
 
 /// A `NAME=value` word.
@@ -25375,13 +25525,24 @@ mod tests {
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
-        let started = std::time::Instant::now();
         let said = super::persist_tracker("probe-c3d4", "claimed");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
-            "{said}"
-        );
         assert!(said.contains("still running after 1s"), "{said}");
+        // The pre-push hook sleeps 4s. Returning while that process is
+        // still alive is the bound: a wall clock of a few seconds is eaten
+        // by git itself when the rest of the suite is also running git.
+        let log = said
+            .split("(log ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .map(str::trim)
+            .expect("the line names the push log");
+        let pid = super::recorded_push_pid(std::path::Path::new(log)).expect("push pid");
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .expect("kill -0")
+            .success();
+        assert!(alive, "the pre-push hook had already exited: {said}");
 
         std::thread::sleep(std::time::Duration::from_secs(5));
         std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
@@ -35273,6 +35434,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             verdict_for(&[], &line).is_none(),
             "no rules, nothing to refuse"
+        );
+    }
+
+    /// `export PATH="$HOME/.local/bin:$PATH"` binds PATH to a value that
+    /// still names PATH. That is one assignment, not a script nested eight
+    /// deep. A seat rule does not change the reading: the same line is
+    /// allowed with rules and without, and a command carried by a variable
+    /// is still seen. A temp HOME never reached this check, which is why
+    /// the same line was allowed there and refused in a real home.
+    #[test]
+    fn a_path_assignment_does_not_make_a_shallow_command_too_deep() {
+        let line = "export PATH=\"$HOME/.local/bin:$PATH\" && cd /work/proj && python3 -m pytest test_kebab.py -v";
+        assert!(
+            !nested_too_deep(line),
+            "the PATH assignment is not a nested script"
+        );
+        assert!(seat_guard(line).is_none(), "{:?}", seat_guard(line));
+        let rules = vec![Rule {
+            pattern: "git push*".into(),
+            verdict: "deny".into(),
+            reason: "no push".into(),
+        }];
+        assert!(verdict_for(&rules, line).is_none());
+        assert!(verdict_for(&[], line).is_none());
+        let hidden = "export PATH=\"$PATH:/usr/bin\" && echo $(git push -f)";
+        assert!(!nested_too_deep(hidden));
+        assert!(
+            nested_lines(hidden, 0)
+                .iter()
+                .any(|l| l.contains("git push -f")),
+            "a substitution in a later segment is still read"
+        );
+        let carried = nested_lines("x='git push -f'; git $x", 0);
+        assert!(
+            carried.iter().any(|l| l.contains("git push -f")),
+            "{carried:?}"
+        );
+        let mut deep = "git push -f".to_string();
+        for _ in 0..=NESTED_DEPTH {
+            deep = format!("echo $({deep})");
+        }
+        assert!(nested_too_deep(&deep));
+        assert_eq!(
+            verdict_for(&rules, &deep).map(|r| r.pattern.as_str()),
+            Some("nested-too-deep")
         );
     }
 

@@ -395,7 +395,7 @@ fn the_hook_cites_a_commit_only_after_it_exits_zero() {
 }
 
 #[test]
-fn the_hook_claims_on_the_first_write_and_on_a_tracked_redirect() {
+fn the_hook_claims_on_the_first_write_and_on_a_redirect() {
     let (_dir, hab) = habitat();
     let cwd = hab.repo.clone();
     let tools = [
@@ -439,7 +439,9 @@ fn the_hook_claims_on_the_first_write_and_on_a_tracked_redirect() {
     );
     let log = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
     let creates = log.matches("create").count();
-    assert_eq!(creates, 5, "{log}");
+    // Write, Edit, MultiEdit, apply_patch, a tracked redirect, and a
+    // redirect that creates a file git does not track yet.
+    assert_eq!(creates, 6, "{log}");
 }
 
 fn context(stdout: &[u8]) -> String {
