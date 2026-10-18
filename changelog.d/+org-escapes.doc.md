@@ -1,0 +1,1 @@
+The reference table shows a bar where its code cells printed `\vert`, and the rule row names `\b` and `\s` instead of doubled backslashes. The org export runs a pandoc filter that writes `\vert` as a bar inside code, so a later export keeps it.
