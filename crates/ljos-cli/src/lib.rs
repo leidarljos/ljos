@@ -21792,7 +21792,19 @@ fn issue_memories(issue: &str) -> Result<Vec<Hit>> {
     Ok(tagged_with_issue(&atoms, issue))
 }
 
-/// [`issue_memories`] on a listing already read.
+/// When an atom was written: `valid_from`, else `source.at`, else `ts`.
+/// The writer restamps `ts` when it rewrites an atom's links or review
+/// clock, so `ts` alone puts every atom it touched in one batch at the
+/// same instant.
+fn written_at(atom: &Value) -> Option<String> {
+    [&atom["valid_from"], &atom["source"]["at"], &atom["ts"]]
+        .into_iter()
+        .find_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+        .map(str::to_string)
+}
+
+/// [`issue_memories`] on a listing already read, ordered by when each
+/// memory was written, newest first.
 fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
     let tag = format!("issue:{issue}");
     let mut own: Vec<Hit> = atoms
@@ -21804,7 +21816,11 @@ fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
                     .as_array()
                     .is_some_and(|e| e.iter().any(|x| x.as_str() == Some(tag.as_str())))
         })
-        .filter_map(|atom| serde_json::from_value::<Hit>(atom.clone()).ok())
+        .filter_map(|atom| {
+            let mut hit = serde_json::from_value::<Hit>(atom.clone()).ok()?;
+            hit.ts = written_at(atom).or(hit.ts);
+            Some(hit)
+        })
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
         .collect();
     own.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| a.id.cmp(&b.id)));
@@ -26263,7 +26279,8 @@ mod tests {
             .collect();
         atoms.push(
             serde_json::json!({"id": "lesson", "kind": "lesson", "text": "tagged lesson",
-            "ts": "2026-10-18T09:00:00.000Z", "entities": ["issue:probe-0lm4"]}),
+            "ts": "2026-10-18T23:00:00.000Z", "valid_from": "2026-10-18T09:00:00.000Z",
+            "entities": ["issue:probe-0lm4"]}),
         );
         atoms.push(
             serde_json::json!({"id": "gone", "kind": "note", "text": "retracted",
