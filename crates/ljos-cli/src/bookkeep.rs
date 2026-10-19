@@ -116,6 +116,11 @@ struct Book {
 struct RepoBook {
     #[serde(default)]
     issue: Option<String>,
+    /// `ljos_start` claimed this row's issue. A hook in another sitting
+    /// takes over only such a row: a row another hook filed is that
+    /// session's own work.
+    #[serde(default)]
+    started: bool,
     /// Commit shas already cited. The id is `deed-file-commit-<sha>`, so a
     /// second commit is a second deed, and the same sha is not cited twice.
     #[serde(default)]
@@ -938,6 +943,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     row.last_unix = now;
     row.issue = Some(issue_id.clone());
     row.finished = false;
+    row.started = true;
     row.claim_failed = false;
     row.recall.clone_from(&recall);
     if !cwd.is_empty() {
@@ -1256,7 +1262,7 @@ fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
             let Some(issue) = row.issue.as_deref() else {
                 continue;
             };
-            if row.finished || !same_checkout(key, repo) {
+            if row.finished || !row.started || !same_checkout(key, repo) {
                 continue;
             }
             if found.as_ref().is_some_and(|(when, ..)| *when > rank) {
