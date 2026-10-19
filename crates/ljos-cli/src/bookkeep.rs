@@ -366,7 +366,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
             || writes_worktree(&repo, &call.cue)
         {
             let offered = subject_title.then_some(offered.as_str());
-            let _ = ensure_claim(&mut book, &repo, offered);
+            let _ = ensure_claim(&mut book, &path, &repo, offered);
         }
         // The commit has not happened on the way in. Cite it on the way
         // out when the evidence says it landed, every new sha since the
@@ -381,7 +381,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
                 // The command named an id the landed message does not: the
                 // commit still gets the claim a commit files.
                 let offered = subject_title.then_some(offered.as_str());
-                let _ = ensure_claim(&mut book, &repo, offered);
+                let _ = ensure_claim(&mut book, &path, &repo, offered);
             }
             let _ = ensure_deed(&mut book, &repo);
         } else if call.event == "PostToolUse" && commit && command_failed(exit) {
@@ -1186,7 +1186,12 @@ fn git_toplevel(cwd: &Path) -> Option<String> {
     (!top.is_empty()).then(|| top.to_string())
 }
 
-fn ensure_claim(book: &mut Book, repo: &str, offered: Option<&str>) -> Result<(), String> {
+fn ensure_claim(
+    book: &mut Book,
+    own: &Path,
+    repo: &str,
+    offered: Option<&str>,
+) -> Result<(), String> {
     let row = book.repos.entry(repo.to_string()).or_default();
     if row.claim_failed {
         return Ok(());
@@ -1195,6 +1200,12 @@ fn ensure_claim(book: &mut Book, repo: &str, offered: Option<&str>) -> Result<()
         if row.recall.is_empty() {
             row.recall = recall_line(&issue);
         }
+        return Ok(());
+    }
+    // The seat may already hold an issue in this checkout under another
+    // book: `ljos_start` in the MCP server keys its book by the seat, the
+    // harness hook by the harness session. That issue is this sitting's.
+    if take_held_issue(book, own, repo) {
         return Ok(());
     }
     // A hold from another repository is a different ticket. This sitting
@@ -1221,6 +1232,114 @@ fn ensure_claim(book: &mut Book, repo: &str, offered: Option<&str>) -> Result<()
             log_line(&format!("claim: {e}"));
             book.repos.entry(repo.to_string()).or_default().claim_failed = true;
             Ok(())
+        }
+    }
+}
+
+/// Put the issue this seat already holds in `repo` on this book's row, and
+/// say whether there was one. A row another book keeps for the checkout
+/// (`ljos_start`, a named commit) moves here whole, so one book finishes
+/// it and the other does not finish it a second time without its deeds.
+/// Else a claim the seat's hold record names in this checkout's project
+/// (`ljos claim`) is taken as the row's issue. Either issue has to be
+/// STARTED in the tracker under this holder, in either form: the bare
+/// seat or `SEAT@TAG`.
+fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
+    let mut found: Option<((u64, u128), PathBuf, String, String)> = None;
+    for path in book_files() {
+        if path == own {
+            continue;
+        }
+        let other = load_book(&path);
+        let rank = row_rank(&path, &other);
+        for (key, row) in &other.repos {
+            let Some(issue) = row.issue.as_deref() else {
+                continue;
+            };
+            if row.finished || !same_checkout(key, repo) {
+                continue;
+            }
+            if found.as_ref().is_some_and(|(when, ..)| *when > rank) {
+                continue;
+            }
+            if held_by_this_seat(issue) {
+                found = Some((rank, path.clone(), key.clone(), issue.to_string()));
+            }
+        }
+    }
+    if let Some((_, path, key, issue)) = found {
+        let mut other = load_book(&path);
+        let moved = other.repos.remove(&key).unwrap_or_default();
+        store_book(&path, &other);
+        adopt_row(book, repo, &issue, moved);
+        log_line(&format!("claim: kept {issue}, already held in {repo}"));
+        return true;
+    }
+    let project = project_for(repo);
+    let Some(issue) = super::held_issue().filter(|id| {
+        id.rsplit_once('-').is_some_and(|(p, _)| p == project) && held_by_this_seat(id)
+    }) else {
+        return false;
+    };
+    adopt_row(book, repo, &issue, RepoBook::default());
+    log_line(&format!("claim: kept {issue}, held by this seat"));
+    true
+}
+
+/// Whether the tracker has `issue` STARTED and claimed by this holder. A
+/// tracker that records no holder answers by the state alone.
+fn held_by_this_seat(issue: &str) -> bool {
+    let Ok(v) = super::issue_record(issue) else {
+        return false;
+    };
+    if v["id"].as_str() != Some(issue) || v["state"].as_str() != Some("STARTED") {
+        return false;
+    }
+    match v["claimed_by"].as_str().map(str::trim) {
+        Some(by) if !by.is_empty() => super::same_holder(by, &super::holder_name()),
+        _ => true,
+    }
+}
+
+/// Fold `moved`, another book's row for the checkout, into this book's
+/// row, which then holds `issue`.
+fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
+    let row = book.repos.entry(repo.to_string()).or_default();
+    row.issue = Some(issue.to_string());
+    row.finished = false;
+    row.claim_failed = false;
+    row.recall = if moved.recall.is_empty() {
+        recall_line(issue)
+    } else {
+        moved.recall
+    };
+    if moved.start_sha.is_some() {
+        row.start_sha = moved.start_sha;
+    }
+    if row.title.is_none() {
+        row.title = moved.title;
+    }
+    for sha in moved.deeds {
+        if !row.deeds.contains(&sha) {
+            row.deeds.push(sha);
+        }
+    }
+    for sha in moved.landed {
+        if !row.landed.contains(&sha) {
+            row.landed.push(sha);
+        }
+    }
+    row.failures.extend(moved.failures);
+    row.asks.extend(moved.asks);
+    row.named |= moved.named;
+    for other in moved.also {
+        if !row.also.contains(&other) {
+            row.also.push(other);
+        }
+    }
+    for sha in moved.elsewhere {
+        if !row.elsewhere.contains(&sha) {
+            row.elsewhere.push(sha);
         }
     }
 }
@@ -5316,6 +5435,161 @@ print(f"id={ident}")
         mcp_shutdown();
         assert!(git_log(&tracker).contains("finished"));
         assert!(open_issue().is_none());
+    }
+
+    /// `ljos_start` in the MCP server books under the seat's key and the
+    /// harness hook under the harness session. The first write after the
+    /// start stays on the started issue instead of filing a second one,
+    /// and the issue is finished once, by the book it moved to.
+    #[test]
+    fn a_write_after_ljos_start_keeps_the_started_issue() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+            std::env::set_var("LJOS_SESSION_ID", "mcp-start-held");
+        }
+        let said = start_work(
+            None,
+            Some(repo.to_str().unwrap()),
+            "Add slugify and its test",
+        )
+        .unwrap();
+        let started = said
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("claimed "))
+            .expect("the start claimed")
+            .to_string();
+        assert_eq!(creates(&tracker), 1);
+
+        let session = "harness-after-start";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(creates(&tracker), 1, "the write filed a second issue");
+        let book = load_book(&book_path(session));
+        let held: Vec<_> = book
+            .repos
+            .values()
+            .filter_map(|r| r.issue.clone())
+            .collect();
+        assert_eq!(held, vec![started.clone()]);
+        assert!(
+            load_book(&book_path(&sitting_key()))
+                .repos
+                .values()
+                .all(|r| r.issue.is_none()),
+            "the start's book still holds the issue"
+        );
+
+        // The server's shutdown has nothing left to finish.
+        mcp_shutdown();
+        assert!(
+            !git_log(&tracker).contains("finished"),
+            "{}",
+            git_log(&tracker)
+        );
+        let (stop_raw, stop_call) = payload("Stop", session, &repo, serde_json::json!({}));
+        let _ = observe(&stop_raw, &stop_call);
+        let log = git_log(&tracker);
+        assert_eq!(
+            log.matches(&format!("{started} finished")).count(),
+            1,
+            "{log}"
+        );
+    }
+
+    /// A STARTED row another holder keeps in the same checkout is that
+    /// holder's ticket: the write files its own.
+    #[test]
+    fn a_write_does_not_take_another_holders_issue() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+            std::env::set_var("LJOS_SESSION_ID", "mcp-start-other");
+        }
+        let said = start_work(
+            None,
+            Some(repo.to_str().unwrap()),
+            "Add slugify and its test",
+        )
+        .unwrap();
+        let started = said
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("claimed "))
+            .expect("the start claimed")
+            .to_string();
+        let org_path = tracker.join("Software/probe/issues.org");
+        let org = std::fs::read_to_string(&org_path).unwrap();
+        let id_line = format!(":ID:         {started}\n");
+        std::fs::write(
+            &org_path,
+            org.replace(
+                &id_line,
+                &format!("{id_line}:CLAIMED_BY: someone-else@zz9\n"),
+            ),
+        )
+        .unwrap();
+
+        let session = "harness-other-holder";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(
+            creates(&tracker),
+            2,
+            "the write took another holder's issue"
+        );
+        let book = load_book(&book_path(session));
+        assert!(book
+            .repos
+            .values()
+            .all(|r| r.issue.as_deref() != Some(started.as_str())));
     }
 
     #[test]
