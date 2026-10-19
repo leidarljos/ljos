@@ -346,8 +346,14 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     }
     // The process tree is not a seat. Without LJOS_SEAT, seats.toml, or the
-    // grokbot-<id8> fallback, the commit stays unbooked.
+    // grokbot-<id8> fallback, the commit stays unbooked; a subagent is told.
     let Some(seat) = crate::git_hook_seat() else {
+        if crate::unseated_subagent() {
+            eprintln!(
+                "ljos: commit {} not booked: this subagent has no seat; export LJOS_SEAT=<your seat> (the parent's) to book it",
+                &head[..head.len().min(12)]
+            );
+        }
         return Ok(());
     };
     let _actor = crate::HookActor::enter(&seat);

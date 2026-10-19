@@ -1156,6 +1156,25 @@ fn a_git_hook_under_exec_daemon_books_the_seat() {
     assert!(!dlog.contains("exec-daemon"), "{dlog}");
 }
 
+/// A subagent's conversation id is not a seat. Its first eight characters
+/// named every subagent `grokbot-sand-sub`; the hook now books nothing and
+/// says what to export.
+#[test]
+fn a_subagent_commit_is_not_booked_and_says_why() {
+    let hab = Hab::new("repo");
+    let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", "sand-subagent-002")]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let vlog = vissue_log(&hab.tracker);
+    assert!(!vlog.contains("grokbot-sand-sub"), "{vlog}");
+    assert!(
+        !vlog.contains("claim"),
+        "a subagent commit claimed:\n{vlog}"
+    );
+    assert!(err.contains("not booked"), "{err}");
+    assert!(err.contains("LJOS_SEAT"), "{err}");
+}
+
 /// With `LJOS_SEAT` exported, a git hook holds under the holder `ljos seat`
 /// prints (`SEAT@TAG`), the name `ljos claim` takes in the same shell. The
 /// hook used to hold under the bare seat, so one conversation held its

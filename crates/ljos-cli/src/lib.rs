@@ -1368,7 +1368,7 @@ impl Seat {
 
     fn tagged(seat: String, tag: &str, source: String) -> Self {
         Self {
-            holder: format!("{seat}-{tag}"),
+            holder: format!("{seat}@{tag}"),
             seat,
             source,
         }
@@ -1399,7 +1399,7 @@ pub fn seat_slug(name: &str) -> String {
 }
 
 /// A short tag for one conversation from the process that runs it: the pid
-/// in base 36, so `acme-cli-39u` reads as a name and not a number.
+/// in base 36, so the holder `acme-cli@39u` reads as a name and not a number.
 #[must_use]
 pub fn conversation_tag(pid: u32) -> String {
     const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -2760,7 +2760,7 @@ fn conversation_seat() -> Option<Seat> {
     }
     let (name, source) = match mapped_seat(&seats_file(), id) {
         Some(name) => (name, "seats.toml"),
-        None => (fallback_seat(id), "CURSOR_CONVERSATION_ID"),
+        None => (fallback_seat(id)?, "CURSOR_CONVERSATION_ID"),
     };
     let slug = seat_slug(&name);
     if slug == "runner" || omitted_actor_name(&slug) {
@@ -2771,10 +2771,10 @@ fn conversation_seat() -> Option<Seat> {
 
 /// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
 /// that is not listed becomes `grokbot-` plus its first eight characters,
-/// never the raw id.
+/// never the raw id. A subagent's id has no seat of its own: `None`.
 #[must_use]
-pub fn seat_for_agent(id: &str) -> String {
-    mapped_seat(&seats_file(), id).unwrap_or_else(|| fallback_seat(id))
+pub fn seat_for_agent(id: &str) -> Option<String> {
+    mapped_seat(&seats_file(), id).or_else(|| fallback_seat(id))
 }
 
 thread_local! {
@@ -2843,13 +2843,47 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
-    let bare_of = |bare: &str, tagged: &str| {
-        !bare.contains('@')
-            && tagged
-                .split_once('@')
-                .is_some_and(|(name, tag)| name == bare && !tag.is_empty())
+    if a == b {
+        return true;
+    }
+    let (seat_a, tag_a) = holder_parts(a);
+    let (seat_b, tag_b) = holder_parts(b);
+    // Two tags of one seat are two conversations, not one holder.
+    seat_a == seat_b && (tag_a.is_none() || tag_b.is_none())
+}
+
+/// Seat names an older ljos wrote that are now another name. `ljos-bot`
+/// held claims before the seat map named the seat `ljosbot`.
+const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
+
+/// A holder as its seat and its conversation tag. `SEAT@TAG` is the form
+/// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
+/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`); a last part of three
+/// or four lowercase letters and digits with at least one digit is read
+/// as that tag, so `eessi-bot` and `disk-saver` stay whole seats.
+#[must_use]
+pub fn holder_parts(holder: &str) -> (String, Option<String>) {
+    let holder = holder.trim();
+    let (seat, tag) = match holder.split_once('@') {
+        Some((seat, tag)) if !tag.is_empty() => (seat, Some(tag)),
+        _ => match holder.rsplit_once('-') {
+            Some((seat, tag)) if !seat.is_empty() && legacy_tag(tag) => (seat, Some(tag)),
+            _ => (holder, None),
+        },
     };
-    a == b || bare_of(a, b) || bare_of(b, a)
+    let seat = LEGACY_SEATS
+        .iter()
+        .find(|(old, _)| *old == seat)
+        .map_or(seat, |(_, now)| *now);
+    (seat.to_string(), tag.map(str::to_string))
+}
+
+fn legacy_tag(tag: &str) -> bool {
+    (3..=4).contains(&tag.len())
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && tag.bytes().any(|b| b.is_ascii_digit())
 }
 
 /// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
@@ -2880,12 +2914,32 @@ pub fn grokbot_seat_name() -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    Some(seat_for_agent(id))
+    seat_for_agent(id)
 }
 
-fn fallback_seat(id: &str) -> String {
+/// Whether `CURSOR_CONVERSATION_ID` names a subagent that `seats.toml`
+/// does not list. Its commits are not booked; [`git_hook_seat`] callers
+/// say so instead of booking under `grokbot-sand-sub`.
+#[must_use]
+pub fn unseated_subagent() -> bool {
+    std::env::var("CURSOR_CONVERSATION_ID")
+        .ok()
+        .map(|id| id.trim().to_string())
+        .is_some_and(|id| subagent_id(&id) && mapped_seat(&seats_file(), &id).is_none())
+}
+
+/// A subagent conversation id. Every one starts `sand-sub`, so its first
+/// eight characters named every subagent `grokbot-sand-sub`.
+fn subagent_id(id: &str) -> bool {
+    id.starts_with("sand-sub")
+}
+
+fn fallback_seat(id: &str) -> Option<String> {
+    if subagent_id(id) {
+        return None;
+    }
     let prefix: String = id.chars().take(8).collect();
-    format!("grokbot-{prefix}")
+    Some(format!("grokbot-{prefix}"))
 }
 
 fn seats_file() -> PathBuf {
@@ -3538,11 +3592,14 @@ fn seat_lines(name: &str) -> String {
     format!(
         "# Seat names live in ${{XDG_CONFIG_HOME:-$HOME/.config}}/ljos/seats.toml, read by `ljos seat`.\n\
          # An unknown conversation id becomes grokbot-<first 8 characters>, never the raw id.\n\
+         # A subagent (sand-sub...) gets no seat: export the parent's LJOS_SEAT.\n\
          # An exported LJOS_SEAT is kept; the conversation id does not replace it.\n\
          if [ -z \"${{LJOS_SHELL_SESSION:-}}\" ]; then\n\
          \texport LJOS_SHELL_SESSION=$$\n\
          fi\n\
-         if [ -z \"${{LJOS_SEAT:-}}\" ] && [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
+         case \"${{CURSOR_CONVERSATION_ID:-}}\" in\n\
+         \tsand-sub*) [ -n \"${{LJOS_SEAT:-}}\" ] || echo \"ljos: a subagent has no seat of its own; export LJOS_SEAT=<the parent's seat>\" >&2 ;;\n\
+         \t*) if [ -z \"${{LJOS_SEAT:-}}\" ] && [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
          \t_ljos_named=$(ljos seat 2>/dev/null | head -n 1 | awk '{{ print $NF }}')\n\
          \tcase \"$_ljos_named\" in\n\
          \t\t\"\"|*[!A-Za-z0-9_-]*) LJOS_SEAT=grokbot-$(printf %.8s \"$CURSOR_CONVERSATION_ID\") ;;\n\
@@ -3550,7 +3607,8 @@ fn seat_lines(name: &str) -> String {
          \tesac\n\
          \texport LJOS_SEAT\n\
          \tunset _ljos_named\n\
-         fi\n\
+         fi ;;\n\
+         esac\n\
          {}",
         keep_seat_assignment(name)
     )
@@ -28311,11 +28369,12 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some("acme-cli"));
-        assert_eq!(lines.next(), Some("acme-cli-39u"));
+        assert_eq!(lines.next(), Some("acme-cli@39u"));
         assert_eq!(
             format_seat(&seat),
-            "seat\tacme-cli\nholder\tacme-cli-39u\nsource\ttest\n"
+            "seat\tacme-cli\nholder\tacme-cli@39u\nsource\ttest\n"
         );
+        assert!(same_holder("acme-cli", &seat.holder));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -29768,10 +29827,29 @@ mod tests {
     }
 
     #[test]
+    fn legacy_holders_resolve_to_their_seat() {
+        assert!(same_holder("inky", "inky-n9o"));
+        assert!(same_holder("inky@i1o6nf7w3i", "inky"));
+        assert!(same_holder("disk-saver", "disk-saver-t4t"));
+        assert!(same_holder("ljosbot", "ljos-bot"));
+        assert!(same_holder("ljos-bot", "ljosbot@q4s23e2cxd"));
+        assert!(!same_holder("inky-n9o", "inky-8zo"));
+        assert!(!same_holder("inky@abc", "inky@def"));
+        assert!(!same_holder("eessi", "eessi-bot"));
+        assert!(!same_holder("disk", "disk-saver"));
+        assert_eq!(holder_parts("disk-saver"), ("disk-saver".to_string(), None));
+        assert_eq!(
+            holder_parts("inky-14ao"),
+            ("inky".to_string(), Some("14ao".to_string()))
+        );
+    }
+
+    #[test]
     fn an_unknown_agent_id_is_a_grokbot_prefix_not_the_raw_id() {
         let id = "bc-1234abcd-rest";
-        assert_eq!(fallback_seat(id), "grokbot-bc-1234a");
-        assert_ne!(fallback_seat(id), id);
+        assert_eq!(fallback_seat(id).as_deref(), Some("grokbot-bc-1234a"));
+        assert_ne!(fallback_seat(id).as_deref(), Some(id));
+        assert_eq!(fallback_seat("sand-subagent-0f3a"), None);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seats.toml");
         std::fs::write(&path, format!("{id:?} = \"rgoswami\"\n")).unwrap();
