@@ -1,0 +1,1 @@
+`ljos_send` and `ljos_reply` no longer file a claim. ljos-mcp counted mail as a write, so the first message a seat sent filed an issue titled by the message text, such as `Hourly poke from Inky: ...` (ljos-6l1n, workspace-57pt).

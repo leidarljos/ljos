@@ -53,6 +53,9 @@ const EDIT_TOOLS: &[&str] = &[
 
 /// MCP tools that write a habitat. The claim, the sitting and the finish
 /// are the bookkeeping verbs themselves, and `ljos_file` opens its own issue.
+/// MCP tools that write, so the server claims before they run. Mail
+/// (`ljos_send`, `ljos_reply`) is not on the list: a message is not work,
+/// and its text ("Hourly poke from Inky: ...") titled the claim it filed.
 const MCP_WRITES: &[&str] = &[
     "ljos_remember",
     "ljos_prefer",
@@ -61,8 +64,6 @@ const MCP_WRITES: &[&str] = &[
     "ljos_deed",
     "ljos_rule",
     "ljos_vote",
-    "ljos_send",
-    "ljos_reply",
     "ljos_learn",
     "ljos_trust",
     "ljos_persona",
@@ -5360,6 +5361,48 @@ print(f"id={ident}")
             creates(&after),
             creates(&before) + 1,
             "a write after shutdown files a new claim\n{after}"
+        );
+    }
+
+    #[test]
+    fn mail_from_the_server_files_no_claim() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "LJOS_SESSION_ID",
+            "LJOS_OFF",
+        ]);
+        let (dir, tracker, _repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", "mcp-mail-1");
+        }
+        assert!(!mcp_tool_writes("ljos_send"));
+        assert!(!mcp_tool_writes("ljos_reply"));
+        let mut args = serde_json::Map::new();
+        args.insert("to".into(), Value::String("disk-saver".into()));
+        args.insert(
+            "text".into(),
+            Value::String(
+                "Hourly poke from Inky: pick up your outstanding queue now and make progress"
+                    .into(),
+            ),
+        );
+        before_mcp_write("ljos_send", Some(&args));
+        before_mcp_write("ljos_reply", Some(&args));
+        let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap_or_default();
+        assert!(!log.contains("create"), "mail filed an issue\n{log}");
+        let book = std::fs::read_to_string(book_path(&sitting_key())).unwrap_or_default();
+        assert!(
+            !book.contains("Hourly poke"),
+            "mail text became the prompt\n{book}"
         );
     }
 
