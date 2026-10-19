@@ -1512,13 +1512,28 @@ pub fn mcp_forward_with_requests(
 ) -> Result<Value> {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
-    let mut child = Command::new(program)
-        .env(marker, "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("{}: spawn", program.display()))?;
+    // A server script just written can be busy for a moment: another
+    // thread's fork still holds the write descriptor until its exec, and the
+    // kernel answers ETXTBSY. The spawn is tried again, as in `tcb_answer`.
+    let spawn = || {
+        Command::new(program)
+            .env(marker, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+    };
+    let mut spawned = spawn();
+    for _ in 0..20 {
+        match &spawned {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                spawned = spawn();
+            }
+            _ => break,
+        }
+    }
+    let mut child = spawned.with_context(|| format!("{}: spawn", program.display()))?;
     let init = init.unwrap_or_else(|| {
         serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "runner", "version": "0"}})
