@@ -951,17 +951,17 @@ Check the seat
 ``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer.
 ``ljos doctor --all`` prints every row.
 The block is an example of that listing.
-On this tree ``ljos doctor`` read these versions from crates.io: ljos 0.30.0, vissue-cli 0.21.0, packset 0.15.2.
-``ljos --version`` printed ``ljos 0.30.0``.
+On this tree ``ljos doctor`` read these versions from crates.io: ljos 0.31.0, vissue-cli 0.21.0, packset 0.15.3.
+``ljos --version`` printed ``ljos 0.31.0``.
 The rows are the shape when the binary on ``PATH`` is that version: no ``behind`` and no ``ahead of`` in front of ``crates.io``.
 Paths stand in for those binaries.
 
 .. code:: text
 
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.30.0  crates.io 0.30.0
-   ok  vissue  /path/to/vissue  0.21.0  crates.io 0.21.0
-   ok  packsetd    /path/to/packsetd  0.15.2  crates.io 0.15.2
+   ok  ljos    /path/to/ljos  0.31.0  crates.io 0.31.0
+   ok  vissue  /path/to/vissue  0.21.0  crates.io (cached) 0.21.0; evidence ballots supported
+   ok  packsetd    /path/to/packsetd  0.15.3  crates.io (cached) 0.15.3
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names how many commits origin lacks, and fails when that count
