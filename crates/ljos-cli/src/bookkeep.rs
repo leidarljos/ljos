@@ -121,6 +121,12 @@ struct RepoBook {
     /// session's own work.
     #[serde(default)]
     started: bool,
+    /// A hook filed this row's issue for the sitting's first edit or
+    /// commit: no one asked for that ticket by name. A commit naming another
+    /// open issue before any deed lands here takes the row over, and this
+    /// issue is cancelled.
+    #[serde(default)]
+    filed: bool,
     /// Commit shas already cited. The id is `deed-file-commit-<sha>`, so a
     /// second commit is a second deed, and the same sha is not cited twice.
     #[serde(default)]
@@ -381,6 +387,11 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         if landed {
             let named = if git_hook { None } else { named_head(&repo) };
             if let Some((issue, head)) = named {
+                // An `ljos_start` row for this checkout comes back first, so
+                // the named commit sees the issue the sitting holds.
+                if book.repos.get(&repo).is_none_or(|row| row.issue.is_none()) {
+                    let _ = take_started_row(&mut book, &path, &repo);
+                }
                 book_named_in(&mut book, &repo, &repo, &head, &issue);
             } else if names_open {
                 // The command named an id the landed message does not: the
@@ -395,6 +406,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     }
     if matches!(call.event.as_str(), "Stop" | "SessionEnd") {
         finish_open(&mut book);
+        drop_unclaimed_rows(&mut book);
     }
     let held = if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
         book.repos.get(&repo).map(|row| {
@@ -641,7 +653,18 @@ fn close_idle_sittings(now: u64, session: Option<&str>, current: Option<&str>) {
             .filter(|(repo, row)| row_is_idle(now, &book, repo, row, limit, hint))
             .map(|(repo, _)| repo.clone())
             .collect();
+        let unclaimed = book.repos.len();
+        let touched = book.last_unix;
+        book.repos.retain(|_, row| {
+            !unclaimed_row(row) || !idle_due(now, row.last_unix.max(touched), limit)
+        });
+        let dropped = book.repos.len() != unclaimed;
         if idle.is_empty() {
+            if dropped {
+                book.cwd_repo
+                    .retain(|_, repo| book.repos.contains_key(repo));
+                store_book(&path, &book);
+            }
             continue;
         }
         finish_rows(&mut book, &idle);
@@ -914,7 +937,13 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
             "ljos_start: pass repo, a git checkout".into()
         });
     };
-    let issue_id = match issue.map(str::trim).filter(|id| !blank_issue(id)) {
+    let asked = issue.map(str::trim).filter(|id| !blank_issue(id));
+    if asked.is_none() {
+        if let Some(said) = start_on_held(&place, &task, &cwd) {
+            return Ok(said);
+        }
+    }
+    let issue_id = match asked {
         Some(id) => {
             claim_existing(id)?;
             id.to_string()
@@ -1231,6 +1260,7 @@ fn ensure_claim(
             }
             let row = book.repos.entry(repo.to_string()).or_default();
             row.issue = Some(issue.clone());
+            row.filed = true;
             row.recall = recall_line(&issue);
             Ok(())
         }
@@ -1242,6 +1272,96 @@ fn ensure_claim(
     }
 }
 
+/// `ljos_start` with no issue, when this seat already holds one in the
+/// checkout `place`: a hook claimed it for an edit, or an earlier start
+/// did. That row moves to the server's book, marked as started, so an
+/// issue-less finish closes it and the next hook call takes it back. The
+/// task goes on the issue as a note when it differs from the title the
+/// hook filed it under. `None` when nothing is held there.
+fn start_on_held(place: &str, task: &str, cwd: &str) -> Option<String> {
+    let held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let own = book_path(&sitting_key());
+    let mut found: Option<((u64, u128), PathBuf, String, String)> = None;
+    for path in book_files() {
+        let other = load_book(&path);
+        let rank = row_rank(&path, &other);
+        for (key, row) in &other.repos {
+            let Some(issue) = row.issue.as_deref() else {
+                continue;
+            };
+            if row.finished || !same_checkout(key, place) {
+                continue;
+            }
+            if found.as_ref().is_some_and(|(when, ..)| *when > rank) {
+                continue;
+            }
+            if held_by_this_seat(issue) {
+                found = Some((rank, path.clone(), key.clone(), issue.to_string()));
+            }
+        }
+    }
+    let (_, path, key, issue) = found?;
+    let mut book = load_book(&own);
+    let moved = if path == own {
+        book.repos.remove(&key).unwrap_or_default()
+    } else {
+        let mut other = load_book(&path);
+        let moved = other.repos.remove(&key).unwrap_or_default();
+        store_book(&path, &other);
+        moved
+    };
+    let filed = moved.filed;
+    let now = unix_secs();
+    book.last_unix = now;
+    if book.prompt.trim().is_empty() {
+        book.prompt = task.chars().take(4000).collect();
+        bind_prompt(&mut book, place, now);
+    }
+    adopt_row(&mut book, place, &issue, moved);
+    let row = book.repos.entry(place.to_string()).or_default();
+    row.started = true;
+    row.last_unix = now;
+    if !cwd.is_empty() {
+        book.cwd_repo.insert(cwd.to_string(), place.to_string());
+    }
+    store_book(&own, &book);
+    drop(held);
+    log_line(&format!("start: kept {issue}, already held in {place}"));
+    if filed && !same_words(task, &issue_title(&issue)) {
+        let note = format!("ljos_start task: {task}");
+        match run_timed("vissue", &["note", &issue, &note], &[]) {
+            Ok(_) => {
+                let line = super::persist_tracker(&issue, "noted");
+                if line.contains("could not") || line.contains("refused") {
+                    log_line(line.trim());
+                }
+            }
+            Err(e) => log_line(&format!("start: note on {issue}: {e}")),
+        }
+    }
+    let recall = format!("{}{}", recall_line(&issue), super::recall_memories(&issue));
+    Some(format!("claimed {issue}\n{recall}"))
+}
+
+/// The title the tracker holds for `issue`, or nothing.
+fn issue_title(issue: &str) -> String {
+    super::issue_record(issue)
+        .ok()
+        .and_then(|v| v["title"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Whether two titles say the same words, case and punctuation aside.
+fn same_words(a: &str, b: &str) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    words(a) == words(b)
+}
+
 /// Put the issue this seat already holds in `repo` on this book's row, and
 /// say whether there was one. A row another book keeps for the checkout
 /// (`ljos_start`, a named commit) moves here whole, so one book finishes
@@ -1251,6 +1371,23 @@ fn ensure_claim(
 /// STARTED in the tracker under this holder, in either form: the bare
 /// seat or `SEAT@TAG`.
 fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
+    if take_started_row(book, own, repo) {
+        return true;
+    }
+    let project = project_for(repo);
+    let Some(issue) = super::held_issue().filter(|id| {
+        id.rsplit_once('-').is_some_and(|(p, _)| p == project) && held_by_this_seat(id)
+    }) else {
+        return false;
+    };
+    adopt_row(book, repo, &issue, RepoBook::default());
+    log_line(&format!("claim: kept {issue}, held by this seat"));
+    true
+}
+
+/// The book scan of [`take_held_issue`]: an `ljos_start` row another book
+/// keeps for the checkout moves to `book`.
+fn take_started_row(book: &mut Book, own: &Path, repo: &str) -> bool {
     let mut found: Option<((u64, u128), PathBuf, String, String)> = None;
     for path in book_files() {
         if path == own {
@@ -1281,15 +1418,7 @@ fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
         log_line(&format!("claim: kept {issue}, already held in {repo}"));
         return true;
     }
-    let project = project_for(repo);
-    let Some(issue) = super::held_issue().filter(|id| {
-        id.rsplit_once('-').is_some_and(|(p, _)| p == project) && held_by_this_seat(id)
-    }) else {
-        return false;
-    };
-    adopt_row(book, repo, &issue, RepoBook::default());
-    log_line(&format!("claim: kept {issue}, held by this seat"));
-    true
+    false
 }
 
 /// Whether the tracker has `issue` STARTED and claimed by this holder. A
@@ -1338,6 +1467,7 @@ fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     row.failures.extend(moved.failures);
     row.asks.extend(moved.asks);
     row.named |= moved.named;
+    row.filed = moved.filed;
     for other in moved.also {
         if !row.also.contains(&other) {
             row.also.push(other);
@@ -1827,6 +1957,22 @@ fn head_sha(repo: &str) -> Result<String, String> {
     Ok(sha)
 }
 
+/// A row that never held an issue and has nothing to say: the prompt hook
+/// opened it with a start sha and a title, and no edit or commit claimed.
+/// A row with failures or asks stays, since its lesson and the failures it
+/// booked are the sitting's record.
+fn unclaimed_row(row: &RepoBook) -> bool {
+    row.issue.is_none() && row.deeds.is_empty() && row.failures.is_empty() && row.asks.is_empty()
+}
+
+/// Drop the rows of a sitting that ended without a claim, so no book keeps
+/// a row whose issue is null. The next prompt opens a fresh one.
+fn drop_unclaimed_rows(book: &mut Book) {
+    book.repos.retain(|_, row| !unclaimed_row(row));
+    book.cwd_repo
+        .retain(|_, repo| book.repos.contains_key(repo));
+}
+
 fn finish_open(book: &mut Book) {
     let repos: Vec<String> = book.repos.keys().cloned().collect();
     finish_rows(book, &repos);
@@ -2032,6 +2178,17 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
     let open = row.issue.clone().filter(|_| !row.finished);
     let holds = open.as_deref() == Some(issue);
     let held_also = row.also.iter().any(|other| other == issue);
+    // The issue a hook filed for this sitting's first edit, with no deed
+    // yet, was a placeholder: the commit says which ticket the work is on.
+    // It is cancelled before the named one is claimed, so a claim graph
+    // that holds one node per assignee takes the named one.
+    let placeholder = open
+        .clone()
+        .filter(|held| held != issue && !held_also && empty_filed_row(row, held));
+    if let Some(auto) = &placeholder {
+        cancel_placeholder(auto, issue);
+    }
+    let open = if placeholder.is_some() { None } else { open };
     if !holds && !held_also {
         match claim_existing(issue) {
             Ok(()) => {
@@ -2062,6 +2219,19 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
                 row.elsewhere.push(head.to_string());
             }
         }
+        None if placeholder.is_some() => {
+            row.issue = Some(issue.to_string());
+            row.named = true;
+            row.filed = false;
+            row.started = false;
+            row.finished = false;
+            row.lesson = false;
+            row.recall = recall_line(issue);
+            row.elsewhere.retain(|seen| seen != head);
+            if cited.is_ok() && !row.deeds.iter().any(|seen| seen == head) {
+                row.deeds.push(head.to_string());
+            }
+        }
         None => {
             *row = RepoBook {
                 issue: Some(issue.to_string()),
@@ -2082,6 +2252,49 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
         book.last_repo = repo.to_string();
     }
     stamp_touch(book, &key, now);
+}
+
+/// Whether `row` holds `held` as a placeholder: a hook filed it, no commit
+/// is booked on it here or in the tracker, and the tracker has it STARTED
+/// under this holder. An issue someone else holds, or one with a deed, is
+/// real work and stays.
+fn empty_filed_row(row: &RepoBook, held: &str) -> bool {
+    if !row.filed || row.named || row.started || !row.deeds.is_empty() {
+        return false;
+    }
+    if !held_by_this_seat(held) {
+        return false;
+    }
+    super::issue_record(held)
+        .is_ok_and(|v| v["deeds"].as_array().is_none_or(|deeds| deeds.is_empty()))
+}
+
+/// Cancel `auto`, the placeholder a hook filed, now that a commit named
+/// `named`. The claim is released first, and the tracker commit and the
+/// log say why.
+fn cancel_placeholder(auto: &str, named: &str) {
+    let assignee = super::resolve_assignee(None);
+    if which::which("claimdag").is_ok() {
+        if let Err(e) = super::release(auto, &assignee) {
+            log_line(&format!("release: {e:#}"));
+        }
+    }
+    match run_timed(
+        "vissue",
+        &["update", auto, "-s", "CANCELLED", "--if-state", "STARTED"],
+        &[],
+    ) {
+        Ok(_) => {
+            let line = super::persist_tracker(auto, "cancelled");
+            if line.contains("could not") || line.contains("refused") {
+                log_line(line.trim());
+            }
+            log_line(&format!(
+                "claim: cancelled {auto}, filed for this sitting with no deed; the commit named {named}"
+            ));
+        }
+        Err(e) => log_line(&format!("claim: could not cancel {auto}: {e}")),
+    }
 }
 
 /// Remember a guard ask on this repository. The book file is the only
@@ -7379,5 +7592,313 @@ print(f"id={ident}")
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// File an issue in the stub tracker the way a person would, outside
+    /// any sitting, and give its id.
+    fn file_by_hand(title: &str) -> String {
+        let out = std::process::Command::new("vissue")
+            .args(["create", "-p", "probe", title, "-q"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn land_commit(repo: &Path, file: &str, message: &str) -> String {
+        std::fs::write(repo.join(file), "x\n").unwrap();
+        git(repo, &["add", file]);
+        git(repo, &["commit", "-q", "-m", message]);
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn issue_state(tracker: &Path, issue: &str) -> String {
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        let at = org.find(&format!(":ID:         {issue}\n")).unwrap();
+        let head = org[..at].rfind("* ").unwrap();
+        org[head + 2..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn hook_row(session: &str, repo: &Path) -> RepoBook {
+        load_book(&book_path(session))
+            .repos
+            .get(repo.to_str().unwrap())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The willma w1 shape: session 2's first edit files a placeholder,
+    /// then the commit names the reopened session 1 issue. The row moves to
+    /// the named issue with the sha in `deeds`, and the placeholder is
+    /// cancelled.
+    #[test]
+    fn a_named_commit_takes_over_the_empty_issue_the_edit_filed() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let named = file_by_hand("Add slugify function and tests");
+        let session = "harness-named-takeover";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let auto = hook_row(session, &repo)
+            .issue
+            .expect("the edit filed a claim");
+        assert_ne!(auto, named);
+        let message = format!("{named}: add kebab_case");
+        let sha = land_commit(&repo, "slug.py", &message);
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash",
+                "tool_input": {"command": format!("git commit -m \"{message}\"")},
+                "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&raw, &call);
+        let row = hook_row(session, &repo);
+        assert_eq!(row.issue.as_deref(), Some(named.as_str()));
+        assert_eq!(row.deeds, vec![sha.clone()]);
+        assert!(row.elsewhere.is_empty(), "{:?}", row.elsewhere);
+        assert!(row.also.is_empty(), "{:?}", row.also);
+        assert!(row.named && !row.filed);
+        assert_eq!(issue_state(&tracker, &auto), "CANCELLED");
+        let log =
+            std::fs::read_to_string(crate::runtime_dir().join("book.log")).unwrap_or_default();
+        assert!(log.contains(&format!("claim: cancelled {auto}")), "{log}");
+        assert_eq!(creates(&tracker), 2, "the commit filed no third issue");
+    }
+
+    /// A placeholder that already has a deed is real work: the named
+    /// commit is booked beside it, and it is not cancelled.
+    #[test]
+    fn a_named_commit_keeps_a_filed_issue_that_has_a_deed() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let named = file_by_hand("Add slugify function and tests");
+        let session = "harness-named-keeps";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let auto = hook_row(session, &repo).issue.unwrap();
+        let first = land_commit(&repo, "one.txt", "add one");
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash",
+                "tool_input": {"command": "git commit -m \"add one\""},
+                "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(hook_row(session, &repo).deeds, vec![first]);
+        let message = format!("{named}: add kebab_case");
+        let sha = land_commit(&repo, "two.txt", &message);
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash",
+                "tool_input": {"command": format!("git commit -m \"{message}\"")},
+                "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&raw, &call);
+        let row = hook_row(session, &repo);
+        assert_eq!(row.issue.as_deref(), Some(auto.as_str()));
+        assert_eq!(row.also, vec![named]);
+        assert!(row.elsewhere.contains(&sha));
+        assert_eq!(issue_state(&tracker, &auto), "STARTED");
+    }
+
+    /// A placeholder another holder has on the tracker is theirs: the
+    /// named commit leaves it alone.
+    #[test]
+    fn a_named_commit_leaves_a_filed_issue_another_holder_has() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let named = file_by_hand("Add slugify function and tests");
+        let session = "harness-named-other";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let auto = hook_row(session, &repo).issue.unwrap();
+        let org_path = tracker.join("Software/probe/issues.org");
+        let org = std::fs::read_to_string(&org_path).unwrap();
+        let needle = format!(":ID:         {auto}\n");
+        std::fs::write(
+            &org_path,
+            org.replace(&needle, &format!("{needle}:CLAIMED_BY: someone-else@zz9\n")),
+        )
+        .unwrap();
+        let message = format!("{named}: add kebab_case");
+        let _ = land_commit(&repo, "slug.py", &message);
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash",
+                "tool_input": {"command": format!("git commit -m \"{message}\"")},
+                "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(
+            hook_row(session, &repo).issue.as_deref(),
+            Some(auto.as_str())
+        );
+        assert_eq!(issue_state(&tracker, &auto), "STARTED");
+    }
+
+    /// The willma w1 session 2 shape: the edit filed an issue, then
+    /// `ljos_start` ran with a task of its own. The start keeps that issue,
+    /// files nothing, and notes the task on it.
+    #[test]
+    fn ljos_start_keeps_the_issue_the_edit_already_filed() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+        }
+        let session = "harness-edit-then-start";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let auto = hook_row(session, &repo).issue.unwrap();
+        assert_eq!(creates(&tracker), 1);
+        unsafe { std::env::set_var("LJOS_SESSION_ID", "mcp-after-edit") };
+        let said = start_work(
+            None,
+            Some(repo.to_str().unwrap()),
+            "add kebab_case function and test",
+        )
+        .unwrap();
+        assert_eq!(
+            said.lines().next(),
+            Some(format!("claimed {auto}").as_str())
+        );
+        assert_eq!(creates(&tracker), 1, "ljos_start filed a second issue");
+        let vissue = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        assert!(
+            vissue.contains(&format!("note {auto} ljos_start task: add kebab_case")),
+            "{vissue}"
+        );
+        assert!(hook_row(session, &repo).issue.is_none());
+        let start = load_book(&book_path(&sitting_key()));
+        let row = start.repos.get(repo.to_str().unwrap()).unwrap();
+        assert_eq!(row.issue.as_deref(), Some(auto.as_str()));
+        assert!(row.started && row.filed);
+
+        // The next write takes it back, and nothing is filed.
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "test_kebab.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(
+            hook_row(session, &repo).issue.as_deref(),
+            Some(auto.as_str())
+        );
+        assert_eq!(creates(&tracker), 1);
+    }
+
+    /// The willma w5 shape: a prompt, then the session ends before any
+    /// edit. No row with a null issue is left.
+    #[test]
+    fn a_sitting_that_never_claimed_leaves_no_row() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "harness-never-claimed";
+        let (raw, call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "In this git repo, add a function slugify(s) to slug.py"}),
+        );
+        let _ = observe(&raw, &call);
+        assert!(load_book(&book_path(session))
+            .repos
+            .values()
+            .all(|row| row.issue.is_none()));
+        let (raw, call) = payload("SessionEnd", session, &repo, serde_json::json!({}));
+        let _ = observe(&raw, &call);
+        let book = load_book(&book_path(session));
+        assert!(book.repos.is_empty(), "{:?}", book.repos);
+        assert_eq!(creates(&tracker), 0);
+    }
+
+    /// The idle sweep drops a row that never claimed, once it is idle.
+    #[test]
+    fn the_idle_sweep_drops_a_row_that_never_claimed() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let mut book = Book::default();
+        book.repos.insert(
+            repo.to_str().unwrap().to_string(),
+            RepoBook {
+                start_sha: Some("1bfeb804".into()),
+                title: Some("slugify".into()),
+                last_unix: 1_000,
+                ..RepoBook::default()
+            },
+        );
+        book.last_unix = 1_000;
+        let path = book_path("harness-idle-null");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        store_book(&path, &book);
+        close_idle_sittings(1_000 + 10 * 24 * 3600, None, None);
+        assert!(load_book(&path).repos.is_empty());
+        assert_eq!(creates(&tracker), 0);
     }
 }
