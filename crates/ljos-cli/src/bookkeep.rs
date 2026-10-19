@@ -2271,7 +2271,8 @@ fn empty_filed_row(row: &RepoBook, held: &str) -> bool {
 
 /// Cancel `auto`, the placeholder a hook filed, now that a commit named
 /// `named`. The claim is released first, and the tracker commit and the
-/// log say why.
+/// log say why. A claim graph's release hands the issue back to TODO, so
+/// the cancel takes STARTED or TODO and leaves any other state alone.
 fn cancel_placeholder(auto: &str, named: &str) {
     let assignee = super::resolve_assignee(None);
     if which::which("claimdag").is_ok() {
@@ -2279,9 +2280,19 @@ fn cancel_placeholder(auto: &str, named: &str) {
             log_line(&format!("release: {e:#}"));
         }
     }
+    let state = super::issue_record(auto)
+        .ok()
+        .and_then(|v| v["state"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    if !matches!(state.as_str(), "STARTED" | "TODO") {
+        log_line(&format!(
+            "claim: left {auto} {state}, not a placeholder now"
+        ));
+        return;
+    }
     match run_timed(
         "vissue",
-        &["update", auto, "-s", "CANCELLED", "--if-state", "STARTED"],
+        &["update", auto, "-s", "CANCELLED", "--if-state", &state],
         &[],
     ) {
         Ok(_) => {
@@ -7900,5 +7911,27 @@ print(f"id={ident}")
         close_idle_sittings(1_000 + 10 * 24 * 3600, None, None);
         assert!(load_book(&path).repos.is_empty());
         assert_eq!(creates(&tracker), 0);
+    }
+
+    /// A claim graph's release hands the placeholder back to TODO before
+    /// the cancel runs. The cancel takes it from TODO too, and leaves an
+    /// issue that is DONE by then alone.
+    #[test]
+    fn a_placeholder_released_to_todo_is_still_cancelled() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, _repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let released = file_by_hand("Work in repo");
+        assert_eq!(issue_state(&tracker, &released), "TODO");
+        cancel_placeholder(&released, "probe-named");
+        assert_eq!(issue_state(&tracker, &released), "CANCELLED");
+        let done = file_by_hand("Work in repo again");
+        let _ = std::process::Command::new("vissue")
+            .args(["update", &done, "-s", "DONE"])
+            .output()
+            .unwrap();
+        cancel_placeholder(&done, "probe-named");
+        assert_eq!(issue_state(&tracker, &done), "DONE");
     }
 }
