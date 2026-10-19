@@ -16,10 +16,12 @@ permissions:
   pages: write
   id-token: write
 
-# Develop builds the docs and does not publish them. Main and a release
-# tag share one group, so a develop run cannot cancel a deploy.
+# Develop and a release tag build the docs and do not publish them. The
+# github-pages environment takes main only, and main is moved to the tag's
+# commit before the tag, so main's deploy publishes the same docs. Main
+# has its own group, so no other run can cancel a deploy.
 concurrency:
-  group: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && 'pages' || format('docs-{0}', github.ref) }}
+  group: ${{ github.ref == 'refs/heads/main' && 'pages' || format('docs-{0}', github.ref) }}
   cancel-in-progress: true
 
 jobs:
@@ -40,16 +42,16 @@ jobs:
       # Exit 2 on any finding the .impeccable config does not ignore.
       - run: npx -y impeccable@4.5.2 detect docs/build
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main'
         with:
           enablement: true
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main'
         with:
           path: docs/build
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
