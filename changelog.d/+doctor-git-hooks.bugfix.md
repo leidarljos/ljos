@@ -1,1 +1,0 @@
-`ljos doctor` has a `git hooks` row. It says when `core.hooksPath` names a directory other than the hooks `ljos onboard` installs, or when stubs are missing there, and names `ljos git-hooks install` to point it back. An unset path is an optional part that is off.

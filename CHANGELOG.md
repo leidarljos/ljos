@@ -5,6 +5,101 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.31.0 (2026-10-19)
+
+### Features
+
+- A hook call finishes a sitting that has been idle for two hours, or for `LJOS_SITTING_IDLE`, and clears the prompt so the next sitting does not keep the old title.
+- Grok Bot seat names are read from `seats.toml` under the config home by `ljos seat`.
+  An unknown conversation id becomes `grokbot-` plus its first eight characters.
+- The guard shim prints held claims, recall, and unread mail on the first git command of a conversation, and not again in that conversation.
+  A booked commit prints one recall line when the sitting's title bears on the message.
+- The static guard refuses a commit that carries a machine trailer, and a commit that omits Signed-off-by when the gate config sets `signoff`. The author and committer are checked only when `name` and `email` are set in `.ljos/gates.toml` or in the user, repository, or seat `ljos.toml`. With none of those set, any author may commit. A push needs a passing `ljos evidence record` for that exact tip when the config sets `test`, and a plain push with that record needs no approval. With no `test` command a plain push is allowed, and a force push still asks. A merge needs green CI on the head sha and every Cursor Bugbot thread resolved or replied to. The hook, a wake, and `ljos guard_check` share that check.
+- `ljos git-hooks install` writes post-commit and post-rewrite hooks that book the commit through `ljos hook --git-commit`.
+  The hooks chain to each repository's own hooks, skip the tracker and a claimdag or deedar store, skip the middle of a rebase or merge, and skip a Claude Code, Codex, or opencode session.
+  An amend and a rebase are booked once, a hook failure never fails the commit, and `LJOS_OFF` turns the hooks off.
+  `ljos onboard --harness grokbot` installs them.
+  The MCP server tells the client to pass `seat` and that commits are booked automatically.
+- `ljos note` queues the memory copy when the pack is off or not answering, and the next note that reaches the pack, `ljos finish`, or `ljos doctor` sends it. A refusal is not queued, the same note waits once, and packsetd answers a resend of the same issue and text with the claim it holds.
+
+### Fixes
+
+- A Codex 0.163 transcript stores the exit on the command item's id, and otherwise in the line Process exited with code N, so a failed command is kept for the lesson.
+- A Codex command whose payload has no exit code takes that code from the transcript, so a failure is kept for the lesson and a commit whose exit cannot be read is not cited.
+- A Stop or SessionEnd in a checkout the book has no row for opens no row. An MCP server that answered only guard checks no longer leaves a seat book row with no issue when it exits.
+- A checkout whose origin matches no tracker project files under the origin repo name; the folder name is used only with no origin.
+- A commit that names an open issue now takes over the issue a hook filed for the sitting's first edit, when that issue has no deed yet and the tracker has it STARTED under this holder. The row moves to the named issue with the sha in `deeds`, and the placeholder is cancelled with a log line, from STARTED or from the TODO a claim graph's release leaves. On willma-20261018d, 10 of 12 cells left that placeholder STARTED with no deeds and the named sha under `elsewhere` (w1: work-ipph next to work-wf02). A filed issue with a deed, or one another holder has, stays as it was.
+- A commit whose runner omits the exit code is cited when the payload or the checkout shows it landed: a git operation, a `[branch sha]` line, or HEAD moving past the sitting's start. Every commit since that start is a deed, including one a compound command wrote. An explicit non-zero exit is still a failure, and it does not finish the sitting or replace that start. The same command exiting 0 later, and the git hook, cite the new commits on the claim already held.
+
+  The first prompt of a session says the user rules, the claims already held, and the lessons already stored before it asks whether the search model is loaded. The warming line is what a prompt with nothing to recall hears.
+
+  A transcript that never answers is read without blocking the hook.
+- A commit whose subject or body names an open issue the tracker holds, such as `ljos-policyd-32fx: ...` or `Fixes ljos-xsor`, is claimed and cited on that issue, and no new issue is filed. A word shaped like an id that is not in the tracker, or an issue already DONE or CANCELLED, is not a named issue. At the end of the sitting the named issue is released back to its earlier state, not closed.
+- A git hook books a commit as the resolved seat: `LJOS_SEAT`, then `seats.toml` through `CURSOR_CONVERSATION_ID`, then `grokbot-` and the first eight characters of that id. The claim, the deed and the tracker record are that name, passed on the child command. The process tree is not a seat, and a commit with none of those names is left unbooked.
+
+  A project matches a checkout by a recorded remote only: a `#+REMOTE:` header, a `remote` field in the project's metadata, or the repository name in that remote. A URL in a note does not.
+
+  `ljos git-hooks install` writes a stub for every standard hook. The stub runs the repository's own hook, or the previous `core.hooksPath`, with the same arguments and stdin. `post-commit` and `post-rewrite` still book. `[git_hooks] skip` in `ljos.toml` adds paths that are not booked, and a reinstall keeps that file.
+
+  `pre-commit install` follows `core.hooksPath` and would replace a stub. Install it into the repository first: `git config --local core.hooksPath "$(git rev-parse --git-dir)/hooks"`, run `pre-commit install`, then `git config --local --unset core.hooksPath`.
+- A git hook claims an issue whose project contains hyphens or digits. The id is the project, then a hyphen, then the base36 suffix vissue mints.
+- A git hook holds under the holder `ljos seat` prints, `SEAT@TAG` when a session id names the conversation, which is the name `ljos claim` takes. The hook used to hold under the bare seat. A holder taken from the process tree is not used. Release, the tracker's claim and a takeover treat the bare seat and its `SEAT@TAG` as one holder, so rows written before this change still match.
+- A git-hook claim takes its title from the commit subject when the seat's saved prompt belongs to another repository or an earlier sitting.
+  A prompt recorded for the current sitting in that same repository still names the claim.
+
+  A hook call finishes every open row that has been idle past the sitting window, one repository at a time.
+  A fresh clock on the book, from a commit in a different repository, no longer keeps those rows open.
+  A row written before it had its own clock is finished on that call when the hook is in another repository.
+- A harness commit that names an open issue claims and cites that issue through the git hook's own booking function, instead of filing a new one.
+- A lesson and any other bookkeeping memory tied to an issue now names that issue on the record.
+  A later lesson for a different issue stays open beside it, and a revision of the same issue's lesson still replaces the old one.
+- A policyd denial of `pack-unavailable: <text>` is the pack failing at runtime, the same unhealthy allow as the bare token `pack-unavailable`. The note keeps the pack's text. Named pack codes such as `shell-secret-in-argv`, `path-outside-workspace`, and `python-missing-pep723` still refuse. The command shims print that same note on stderr and match the unready tokens without regard to case or surrounding space.
+- A policyd denial of `pack-unavailable` means the pack did not load. The command is allowed and the guard says it is unhealthy, the same as an empty reason, the bare token `phronesis`, and `bind-failed`. A denial that carries the pack's reason text still refuses.
+- A policyd denial whose token is `phronesis:` plus words stays a refusal and keeps those words. Only an empty reason, the bare token `phronesis`, and `bind-failed` mean the seat is not ready; those allow the command and say the guard is unhealthy.
+- A push is reviewed as a merge only when the commit it publishes is a merge. Sitting on a merge commit does not make a push of another branch wait on that merge's CI.
+- A push with --force-with-lease or --force-if-includes is an ordinary push, the same line ljos-policyd draws, so the force-push reason names a command the gate allows.
+  A guard reason's suggested command is one that same gate allows: one named volume can be removed, and clearing a stash points at listing, showing and applying a stash.
+  A relative tool workdir resolves against the session directory, and a directory that cannot be resolved does not deny the command.
+  An automatic session lesson is a sentence about the work and what the guard asked.
+- A sitting that ends without a claim no longer leaves a book row whose issue is null. The prompt hook opens the row with a start sha and a title. Stop and SessionEnd now drop such a row, and so does the idle sweep once the row is idle. On willma-20261018d w5, session 1 timed out before any edit and left `book-u5cvnlu0hn.json` that way. A row with failures or asks stays, since its lesson and the failures it booked are the sitting's record.
+- A test that needs a fake binary puts that directory in front of PATH while it holds the environment lock, and puts the previous PATH back when the guard drops.
+- A tool hook no longer replaces the sitting's owner pid, so a short-lived hook does not make the sitting look abandoned.
+- A tool hook that also carries a prompt field reads the command, so a commit is cited instead of being stored as the baseline.
+- An MCP claim uses the tool's repo, or the last checkout the git hook booked for that seat, and refuses a directory that is not a git checkout.
+  The tracker project is the one whose remote matches the checkout before a project is created from the directory name.
+- An issue the hook files with no prompt to name it is titled after the project it files under, so a clone in `bench-w18b-tfn7` with origin `leidarljos/bench` opens "Work in bench".
+- Codex PreToolUse does not honour `permissionDecision: ask`: the hook is marked failed and the tool runs. An ask there, and on Cursor `preToolUse`, is now a deny whose reason says how to grant it (`approve <tag>`, `ljos_request_approval`, or `ljos approve <tag>`). Claude Code, opencode, agy, and Cursor `beforeShellExecution` still receive `ask`. Gemini still receives `deny`, including when its event is `BeforeTool`.
+- Recall orders an issue's memories by when each was written (`valid_from`), not by `ts`, which the writer restamps when it rewrites links or review clocks.
+- The commit gate no longer ships a built-in person, and its denial names the config file rather than git's identity. A push is not held for test evidence unless `test` is configured. A policyd denial that names no check (the `phronesis` placeholder an overloaded seat prints when the decision text is empty) allows the command and says the guard is unhealthy. Hook and guard tests read an isolated config directory instead of `~/.config/ljos/user-rules.json`, and they do not sync user rules unless a test asks.
+- The first prompt recalls a lesson while the search model is still loading, by ranking the atoms already stored, and a new session starts that load only after its opening line is ready.
+  `export PATH="$PATH:..."` is no longer read as a script nested eight deep, so a shallow command beside it is not refused as nested-too-deep.
+  A shell redirect that writes a file inside the work tree (`cat > f`, `echo > f`) claims on that call, the way Write does, including a file git does not track yet. A redirect outside the checkout does not.
+- The first write or commit after `ljos_start` stays on the issue the start claimed. The MCP server keeps its book under the seat and the harness hook under the harness session, so the hook found no claim and filed a second issue: on the willma rerun, claude claimed work-z33v and then work-ddkw 6 seconds later, and opencode claimed work-rxm7 and then work-f3ko. A write or commit hook now takes the issue an `ljos_start` book holds for the same checkout, when the tracker has it STARTED under this holder as the bare seat or as `SEAT@TAG`. The row moves to the hook's book, so the server's shutdown does not finish it a second time without its deeds. A claim the seat's hold record names in this checkout's project, from `ljos claim`, is reused the same way. A row another hook session filed stays with that session.
+- When the pack refuses the memory copy of `ljos note`, for a sentence past its word limit, the note stays on the ticket and the command prints a warning that names the logbook. The pack has no kind or flag that admits an agent's long sentence, so the ticket is where such a note lives.
+- `ljos doctor` calls a runner env file that an older ljos wrote stale, not missing, and names `ljos onboard --harness NAME` to rewrite it.
+- `ljos doctor` has a `git hooks` row. It says when `core.hooksPath` names a directory other than the hooks `ljos onboard` installs, or when stubs are missing there, and names `ljos git-hooks install` to point it back. An unset path is an optional part that is off.
+- `ljos finish` without `--close` drops the claim and puts the issue back to the state it had before the claim, as `ljos release` does. It left the issue STARTED with nobody holding it, which hid it from every ready list. `ljos finish --close` and `ljos complete` keep the state.
+- `ljos note` copies the note to memory as packset's `note` kind, which keeps three sentences or a long one, and sends it as a `summary` to a pack older than 0.15.2. ljos needs packset-core and packset-client 0.15.2.
+- `ljos note` stores a progress note as a `summary`. Packset has no atom kind `note`, and a pack rejected that kind.
+- `ljos recall` and the SessionStart and prompt hooks list an issue's own memories by their `issue:ID` tag, newest first, up to 20 with a count of the rest, then up to five related search hits not already listed. Before, recall showed the five best search hits, so newer notes on a busy issue were left out, and the hooks repeated the recall stored at the claim.
+- `ljos release` puts an issue back to the state it had before the claim: the state the newest logbook change into STARTED came from, else TODO. A release used to drop the claim and keep STARTED, so the issue read as taken by nobody and left every ready list. `ljos complete` keeps the state as before.
+- `ljos seat` and `ljos doctor` name the same seat. An exported `LJOS_SEAT` wins over a conversation id, and both say it came from `LJOS_SEAT`.
+- `ljos_start` with no issue keeps the issue this seat already holds in the checkout instead of filing another. On willma-20261018d w1, the edit hook claimed work-ipph and `ljos_start` claimed work-8372 four seconds later. The held row moves to the server's book, and the next hook call takes it back. When the task differs from the title a hook filed the issue under, the task goes on the issue as a note, since vissue has no verb that renames an issue.
+- mcp_forward now tries the spawn again for about 100 ms when the kernel answers ETXTBSY, as `tcb_answer` does. A server script written just before the forward, as in a test or right after an install, can be busy while another thread's fork still holds its write descriptor. The main push run on 2da1044 failed `a_forwarded_call_is_answered_by_the_fresh_server` that way.
+
+### Documentation
+
+- The docs site no longer loads sphinx-design, which no page used. custom.css states the insets of the header, the copy-page buttons and the edit link as plain lengths, with no change on screen. `.impeccable/config.json` records the detector ignores for the vendored theme stylesheet, command flags in code, and the house paper colour, each with its reason.
+- The reference documents git hooks, user rules, and the commands it had left out.
+  The doctor example uses the versions `ljos doctor` read from crates.io.
+  Docs pages carry their titles, descriptions, and a preview image, and Pages deploys them from main and from release tags.
+- The reference table shows a bar where its code cells printed `\vert`, and the rule row names `\b` and `\s` instead of doubled backslashes. The org export runs a pandoc filter that writes `\vert` as a bar inside code, so a later export keeps it.
+
+### Miscellaneous
+
+- A pull request into develop or main that touches the docs now exports the org sources, builds the site with Sphinx `-n -W`, and runs impeccable 4.5.2 on the built pages against `.impeccable/config.json`. Any finding fails the run. A pull request never publishes the site.
+
+
 ## 0.30.0 (2026-10-17)
 
 ### Features

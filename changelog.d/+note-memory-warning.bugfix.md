@@ -1,1 +1,0 @@
-When the pack refuses the memory copy of `ljos note`, for a sentence past its word limit, the note stays on the ticket and the command prints a warning that names the logbook. The pack has no kind or flag that admits an agent's long sentence, so the ticket is where such a note lives.

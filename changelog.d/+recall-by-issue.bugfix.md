@@ -1,1 +1,0 @@
-`ljos recall` and the SessionStart and prompt hooks list an issue's own memories by their `issue:ID` tag, newest first, up to 20 with a count of the rest, then up to five related search hits not already listed. Before, recall showed the five best search hits, so newer notes on a busy issue were left out, and the hooks repeated the recall stored at the claim.

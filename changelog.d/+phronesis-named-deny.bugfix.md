@@ -1,1 +1,0 @@
-A policyd denial whose token is `phronesis:` plus words stays a refusal and keeps those words. Only an empty reason, the bare token `phronesis`, and `bind-failed` mean the seat is not ready; those allow the command and say the guard is unhealthy.

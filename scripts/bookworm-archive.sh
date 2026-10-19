@@ -58,7 +58,7 @@ cargo build --locked --release --target "$target" -p ljos -p ljos-hud
 
 prefix=${BOOKWORM_PREFIX:-/tmp/ljos-seat-bins}
 cargo install --locked --root "$prefix" vissue-cli --version 0.21.0
-cargo install --locked --root "$prefix" packset --version 0.15.2
+cargo install --locked --root "$prefix" packset --version 0.15.3
 cargo install --locked --root "$prefix" ljos-consensus --version 0.7.0
 
 name="ljos-${sha}-x86_64-linux"

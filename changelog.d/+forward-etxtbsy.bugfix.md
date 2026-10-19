@@ -1,1 +1,0 @@
-mcp_forward now tries the spawn again for about 100 ms when the kernel answers ETXTBSY, as `tcb_answer` does. A server script written just before the forward, as in a test or right after an install, can be busy while another thread's fork still holds its write descriptor. The main push run on 2da1044 failed `a_forwarded_call_is_answered_by_the_fresh_server` that way.

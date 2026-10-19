@@ -1,1 +1,0 @@
-`ljos release` puts an issue back to the state it had before the claim: the state the newest logbook change into STARTED came from, else TODO. A release used to drop the claim and keep STARTED, so the issue read as taken by nobody and left every ready list. `ljos complete` keeps the state as before.

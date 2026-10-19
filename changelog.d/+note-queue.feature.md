@@ -1,1 +1,0 @@
-`ljos note` queues the memory copy when the pack is off or not answering, and the next note that reaches the pack, `ljos finish`, or `ljos doctor` sends it. A refusal is not queued, the same note waits once, and packsetd answers a resend of the same issue and text with the claim it holds.

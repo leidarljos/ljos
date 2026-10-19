@@ -1,1 +1,0 @@
-`ljos finish` without `--close` drops the claim and puts the issue back to the state it had before the claim, as `ljos release` does. It left the issue STARTED with nobody holding it, which hid it from every ready list. `ljos finish --close` and `ljos complete` keep the state.
