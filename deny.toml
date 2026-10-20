@@ -1,4 +1,17 @@
-# Licenses this workspace may depend on. CI runs `cargo deny check licenses`.
+# Licenses this workspace may depend on. CI runs `cargo deny check`.
+
+[advisories]
+ignore = [
+    # Unmaintained only. A vulnerability or an unsound crate is not ignored.
+    { id = "RUSTSEC-2025-0141", reason = "syntect 5.3.0 still serializes its dumps with bincode 1.3.3, and no maintained release replaces it" },
+    { id = "RUSTSEC-2024-0436", reason = "wgpu and image still use paste, and no maintained release of those drops it" },
+    { id = "RUSTSEC-2026-0206", reason = "iced 0.14 pulls rustybuzz through usvg 0.45; usvg 0.48 moved to harfrust" },
+    { id = "RUSTSEC-2026-0192", reason = "iced still parses fonts with ttf-parser, and no maintained release of that stack drops it" },
+    { id = "RUSTSEC-2024-0320", reason = "syntect 5.3.0 still reads themes with yaml-rust, and no maintained release replaces it" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus 5, via ksni and iced, still uses zbus_names; zbus 6 folded the crate in" },
+    { id = "RUSTSEC-2026-0370", reason = "zbus 5, via ksni and iced, still uses zvariant; zbus 6 folded the crate in" },
+    { id = "RUSTSEC-2026-0372", reason = "zbus 5, via ksni and iced, still uses zvariant_derive; zbus 6 folded the crate in" },
+]
 
 [licenses]
 allow = [
