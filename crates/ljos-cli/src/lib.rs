@@ -2858,9 +2858,10 @@ pub fn same_holder(a: &str, b: &str) -> bool {
 /// one checkout, where a git hook (`SEAT@TAG`, or `SEAT-TAG` from ljos
 /// 0.31 and earlier) and the MCP server (the bare seat, or its own tag)
 /// are one conversation booking under two names. A `SEAT-TAG` whose seat
-/// part is this seat counts when the tag is one to four lowercase letters
-/// and digits (`free-claude-8h`, `free-agy-aak`) and the whole name is not
-/// itself a seat in `known`, so `eessi-bot` stays apart from `eessi`.
+/// part is this seat counts when the tag is one to six lowercase letters
+/// and digits, a pid in base 36 (`free-claude-8h`, `free-opencode-1v8am`),
+/// and the whole name is not itself a seat in `known`, so `eessi-bot`
+/// stays apart from `eessi`.
 #[must_use]
 pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<String>) -> bool {
     let (held, holder) = (held.trim(), holder.trim());
@@ -2878,7 +2879,7 @@ pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<St
                 .strip_prefix(seat)
                 .and_then(|rest| rest.strip_prefix('-'))
                 .is_some_and(|tag| {
-                    (1..=4).contains(&tag.len())
+                    (1..=6).contains(&tag.len())
                         && tag
                             .bytes()
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
@@ -29914,7 +29915,8 @@ mod tests {
         assert!(same_seat("free-opencode-nrv", "free-opencode", &known));
         assert!(!same_seat("eessi-bot", "eessi", &known));
         assert!(!same_seat("free-claude-8h", "free-codex", &known));
-        assert!(!same_seat("free-claude-saver", "free-claude", &known));
+        assert!(same_seat("free-opencode-1v8am", "free-opencode", &known));
+        assert!(!same_seat("free-claude-sandbox", "free-claude", &known));
         assert!(!same_seat("", "free-claude", &known));
     }
 
