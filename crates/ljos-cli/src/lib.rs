@@ -33761,7 +33761,8 @@ mod tests {
             answer.contains("\"permissionDecision\":\"ask\""),
             "{answer}"
         );
-        assert!(answer.contains("--force-with-lease"), "{answer}");
+        assert!(answer.contains("asks you first"), "{answer}");
+        assert!(!answer.contains("--force-with-lease"), "{answer}");
         let codex = HookCall {
             event: "PreToolUse".into(),
             cue: "git push --force origin main".into(),
@@ -36728,7 +36729,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(forced.verdict, "ask", "{}", forced.reason);
         assert_eq!(forced.pattern, "git-force-push");
         assert!(
-            forced.reason.contains("--force-with-lease"),
+            forced.reason.contains("asks you first"),
+            "{}",
+            forced.reason
+        );
+        assert!(
+            !forced.reason.contains("--force-with-lease"),
             "{}",
             forced.reason
         );
