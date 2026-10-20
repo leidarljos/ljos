@@ -2852,6 +2852,47 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     seat_a == seat_b && (tag_a.is_none() || tag_b.is_none())
 }
 
+/// Whether `held`, the name a tracker row is claimed under, belongs to
+/// the seat `holder` sits as. [`same_holder`] keeps two tags of one seat
+/// apart; this does not. The bookkeeping that asks already looks only at
+/// one checkout, where a git hook (`SEAT@TAG`, or `SEAT-TAG` from ljos
+/// 0.31 and earlier) and the MCP server (the bare seat, or its own tag)
+/// are one conversation booking under two names. A `SEAT-TAG` whose seat
+/// part is this seat counts when the tag is one to four lowercase letters
+/// and digits (`free-claude-8h`, `free-agy-aak`) and the whole name is not
+/// itself a seat in `known`, so `eessi-bot` stays apart from `eessi`.
+#[must_use]
+pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<String>) -> bool {
+    let (held, holder) = (held.trim(), holder.trim());
+    if held.is_empty() || holder.is_empty() {
+        return false;
+    }
+    let (seat_a, _) = holder_parts(held);
+    let (seat_b, _) = holder_parts(holder);
+    if seat_a == seat_b {
+        return true;
+    }
+    let suffixed = |name: &str, seat: &str| {
+        !known.contains(name)
+            && name
+                .strip_prefix(seat)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|tag| {
+                    (1..=4).contains(&tag.len())
+                        && tag
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                })
+    };
+    suffixed(&seat_a, &seat_b) || suffixed(&seat_b, &seat_a)
+}
+
+/// [`same_seat`] against the seats this tracker lists.
+#[must_use]
+pub fn same_seat_here(held: &str, holder: &str) -> bool {
+    same_seat(held, holder, &tracker_known_seats())
+}
+
 /// Seat names an older ljos wrote that are now another name. `ljos-bot`
 /// held claims before the seat map named the seat `ljosbot`.
 const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
@@ -29857,6 +29898,24 @@ mod tests {
             holder_parts("inky@14ao"),
             ("inky".to_string(), Some("14ao".to_string()))
         );
+    }
+
+    #[test]
+    fn a_hook_holder_and_the_bare_seat_are_one_seat() {
+        let known: std::collections::BTreeSet<String> =
+            ["free-claude", "free-agy", "eessi", "eessi-bot"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+        assert!(same_seat("free-claude-8h", "free-claude", &known));
+        assert!(same_seat("free-claude", "free-claude-8h", &known));
+        assert!(same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
+        assert!(same_seat("free-opencode@abc", "free-opencode@xyz", &known));
+        assert!(same_seat("free-opencode-nrv", "free-opencode", &known));
+        assert!(!same_seat("eessi-bot", "eessi", &known));
+        assert!(!same_seat("free-claude-8h", "free-codex", &known));
+        assert!(!same_seat("free-claude-saver", "free-claude", &known));
+        assert!(!same_seat("", "free-claude", &known));
     }
 
     #[test]

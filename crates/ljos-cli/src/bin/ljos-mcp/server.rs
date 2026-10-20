@@ -56,6 +56,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_guard_check",
     "ljos_file",
     "ljos_note",
+    "ljos_recall",
     "ljos_sitting",
     "ljos_finish",
     "ljos_claim",
@@ -443,7 +444,8 @@ pub struct FileArgs {
 /// A dated progress note on an issue.
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteArgs {
-    /// The issue id.
+    /// The issue id. Omitted or blank is the issue this seat holds.
+    #[serde(default)]
     pub issue: String,
     /// The note.
     pub text: String,
@@ -1521,7 +1523,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to record progress or a finding on an issue: a dated note on its logbook, with the tracker committed.",
+        description = "Call this to record progress or a finding on an issue: a dated note on its logbook, with the tracker committed. The note goes on the issue you name, else the one this seat holds; it never files an issue.",
         annotations(
             title = "Note progress",
             read_only_hint = false,
@@ -1534,7 +1536,19 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<NoteArgs>,
     ) -> Result<Json<Said>, McpError> {
-        habitat("ljos", &["note", &args.issue, &args.text])
+        // A note never files an issue: it goes on the named one, else the
+        // one held, else it is refused.
+        let issue = tokio::task::spawn_blocking(move || {
+            ljos_cli::bookkeep::canonical_issue(Some(&args.issue), None)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
+        .ok_or_else(|| {
+            refused(anyhow::anyhow!(
+                "nothing is held to note on: pass issue, or ljos_start first; a note never files an issue"
+            ))
+        })?;
+        habitat("ljos", &["note", &issue, &args.text])
     }
 
     #[tool(
@@ -1550,7 +1564,13 @@ impl LjosServer {
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Said>, McpError> {
         ljos_cli::log_recall("recall", &args.issue);
-        habitat("vissue", &["recall", &args.issue])
+        // The same answer as `ljos recall`: the tracker's working set, then
+        // the memories on the issue, notes included.
+        let mut said = habitat("vissue", &["recall", &args.issue])?;
+        said.0
+            .text
+            .push_str(&ljos_cli::recall_memories(&args.issue));
+        Ok(said)
     }
 
     #[tool(

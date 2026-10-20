@@ -386,12 +386,12 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which
-runs the `ljos-mcp` installed beside it. By default it lists seventeen core
-tools, guard and memory first: `rule`, `request_approval`, `prefer`,
-`remember`, `search`, `file`, `note`, `sitting`, `finish`, `claim`,
-`release`, `send`, `inbox`, `reply`, `vote`, `consensus` and `doctor`, each
-with the prefix `ljos_`.
+`ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which runs
+the `ljos-mcp` installed beside it. By default it lists twenty core tools,
+guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
+`search`, `start`, `guard_check`, `file`, `note`, `recall`, `sitting`,
+`finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
+`doctor`, each with the prefix `ljos_`.
 Every listed tool costs its description and schema on every session: about
 6,100 tokens for the core set against 15,000 for all forty-seven (o200k_base
 count). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;

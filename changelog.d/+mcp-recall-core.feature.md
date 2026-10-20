@@ -1,0 +1,1 @@
+`ljos_recall` is in the default tool set, and it answers like `ljos recall`: the issue's working set, then its memories, notes included. opencode sessions called `ljos_ljos_recall` and got "unavailable tool", so a note was stored and never read back.

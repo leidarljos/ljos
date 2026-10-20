@@ -1,0 +1,1 @@
+`ljos_note` no longer files a STARTED issue titled with the note text. The note goes on the issue named in the call, else the one this seat holds. With neither, the call is refused and says to pass `issue` or call `ljos_start` first.

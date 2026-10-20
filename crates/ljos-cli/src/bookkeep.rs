@@ -60,7 +60,6 @@ const MCP_WRITES: &[&str] = &[
     "ljos_remember",
     "ljos_prefer",
     "ljos_forget",
-    "ljos_note",
     "ljos_deed",
     "ljos_rule",
     "ljos_vote",
@@ -989,13 +988,30 @@ fn claim_existing(issue: &str) -> Result<(), String> {
     if which::which("claimdag").is_ok() && super::claim(issue, &assignee).is_ok() {
         return Ok(());
     }
-    run_timed(
+    let first = run_timed(
         "vissue",
         &["claim", issue],
         &[("VISSUE_AGENT", assignee.as_str())],
-    )
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    );
+    match first {
+        Ok(_) => Ok(()),
+        // The same seat under another name (the hook's tag, the server's
+        // bare seat) holds it: this conversation takes its own claim back.
+        Err(e)
+            if e.to_string().contains("pass --force")
+                && tracker_holder(issue)
+                    .is_some_and(|by| super::same_seat_here(&by, &assignee)) =>
+        {
+            run_timed(
+                "vissue",
+                &["claim", issue, "--force"],
+                &[("VISSUE_AGENT", assignee.as_str())],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn reopen_finished(session: &str) {
@@ -1422,8 +1438,11 @@ fn take_started_row(book: &mut Book, own: &Path, repo: &str) -> bool {
     false
 }
 
-/// Whether the tracker has `issue` STARTED and claimed by this holder. A
-/// tracker that records no holder answers by the state alone.
+/// Whether the tracker has `issue` STARTED and claimed by this seat. The
+/// callers look at one checkout, so a holder of this seat under another
+/// tag is this conversation: the git hook books `SEAT@TAG` (`SEAT-TAG`
+/// before 0.32) and `ljos_start` books the bare seat ([`super::same_seat`]).
+/// A tracker that records no holder answers by the state alone.
 fn held_by_this_seat(issue: &str) -> bool {
     let Ok(v) = super::issue_record(issue) else {
         return false;
@@ -1432,9 +1451,20 @@ fn held_by_this_seat(issue: &str) -> bool {
         return false;
     }
     match v["claimed_by"].as_str().map(str::trim) {
-        Some(by) if !by.is_empty() => super::same_holder(by, &super::holder_name()),
+        Some(by) if !by.is_empty() => super::same_seat_here(by, &super::holder_name()),
         _ => true,
     }
+}
+
+/// The tracker's holder of `issue`, when the record names one.
+fn tracker_holder(issue: &str) -> Option<String> {
+    super::issue_record(issue).ok().and_then(|v| {
+        v["claimed_by"]
+            .as_str()
+            .map(str::trim)
+            .filter(|by| !by.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// Fold `moved`, another book's row for the checkout, into this book's
@@ -5365,7 +5395,7 @@ print(f"id={ident}")
     }
 
     #[test]
-    fn mail_from_the_server_files_no_claim() {
+    fn mail_and_notes_from_the_server_file_no_claim() {
         let _g = lock();
         let _saved = Restore::new(&[
             "PATH",
@@ -5397,8 +5427,14 @@ print(f"id={ident}")
         );
         before_mcp_write("ljos_send", Some(&args));
         before_mcp_write("ljos_reply", Some(&args));
+        // A note names its issue; it never files one titled by its text
+        // (willma-20261018e w4 work-d3pl, w11 work-0v1j).
+        before_mcp_write("ljos_note", Some(&args));
         let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap_or_default();
-        assert!(!log.contains("create"), "mail filed an issue\n{log}");
+        assert!(
+            !log.contains("create"),
+            "mail or a note filed an issue\n{log}"
+        );
         let book = std::fs::read_to_string(book_path(&sitting_key())).unwrap_or_default();
         assert!(
             !book.contains("Hourly poke"),
@@ -5432,7 +5468,7 @@ print(f"id={ident}")
         }
         let mut args = serde_json::Map::new();
         args.insert("text".into(), Value::String("note on rtrash-adz0".into()));
-        before_mcp_write("ljos_note", Some(&args));
+        before_mcp_write("ljos_remember", Some(&args));
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-call-2");
         }
@@ -5440,7 +5476,7 @@ print(f"id={ident}")
             "text".into(),
             Value::String("still noting rtrash-adz0".into()),
         );
-        before_mcp_write("ljos_note", Some(&args));
+        before_mcp_write("ljos_remember", Some(&args));
         let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
         let creates =
             |text: &str| text.matches("\ncreate").count() + usize::from(text.starts_with("create"));
@@ -5460,7 +5496,7 @@ print(f"id={ident}")
             finished.contains("finished"),
             "the next start closes the idle sitting\n{finished}"
         );
-        before_mcp_write("ljos_note", Some(&args));
+        before_mcp_write("ljos_remember", Some(&args));
         let after = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
         assert_eq!(
             creates(&after),
