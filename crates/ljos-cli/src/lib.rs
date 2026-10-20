@@ -18607,7 +18607,7 @@ const POLICY_TABLE_ONLY: &str =
 /// The oldest `ljos-policyd` this ljos runs with. A Rust older than the
 /// workspace's `rust-version` can leave an older one installed: `cargo
 /// install` picks the newest release that builds and says nothing.
-pub const POLICYD_MIN: &str = "0.3.0";
+pub const POLICYD_MIN: &str = "0.4.5";
 
 /// The policy row's state from what `ljos-policyd version` printed: the
 /// law it runs, or an error when the release is older than
@@ -28049,13 +28049,13 @@ mod tests {
             ok: true,
         };
         let table = row(format!(
-            "ljos-policyd 0.3.0 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
+            "ljos-policyd 0.4.5 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
         ));
         let old = row(format!(
             "ljos-policyd 0.2.0 at /bin/ljos-policyd: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}"
         ));
         let linked = row(
-            "ljos-policyd 0.4.0 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
+            "ljos-policyd 0.4.5 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
         );
         assert_eq!(doctor_word(&table), "warn");
         assert_eq!(doctor_word(&old), "warn");
@@ -28068,18 +28068,23 @@ mod tests {
     fn a_policyd_older_than_the_floor_fails_the_policy_row() {
         assert_eq!(RUST_MIN, "1.89");
         let old = policy_state("ljos-policyd 0.2.6 (host table)", "/bin/ljos-policyd").unwrap_err();
-        assert!(old.contains("older than 0.3.0"), "{old}");
+        assert!(old.contains("older than 0.4.5"), "{old}");
         assert!(old.contains("Rust older than 1.89"), "{old}");
         assert!(old.contains("rustup update stable"), "{old}");
         let unnamed = policy_state("ljos-policyd 0.2.0", "/bin/ljos-policyd");
         assert!(unnamed.is_err());
-        let current = policy_state("ljos-policyd 0.3.0 (host table)", "/bin/ljos-policyd").unwrap();
+        let previous = policy_state("ljos-policyd 0.4.4 (phronesis)", "/bin/ljos-policyd");
+        assert!(previous.is_err(), "{previous:?}");
+        let current = policy_state("ljos-policyd 0.4.5 (host table)", "/bin/ljos-policyd").unwrap();
         assert!(current.ends_with(POLICY_TABLE_ONLY), "{current}");
-        let linked = policy_state("ljos-policyd 0.4.0 (phronesis)", "/bin/ljos-policyd").unwrap();
+        let linked = policy_state("ljos-policyd 0.4.5 (phronesis)", "/bin/ljos-policyd").unwrap();
         assert!(linked.ends_with("then by phronesis"), "{linked}");
         let floor = below_floor("ljos-policyd", Some("0.2.6")).unwrap();
-        assert!(floor.contains("older than 0.3.0"), "{floor}");
-        assert_eq!(below_floor("ljos-policyd", Some("0.3.0")), None);
+        assert!(floor.contains("older than 0.4.5"), "{floor}");
+        assert!(below_floor("ljos-policyd", Some("0.4.4"))
+            .unwrap()
+            .contains("older than 0.4.5"));
+        assert_eq!(below_floor("ljos-policyd", Some("0.4.5")), None);
         assert_eq!(below_floor("vissue", Some("0.0.1")), None);
         // The short doctor names only required failures. The binary row
         // stays required, so an old ljos-policyd is on that line and in
@@ -28104,7 +28109,7 @@ mod tests {
             "{short}"
         );
         assert!(short.contains("no\tljos-policyd\t"), "{short}");
-        assert!(short.contains("older than 0.3.0"), "{short}");
+        assert!(short.contains("older than 0.4.5"), "{short}");
         assert!(short.contains("rustup update stable"), "{short}");
         assert!(short.contains("Rust older than 1.89"), "{short}");
     }

@@ -40,7 +40,7 @@ The installer also checks each tarball's GitHub build attestation, with `gh` 2.4
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
-An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.3.0 installed without a word, so the doctor marks that row `no` and names the fix.
+An older Rust fails on several crates and can leave an `ljos-policyd` older than 0.4.5 installed without a word, so the doctor marks that row `no` and names the fix.
 
 Each ljos release from 0.29.0 on attaches the script as `install.sh`.
 Read the script before you run it; it is

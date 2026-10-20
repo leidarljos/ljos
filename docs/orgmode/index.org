@@ -64,7 +64,7 @@ writer =packsetd=. =packset-embed= is the encoder for meaning-based search; with
 check. Those are the binaries the tutorial calls. Each comes prebuilt from
 its GitHub release; =cargo install= takes the same names and builds from
 source with Rust 1.89 or newer. An older Rust fails on several crates and can
-install an =ljos-policyd= older than 0.3.0 without a word; =ljos doctor= marks
+install an =ljos-policyd= older than 0.4.5 without a word; =ljos doctor= marks
 that row =no= and names the fix.
 
 =doctor= says whether ljos is ready and lists the habitats that need action;
