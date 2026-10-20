@@ -8034,12 +8034,8 @@ print(f"id={ident}")
         let path = dir.path().join("long-chat.jsonl");
         let mut file = std::fs::File::create(&path).unwrap();
         file.seek(SeekFrom::Start(64 * 1024 * 1024)).unwrap();
-        writeln!(
-            file,
-            "\n{}",
-            r#"{"type":"user_message","message":"check the saddle"}"#
-        )
-        .unwrap();
+        file.write_all(b"\n{\"type\":\"user_message\",\"message\":\"check the saddle\"}\n")
+            .unwrap();
         drop(file);
         let tail = read_text_bounded(&path).unwrap();
         assert!(tail.len() <= TRANSCRIPT_TAIL_BYTES as usize);
