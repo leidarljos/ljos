@@ -1185,7 +1185,7 @@ fn run_command() -> Result<()> {
     // The commands that name a holder refuse instead.
     if matches!(
         cmd,
-        Cmd::Seat { .. }
+        Cmd::Seat
             | Cmd::Sitting { .. }
             | Cmd::Claim { .. }
             | Cmd::Note { .. }
