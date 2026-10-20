@@ -1175,15 +1175,16 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
     // The installed hook prints stdout and drops stderr.
     assert!(said.contains("not booked"), "{said}\n{err}");
     assert!(said.contains("LJOS_SEAT"), "{said}");
-    let seat = hab.ljos_in(
-        &hab.repo,
-        &["seat"],
-        None,
-        &[
-            ("LJOS_SEAT", ""),
-            ("CURSOR_CONVERSATION_ID", "sand-subagent-002"),
-        ],
-    );
+    // `ljos_in` asserts success, so the refusal runs the binary directly.
+    let seat = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .arg("seat")
+        .current_dir(&hab.repo)
+        .env_clear()
+        .envs(hab.base_env())
+        .env("LJOS_SEAT", "")
+        .env("CURSOR_CONVERSATION_ID", "sand-subagent-002")
+        .output()
+        .unwrap();
     let seat_err = String::from_utf8_lossy(&seat.stderr);
     assert!(!seat.status.success(), "ljos seat named a subagent seat");
     assert!(seat_err.contains("no seat of its own"), "{seat_err}");
