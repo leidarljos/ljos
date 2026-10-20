@@ -5260,7 +5260,17 @@ pub fn last_user_text(transcript: &str) -> String {
         .lines()
         .rev()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(is_user)
+        .find_map(|v| {
+            if is_user(&v) {
+                return Some(v);
+            }
+            // Event envelopes carry the message's role and text in payload.
+            // Only message envelopes may contribute a user's prompt.
+            if matches!(v["type"].as_str(), Some("event_msg" | "response_item")) {
+                return v.get("payload").filter(|p| is_user(p)).cloned();
+            }
+            None
+        })
         .map(|v| {
             let mut found = Vec::new();
             texts(&v, false, &mut found);
@@ -37622,6 +37632,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 None => unsafe { std::env::remove_var(k) },
             }
         }
+    }
+
+    #[test]
+    fn prompt_lookup_recognizes_nested_message_envelopes() {
+        let event = r#"{"type":"event_msg","payload":{"type":"user_message","message":"check the force count"}}"#;
+        let response = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"check the Hessian"}]}}"#;
+        let output = r#"{"type":"response_item","payload":{"type":"function_call_output","output":"user text inside a result"}}"#;
+        assert_eq!(last_user_text(event), "check the force count");
+        assert_eq!(last_user_text(response), "check the Hessian");
+        assert_eq!(
+            last_user_text(&format!("{event}\n{response}\n{output}")),
+            "check the Hessian"
+        );
+        assert_eq!(last_user_text(output), "");
     }
 
     #[test]

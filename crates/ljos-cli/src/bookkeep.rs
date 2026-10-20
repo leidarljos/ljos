@@ -358,8 +358,12 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         .get("ljos_git_hook")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let offered = super::prompt_of(&value);
     let subject_title = git_hook && !prompt_live_for(&book, &repo, now);
+    let offered = if subject_title {
+        super::prompt_of(&value)
+    } else {
+        String::new()
+    };
     if subject_title {
         // An issue already open in this checkout keeps the title it was
         // filed under. The subject is for the claim this commit opens.
@@ -3590,11 +3594,11 @@ fn read_transcript_tail(path: &Path) -> Option<String> {
     read_bounded(path, TRANSCRIPT_TAIL_BYTES, true)
 }
 
-/// The whole file, or nothing if it does not become readable before
-/// [`TRANSCRIPT_DEADLINE`]. A prompt's transcript is read the same way as
-/// the exit lookup, so a fifo with no writer cannot hold the hook.
+/// The transcript's tail, bounded in bytes like the exit lookup. Regular
+/// files remain readable regardless of their size, so polling alone cannot
+/// limit the work. A missing prompt in this window leaves the stored one in use.
 pub(crate) fn read_text_bounded(path: &Path) -> Option<String> {
-    read_bounded(path, u64::MAX, false)
+    read_transcript_tail(path)
 }
 
 /// Open `path` without blocking and read at most `max_bytes`. A regular
@@ -3703,8 +3707,18 @@ fn read_available(file: &mut std::fs::File, max_bytes: u64, deadline: Duration) 
         let nread = room.min(tmp.len());
         match file.read(&mut tmp[..nread]) {
             Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if !deadline.is_zero() && start.elapsed() >= deadline {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => {
+                if !deadline.is_zero() && start.elapsed() >= deadline {
+                    break;
+                }
+                continue;
+            }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {
                 let left = deadline.saturating_sub(start.elapsed());
                 if left.is_zero() || !wait_readable(file.as_raw_fd(), left) {
@@ -7935,6 +7949,25 @@ print(f"id={ident}")
         let book = load_book(&book_path(session));
         assert!(book.repos.is_empty(), "{:?}", book.repos);
         assert_eq!(creates(&tracker), 0);
+    }
+
+    #[test]
+    fn prompt_reads_are_bounded_by_bytes_on_large_regular_files() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long-chat.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.seek(SeekFrom::Start(64 * 1024 * 1024)).unwrap();
+        writeln!(
+            file,
+            "\n{}",
+            r#"{"type":"user_message","message":"check the saddle"}"#
+        )
+        .unwrap();
+        drop(file);
+        let tail = read_text_bounded(&path).unwrap();
+        assert!(tail.len() <= TRANSCRIPT_TAIL_BYTES as usize);
+        assert_eq!(super::super::last_user_text(&tail), "check the saddle");
     }
 
     /// The idle sweep drops a row that never claimed, once it is idle.
