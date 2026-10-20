@@ -35,6 +35,7 @@ pub mod runner_hooks;
 pub mod sync;
 pub mod tools;
 mod tracker_push;
+pub mod tree_cleanup;
 pub mod upgrade;
 pub mod user_rules;
 pub mod wake;
@@ -24466,20 +24467,32 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         .map(as_static_rule)
 }
 
-/// `rm -rf` or `find -delete` aimed outside a temp directory.
+/// `rm -rf` or `find -delete` aimed outside a temp directory. A build
+/// output directory, a scratch directory at the top of the tree, or a
+/// `find` cleanup of regenerable files, each named as a plain relative
+/// path, is inside the working tree and loses no work, so it runs
+/// ([`tree_cleanup`]). A line that can `cd` out of the tree first leaves
+/// only temp paths free.
 fn destructive_delete(line: &str) -> Option<Rule> {
-    for segment in nested_lines(line, 0)
+    let commands: Vec<Vec<String>> = nested_lines(line, 0)
         .iter()
         .flat_map(|part| raw_segments(part))
-    {
-        let words = shell_words(&segment);
-        let (at, _) = prefix_end(&words);
-        let words = &words[at..];
+        .map(|segment| {
+            let words = shell_words(&segment);
+            let (at, _) = prefix_end(&words);
+            words[at..].to_vec()
+        })
+        .collect();
+    let moved = commands
+        .iter()
+        .any(|words| tree_cleanup::leaves_tree(words));
+    for words in &commands {
+        let words = words.as_slice();
         let Some(first) = words.first() else {
             continue;
         };
         let name = first.rsplit('/').next().unwrap_or(first);
-        if name == "rm" && rm_recursive_force(words) && targets_outside_temp(words) {
+        if name == "rm" && rm_recursive_force(words) && targets_outside_temp(words, moved) {
             return Some(Rule {
                 pattern: "rm-rf-outside-tmp".into(),
                 verdict: "deny".into(),
@@ -24488,7 +24501,7 @@ fn destructive_delete(line: &str) -> Option<Rule> {
         }
         if name == "find"
             && words.iter().any(|word| word == "-delete")
-            && find_targets_outside(words)
+            && find_targets_outside(words, moved)
         {
             return Some(Rule {
                 pattern: "find-delete-outside-tmp".into(),
@@ -24531,8 +24544,10 @@ fn rm_recursive_force(words: &[String]) -> bool {
     recursive && force
 }
 
-/// True when a command names no path, or names one outside a temp root.
-fn targets_outside_temp(words: &[String]) -> bool {
+/// True when a command names no path, or names one outside a temp root
+/// that is not a build output or scratch directory in the tree. `moved`
+/// says the line can `cd` out of the tree, so only temp paths are free.
+fn targets_outside_temp(words: &[String], moved: bool) -> bool {
     let mut dashed = false;
     let mut paths = Vec::new();
     for word in words.iter().skip(1) {
@@ -24546,25 +24561,38 @@ fn targets_outside_temp(words: &[String]) -> bool {
         paths.push(word.as_str());
     }
     paths.is_empty()
-        || paths
-            .iter()
-            .any(|path| !bookkeep::path_is_temp(Some(std::path::Path::new(path))))
+        || paths.iter().any(|path| {
+            !bookkeep::path_is_temp(Some(std::path::Path::new(path)))
+                && (moved || !(tree_cleanup::build_output(path) || tree_cleanup::scratch(path)))
+        })
 }
 
 /// `find` paths are the operands before the expression. `-name x` is not a
-/// path. No path means find starts at `.`.
-fn find_targets_outside(words: &[String]) -> bool {
+/// path. No path means find starts at `.`. Starting points all under a temp
+/// root, or a cleanup of regenerable files inside the tree
+/// ([`tree_cleanup::regenerable_cleanup`]) with no `cd` out first, are not
+/// outside.
+fn find_targets_outside(words: &[String], moved: bool) -> bool {
     let mut paths = Vec::new();
     for word in words.iter().skip(1) {
-        if word.starts_with('-') || word == "!" || word == "(" {
+        if word.starts_with('-') || word == "!" || word == "(" || word == "\\(" {
             break;
         }
         paths.push(word.as_str());
     }
-    paths.is_empty()
-        || paths
+    if !paths.is_empty()
+        && paths
             .iter()
-            .any(|path| !bookkeep::path_is_temp(Some(std::path::Path::new(path))))
+            .all(|path| bookkeep::path_is_temp(Some(std::path::Path::new(path))))
+    {
+        return false;
+    }
+    let expr: Vec<&str> = words
+        .iter()
+        .skip(1 + paths.len())
+        .map(String::as_str)
+        .collect();
+    moved || !tree_cleanup::regenerable_cleanup(&paths, &expr)
 }
 
 /// A force push from the push gate, in the words policyd uses for it.
@@ -36774,6 +36802,79 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{}",
             denied_push.reason
         );
+    }
+
+    /// A stock seat, with no rule of its own, lets a build or scratch
+    /// directory and a cleanup of regenerable files go inside the tree, as
+    /// ljos-policyd does. The home, the root, `.git`, a climb out, a glob,
+    /// a variable and a line that can `cd` away first are still refused.
+    #[test]
+    fn a_stock_seat_lets_a_build_dir_delete_run_inside_the_tree() {
+        let _g = env_guard();
+        let home = SeatDir::new("tree-cleanup");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("PACKSET_WORKSPACE", "tree-cleanup"),
+            ("LJOS_OFF", "0"),
+        ]);
+        for line in [
+            "rm -rf target/",
+            "rm -rf node_modules",
+            "rm -rf dist build",
+            "rm -rf .pytest_cache __pycache__",
+            "rm -rf ./tmp/test-output",
+            "rm -fr web/node_modules",
+            "rm -rf -- .venv",
+            "cd web && rm -rf node_modules dist",
+            "sh -c 'rm -rf target'",
+            "find . -name '*.pyc' -delete",
+            "find . -name '.DS_Store' -delete",
+            "find ./src -type f -name '*.orig' -delete",
+            "find -name '*.pyc' -delete",
+        ] {
+            assert!(static_guard(line).is_none(), "{line}");
+        }
+        for (line, rule) in [
+            ("rm -rf /", "rm-rf-outside-tmp"),
+            ("rm -rf ~", "rm-rf-outside-tmp"),
+            ("rm -rf $HOME", "rm-rf-outside-tmp"),
+            ("rm -rf .", "rm-rf-outside-tmp"),
+            ("rm -rf ./", "rm-rf-outside-tmp"),
+            ("rm -rf .git", "rm-rf-outside-tmp"),
+            ("rm -rf .git/target", "rm-rf-outside-tmp"),
+            ("rm -rf src", "rm-rf-outside-tmp"),
+            ("rm -rf ../target", "rm-rf-outside-tmp"),
+            ("rm -rf ~/target", "rm-rf-outside-tmp"),
+            ("rm -rf target/..", "rm-rf-outside-tmp"),
+            ("rm -rf build/*", "rm-rf-outside-tmp"),
+            ("rm -rf node_modules src", "rm-rf-outside-tmp"),
+            ("rm -rf tmp/../src", "rm-rf-outside-tmp"),
+            ("rm -rf /home/u/proj/target", "rm-rf-outside-tmp"),
+            ("cd / && rm -rf build", "rm-rf-outside-tmp"),
+            ("cd .. && rm -rf target", "rm-rf-outside-tmp"),
+            ("cd && rm -rf build", "rm-rf-outside-tmp"),
+            ("sh -c 'cd /srv && rm -rf build'", "rm-rf-outside-tmp"),
+            ("find . -delete", "find-delete-outside-tmp"),
+            ("find . -name '*.rs' -delete", "find-delete-outside-tmp"),
+            ("find . -name '*' -delete", "find-delete-outside-tmp"),
+            ("find ~ -name '*.pyc' -delete", "find-delete-outside-tmp"),
+            ("find .. -name '*.pyc' -delete", "find-delete-outside-tmp"),
+            (
+                "find .git -name '*.orig' -delete",
+                "find-delete-outside-tmp",
+            ),
+            ("find . ! -name '*.pyc' -delete", "find-delete-outside-tmp"),
+            ("find . -name '*.pyc' -o -delete", "find-delete-outside-tmp"),
+            (
+                "cd / && find . -name '*.pyc' -delete",
+                "find-delete-outside-tmp",
+            ),
+        ] {
+            let got = static_guard(line).unwrap_or_else(|| panic!("{line} ran"));
+            assert_eq!(got.verdict, "deny", "{line}");
+            assert_eq!(got.pattern, rule, "{line}");
+        }
     }
 
     #[test]

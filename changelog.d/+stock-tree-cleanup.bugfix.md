@@ -1,0 +1,1 @@
+With no rule of its own, the guard lets `rm -rf` of a build or scratch directory (`target/`, `node_modules`, `dist`, `./tmp/out`) and a `find -name '*.pyc' -delete` cleanup run inside the working tree, as ljos-policyd does. The home, the root, `.git`, a path that climbs out and a line that can `cd` away first are still refused.
