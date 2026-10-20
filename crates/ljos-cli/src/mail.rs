@@ -570,9 +570,12 @@ const SEAT_HINT_MAX: usize = 4;
 #[must_use]
 pub fn named_seat(name: &str) -> bool {
     let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
     let rest = name.strip_prefix("sess-").unwrap_or(name);
     let hex: Vec<char> = rest.chars().filter(|c| *c != '-').collect();
-    !name.is_empty() && !(hex.len() >= 16 && hex.iter().all(char::is_ascii_hexdigit))
+    hex.len() < 16 || hex.iter().any(|c| !c.is_ascii_hexdigit())
 }
 
 /// The hint an unknown seat gets: the seat it most likely meant, then a
