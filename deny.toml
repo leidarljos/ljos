@@ -1,4 +1,35 @@
-# Licenses this workspace may depend on. CI runs `cargo deny check licenses`.
+# CI runs `cargo deny check`: advisories, bans, licenses and sources.
+
+[advisories]
+# Each ignore names one advisory and the crates that bring it in.
+ignore = [
+    # Unmaintained, with no release to move to. Each arrives through
+    # ljos-hud's GUI stack. iced 0.14.0 is the newest iced, and it pins
+    # two-face 0.4, wgpu 27, resvg 0.45 and cosmic-text 0.15. ksni 0.3.7
+    # and mundy 0.2.3, the newest of each, still depend on zbus 5.
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1 under syntect 5.3.0, the newest syntect, which iced_highlighter reaches through two-face 0.4" },
+    { id = "RUSTSEC-2024-0320", reason = "yaml-rust under syntect 5.3.0, the newest syntect, which iced_highlighter reaches through two-face 0.4" },
+    { id = "RUSTSEC-2024-0436", reason = "paste under metal 0.32 (wgpu 27) and pulp and rav1e (image 0.25.10, the newest image)" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz under usvg 0.45, which iced 0.14 pins" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser under fontdb 0.23, owned_ttf_parser and rustybuzz, from cosmic-text 0.15, usvg 0.45 and winit 0.30" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, part of zbus 5" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, part of zbus 5" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, part of zbus 5" },
+    # Flagged by version only. ureq 2.12.1 depends on webpki-roots 0.26.11,
+    # which re-exports TLS_SERVER_ROOTS from webpki-roots 1. The bans below
+    # fail the check on any webpki-roots release that ships its own copy of
+    # the emSign root, and crates/ljos-cli/tests/tls_roots.rs checks the
+    # root is not in the build.
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots 0.26.11 re-exports the 1.0.10 roots" },
+]
+
+[bans]
+deny = [
+    { crate = "webpki-roots:<0.26.11", reason = "carries its own roots, with the emSign root RUSTSEC-2026-0381 names" },
+    { crate = "webpki-roots:>=1.0.0,<1.0.10", reason = "still ships the emSign root RUSTSEC-2026-0381 names" },
+]
+
+# Licenses this workspace may depend on.
 
 [licenses]
 allow = [

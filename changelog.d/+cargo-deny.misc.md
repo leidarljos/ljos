@@ -1,0 +1,1 @@
+CI runs `cargo deny check` with every section, where it ran the license section alone. Each ignored advisory is named with the crates that bring it in, and `deny.toml` bans every webpki-roots release that still ships the emSign root.
