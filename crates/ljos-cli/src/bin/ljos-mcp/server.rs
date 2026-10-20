@@ -3291,7 +3291,10 @@ impl ServerHandler for LjosServer {
             arguments.remove("seat");
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let call = Self::tool_router().call(tcc);
+        // `call` borrows the router. A temporary router is dropped at the
+        // end of the statement that builds the future, before the call runs.
+        let router = Self::tool_router();
+        let call = router.call(tcc);
         let seated_call = async move {
             match seat {
                 Some(seat) => ljos_cli::with_call_seat(seat, call).await,
