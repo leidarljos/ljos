@@ -1,0 +1,1 @@
+The README now gives the measured cost of the default MCP tool set: 8,201 tokens for the twenty core tools against 17,830 for all forty-nine (o200k_base, `initialize` instructions plus the compact `tools/list` result from aea765d). It said 6,100 and 15,000 from the seventeen-tool set.
