@@ -1,6 +1,7 @@
 //! `ljos policy` on a push, with no seat rules and the ask pack switched off.
-//! Force, a `+refspec`, deleting a remote branch, and pushing tags ask.
-//! A plain branch push stays allowed.
+//! Force, a `+refspec`, a `--force-with-lease` push onto main, master or
+//! develop, deleting a remote branch, and pushing tags ask. A plain branch
+//! push and a lease push onto a feature branch stay allowed.
 
 use std::process::Command;
 
@@ -60,6 +61,22 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
             "a force push rewrites what others may hold",
         ),
         (
+            "git push --force-with-lease origin main",
+            "a force push rewrites what others may hold",
+        ),
+        (
+            "git push --force-with-lease=main:abc123 origin main",
+            "a force push rewrites what others may hold",
+        ),
+        (
+            "git push --force-with-lease origin HEAD:develop",
+            "a force push rewrites what others may hold",
+        ),
+        (
+            "git push --force-with-lease origin +feature",
+            "a force push rewrites what others may hold",
+        ),
+        (
             "git push origin --delete old",
             "deleting a remote branch removes what others may hold",
         ),
@@ -93,6 +110,9 @@ fn a_plain_push_stays_allowed() {
         "git push origin main",
         "git push upstream develop",
         "git push -u origin feature/x",
+        "git push --force-with-lease origin feature",
+        "git push --force-with-lease --force-if-includes origin feature/x",
+        "git push --force-with-lease=feature:abc123 origin HEAD:feature",
         "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
     ] {
         let text = stdout_of(line);

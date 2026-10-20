@@ -33,9 +33,11 @@ const TABLE: &[(&[&str], &str)] = &[
     (&["pip", "pip3"], r"re:(python3?\s+-m\s+)?pip3?\s+install\b"),
     (
         &["force-push", "force"],
-        // `--force` at a word end, so `--force-with-lease` and
-        // `--force-if-includes` stay ordinary pushes.
-        r"re:git\s+push\b.*(--force( |$)|-f( |$))",
+        // `--force` at a word end, or a `--force-with-lease` push (any
+        // form) that names main, master or develop on either side of it.
+        // A lease push onto another branch and `--force-if-includes`
+        // alone stay ordinary pushes; the guard reads a bare lease push.
+        r"re:git\s+push\b.*(--force( |$)|-f( |$)|--force-with-lease\S*.*[\s:=](refs/heads/)?(main|master|develop)(\s|:|$)|[\s:=](refs/heads/)?(main|master|develop)(\s|:).*--force-with-lease)",
     ),
     (&["push"], r"re:git\s+push\b.*\b(main|master)\b"),
     (&[".env"], r"re:.*>>?\s*\S*\.env\b"),
@@ -338,9 +340,34 @@ mod tests {
         ));
         assert!(asks("Never force push", "git push --force origin dev"));
         assert!(asks("Never force push", "git push -f origin dev"));
-        assert!(!asks(
+        assert!(asks(
             "Never force push",
             "git push --force-with-lease origin HEAD:main"
+        ));
+        assert!(asks(
+            "Never force push",
+            "git push --force-with-lease=main:abc123 origin main"
+        ));
+        assert!(!asks("Never force push", "git push -u origin feature"));
+        assert!(asks(
+            "Never force push",
+            "git push --force-with-lease origin develop"
+        ));
+        assert!(asks(
+            "Never force push",
+            "git push origin main --force-with-lease"
+        ));
+        assert!(!asks(
+            "Never force push",
+            "git push --force-with-lease origin feature"
+        ));
+        assert!(!asks(
+            "Never force push",
+            "git push --force-with-lease --force-if-includes origin feature/main-menu"
+        ));
+        assert!(!asks(
+            "Never force push",
+            "git push --force-with-lease origin maintenance"
         ));
         assert!(!asks(
             "Never force push",

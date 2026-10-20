@@ -69,10 +69,11 @@ What this seat already knows that bears on this (from the pack, each with its ag
 
 When the agent then reaches for `git push --force origin main`, the runner
 asks before it runs. `ljos-policyd` answers first, with the rules it ships,
-and lets `--force-with-lease` through:
+and asks the same way for `--force-with-lease` onto `main`, `master`,
+`develop` or a protected branch:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `git-force-push`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (seat rule `git-force-push`)"}}
 ```
 
 `sh -c "cd repo && git push -f origin main"` gets the same answer. A command
@@ -117,10 +118,14 @@ runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
   (`ljos rule`), tried on each command a line runs, plus a guard that keeps agents from rewriting the
   checker's own binaries and hook files. An ordinary `git push` of a branch
   is allowed, whichever remote it names and whether or not that remote's
-  owner can be read. `--force-with-lease` and `--force-if-includes` are
-  ordinary pushes: the remote refuses them when it holds commits the pusher
-  has not seen. Force (`--force`, `-f`, a `+refspec`), deleting a remote
-  branch, and pushing tags ask by default, with or without a seat rule.
+  owner can be read, and so is `git push -u origin BRANCH`. Force
+  (`--force`, `-f`, a `+refspec`), deleting a remote branch, and pushing
+  tags ask by default, with or without a seat rule. A `--force-with-lease`
+  push, with or without `--force-if-includes`, asks onto `main`, `master`,
+  `develop` or a branch the checkout protects (`protected_branches` in
+  `ljos.toml` or `.ljos/gates.toml`), and runs onto any other branch. With
+  no refspec, the guard reads the current branch's upstream, and asks when
+  it cannot tell.
   A pattern as wide as `git push*` is refused when a rule is written.
 - Decisions with more than one defensible answer go to personas, voters with
   a view of their own. They settle by trust-weighted

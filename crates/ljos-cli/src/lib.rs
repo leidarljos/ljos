@@ -5368,10 +5368,13 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
                 // writes is named, so the seat's guard sees it.
                 .unwrap_or_else(|| {
                     let name = v["toolCall"]["name"].as_str().unwrap_or("");
+                    // agy 1.4.3 names the file `Path` for `write_file`,
+                    // `edit_file` and `view_file`.
                     let path = [
                         "TargetFile",
                         "AbsolutePath",
                         "FilePath",
+                        "Path",
                         "file_path",
                         "path",
                     ]
@@ -15855,21 +15858,28 @@ pub struct PushFacts {
 /// looked the remote up still compiles; it does not change the tier.
 #[must_use]
 pub fn push_tier(args: &[String], facts: &PushFacts) -> PushTier {
+    push_tier_in(args, facts, None)
+}
+
+/// [`push_tier`] for a push run in `dir`, so a bare `--force-with-lease`
+/// push is judged by the branch the checkout would push to.
+#[must_use]
+pub fn push_tier_in(args: &[String], facts: &PushFacts, dir: Option<&str>) -> PushTier {
     let _facts = (&facts.slug, facts.access, facts.released);
-    if let Some(why) = dangerous_push_reason(args) {
+    if let Some(why) = dangerous_push_reason(args, dir) {
         return PushTier::Person(why);
     }
     PushTier::Free
 }
 
-/// Force, deleting a remote branch, or publishing tags. `--force-with-lease`
-/// and `--force-if-includes` are ordinary pushes: the remote refuses them
-/// when it holds commits the pusher has not seen, which is the line
-/// ljos-policyd's `force_push` draws. Anything else, including `-u` and a
-/// plain refspec, is an ordinary branch push.
-fn dangerous_push_reason(args: &[String]) -> Option<String> {
-    let force = args.iter().any(|a| push_rewrites(a));
-    if force {
+/// Force, deleting a remote branch, or publishing tags. A
+/// `--force-with-lease` push is force when [`lease_asks`] says so: onto
+/// main, master, develop or a protected branch, or onto a branch nobody can
+/// read. Anything else, including `-u`, a plain refspec, a lease push onto
+/// a feature branch and `--force-if-includes` alone, is an ordinary branch
+/// push. `dir` is the checkout the push runs in, when it is known.
+fn dangerous_push_reason(args: &[String], dir: Option<&str>) -> Option<String> {
+    if push_forces(args, dir) {
         return Some("a force push rewrites what others may hold".into());
     }
     if args.iter().any(|a| a == "--delete" || delete_refspec(a)) {
@@ -15888,9 +15898,172 @@ fn dangerous_push_reason(args: &[String]) -> Option<String> {
 
 /// `--force`, a short cluster containing `f` (`-f`, `-fu`), or a refspec
 /// that starts with `+`. `--force-with-lease` and `--force-if-includes`
-/// are not force. The same line in ljos-policyd is `force_push`.
+/// are not this; [`push_forces`] judges a lease push by where it goes. The
+/// same line in ljos-policyd is `force_push`.
 pub(crate) fn push_rewrites(arg: &str) -> bool {
     arg == "--force" || short_force(arg) || (arg.starts_with('+') && arg.len() > 1)
+}
+
+/// A push that replaces history on the remote and so asks: a word
+/// [`push_rewrites`] names, or a `--force-with-lease` push that
+/// [`lease_asks`] holds. `args` are the words after `push`.
+pub(crate) fn push_forces(args: &[String], dir: Option<&str>) -> bool {
+    args.iter().any(|a| push_rewrites(a))
+        || lease_push(args).is_some_and(|lease| lease_asks(&lease, dir))
+}
+
+/// `git push` options that take the next word as their value.
+const PUSH_VALUED: &[&str] = &["-o", "--push-option", "--receive-pack", "--exec", "--repo"];
+
+/// Where a `--force-with-lease` push goes on the remote, read from its
+/// words alone. The same reading is `lease_push_guarded` in ljos-policyd
+/// and `lease-push-guarded?` in the phronesis law.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LeasePush {
+    /// Each refspec's branch on the remote (`dst` of `src:dst`, else the
+    /// refspec, `+` and `refs/heads/` taken off), and any ref the lease
+    /// names (`--force-with-lease=main:abc123`).
+    branches: Vec<String>,
+    /// A destination the words leave open: a wildcard, a word the shell
+    /// still expands, an empty `dst`, `--all` or `--branches`.
+    open: bool,
+    /// No refspec at all: the checkout's upstream says where it goes.
+    bare: bool,
+    /// A refspec or lease ref that is `HEAD`: the current branch.
+    head: bool,
+}
+
+impl LeasePush {
+    fn name(&mut self, name: &str) {
+        let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+        if name == "HEAD" {
+            self.head = true;
+        } else if name.is_empty() || name.contains(['$', '`', '*', '?', '[']) {
+            self.open = true;
+        } else {
+            self.branches.push(name.to_string());
+        }
+    }
+}
+
+/// The lease push `args` (the words after `push`) make, or `None` when no
+/// word is `--force-with-lease` or `--force-with-lease=...`. The first
+/// word past the options is the remote; the rest are refspecs.
+fn lease_push(args: &[String]) -> Option<LeasePush> {
+    if !args
+        .iter()
+        .any(|a| a == "--force-with-lease" || a.starts_with("--force-with-lease="))
+    {
+        return None;
+    }
+    let mut out = LeasePush::default();
+    let mut words: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        if a == "--" {
+            words.extend(args[i..].iter().map(String::as_str));
+            break;
+        }
+        if PUSH_VALUED.contains(&a) {
+            i += 1;
+            continue;
+        }
+        if matches!(a, "--all" | "--branches") {
+            out.open = true;
+            continue;
+        }
+        if let Some(value) = a.strip_prefix("--force-with-lease=") {
+            let name = value.split_once(':').map_or(value, |(name, _)| name);
+            if !name.is_empty() {
+                out.name(name);
+            }
+            continue;
+        }
+        if !a.starts_with('-') {
+            words.push(a);
+        }
+    }
+    let specs = words.get(1..).unwrap_or(&[]);
+    out.bare = specs.is_empty();
+    for spec in specs {
+        let spec = spec.strip_prefix('+').unwrap_or(spec);
+        out.name(spec.split_once(':').map_or(spec, |(_, dst)| dst));
+    }
+    Some(out)
+}
+
+/// Whether a lease push asks. Rohit's rule of 2026-10-20: it asks onto
+/// `main`, `master`, `develop` or a branch the checkout protects
+/// (`protected_branches` in `ljos.toml` or `.ljos/gates.toml`), and when
+/// its branch cannot be read; onto any other branch it runs. A bare push
+/// goes to the current branch's upstream, and `HEAD` is the current
+/// branch, both read in `dir`. With no `dir`, no current branch, no
+/// upstream for a bare push, or a config file that does not parse, it
+/// asks.
+fn lease_asks(lease: &LeasePush, dir: Option<&str>) -> bool {
+    if lease.open {
+        return true;
+    }
+    let mut branches = lease.branches.clone();
+    if lease.bare || lease.head {
+        let Some(current) =
+            dir.and_then(|d| git_out(Some(d), &["symbolic-ref", "--short", "HEAD"]))
+        else {
+            return true;
+        };
+        if lease.bare {
+            let key = format!("branch.{current}.merge");
+            let Some(merge) = git_out(dir, &["config", "--get", &key]).filter(|m| !m.is_empty())
+            else {
+                return true;
+            };
+            branches.push(merge.trim_start_matches("refs/heads/").to_string());
+        }
+        branches.push(current);
+    }
+    let Some(guarded) = gates::lease_protected(dir.map(Path::new)) else {
+        return true;
+    };
+    branches.iter().any(|b| guarded.contains(b))
+}
+
+/// A push ljos-policyd refused as `git-force-push` that this checkout
+/// clears: one `git push` with no other command on its words, no plain
+/// force, and a lease push [`lease_asks`] lets run. ljos-policyd reads the
+/// words alone, so it refuses a bare `git push --force-with-lease`; ljos
+/// reads the upstream that push goes to. `git -C DIR` moves the checkout.
+fn lease_cleared(argv: &[String], cwd: Option<&Path>) -> bool {
+    let Some(at) = argv.iter().position(|a| a == "push") else {
+        return false;
+    };
+    let git = argv[..at]
+        .iter()
+        .any(|w| w.rsplit('/').next() == Some("git"));
+    let args = &argv[at + 1..];
+    let alone = argv.iter().filter(|w| *w == "push").count() == 1
+        && !argv
+            .iter()
+            .any(|w| matches!(w.as_str(), "|" | ";" | "&&" | "||" | "&"));
+    if !git || !alone || args.iter().any(|a| push_rewrites(a) || a == "--mirror") {
+        return false;
+    }
+    let here = cwd.map(|p| p.display().to_string()).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|d| d.display().to_string())
+    });
+    let moved = argv[..at]
+        .windows(2)
+        .find(|w| w[0] == "-C")
+        .map(|w| w[1].clone());
+    let dir = match (moved, here) {
+        (Some(d), Some(h)) if !d.starts_with('/') => Some(format!("{h}/{d}")),
+        (Some(d), _) => Some(d),
+        (None, h) => h,
+    };
+    lease_push(args).is_some_and(|lease| !lease_asks(&lease, dir.as_deref()))
 }
 
 /// `-fu` and `-uf`: git's short cluster that includes force. `-u` alone
@@ -16087,13 +16260,7 @@ fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
 /// any tag exists there.
 #[must_use]
 pub fn push_tier_at(p: &PushCall, cwd: Option<&str>) -> PushTier {
-    let dir: Option<String> = match (&p.dir, cwd) {
-        (Some(d), Some(c)) if !d.starts_with('/') && !d.starts_with('~') => {
-            Some(format!("{c}/{d}"))
-        }
-        (Some(d), _) => Some(d.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)),
-        (None, c) => c.map(str::to_string),
-    };
+    let dir = push_dir(p, cwd);
     let dir = dir.as_deref();
     let remote = p
         .args
@@ -16107,7 +16274,19 @@ pub fn push_tier_at(p: &PushCall, cwd: Option<&str>) -> PushTier {
         .unwrap_or_else(|| "origin".into());
     let url = git_out(dir, &["remote", "get-url", &remote]).unwrap_or(remote);
     let tagged = git_out(dir, &["tag", "--list"]).is_some_and(|t| t.lines().any(is_version_tag));
-    push_tier(&p.args, &push_facts(&url, tagged))
+    push_tier_in(&p.args, &push_facts(&url, tagged), dir)
+}
+
+/// The checkout a push runs in: its `cd DIR` or `git -C DIR` taken
+/// against `cwd`, else `cwd`.
+fn push_dir(p: &PushCall, cwd: Option<&str>) -> Option<String> {
+    match (&p.dir, cwd) {
+        (Some(d), Some(c)) if !d.starts_with('/') && !d.starts_with('~') => {
+            Some(format!("{c}/{d}"))
+        }
+        (Some(d), _) => Some(d.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)),
+        (None, c) => c.map(str::to_string),
+    }
 }
 
 /// Whether a tag names a release: a version, `v1.2` or `0.3.0`, not a
@@ -16765,15 +16944,15 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// same line is left as it is when the push itself is ordinary.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
-    let _ = cwd;
     let Some(call) = push_call(line) else {
         return rule.cloned();
     };
+    let dir = push_dir(&call, cwd);
     let segment = push_segment(&call);
     let about_push = rule.is_some_and(|r| {
         rule_matches(&r.pattern, &segment) || rule_matches(&r.pattern, "git push")
     });
-    let Some(why) = dangerous_push_reason(&call.args) else {
+    let Some(why) = dangerous_push_reason(&call.args, dir.as_deref()) else {
         if about_push {
             return None;
         }
@@ -24092,11 +24271,15 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     // their pipelines is judged as well: `echo $(git push -f)` is a push.
     // A here-document fed to `python3 -` or `node` is that program, sent
     // as `python3 -c BODY`, so a shell call inside it is judged.
+    // A download and each later pipeline go once more as one call, so a
+    // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
+    // the pair it is.
     let argvs = nested_lines(line, 0)
         .into_iter()
         .flat_map(|l| pipelines(&l))
         .map(|seg| shell_words(&seg))
-        .chain(stdin_programs(line));
+        .chain(stdin_programs(line))
+        .chain(fetch_pairs(line));
     for argv in argvs {
         if argv.is_empty() {
             continue;
@@ -24106,11 +24289,19 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 clear_guard_note();
                 let token = policyd_token(&t);
                 let token = if token.is_empty() { "tcb" } else { token };
-                // A force push asks. The other checks still deny.
-                let ask = token == "git-force-push";
+                // A force push asks, whether the table or the phronesis
+                // law (`git-force-push: ...`) refused it. The other checks
+                // still deny. A lease push the checkout clears runs:
+                // ljos-policyd cannot read where a bare one goes.
+                let code = token.split(':').next().unwrap_or(token).trim();
+                let ask = code == "git-force-push";
+                if ask && lease_cleared(&argv, cwd) {
+                    answered = true;
+                    continue;
+                }
                 return Some(Rule {
                     pattern: if ask {
-                        token.to_string()
+                        code.to_string()
                     } else {
                         "ljos-policyd".into()
                     },
@@ -24134,6 +24325,38 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                  shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
             .to_string(),
     })
+}
+
+/// Most pairs [`fetch_pairs`] hands the TCB for one line.
+const FETCH_PAIRS: usize = 16;
+
+/// Each pipeline that downloads (`curl`, `wget`) beside each later
+/// pipeline of its line, joined by `&&`, so the TCB judges the two as one
+/// call: `curl -o i.sh URL && sh i.sh` runs what it fetched, and neither
+/// pipeline alone shows that. A line with no download adds none.
+fn fetch_pairs(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for l in nested_lines(line, 0) {
+        let segs: Vec<Vec<String>> = pipelines(&l).iter().map(|s| shell_words(s)).collect();
+        for (i, fetch) in segs.iter().enumerate() {
+            let downloads = fetch
+                .iter()
+                .any(|w| matches!(w.rsplit('/').next(), Some("curl" | "wget")));
+            if !downloads {
+                continue;
+            }
+            for later in &segs[i + 1..] {
+                if out.len() >= FETCH_PAIRS {
+                    return out;
+                }
+                let mut pair = fetch.clone();
+                pair.push("&&".to_string());
+                pair.extend(later.iter().cloned());
+                out.push(pair);
+            }
+        }
+    }
+    out
 }
 
 /// How long the guard waits for a slow check. A loaded machine used to
@@ -24232,7 +24455,13 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = gates::command_gate(line, cwd) {
         return Some(rule);
     }
-    gate_push(None, line, None)
+    // The push gate reads the checkout, the working directory when no
+    // `cwd` is given as `command_gate` does, so a bare lease push is
+    // judged by the branch it would replace.
+    let here = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    gate_push(None, line, here.as_deref().and_then(Path::to_str))
         .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
         .map(as_static_rule)
 }
@@ -24365,11 +24594,7 @@ pub fn policyd_reason(token: &str) -> String {
         None => (token, ""),
     };
     let said = match code {
-        "git-force-push" => {
-            "a force push rewrites history that others may already have pulled. Push \
-             without --force, use --force-with-lease to overwrite only your own last push, or \
-             ask the person to run it"
-        }
+        "git-force-push" => "it rewrites shared history, so the agent asks you first",
         "git-reset-hard" => {
             "git reset --hard throws away every uncommitted change in the tree. Commit or \
              `git stash` the work first, or reset one file with `git restore --source REF FILE`"
@@ -33306,7 +33531,12 @@ mod tests {
             assert!(said.starts_with(&format!("{token}: ")), "{said}");
             assert!(said.len() > token.len() + 40, "{said}");
         }
-        assert!(policyd_reason("git-force-push").contains("--force-with-lease"));
+        // One short sentence that fits a terminal line and recommends no
+        // other push: a lease push asks too onto main, master or develop.
+        let force = policyd_reason("git-force-push");
+        assert!(force.len() < 100, "{} columns: {force}", force.len());
+        assert!(!force.contains("--force-with-lease"), "{force}");
+        assert_eq!(force.matches(". ").count(), 0, "{force}");
         assert!(policyd_reason("git-reset-hard").contains("git stash"));
         let secret = policyd_reason("shell-secret-in-argv: token on the command line");
         assert!(secret.starts_with("shell-secret-in-argv: "), "{secret}");
@@ -33329,8 +33559,8 @@ mod tests {
     }
 
     /// Every command a guard reason recommends is allowed by that same gate.
-    /// `--force-with-lease` is the command the force-push reason names, and
-    /// it is an ordinary push. `--force` still asks.
+    /// The force-push reason recommends no command. `--force` asks, and so
+    /// does `--force-with-lease` onto main; onto a feature branch it runs.
     #[test]
     fn recommended_commands_are_not_refused_by_the_same_gate() {
         let mut reasons = Vec::new();
@@ -33382,18 +33612,12 @@ mod tests {
                     commands.push(span.to_string());
                 }
             }
-            if reason.contains("use --force-with-lease") {
-                commands.push("git push --force-with-lease origin HEAD:main".into());
-            }
-            if reason.contains("without --force") {
-                commands.push("git push origin HEAD:main".into());
-            }
         }
         assert!(
-            commands
+            !commands
                 .iter()
                 .any(|line| line.contains("--force-with-lease")),
-            "the force-push reason names --force-with-lease: {commands:?}"
+            "a lease push asks, so no reason recommends it: {commands:?}"
         );
         let repo = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -33451,21 +33675,26 @@ mod tests {
                     "recommended `{line}` (from `{template}`) is refused: {ruled:?}"
                 );
             }
-            let lease = guard_line("git push --force-with-lease origin HEAD:main", repo.path());
-            assert!(lease.is_none(), "{lease:?}");
+            let lease = guard_line("git push --force-with-lease origin HEAD:main", repo.path())
+                .expect("a lease push asks");
+            assert_eq!(lease.verdict, "ask");
+            assert_eq!(lease.pattern, "git-force-push");
             let includes = guard_line("git push --force-if-includes origin HEAD:main", repo.path());
             assert!(includes.is_none(), "{includes:?}");
             let leased = guard_line(
                 "git push --force-with-lease=refs/heads/main origin main",
                 repo.path(),
-            );
-            assert!(leased.is_none(), "{leased:?}");
+            )
+            .expect("a lease push with a ref asks");
+            assert_eq!(leased.verdict, "ask");
+            let upstream = guard_line("git push -u origin feature", repo.path());
+            assert!(upstream.is_none(), "{upstream:?}");
             let forced = guard_line("git push --force origin HEAD:main", repo.path())
                 .expect("a force push still asks");
             assert_eq!(forced.verdict, "ask");
             assert_eq!(forced.pattern, "git-force-push");
             assert!(
-                forced.reason.contains("--force-with-lease"),
+                forced.reason.contains("asks you first"),
                 "{}",
                 forced.reason
             );
@@ -34876,10 +35105,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             push_tier(&args(&["--tags"]), &unread),
             PushTier::Person(_)
         ));
-        assert_eq!(
+        assert!(matches!(
             push_tier(&args(&["--force-with-lease"]), &unread),
+            PushTier::Person(_)
+        ));
+        assert!(matches!(
+            push_tier(
+                &args(&["--force-with-lease=main:abc123", "origin", "main"]),
+                &unread
+            ),
+            PushTier::Person(_)
+        ));
+        assert_eq!(
+            push_tier(&args(&["-u", "origin", "feature"]), &unread),
             PushTier::Free
         );
+        assert_eq!(
+            push_tier(&args(&["--force-with-lease", "origin", "feature"]), &unread),
+            PushTier::Free,
+            "a lease push onto a feature branch runs"
+        );
+        assert!(matches!(
+            push_tier(
+                &args(&["--force-with-lease", "origin", "+feature"]),
+                &unread
+            ),
+            PushTier::Person(_)
+        ));
+        assert!(matches!(
+            push_tier(
+                &args(&["--force-with-lease", "origin", "HEAD:develop"]),
+                &unread
+            ),
+            PushTier::Person(_)
+        ));
         assert_eq!(
             push_tier(&args(&["--force-if-includes"]), &unread),
             PushTier::Free
@@ -35341,6 +35600,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             Some("PreToolUse"),
         );
         assert_eq!(edit.cue, "write_to_file /home/u/.local/bin/ljos");
+    }
+
+    /// agy 1.4.3 names the file `Path` for `write_file` and `edit_file`.
+    /// The guard read neither, so it saw those calls with no path. These
+    /// are the PreToolUse payloads cell w4 of willma-20261020f sent (no
+    /// `error` field, so a call before the tool runs), with the run's home
+    /// and file text shortened.
+    #[test]
+    fn an_agy_file_tool_names_its_path_to_the_guard() {
+        let write = hook_call(
+            r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"gemini-3.1-pro-low","stepIdx":8,"toolCall":{"args":{"Content":"import re\n","Overwrite":false,"Path":"/h/work/slug.py"},"name":"write_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
+        );
+        assert_eq!(write.event, "PreToolUse");
+        assert_eq!(write.cue, "write_file /h/work/slug.py");
+        let edit = hook_call(
+            r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"gemini-3.1-pro-low","stepIdx":18,"toolCall":{"args":{"Path":"/h/work/slug.py","Replacement":"import re\n","Target":"import os\n"},"name":"edit_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
+        );
+        assert_eq!(edit.event, "PreToolUse");
+        assert_eq!(edit.cue, "edit_file /h/work/slug.py");
+        // The same call aimed at the seat's own binary is refused.
+        let own = hook_call(
+            r##"{"conversationId":"6839fd1e","toolCall":{"args":{"Content":"#!/bin/sh\n","Overwrite":true,"Path":"/home/u/.local/bin/ljos"},"name":"write_file"},"workspacePaths":["/h/work"]}"##,
+        );
+        assert_eq!(own.cue, "write_file /home/u/.local/bin/ljos");
+        assert!(seat_guard(&own.cue).is_some(), "{}", own.cue);
+        let own = hook_call(
+            r##"{"conversationId":"6839fd1e","toolCall":{"args":{"Path":"/home/u/.local/bin/ljos","Replacement":"x","Target":"y"},"name":"edit_file"},"workspacePaths":["/h/work"]}"##,
+        );
+        assert!(seat_guard(&own.cue).is_some(), "{}", own.cue);
+        // Reading a file names no write.
+        let read = hook_call(
+            r##"{"conversationId":"6839fd1e","toolCall":{"args":{"Path":"/home/u/.local/bin/ljos"},"name":"view_file"},"workspacePaths":["/h/work"]}"##,
+        );
+        assert_eq!(read.cue, "view_file");
     }
 
     #[test]
@@ -35940,6 +36233,311 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    /// A download and a later pipeline that runs the file it saved reach
+    /// the TCB as one call. Lines with no download add no call.
+    #[test]
+    fn a_saved_download_and_its_run_reach_the_tcb_together() {
+        let pairs = fetch_pairs("curl -fsSLo /tmp/i.sh https://example.org/i.sh && sh /tmp/i.sh");
+        assert_eq!(
+            pairs,
+            vec![[
+                "curl",
+                "-fsSLo",
+                "/tmp/i.sh",
+                "https://example.org/i.sh",
+                "&&",
+                "sh",
+                "/tmp/i.sh"
+            ]
+            .map(String::from)
+            .to_vec()]
+        );
+        assert_eq!(
+            fetch_pairs("wget https://example.org/i.sh; bash i.sh").len(),
+            1
+        );
+        assert!(fetch_pairs("git fetch origin && bash build.sh").is_empty());
+        assert!(fetch_pairs("cargo build && cargo test").is_empty());
+        assert!(fetch_pairs("curl -o /tmp/i.sh https://example.org/i.sh").is_empty());
+        let many = (0..40).map(|_| "true").collect::<Vec<_>>().join(" && ");
+        assert_eq!(
+            fetch_pairs(&format!("curl -O https://x.test/a && {many}")).len(),
+            FETCH_PAIRS
+        );
+
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_policyd(
+            dir.path(),
+            "ljos-policyd",
+            "case \"$*\" in\n*curl*'&& sh /tmp/i.sh'*) printf 'deny\\tcurl-pipe-shell\\n'; exit 2;;\n*) echo allow;;\nesac",
+        );
+        let home = SeatDir::new("fetch-pairs");
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+        ]);
+        let denied = tcb_verdict("curl -fsSLo /tmp/i.sh https://example.org/i.sh && sh /tmp/i.sh")
+            .expect("the pair is refused");
+        assert_eq!(denied.verdict, "deny");
+        assert!(
+            denied.reason.starts_with("curl-pipe-shell"),
+            "{}",
+            denied.reason
+        );
+        assert!(tcb_verdict("curl -fsSLo /tmp/i.sh https://example.org/i.sh").is_none());
+        assert!(tcb_verdict("git fetch origin && bash build.sh").is_none());
+    }
+
+    /// Rohit's rule of 2026-10-20 for `git push --force-with-lease`, with
+    /// or without `=REF:SHA` and `--force-if-includes`: it asks onto main,
+    /// master, develop or a branch the checkout protects, and when its
+    /// branch cannot be read; onto any other branch it runs. A bare lease
+    /// push goes to the current branch's upstream. ljos-policyd refuses a
+    /// bare one, since it reads only the words; the hook clears it when the
+    /// checkout says where it goes.
+    #[test]
+    fn a_lease_push_asks_only_onto_a_guarded_or_unread_branch() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let named = lease_push(&args(&[
+            "--force-with-lease=main:abc123",
+            "origin",
+            "feature",
+        ]))
+        .expect("a lease push");
+        assert_eq!(named.branches, ["main", "feature"]);
+        assert!(lease_push(&args(&["origin", "feature"])).is_none());
+        assert!(lease_push(&args(&["--force-if-includes", "origin", "feature"])).is_none());
+        assert!(lease_push(&args(&["--no-force-with-lease", "origin", "main"])).is_none());
+        for bare in [
+            &["--force-with-lease"][..],
+            &["--force-with-lease", "origin"],
+        ] {
+            let lease = lease_push(&args(bare)).expect("a lease push");
+            assert!(lease.bare && lease.branches.is_empty(), "{bare:?}");
+        }
+        let head = lease_push(&args(&["--force-with-lease", "origin", "HEAD"])).unwrap();
+        assert!(head.head && !head.bare);
+        let plus = lease_push(&args(&[
+            "--force-with-lease",
+            "origin",
+            "+refs/heads/topic",
+        ]))
+        .unwrap();
+        assert_eq!(plus.branches, ["topic"]);
+        let valued = lease_push(&args(&[
+            "--force-with-lease",
+            "-o",
+            "main",
+            "origin",
+            "feature",
+        ]))
+        .unwrap();
+        assert_eq!(valued.branches, ["feature"]);
+        for open in [
+            &["--force-with-lease", "--all", "origin"][..],
+            &["--force-with-lease", "origin", "refs/heads/*:refs/heads/*"],
+            &["--force-with-lease", "origin", "$BRANCH"],
+            &["--force-with-lease", "origin", "topic:"],
+        ] {
+            assert!(lease_push(&args(open)).unwrap().open, "{open:?}");
+        }
+
+        let _g = env_guard();
+        let config = tempfile::tempdir().unwrap();
+        let home = SeatDir::new("lease-rule");
+        let pd = tempfile::tempdir().unwrap();
+        // The strictest policyd: every lease push is `git-force-push`.
+        let bin = fake_policyd(
+            pd.path(),
+            "ljos-policyd",
+            "case \"$*\" in\n*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) echo allow;;\nesac",
+        );
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+            ("LJOS_CONFIG", ""),
+            ("LJOS_OFF", "0"),
+        ]);
+        super::with_config_home(config.path(), || {
+            for (words, asks) in [
+                (&["--force-with-lease", "origin", "main"][..], true),
+                (&["--force-with-lease", "origin", "master"], true),
+                (&["--force-with-lease", "origin", "develop"], true),
+                (&["--force-with-lease", "origin", "HEAD:main"], true),
+                (
+                    &["--force-with-lease", "origin", "topic:refs/heads/main"],
+                    true,
+                ),
+                (&["--force-with-lease", "origin", "+feature"], true),
+                (&["--force-with-lease", "-f", "origin", "feature"], true),
+                (&["--force-with-lease=main:abc123", "origin", "main"], true),
+                (
+                    &["--force-with-lease=main:abc123", "origin", "feature"],
+                    true,
+                ),
+                (
+                    &[
+                        "--force-with-lease",
+                        "--force-if-includes",
+                        "origin",
+                        "main",
+                    ],
+                    true,
+                ),
+                (&["--force-with-lease"], true),
+                (&["--force-with-lease", "origin", "HEAD"], true),
+                (&["--force-with-lease", "origin", "feature"], false),
+                (
+                    &[
+                        "--force-with-lease",
+                        "--force-if-includes",
+                        "origin",
+                        "feature",
+                    ],
+                    false,
+                ),
+                (
+                    &["--force-with-lease", "origin", "HEAD:feature/login"],
+                    false,
+                ),
+                (
+                    &["--force-with-lease=feature:abc123", "origin", "feature"],
+                    false,
+                ),
+                (&["--force-with-lease", "origin", "maintenance"], false),
+            ] {
+                assert_eq!(push_forces(&args(words), None), asks, "{words:?}");
+            }
+
+            let repo = tempfile::tempdir().unwrap();
+            let git = |a: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo.path())
+                    .args(a)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "git {a:?}");
+            };
+            git(&["init", "-q"]);
+            git(&["remote", "add", "origin", "https://example.invalid/r.git"]);
+            let dir = repo.path().to_str().unwrap();
+            let on = |branch: &str, upstream: Option<&str>| {
+                git(&["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")]);
+                let key = format!("branch.{branch}.merge");
+                match upstream {
+                    Some(up) => {
+                        git(&["config", &format!("branch.{branch}.remote"), "origin"]);
+                        git(&["config", &key, &format!("refs/heads/{up}")]);
+                    }
+                    None => {
+                        let _ = std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(repo.path())
+                            .args(["config", "--unset", &key])
+                            .output();
+                    }
+                }
+            };
+            let bare = args(&["--force-with-lease"]);
+            let bare_origin = args(&["--force-with-lease", "origin"]);
+            let head = args(&["--force-with-lease", "origin", "HEAD"]);
+            on("feature", Some("feature"));
+            assert!(!push_forces(&bare, Some(dir)), "upstream feature");
+            assert!(!push_forces(&bare_origin, Some(dir)));
+            assert!(!push_forces(&head, Some(dir)));
+            on("feature", Some("main"));
+            assert!(push_forces(&bare, Some(dir)), "upstream main");
+            on("topic", None);
+            assert!(push_forces(&bare, Some(dir)), "no upstream: cannot tell");
+            assert!(!push_forces(&head, Some(dir)), "HEAD is topic");
+            on("develop", Some("develop"));
+            assert!(push_forces(&bare, Some(dir)));
+            assert!(push_forces(&head, Some(dir)));
+
+            // A branch the checkout protects asks too; the three stay.
+            on("feature", Some("feature"));
+            std::fs::create_dir_all(repo.path().join(".ljos")).unwrap();
+            let gates = repo.path().join(".ljos/gates.toml");
+            std::fs::write(&gates, "protected_branches = [\"release\"]\n").unwrap();
+            let release = args(&["--force-with-lease", "origin", "release"]);
+            assert!(push_forces(&release, Some(dir)));
+            assert!(push_forces(
+                &args(&["--force-with-lease", "origin", "main"]),
+                Some(dir)
+            ));
+            assert!(!push_forces(
+                &args(&["--force-with-lease", "origin", "feature"]),
+                Some(dir)
+            ));
+            assert!(!push_forces(&release, None), "outside the checkout");
+            std::fs::write(&gates, "protected_branches = \"release\"\n").unwrap();
+            assert!(
+                push_forces(
+                    &args(&["--force-with-lease", "origin", "feature"]),
+                    Some(dir)
+                ),
+                "a config that does not parse asks"
+            );
+            std::fs::write(&gates, "").unwrap();
+
+            // The hook: policyd refuses every lease push here, and ljos
+            // clears the ones whose branch the checkout says is free.
+            let cwd = Some(repo.path());
+            for line in [
+                "git push --force-with-lease",
+                "git push --force-with-lease origin",
+                "git push --force-with-lease origin feature",
+                "git push --force-with-lease --force-if-includes origin HEAD:feature",
+            ] {
+                assert!(tcb_verdict_in(line, cwd).is_none(), "{line}");
+                assert!(gates::guard_verdict(line, cwd, &[]).is_none(), "{line}");
+            }
+            for line in [
+                "git push --force-with-lease origin main",
+                "git push --force-with-lease=main:abc123 origin main",
+                "git push --force-with-lease origin +feature",
+                "git push --force-with-lease -f origin feature",
+                "git push --force-with-lease origin feature | cat",
+            ] {
+                let rule = tcb_verdict_in(line, cwd).expect(line);
+                assert_eq!(rule.verdict, "ask", "{line}");
+                assert_eq!(rule.pattern, "git-force-push", "{line}");
+            }
+            for line in [
+                "git push --force-with-lease origin main",
+                "git push --force-with-lease origin HEAD:develop",
+                "git push --force-with-lease origin +feature",
+            ] {
+                let rule = gates::guard_verdict(line, cwd, &[]).expect(line);
+                assert_eq!(rule.verdict, "ask", "{line}");
+            }
+            on("feature", Some("main"));
+            let rule = tcb_verdict_in("git push --force-with-lease", cwd).expect("upstream main");
+            assert_eq!(rule.verdict, "ask");
+            let rule = gates::guard_verdict("git push --force-with-lease", cwd, &[])
+                .expect("upstream main");
+            assert_eq!(rule.verdict, "ask");
+            let outside = tempfile::tempdir().unwrap();
+            assert!(
+                tcb_verdict_in("git push --force-with-lease", Some(outside.path())).is_some(),
+                "no checkout: cannot tell"
+            );
+
+            // The phronesis law words its refusal, and it still asks.
+            let worded = fake_policyd(
+                pd.path(),
+                "worded",
+                "printf 'deny\\tgit-force-push: force push denied\\n'; exit 2",
+            );
+            let _worded = HoldEnv::set(&[("POLICYD_BIN", worded.to_str().unwrap())]);
+            let rule = tcb_verdict_in("ls", cwd).expect("a worded refusal");
+            assert_eq!(rule.verdict, "ask");
+            assert_eq!(rule.pattern, "git-force-push");
+        });
     }
 
     #[test]

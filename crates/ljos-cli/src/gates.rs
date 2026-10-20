@@ -985,6 +985,51 @@ fn hits_protected(dests: &[String], protected: &[String]) -> bool {
     dests.iter().any(|d| is_protected(d, protected))
 }
 
+/// The branches a `--force-with-lease` push asks before it replaces:
+/// `main`, `master` and `develop`, and every branch `protected_branches`
+/// names in the config layers [`config_layers`] reads (the user and seat
+/// `ljos.toml`, the repository's `ljos.toml`, `LJOS_CONFIG` and
+/// `.ljos/gates.toml`). Outside a checkout the user and seat files and
+/// `LJOS_CONFIG` still count. `None` when one of them does not parse, so
+/// the caller asks.
+pub(crate) fn lease_protected(cwd: Option<&Path>) -> Option<Vec<String>> {
+    let mut cfg = GateConfig {
+        test: None,
+        signoff: false,
+        protected: Vec::new(),
+        identity: None,
+        identity_from: None,
+    };
+    let layers = match cwd.and_then(repo_root) {
+        Some(root) => config_layers(&root),
+        None => user_layers(),
+    };
+    for path in layers {
+        if path.is_file() {
+            apply_gate_file(&mut cfg, &path).ok()?;
+        }
+    }
+    let mut out: Vec<String> = ["main", "master", "develop"].map(String::from).to_vec();
+    out.extend(cfg.protected);
+    Some(out)
+}
+
+/// The config layers that do not live in a checkout: the user and seat
+/// `ljos.toml`, then `LJOS_CONFIG`.
+fn user_layers() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(base) = user_config_base() {
+        paths.push(base.join("ljos").join("ljos.toml"));
+        if let Some(seat) = configured_seat() {
+            paths.push(base.join("ljos").join("seats").join(seat).join("ljos.toml"));
+        }
+    }
+    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
+        paths.push(PathBuf::from(path));
+    }
+    paths
+}
+
 fn repo_root(cwd: &Path) -> Option<PathBuf> {
     git_text(cwd, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
@@ -2908,14 +2953,17 @@ esac
             .expect("force still asks");
         assert_eq!(forced.verdict, "ask");
         assert_eq!(forced.pattern, "git-force-push");
+        let leased = guard_verdict(
+            "git push --force-with-lease origin HEAD:main",
+            Some(dir.path()),
+            &[],
+        )
+        .expect("a lease push asks");
+        assert_eq!(leased.verdict, "ask");
+        assert_eq!(leased.pattern, "git-force-push");
         assert!(
-            guard_verdict(
-                "git push --force-with-lease origin HEAD:main",
-                Some(dir.path()),
-                &[]
-            )
-            .is_none(),
-            "force-with-lease is an ordinary push"
+            guard_verdict("git push -u origin feature", Some(dir.path()), &[]).is_none(),
+            "a push that sets the upstream is an ordinary push"
         );
         assert!(
             guard_verdict(

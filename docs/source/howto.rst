@@ -205,7 +205,7 @@ Computing Base (TCB)
 .. code:: console
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (seat rule `ljos-policyd`)"}}
 
 An ``ask`` rule uses the caller's approval UI when that UI is supported.
 Otherwise the hook stops the command and prints a request id. Calling
@@ -260,6 +260,31 @@ A policy daemon does the same with the argv:
    $ ljos policy cargo test --release
    cargo test --release
    What this seat already knows that bears on this ...
+
+Choose the branches a lease push asks on
+========================================
+
+A ``git push --force-with-lease`` replaces the remote branch, so the guard
+asks before one lands on ``main``, ``master``, ``develop`` or a branch the
+checkout protects. Onto any other branch it runs: the remote refuses a
+lease push when it holds commits you have not fetched. The destination is
+each refspec's branch on the remote (``src:dst``, a bare ``branch``,
+``HEAD:branch``), and a ref the lease names (``--force-with-lease=main:abc123``)
+counts too. A ``+refspec``, ``--force`` or ``-f`` asks whatever the branch.
+
+With no refspec, the guard reads the current branch's upstream in the
+checkout, and asks when it cannot tell: no upstream, a detached ``HEAD``, a
+wildcard or ``--all``.
+
+Name more protected branches with ``protected_branches`` in ``ljos.toml`` (the
+user, seat or repository file) or in ``.ljos/gates.toml``. A later file
+replaces the list an earlier one set, and the merge gate reads the same
+list. ``main``, ``master`` and ``develop`` ask whatever the list says.
+
+.. code:: toml
+
+   # .ljos/gates.toml
+   protected_branches = ["main", "release"]
 
 Let Jev judge the prompt
 ========================

@@ -6298,8 +6298,7 @@ print(f"id={ident}")
     #[test]
     fn an_ask_only_session_lesson_is_a_sentence() {
         let prompt = "git function slugify slug lowercases";
-        let ask =
-            "git-force-push: a force push rewrites history that others may already have pulled";
+        let ask = "git-force-push: it rewrites shared history, so the agent asks you first";
         let keyword = "git function slugify slug lowercases. The guard asked about git-force-push.";
         let text = lesson_text(prompt, "", &[], &[], &[ask.into()]);
         assert_lesson(&text);
