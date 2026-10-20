@@ -2753,6 +2753,7 @@ dependencies = [
  "toml 0.8.23",
  "ureq",
  "vissue-core",
+ "webpki-roots 1.0.10",
  "which",
 ]
 
