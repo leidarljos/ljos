@@ -1,1 +1,0 @@
-The guard sees the file an agy `write_file` or `edit_file` names. agy 1.4.3 sends the file as `Path`, a field the hook did not read, so those calls reached the guard with no path and a write to the seat's own binary or hook files went unchecked. `Path` is now read beside `TargetFile`, `AbsolutePath`, `FilePath`, `file_path` and `path`.

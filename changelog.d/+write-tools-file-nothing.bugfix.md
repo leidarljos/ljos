@@ -1,1 +1,0 @@
-`ljos_remember`, `ljos_prefer` and the other MCP write tools no longer file or claim an issue before they run. Their text used to title a new STARTED issue when the seat held nothing. Now a call joins the issue this seat holds in the checkout, and with none held it runs unattached and `book.log` says so.

@@ -1,1 +1,0 @@
-A release tag builds and checks the docs but does not deploy them. The github-pages environment takes main only, and refused the v0.31.0 deploy; main is moved to the tagged commit first, so its deploy publishes the same docs.
