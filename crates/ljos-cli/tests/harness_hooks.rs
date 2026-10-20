@@ -578,10 +578,7 @@ server.serve_forever()
         warming.contains("pack is loading its search model"),
         "{warming}"
     );
-    assert!(
-        !warming.contains("What this seat already knows"),
-        "{warming}"
-    );
+    assert!(!warming.contains("Remembered, oldest first"), "{warming}");
     ljos(
         &hab,
         &claude(
@@ -651,10 +648,7 @@ server.serve_forever()
         &[("PACKSET_URL", url.as_str())],
     );
     let recalled = context(&recalled.stdout);
-    assert!(
-        recalled.contains("What this seat already knows"),
-        "{recalled}"
-    );
+    assert!(recalled.contains("Remembered, oldest first"), "{recalled}");
     assert!(recalled.contains("readme"), "{recalled}");
     let _ = pack_proc.kill();
     let _ = pack_proc.wait();
@@ -1725,7 +1719,7 @@ server.serve_forever()
         note.contains("The slugify helper keeps kebab words whole."),
         "{note}"
     );
-    assert!(note.contains("What this seat already knows"), "{note}");
+    assert!(note.contains("Remembered, oldest first"), "{note}");
     assert!(note.contains("probe-held"), "{note}");
     assert!(
         !note.contains("pack is loading its search model"),

@@ -73,13 +73,13 @@ export default function ljosHook(pi: ExtensionAPI) {
 			tool_input: { command },
 		});
 		const spec = out?.hookSpecificOutput;
-		const reason = spec?.permissionDecisionReason ?? "seat rule";
+		const reason = spec?.permissionDecisionReason ?? "ljos rule";
 		if (spec?.permissionDecision === "deny") return { block: true, reason };
 		if (spec?.permissionDecision === "ask") {
 			// A print-mode run has nobody to ask.
 			if (!ctx.hasUI) return { block: true, reason: `${reason}; needs a person to approve` };
 			try {
-				if (await ctx.ui.confirm("ljos seat rule", `${reason}\n\n${command}`)) return;
+				if (await ctx.ui.confirm("ljos guard", `${reason}\n\n${command}`)) return;
 			} catch {
 				// no dialog: fall through to block
 			}

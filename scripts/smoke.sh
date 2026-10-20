@@ -142,7 +142,7 @@ echo "$named" | grep -q 'alice 0.50, bob 0.50)' || fail "the clones count once"
 # an unrelated one brings back nothing.
 ljos prefer "Run cargo test with rustc 1.88 or newer; rustc 1.83 lacks edition2024." >/dev/null
 failed='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-fail","toolInput":{"command":"cargo test"},"error":"feature edition2024 is required, rustc 1.83"}'
-printf '%s' "$failed" | ljos hook | grep -q 'bears on this failure' || fail "failure recall"
+printf '%s' "$failed" | ljos hook | grep -q 'Remembered about this failure' || fail "failure recall"
 other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolInput":{"command":"npm run build"},"error":"Module not found: react-dom"}'
 [ -z "$(printf '%s' "$other" | ljos hook)" ] || fail "an unrelated failure recalled a memory"
 

@@ -51,47 +51,47 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
     let cases = [
         (
             "git push --force origin main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push -f origin main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push origin +main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push --force-with-lease origin main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push --force-with-lease=main:abc123 origin main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push --force-with-lease origin HEAD:develop",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push --force-with-lease origin +feature",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push origin --delete old",
-            "deleting a remote branch removes what others may hold",
+            "deleting a remote branch removes shared work",
         ),
         (
             "git push origin :old",
-            "deleting a remote branch removes what others may hold",
+            "deleting a remote branch removes shared work",
         ),
         (
             "git push origin :refs/tags/v1.0.0",
-            "deleting a remote branch removes what others may hold",
+            "deleting a remote branch removes shared work",
         ),
         (
             "git push origin +refs/tags/v1.0.0",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push --mirror origin",
@@ -101,7 +101,7 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
     for (line, why) in cases {
         let text = stdout_of(line);
         assert!(
-            text.contains(&format!("ask: {why}")) && text.contains("built-in: dangerous push"),
+            text.contains(&format!("ask: {why}")) && text.contains("(rule: built-in push)"),
             "{line}\n{text}"
         );
         assert!(

@@ -101,7 +101,7 @@ pub fn judge(command: &str) -> Option<super::Rule> {
 
 fn refusal(command: &str, rule: &super::Rule) -> String {
     format!(
-        "the guard says {} on `{command}`: {} (rule `{}`). A wake runs with nobody to ask, so it does not run",
+        "the guard says {} on `{command}`: {} (rule: {}). A wake runs with nobody to ask, so it does not run",
         rule.verdict, rule.reason, rule.pattern
     )
 }

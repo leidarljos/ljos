@@ -210,6 +210,42 @@ fn home_or_cwd_is_temp() -> bool {
     path_is_temp(home.as_deref()) || path_is_temp(cwd.as_deref())
 }
 
+/// Whether `LJOS_OFF` is set to one of its on-switches.
+#[must_use]
+pub fn ljos_is_off() -> bool {
+    ljos_off()
+}
+
+/// `HOME` when it is a temporary directory or sits inside one.
+#[must_use]
+pub fn temp_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| path_is_temp(Some(home.as_path())))
+}
+
+/// Why [`guard_suspended`] holds in this process, in words a person reads
+/// in `ljos doctor`. `None` when the guard is on.
+#[must_use]
+pub fn guard_off_reason() -> Option<String> {
+    if ljos_off() {
+        return Some("off: LJOS_OFF is set".to_string());
+    }
+    if let Some(home) = temp_home() {
+        return Some(format!(
+            "off: HOME ({}) is a temporary directory, and ljos stays out of test sandboxes",
+            home.display()
+        ));
+    }
+    let cwd = std::env::current_dir().ok()?;
+    path_is_temp(Some(cwd.as_path())).then(|| {
+        format!(
+            "off here: {} is a temporary directory, and ljos stays out of test sandboxes",
+            cwd.display()
+        )
+    })
+}
+
 /// Whether `path` is a temporary directory or sits inside one.
 /// A missing path is judged as written, so `/tmpfoo` is not `/tmp`.
 #[must_use]
@@ -6206,7 +6242,7 @@ print(f"id={ident}")
             serde_json::json!({"prompt": "add a function slugify to the helper"}),
         );
         let (note, _) = crate::hook_note(&call, 4);
-        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("Remembered, oldest first"), "{note}");
         assert!(note.contains("slugify"), "{note}");
         assert!(note.contains("git-force-push"), "{note}");
     }
@@ -6271,7 +6307,7 @@ print(f"id={ident}")
         );
         let (note, _) = crate::hook_note(&call, 4);
         assert!(
-            note.contains("What this seat already knows"),
+            note.contains("Remembered, oldest first"),
             "the first prompt recalled nothing: {note}"
         );
         assert!(note.contains("kebab"), "{note}");
@@ -6549,7 +6585,7 @@ print(f"id={ident}")
             serde_json::json!({"prompt": "repair the slugify helper"}),
         );
         let (note, _) = crate::hook_note(&call, 4);
-        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("Remembered, oldest first"), "{note}");
         assert!(note.contains("slugify"), "{note}");
     }
 
@@ -6785,7 +6821,7 @@ print(f"id={ident}")
             serde_json::json!({"prompt": "repair the slugify helper"}),
         );
         let (note, _) = crate::hook_note(&call, 4);
-        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("Remembered, oldest first"), "{note}");
         assert!(note.contains("slugify"), "{note}");
     }
 
@@ -7018,7 +7054,7 @@ print(f"id={ident}")
         let start = crate::session_start_for(Some("agy-next"));
         assert!(!start.contains("no memories here yet"), "{start}");
         let (note, _) = crate::hook_note(&next_call, 4);
-        assert!(note.contains("What this seat already knows"), "{note}");
+        assert!(note.contains("Remembered, oldest first"), "{note}");
         assert!(note.contains("slugify"), "{note}");
     }
 

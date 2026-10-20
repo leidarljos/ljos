@@ -3763,7 +3763,7 @@ if command -v ljos-policyd >/dev/null 2>&1; then
               [ -n "$text" ] && why="$why: $text"
               ;;
           esac
-          printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No seat rule would refuse it. Run \`ljos doctor\`." >&2
+          printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No ljos rule would refuse it. Run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
       esac
       case "$rule" in
@@ -5760,10 +5760,7 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
     let ids = rows.iter().filter_map(|h| h.id.clone()).collect();
     (
-        format!(
-            "What this seat knows that bears on this failure (from the pack, each with its age; `ljos search` for more):\n{}",
-            lines.join("\n")
-        ),
+        format!("{FAILURE_RECALL_HEADER}\n{}", lines.join("\n")),
         ids,
     )
 }
@@ -6461,13 +6458,7 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     if lines.is_empty() {
         return None;
     }
-    Some((
-        format!(
-            "What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):\n{}",
-            lines.join("\n")
-        ),
-        ids,
-    ))
+    Some((format!("{RECALL_HEADER}\n{}", lines.join("\n")), ids))
 }
 
 /// The text a cold prompt is matched on: the claim, plus the title, rule
@@ -6813,10 +6804,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     if lines.is_empty() {
         return (nudge, ids);
     }
-    let mut out = format!(
-        "What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):\n{}",
-        lines.join("\n")
-    );
+    let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
     if !nudge.is_empty() {
         out.push('\n');
         out.push_str(&nudge);
@@ -8950,7 +8938,7 @@ fn offers_approval(reason: &str) -> bool {
 /// push (`LJOS_CITE=`) says the same line does not pass again unchanged.
 fn denial_for_unasked(rule: &Rule, stuck: &str) -> String {
     if offers_approval(&rule.reason) {
-        return format!("{} (seat rule `{}`)", rule.reason, rule.pattern);
+        return format!("{} (ljos rule `{}`)", rule.reason, rule.pattern);
     }
     let (lead, tail) = if rule.reason.contains("LJOS_CITE=") {
         (
@@ -8961,7 +8949,7 @@ fn denial_for_unasked(rule: &Rule, stuck: &str) -> String {
         ("ask the person before running this: ", stuck)
     };
     format!(
-        "{lead}{} (seat rule `{}`).{tail}",
+        "{lead}{} (ljos rule `{}`).{tail}",
         rule.reason, rule.pattern
     )
 }
@@ -9006,7 +8994,7 @@ fn steps_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Strin
         (event, Some(r)) if event == "PreToolUse" || user_rules::mcp_event_denies(event, r) => {
             serde_json::json!({
                 "decision": r.verdict,
-                "reason": format!("{} (seat rule `{}`)", r.reason, r.pattern),
+                "reason": format!("{} (ljos rule `{}`)", r.reason, r.pattern),
             })
         }
         ("PreToolUse", None) => serde_json::json!({"decision": "allow"}),
@@ -9173,7 +9161,7 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
         let mut out = String::new();
         if let Some(r) = verdict {
             out.push_str(&format!(
-                "{}: {} (rule `{}`)\n",
+                "{}: {} (rule: {})\n",
                 r.verdict, r.reason, r.pattern
             ));
         }
@@ -9208,7 +9196,7 @@ pub fn hook_output_ruled(call: &HookCall, context: &str, verdict: Option<&Rule>)
             } else {
                 (
                     r.verdict.as_str(),
-                    format!("{} (seat rule `{}`)", r.reason, r.pattern),
+                    format!("{} (ljos rule `{}`)", r.reason, r.pattern),
                 )
             };
             if call.shape == HookShape::Context {
@@ -9290,7 +9278,7 @@ fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Stri
     match call.event.as_str() {
         "beforeMCPExecution" => {
             if let Some(r) = verdict.filter(|r| user_rules::mcp_event_denies(&call.event, r)) {
-                let reason = format!("{} (seat rule `{}`)", r.reason, r.pattern);
+                let reason = format!("{} (ljos rule `{}`)", r.reason, r.pattern);
                 out.insert("permission".into(), Value::String("deny".into()));
                 out.insert("user_message".into(), Value::String(reason.clone()));
                 out.insert("agent_message".into(), Value::String(reason));
@@ -9310,7 +9298,7 @@ fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Stri
                 }
                 Some(r) => (
                     r.verdict.as_str(),
-                    format!("{} (seat rule `{}`)", r.reason, r.pattern),
+                    format!("{} (ljos rule `{}`)", r.reason, r.pattern),
                 ),
                 None => ("allow", String::new()),
             };
@@ -9359,7 +9347,7 @@ fn runner_env_state(name: &str, env_path: &Path, ready: bool, exists: bool) -> S
             "{name}: {} is stale, an older ljos wrote it; ljos onboard --harness {name}",
             env_path.display()
         ),
-        (false, false) => format!("{name}: no seat env; ljos onboard --harness {name}"),
+        (false, false) => format!("{name}: no ljos env file; ljos onboard --harness {name}"),
     }
 }
 
@@ -10115,9 +10103,38 @@ pub fn normalize_tracker_env() {
     });
 }
 
-/// Printed on stderr. `ljos-policyd` is the TCB when it exists.
+/// The note `ljos_rule` hands an agent over MCP: the call prints a line and
+/// does not check it; `ljos-policyd` is the trusted base when it exists.
+/// The command line does not print it.
 pub const POLICY_TCB: &str =
     "argv law. ljos-policyd is the TCB when present. Reloading a pack is not a check.";
+
+/// The line above the memories a prompt or a command recalls. The hook, the
+/// runners and `ljos policy` all print it.
+pub const RECALL_HEADER: &str = "Remembered, oldest first (`ljos search` for more):";
+
+/// The line above the memories a failed tool call recalls.
+pub const FAILURE_RECALL_HEADER: &str = "Remembered about this failure (`ljos search` for more):";
+
+/// What a prompt hook's JSON answer hands the model, for a person at a
+/// terminal: `hookSpecificOutput.additionalContext`, or the answer as it
+/// came when it is not that JSON. Empty when the hook had nothing to say.
+#[must_use]
+pub fn hook_text(answer: &str) -> String {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return String::new();
+    }
+    match serde_json::from_str::<serde_json::Value>(answer) {
+        Ok(value) => value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .map(str::trim_end)
+            .filter(|text| !text.is_empty())
+            .map(|text| format!("{text}\n"))
+            .unwrap_or_default(),
+        Err(_) => format!("{answer}\n"),
+    }
+}
 
 /// The workspace the seat's memory lives in when nothing names one. The
 /// pack's command line keys a workspace to the repository it stands in;
@@ -10337,10 +10354,13 @@ fn pack_timeout() -> std::time::Duration {
 
 /// Start the default writer when a memory verb could not connect.
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
-/// replaced with the default writer. A temp sandbox and `LJOS_OFF` do not
-/// get a daemon: the process's home is not a seat to write into.
+/// replaced with the default writer. `LJOS_OFF` gets no daemon and no
+/// word. A temporary `HOME` gets no daemon either, since the daemon would
+/// write under a home that is about to vanish, and the person reads why
+/// and how to start it. A temporary working directory under a real `HOME`
+/// starts the writer as any other directory does.
 fn ensure_writer() -> Result<()> {
-    if bookkeep::guard_suspended() {
+    if bookkeep::ljos_is_off() {
         return Ok(());
     }
     if std::env::var("PACKSET_URL").ok().as_deref() == Some("off") {
@@ -10356,6 +10376,13 @@ fn ensure_writer() -> Result<()> {
     }
     if !on_path("packset") {
         bail!("no pack writer is answering, and packset is not on PATH. cargo install --locked packset");
+    }
+    if let Some(home) = bookkeep::temp_home() {
+        bail!(
+            "the memory writer does not start on its own under a temporary HOME ({}); \
+             run `packset ensure` to start it",
+            home.display()
+        );
     }
     run_captured("packset", &["ensure"]).context("packset ensure")?;
     Ok(())
@@ -15885,10 +15912,10 @@ pub fn push_tier_in(args: &[String], facts: &PushFacts, dir: Option<&str>) -> Pu
 /// push runs in, when it is known.
 fn dangerous_push_reason(args: &[String], dir: Option<&str>) -> Option<String> {
     if push_forces(args, dir) {
-        return Some("a force push rewrites what others may hold".into());
+        return Some("a force push rewrites shared history".into());
     }
     if args.iter().any(|a| a == "--delete" || delete_refspec(a)) {
-        return Some("deleting a remote branch removes what others may hold".into());
+        return Some("deleting a remote branch removes shared work".into());
     }
     if args.iter().any(|a| a == "--mirror") {
         return Some("a mirror push overwrites and deletes every ref on the remote".into());
@@ -16967,7 +16994,7 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
             return Some(Rule {
                 pattern: r.pattern.clone(),
                 verdict: "ask".into(),
-                reason: format!("{} ({why}); the person runs this one", r.reason),
+                reason: format!("{} ({why}); the agent asks you first", r.reason),
             });
         }
         if r.verdict == "deny" {
@@ -16975,9 +17002,9 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
         }
     }
     Some(Rule {
-        pattern: "built-in: dangerous push".into(),
+        pattern: "built-in push".into(),
         verdict: "ask".into(),
-        reason: format!("{why}; the person runs this one"),
+        reason: format!("{why}; the agent asks you first"),
     })
 }
 
@@ -18280,9 +18307,10 @@ pub fn local_when(ts: &str) -> String {
 }
 
 /// What `remember` and `prefer` print to a person at a terminal: the
-/// kind and the text, when it comes up for review in local time, and the
-/// first eight characters of its id, which `accept`, `forget` and `graded`
-/// take. A pipe gets [`format_write_ack`].
+/// kind and the text, then on a line of its own the first eight characters
+/// of its id, which `accept`, `forget` and `graded` take, and when it comes
+/// up for review in local time. The text keeps the first line short. A
+/// pipe gets [`format_write_ack`].
 #[must_use]
 pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> String {
     let id = body["id"].as_str().unwrap_or("?");
@@ -18291,9 +18319,9 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
     let due = body["due_at"]
         .as_str()
         .filter(|d| !d.is_empty())
-        .map_or_else(String::new, |d| format!(" Review {}.", when(d)));
+        .map_or_else(String::new, |d| format!(", next review {}", when(d)));
     format!(
-        "remembered ({}): {}{due} id {short}",
+        "remembered ({}): {}\n  id {short}{due}",
         body["kind"].as_str().unwrap_or("?"),
         text.trim()
     )
@@ -18534,10 +18562,22 @@ pub fn doctor() -> Vec<Habitat> {
     out.push(seat_binary_row());
     out.push(git_hooks::doctor_row());
     out.push(policy_row());
+    out.extend(guard_off_row());
     out.push(bypass_row());
     out.push(panes_row());
     out.push(note_queue_row());
     out
+}
+
+/// A row only while the guard is off in this process (`LJOS_OFF`, or a
+/// temporary `HOME` or working directory), so a person who tries ljos in
+/// `/tmp` reads why a command it would stop runs.
+fn guard_off_row() -> Option<Habitat> {
+    bookkeep::guard_off_reason().map(|state| Habitat {
+        name: "guard",
+        state,
+        ok: false,
+    })
 }
 
 /// Which tool would open a persona's pane: the first of the declared and
@@ -18923,7 +18963,14 @@ pub fn doctor_seat() -> Vec<Habitat> {
             },
             Err(e) => Habitat {
                 name: "pack",
-                state: format!("{} does not answer: {e}", client.base()),
+                state: match bookkeep::temp_home() {
+                    Some(_) => format!(
+                        "{} does not answer: {e}. Under a temporary HOME the writer does not \
+                         start on its own; run `packset ensure`",
+                        client.base()
+                    ),
+                    None => format!("{} does not answer: {e}", client.base()),
+                },
                 ok: false,
             },
         },
@@ -19627,7 +19674,7 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))
     {
         "info"
-    } else if WARN_ROWS.contains(&row.name) {
+    } else if WARN_ROWS.contains(&row.name) || row.name == "guard" {
         "warn"
     } else {
         "no"
@@ -19668,23 +19715,29 @@ fn and_list(names: &[&str]) -> String {
 
 fn summary_line(down: &[&str], off: usize) -> String {
     let mut line = if down.is_empty() {
-        "ljos is ready: memory, the tracker and the command guard answer.".to_string()
+        "ljos is ready: memory, tracker and command guard work.".to_string()
     } else {
+        let names: Vec<&str> = down.iter().copied().map(plain_part).collect();
         format!(
             "ljos is not ready: {} {} not answer.",
-            and_list(down),
+            and_list(&names),
             if down.len() == 1 { "does" } else { "do" }
         )
     };
     if off > 0 {
-        line.push_str(&format!(
-            " {off} optional part{} {} off.",
-            if off == 1 { "" } else { "s" },
-            if off == 1 { "is" } else { "are" }
-        ));
+        line.push_str(" Optional extras: `ljos doctor --all`.\n");
+    } else {
+        line.push_str(" Every check: `ljos doctor --all`.\n");
     }
-    line.push_str(" `ljos doctor --all` lists every row.\n");
     line
+}
+
+/// A doctor row's name as the summary line says it: `pack` is the memory.
+fn plain_part(name: &str) -> &str {
+    match name {
+        "pack" => "memory",
+        other => other,
+    }
 }
 
 /// The short doctor: the summary line, then only the rows that need
@@ -24041,7 +24094,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
             Some(tcb) if !(tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some()) => Some(tcb),
-            None if policyd_required() => Some("deny\tTCB required".to_string()),
+            None if policyd_required() => Some("deny\tljos-policyd required".to_string()),
             _ => None,
         }
     };
@@ -24150,7 +24203,7 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     // words again drops the quotes a commit message needs.
     if let Some(rule) = static_guard(line) {
         let text = format!(
-            "{line}\n{}: {} (rule `{}`)\n",
+            "{line}\n{}: {} (rule: {})\n",
             rule.verdict, rule.reason, rule.pattern
         );
         if rule.verdict == "deny" {
@@ -24322,7 +24375,7 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     (!answered && policyd_required()).then(|| Rule {
         pattern: "ljos-policyd".into(),
         verdict: "deny".into(),
-        reason: "TCB required: POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
+        reason: "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
                  shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
             .to_string(),
     })
@@ -24412,7 +24465,7 @@ fn guard_note_of(text: &str) -> Option<String> {
 pub fn unhealthy_note(why: &str) -> String {
     format!(
         "the ljos guard is unhealthy ({why}) and did not judge this call, so it is allowed. \
-         No seat rule would refuse it. Run `ljos doctor`."
+         No ljos rule would refuse it. Run `ljos doctor`."
     )
 }
 
@@ -26604,8 +26657,15 @@ mod tests {
             std::env::set_var("HOME", dir.path());
         }
         assert!(super::tcb_verdict("git branch -D gone").is_none());
-        assert!(super::ensure_writer().is_ok());
+        let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
+        assert!(
+            refused.to_string().contains("temporary HOME")
+                && refused.to_string().contains("packset ensure"),
+            "{refused}"
+        );
         assert!(!marker.exists(), "a temp HOME started the pack daemon");
+        let off = crate::bookkeep::guard_off_reason().expect("the guard is off");
+        assert!(off.contains("temporary directory"), "{off}");
         unsafe {
             for (k, v) in &saved {
                 match v {
@@ -33913,7 +33973,7 @@ mod tests {
         let short = format_doctor_short(&rows);
         assert_eq!(
             short,
-            "ljos is ready: memory, the tracker and the command guard answer. 1 optional part is off. `ljos doctor --all` lists every row.\n"
+            "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n"
         );
         assert!(format_doctor(&rows).contains("host key"));
     }
@@ -33936,7 +33996,7 @@ mod tests {
         // pack, with its fix.
         assert_eq!(
             lines[0],
-            "ljos is not ready: pack does not answer. 1 optional part is off. `ljos doctor --all` lists every row."
+            "ljos is not ready: memory does not answer. Optional extras: `ljos doctor --all`."
         );
         assert_eq!(lines.len(), 2, "{short}");
         assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
@@ -33961,7 +34021,7 @@ mod tests {
         let short = compact_sitting(full, "Software-x");
         assert_eq!(
             short,
-            "ljos is ready: memory, the tracker and the command guard answer. 1 optional part is off. `ljos doctor --all` lists every row.\n\
+            "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n\
 encoder down: the pack ranks by words alone\n\
 2 due; the soonest: abc\n\
 claimed Software-x for ljos-bot@ux-fix\n\
@@ -34340,7 +34400,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(stale.contains("is stale"), "{stale}");
         assert!(stale.contains("ljos onboard --harness grokbot"), "{stale}");
         let none = super::runner_env_state("grokbot", path, false, false);
-        assert!(none.contains("no seat env"), "{none}");
+        assert!(none.contains("no ljos env file"), "{none}");
     }
 
     #[test]
@@ -34490,7 +34550,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let when = |d: &str| local_when_in(d, &zone);
         assert_eq!(
             format_write_ack_plain(&body, &when),
-            "remembered (preference): Plain words in denials. Review 2026-10-12 09:00 -05:00. id 922d35cd"
+            "remembered (preference): Plain words in denials.\n  id 922d35cd, next review 2026-10-12 09:00 -05:00"
         );
         // A pipe keeps the tab row.
         assert!(
@@ -34526,6 +34586,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!out.contains("must not appear"));
         assert!(!out.contains("NOTES.md"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hook_text_is_the_context_a_prompt_hands_the_model() {
+        let json = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Remembered, oldest first (`ljos search` for more):\n- [preference, today] Tag it.\n"}}"#;
+        assert_eq!(
+            hook_text(json),
+            "Remembered, oldest first (`ljos search` for more):\n- [preference, today] Tag it.\n"
+        );
+        assert_eq!(hook_text(""), "");
+        assert_eq!(hook_text("{}"), "");
+        assert_eq!(hook_text("plain words\n"), "plain words\n");
+    }
+
+    #[test]
+    fn first_run_lines_fit_a_100_column_terminal() {
+        for line in [RECALL_HEADER, FAILURE_RECALL_HEADER] {
+            assert!(line.chars().count() <= 100, "{line}");
+        }
+        let cases: [(&[&str], usize); 4] = [
+            (&[], 0),
+            (&[], 6),
+            (&["pack"], 6),
+            (&["pack", "ljos-policyd"], 1),
+        ];
+        for (down, off) in cases {
+            let line = summary_line(down, off);
+            assert!(line.trim_end().chars().count() <= 100, "{line}");
+            assert!(!line.contains("pack"), "{line}");
+        }
     }
 
     #[test]
@@ -35244,9 +35334,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ] {
             let gated = gate_push(None, line, None);
             assert!(
-                gated.as_ref().is_some_and(|r| {
-                    r.verdict == "ask" && r.pattern == "built-in: dangerous push"
-                }),
+                gated
+                    .as_ref()
+                    .is_some_and(|r| { r.verdict == "ask" && r.pattern == "built-in push" }),
                 "{line} -> {gated:?}"
             );
         }
@@ -36940,7 +37030,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(note.contains("unhealthy"), "{note}");
         assert!(note.contains("refused without a reason"), "{note}");
         assert!(
-            !note.contains("(seat rule"),
+            !note.contains("(ljos rule"),
             "a missing reason must not render as a seat refusal: {note}"
         );
         let mut joins = Vec::new();

@@ -200,7 +200,7 @@ Computing Base (TCB)
 
 #+begin_src console
 $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (seat rule `ljos-policyd`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"}}
 #+end_src
 
 An =ask= rule uses the caller's approval UI when that UI is supported.
@@ -254,7 +254,7 @@ $ echo "cargo test --release" | ljos hook
 - [lesson] The lme dense run needs 40G and sessions only; windows and sessions ran past four hours.
 $ ljos policy cargo test --release
 cargo test --release
-What this seat already knows that bears on this ...
+Remembered, oldest first (`ljos search` for more):
 #+end_src
 
 * Choose the branches a lease push asks on

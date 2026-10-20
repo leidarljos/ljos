@@ -1,0 +1,1 @@
+`docs/demo/demo.sh` records the README demo with no step off screen. Its fresh HOME is made outside /tmp, so the writer starts on the first memory command and the guard is on, and the recall step uses `ljos hook --prompt --text`. The README's sample preference is now `Push a tag with git push origin TAG; --follow-tags skips lightweight tags.`, which fits a 100-column terminal.

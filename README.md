@@ -20,14 +20,14 @@ and Antigravity's `agy`.
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
-ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
 
 The installer downloads each program from its GitHub release, checks it
 against the published SHA-256 sum, and builds from source with `cargo` where a
 platform has no release. It then runs `ljos onboard` for every coding agent it
-finds and shows the guard refusing a force push. Its programs are ljos,
+finds and shows the guard asking before a force push. Its programs are ljos,
 packset (memory), vissue (the tracker), deedar (records of work), claimdag
 (who works on what), ljos-policyd (the command check) and ljos-consensus
 (voting), plus `packset-embed`, the encoder for meaning-based search.
@@ -36,7 +36,7 @@ a paraphrase that shares no word with the memory. Where a platform has no
 encoder build, the installer warns and goes on without it. `--with-embed` is
 still accepted and changes nothing. `ljos doctor` names any part that is missing.
 `--version 0.29.0` installs that ljos release instead of the latest, and `--pin packset=0.14.0` holds another repository at a version; a pinned version with no release for the platform builds that version's crate, never a newer one.
-With the `gh` CLI signed in, the installer also checks each tarball's GitHub build attestation and prints whether it verified; `--attest` stops the install when one does not.
+The installer also checks each tarball's GitHub build attestation, with `gh` 2.49 or newer or with `cosign`, and sums up in one line; `--attest` stops the install when one is missing or does not verify.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
@@ -49,7 +49,7 @@ Read the script before you run it; it is
 ```
 cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard                                # every coding tool found on this machine: MCP server, hooks and skill
-ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
 ```
 
@@ -63,9 +63,12 @@ Start a new session and ask for something the preference bears on, such as
 tagging a release. Before the model reads the prompt, the hook adds:
 
 ```
-What this seat already knows that bears on this (from the pack, each with its age, lessons oldest first; `ljos search` for more):
-- [preference, today] Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.
+Remembered, oldest first (`ljos search` for more):
+- [preference, today] Push a tag with git push origin TAG; --follow-tags skips lightweight tags.
 ```
+
+To read the same text in a terminal, without the runner's JSON:
+`echo "how do I push the v0.32.0 tag?" | ljos hook --prompt --text`.
 
 When the agent then reaches for `git push --force origin main`, the runner
 asks before it runs. `ljos-policyd` answers first, with the rules it ships,
@@ -73,7 +76,7 @@ and asks the same way for `--force-with-lease` onto `main`, `master`,
 `develop` or a protected branch:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (seat rule `git-force-push`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
 ```
 
 `sh -c "cd repo && git push -f origin main"` gets the same answer. A command
@@ -81,7 +84,7 @@ only your own rule covers, such as `terraform destroy -auto-approve`, meets
 that rule:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (seat rule `terraform destroy*`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (ljos rule `terraform destroy*`)"}}
 ```
 
 The hook shows what you write from the moment it is written: a preference
@@ -118,9 +121,10 @@ runner's `hook_events` in `~/.config/ljos/harnesses.toml`.
   (`ljos rule`), tried on each command a line runs, plus a guard that keeps agents from rewriting the
   checker's own binaries and hook files. An ordinary `git push` of a branch
   is allowed, whichever remote it names and whether or not that remote's
-  owner can be read, and so is `git push -u origin BRANCH`. Force
-  (`--force`, `-f`, a `+refspec`), deleting a remote branch, and pushing
-  tags ask by default, with or without a seat rule. A `--force-with-lease`
+  owner can be read, and so is `git push -u origin BRANCH`. A tag push
+  runs as a branch push does. Force (`--force`, `-f`, a `+refspec`),
+  deleting a remote branch or tag, and `--mirror` ask by default, with or
+  without a rule of your own. A `--force-with-lease`
   push, with or without `--force-if-includes`, asks onto `main`, `master`,
   `develop` or a branch the checkout protects (`protected_branches` in
   `ljos.toml` or `.ljos/gates.toml`), and runs onto any other branch. With

@@ -76,7 +76,7 @@ The command prints the decision. It does not start the pane.
 #+begin_src console
 $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"echo"}}' | ljos hook
 $ echo '{"hookEventName":"pre_tool_use","toolInput":{"command":"git push --force"}}' | ljos hook
-{"decision":"deny","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (seat rule `ljos-policyd`)"},"reason":"git-force-push: it rewrites shared history, so the agent asks you first (seat rule `ljos-policyd`)"}
+{"decision":"deny","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"},"reason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"}
 $ echo '{"hook_event_name":"PostToolUse","session_id":"s"}' | ljos hook
 #+end_src
 
