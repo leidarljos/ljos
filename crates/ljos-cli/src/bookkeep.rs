@@ -37,7 +37,9 @@ const BOOK_EVENTS: &[&str] = &[
 ];
 
 /// File tools. The first one in a session files the claim. Names are matched
-/// without regard to case, so `edit` and `Edit` are the same tool.
+/// without regard to case, so `edit` and `Edit` are the same tool. agy 1.4.3
+/// writes a new file with `write_file` (arguments `Path`, `Content`,
+/// `Overwrite`) and changes one with `edit_file`.
 const EDIT_TOOLS: &[&str] = &[
     "Edit",
     "Write",
@@ -46,6 +48,7 @@ const EDIT_TOOLS: &[&str] = &[
     "StrReplace",
     "ApplyPatch",
     "write_to_file",
+    "write_file",
     "replace_file_content",
     "edit_file",
     "NotebookEdit",
@@ -4200,6 +4203,25 @@ mod tests {
 
     fn lock() -> crate::EnvLock {
         crate::test_env_lock()
+    }
+
+    /// willma-20261020f w4, w8 and w12: agy 1.4.3's `write_file` filed no
+    /// claim, and the claim came later with `edit_file` or a shell command.
+    /// Every agy file tool those cells sent is an edit; a read is not.
+    #[test]
+    fn every_agy_file_tool_is_an_edit() {
+        for name in [
+            "write_file",
+            "edit_file",
+            "write_to_file",
+            "replace_file_content",
+        ] {
+            let raw =
+                serde_json::json!({"toolCall": {"name": name, "args": {"Path": "/w/slug.py"}}});
+            assert!(is_edit(&raw, name), "{name}");
+        }
+        let read = serde_json::json!({"toolCall": {"name": "view_file", "args": {}}});
+        assert!(!is_edit(&read, "view_file"));
     }
 
     struct Restore {

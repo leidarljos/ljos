@@ -969,6 +969,47 @@ fn the_session_start_line_names_the_claimed_issue() {
     );
 }
 
+/// willma-20261020f w4, w8 and w12: agy 1.4.3 wrote `slug.py` with
+/// `write_file`, the after hook answered `{}`, and no claim was filed until a
+/// later `edit_file` or shell command. This is that payload, with no `cwd`
+/// field, as agy sends it; the write itself files the claim.
+#[test]
+fn an_agy_write_file_files_the_claim() {
+    let (_dir, hab) = habitat();
+    let cwd = hab.repo.clone();
+    let file = cwd.join("slug.py");
+    std::fs::write(&file, "import re\n").unwrap();
+    let payload = serde_json::json!({
+        "artifactDirectoryPath": hab.home.join(".gemini/antigravity-cli/brain/agy-write"),
+        "conversationId": "agy-write",
+        "error": "",
+        "modelName": "gemini-3.1-pro-low",
+        "stepIdx": 8,
+        "toolCall": {
+            "name": "write_file",
+            "args": {"Content": "import re\n", "Overwrite": false, "Path": file}
+        },
+        "workspacePaths": [cwd],
+    })
+    .to_string();
+    ljos_cmd(
+        &hab,
+        &["hook", "--event", "PostToolUse"],
+        &payload,
+        &[("LJOS_TRACK_WORK", "on")],
+    );
+    let log = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap_or_default();
+    assert_eq!(
+        log.lines().filter(|l| l.starts_with("create ")).count(),
+        1,
+        "one issue filed by write_file:\n{log}"
+    );
+    assert!(
+        log.lines().any(|l| l.starts_with("claim ")),
+        "no claim after write_file:\n{log}"
+    );
+}
+
 #[test]
 fn an_agy_idle_stop_finishes_and_a_mid_loop_stop_does_not() {
     let (_dir, hab) = habitat();
