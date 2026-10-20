@@ -2539,7 +2539,10 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
     let known = seat_roster(&slug);
-    if !known.contains(&slug) {
+    // The initialized connection names its own seat even when this tracker
+    // has only historical holders. A different name still needs the roster.
+    let connected = ANNOUNCED.get().is_some_and(|seat| seat.seat == slug);
+    if !connected && !known.contains(&slug) {
         let guess = mail::closest_seat(&slug, &known)
             .map(|seat| format!(" Did you mean {seat}?"))
             .unwrap_or_default();
