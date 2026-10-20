@@ -9690,16 +9690,16 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 pub(crate) fn isolated_config_home() -> &'static Path {
     use std::sync::OnceLock;
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../target")
-            .join(format!("ljos-isolated-config-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
+        let dir = tempfile::Builder::new()
+            .prefix("ljos-isolated-config-")
+            .tempdir()
+            .expect("isolated config directory");
+        std::fs::create_dir_all(dir.path().join("ljos")).expect("isolated config dir");
         dir
     })
-    .as_path()
+    .path()
 }
 
 fn named_env(key: &str) -> Option<String> {
