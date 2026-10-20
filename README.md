@@ -393,8 +393,8 @@ guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
 Every listed tool costs its description and schema on every session: about
-6,100 tokens for the core set against 15,000 for all forty-seven (o200k_base
-count). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
+8,200 tokens for the core set against 17,800 for all forty-nine (o200k_base
+count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads
 it. The server also has the protocol at `ljos://protocol`, the cards
