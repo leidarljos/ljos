@@ -5756,10 +5756,7 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     let lines: Vec<String> = rows.iter().map(|h| hit_line(h, &now)).collect();
     let ids = rows.iter().filter_map(|h| h.id.clone()).collect();
     (
-        format!(
-            "{FAILURE_RECALL_HEADER}\n{}",
-            lines.join("\n")
-        ),
+        format!("{FAILURE_RECALL_HEADER}\n{}", lines.join("\n")),
         ids,
     )
 }
@@ -6457,13 +6454,7 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     if lines.is_empty() {
         return None;
     }
-    Some((
-        format!(
-            "{RECALL_HEADER}\n{}",
-            lines.join("\n")
-        ),
-        ids,
-    ))
+    Some((format!("{RECALL_HEADER}\n{}", lines.join("\n")), ids))
 }
 
 /// The text a cold prompt is matched on: the claim, plus the title, rule
@@ -6809,10 +6800,7 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     if lines.is_empty() {
         return (nudge, ids);
     }
-    let mut out = format!(
-        "{RECALL_HEADER}\n{}",
-        lines.join("\n")
-    );
+    let mut out = format!("{RECALL_HEADER}\n{}", lines.join("\n"));
     if !nudge.is_empty() {
         out.push('\n');
         out.push_str(&nudge);
@@ -35053,9 +35041,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ] {
             let gated = gate_push(None, line, None);
             assert!(
-                gated.as_ref().is_some_and(|r| {
-                    r.verdict == "ask" && r.pattern == "built-in push"
-                }),
+                gated
+                    .as_ref()
+                    .is_some_and(|r| { r.verdict == "ask" && r.pattern == "built-in push" }),
                 "{line} -> {gated:?}"
             );
         }

@@ -578,10 +578,7 @@ server.serve_forever()
         warming.contains("pack is loading its search model"),
         "{warming}"
     );
-    assert!(
-        !warming.contains("Remembered, oldest first"),
-        "{warming}"
-    );
+    assert!(!warming.contains("Remembered, oldest first"), "{warming}");
     ljos(
         &hab,
         &claude(
@@ -651,10 +648,7 @@ server.serve_forever()
         &[("PACKSET_URL", url.as_str())],
     );
     let recalled = context(&recalled.stdout);
-    assert!(
-        recalled.contains("Remembered, oldest first"),
-        "{recalled}"
-    );
+    assert!(recalled.contains("Remembered, oldest first"), "{recalled}");
     assert!(recalled.contains("readme"), "{recalled}");
     let _ = pack_proc.kill();
     let _ = pack_proc.wait();

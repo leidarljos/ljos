@@ -76,8 +76,7 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
     for (line, why) in cases {
         let text = stdout_of(line);
         assert!(
-            text.contains(&format!("ask: {why}"))
-                && text.contains("(rule: built-in push)"),
+            text.contains(&format!("ask: {why}")) && text.contains("(rule: built-in push)"),
             "{line}\n{text}"
         );
         assert!(
