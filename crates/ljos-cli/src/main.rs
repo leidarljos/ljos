@@ -1180,7 +1180,25 @@ fn run_command() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    match Cli::parse().cmd {
+    let cmd = Cli::parse().cmd;
+    // A subagent with no seat would hold under its process tree ("bash").
+    // The commands that name a holder refuse instead.
+    if matches!(
+        cmd,
+        Cmd::Seat { .. }
+            | Cmd::Sitting { .. }
+            | Cmd::Claim { .. }
+            | Cmd::Note { .. }
+            | Cmd::Finish { .. }
+            | Cmd::Release { .. }
+            | Cmd::Complete { .. }
+            | Cmd::File { .. }
+            | Cmd::Deed { .. }
+    ) && ljos_cli::unseated_subagent()
+    {
+        bail!("{}", ljos_cli::SUBAGENT_NO_SEAT);
+    }
+    match cmd {
         Cmd::Remember {
             text,
             as_persona,

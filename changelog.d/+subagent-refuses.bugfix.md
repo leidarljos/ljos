@@ -1,0 +1,1 @@
+A subagent with no seat is told so where it sees it. The git hook prints `not booked` on stdout, which the installed hook shows (it drops stderr), and `ljos seat`, `sitting`, `claim`, `note`, `finish`, `release`, `complete`, `file` and `deed` refuse with the `LJOS_SEAT` to export instead of holding under the process tree (`bash`).

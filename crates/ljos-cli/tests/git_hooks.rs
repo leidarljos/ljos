@@ -1165,14 +1165,28 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
     let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", "sand-subagent-002")]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
+    let said = String::from_utf8_lossy(&out.stdout);
     let vlog = vissue_log(&hab.tracker);
     assert!(!vlog.contains("grokbot-sand-sub"), "{vlog}");
     assert!(
         !vlog.contains("claim"),
         "a subagent commit claimed:\n{vlog}"
     );
-    assert!(err.contains("not booked"), "{err}");
-    assert!(err.contains("LJOS_SEAT"), "{err}");
+    // The installed hook prints stdout and drops stderr.
+    assert!(said.contains("not booked"), "{said}\n{err}");
+    assert!(said.contains("LJOS_SEAT"), "{said}");
+    let seat = hab.ljos_in(
+        &hab.repo,
+        &["seat"],
+        None,
+        &[
+            ("LJOS_SEAT", ""),
+            ("CURSOR_CONVERSATION_ID", "sand-subagent-002"),
+        ],
+    );
+    let seat_err = String::from_utf8_lossy(&seat.stderr);
+    assert!(!seat.status.success(), "ljos seat named a subagent seat");
+    assert!(seat_err.contains("no seat of its own"), "{seat_err}");
 }
 
 /// With `LJOS_SEAT` exported, a git hook holds under the holder `ljos seat`

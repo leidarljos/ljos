@@ -349,7 +349,8 @@ fn book_commit(hook: &str) -> Result<()> {
     // grokbot-<id8> fallback, the commit stays unbooked; a subagent is told.
     let Some(seat) = crate::git_hook_seat() else {
         if crate::unseated_subagent() {
-            eprintln!(
+            // Stdout: the installed hook shows that line and drops stderr.
+            println!(
                 "ljos: commit {} not booked: this subagent has no seat; export LJOS_SEAT=<your seat> (the parent's) to book it",
                 &head[..head.len().min(12)]
             );

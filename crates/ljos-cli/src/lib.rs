@@ -2922,11 +2922,21 @@ pub fn grokbot_seat_name() -> Option<String> {
 /// say so instead of booking under `grokbot-sand-sub`.
 #[must_use]
 pub fn unseated_subagent() -> bool {
+    if named_var("LJOS_SEAT").is_some()
+        || named_var("VISSUE_AGENT").is_some()
+        || named_var("LJOS_HOLD").is_some()
+    {
+        return false;
+    }
     std::env::var("CURSOR_CONVERSATION_ID")
         .ok()
         .map(|id| id.trim().to_string())
         .is_some_and(|id| subagent_id(&id) && mapped_seat(&seats_file(), &id).is_none())
 }
+
+/// What a seat-bound command says to a subagent that has no seat.
+pub const SUBAGENT_NO_SEAT: &str =
+    "this subagent has no seat of its own; export LJOS_SEAT=<the parent's seat> and run it again";
 
 /// A subagent conversation id. Every one starts `sand-sub`, so its first
 /// eight characters named every subagent `grokbot-sand-sub`.
