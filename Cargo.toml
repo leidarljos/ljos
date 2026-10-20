@@ -23,3 +23,9 @@ serde_json = "1"
 toml = "0.8"
 which = "7"
 vissue-core = "0.20"
+
+[patch.crates-io]
+# ureq 2.12.1's tls feature pulls webpki-roots 0.26.11, which RUSTSEC-2026-0381
+# still flags. The patch depends on webpki-roots 1 instead.
+ureq = { path = "vendor/ureq" }
+
