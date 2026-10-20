@@ -286,11 +286,10 @@ pub fn session_cast_refusal(
         ));
     }
     for note in notes {
-        if let Some(sig) = ballot_sig::parse_note(note) {
-            let other = session_key(
-                sig.harness.as_deref().unwrap_or(""),
-                sig.nonce.as_deref().unwrap_or(""),
-            );
+        // Any ballot note counts, whatever its choice text: a choice with a
+        // space (`beside binary`) binds its session like a one-word choice.
+        if let Some((harness, nonce)) = ballot_sig::note_session(note) {
+            let other = session_key(&harness, &nonce);
             // The first ballot this session cast on the question stands.
             // A later one, including the same persona recast an hour on,
             // is a second voice. The voter name is not the session.
@@ -1007,6 +1006,43 @@ mod tests {
         std::env::remove_var("VISSUE_ROOT");
         std::env::remove_var("LJOS_HARNESS_SESSION");
         std::env::remove_var("LJOS_PROCESS_NONCE");
+    }
+
+    #[test]
+    fn a_choice_with_a_space_is_still_this_sessions_one_ballot() {
+        // The panel eval's unscored case on 7e21d3c: session spaced-1 cast
+        // `beside binary` as seat-a, then `xdg home`, and both landed.
+        let k = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let first =
+            ballot_sig::sign_bound(&k, "panel-spcd", "seat-a", "beside binary", "spaced-1", "-");
+        let again = session_cast_refusal(
+            "panel-spcd",
+            "spaced-1",
+            "seat-a",
+            std::slice::from_ref(&first),
+        )
+        .expect("a second cast from spaced-1 was let through");
+        assert!(
+            again.contains("already cast") && again.contains("Nothing was cast"),
+            "{again}"
+        );
+        assert!(session_cast_refusal(
+            "panel-spcd",
+            "other-sess",
+            "seat-b",
+            std::slice::from_ref(&first)
+        )
+        .is_none());
+        // A drawer that already holds both, as the eval left it: the first
+        // ballot counts and the later one is not a second voice.
+        let later = ballot_sig::sign_bound(&k, "panel-spcd", "seat-a", "xdg home", "spaced-1", "-");
+        let rows = [serde_json::json!({"agent": "seat-a", "choice": "xdg home"})];
+        let (counted, _) = tally_of(&rows, &[later, first], &std::collections::BTreeSet::new());
+        assert_eq!(counted.len(), 1, "{counted:?}");
+        assert_eq!(counted[0]["choice"], "beside binary");
+        // A ballot note that does not parse still names its session.
+        let odd = "ballot-sig: seat-a beside binary ab cd spaced-1 -".to_string();
+        assert!(session_cast_refusal("panel-spcd", "spaced-1", "seat-a", &[odd]).is_some());
     }
 
     #[test]

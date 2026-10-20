@@ -243,6 +243,54 @@ fn one_session_of_n_seats_is_refused_at_the_cast() {
 }
 
 #[test]
+fn a_choice_with_a_space_is_one_ballot_per_session() {
+    // The panel eval's unscored case on 7e21d3c: session spaced-1 cast
+    // `beside binary` as seat-a, then `xdg home`, and both landed.
+    let world = World::new();
+    let issue = "panel-spcd";
+    let first = world.ljos(
+        "seat-a",
+        "spaced-1",
+        &["vote", issue, "--for", "beside binary", "--used", "none"],
+    );
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    assert!(said.contains("session spaced-1"), "{said}");
+    let again = world.ljos(
+        "seat-a",
+        "spaced-1",
+        &["vote", issue, "--for", "xdg home", "--used", "none"],
+    );
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast") && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    let notes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("notes.json")).unwrap())
+            .unwrap();
+    let sigs: Vec<&str> = notes[issue]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["note"].as_str())
+        .filter(|n| n.starts_with("ballot-sig: "))
+        .collect();
+    assert_eq!(sigs.len(), 1, "{sigs:?}");
+    assert!(
+        sigs[0].starts_with("ballot-sig: seat-a beside binary "),
+        "{sigs:?}"
+    );
+    let tally = world.ljos("seat-b", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("seat-a  beside binary"), "{said}");
+}
+
+#[test]
 fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
     let world = World::new();
     let session = "sand-subagent-fcdb9c57-9988-7d91-4311-9fc5e42f7529";

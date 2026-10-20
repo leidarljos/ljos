@@ -67,30 +67,87 @@ pub struct SigNote {
 }
 
 /// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
-/// `HARNESS NONCE` when the ballot is bound to a session.
+/// `HARNESS NONCE` when the ballot is bound to a session. The choice may
+/// hold spaces (`beside binary`): the key and signature are found by their
+/// hex lengths, counted from the end, and the choice is the text between
+/// the voter and the key. A note whose key is not 64 hex digits parses only
+/// in the four- or six-field shape.
 #[must_use]
 pub fn parse_note(note: &str) -> Option<SigNote> {
     let rest = note.trim().strip_prefix(SIG_NOTE)?;
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    match parts.as_slice() {
-        [voter, choice, key, sig] => Some(SigNote {
-            voter: (*voter).to_string(),
-            choice: (*choice).to_string(),
-            key: (*key).to_string(),
-            sig: (*sig).to_string(),
-            harness: None,
-            nonce: None,
-        }),
-        [voter, choice, key, sig, harness, nonce] => Some(SigNote {
-            voter: (*voter).to_string(),
-            choice: (*choice).to_string(),
-            key: (*key).to_string(),
-            sig: (*sig).to_string(),
-            harness: Some((*harness).to_string()),
-            nonce: Some((*nonce).to_string()),
-        }),
-        _ => None,
+    let at = spans(rest);
+    let n = at.len();
+    if n < 4 {
+        return None;
     }
+    let tok = |i: usize| &rest[at[i].0..at[i].1];
+    let key_at = |i: usize| is_hex_len(tok(i), 64) && is_hex_len(tok(i + 1), 128);
+    // Where the key sits, and whether a session follows the signature.
+    let (k, bound) = if n >= 6 && key_at(n - 4) {
+        (n - 4, true)
+    } else if key_at(n - 2) {
+        (n - 2, false)
+    } else if n == 6 {
+        (2, true)
+    } else if n == 4 {
+        (2, false)
+    } else {
+        return None;
+    };
+    let choice = rest[at[1].0..at[k - 1].1].trim();
+    Some(SigNote {
+        voter: tok(0).to_string(),
+        choice: choice.to_string(),
+        key: tok(k).to_string(),
+        sig: tok(k + 1).to_string(),
+        harness: bound.then(|| tok(k + 2).to_string()),
+        nonce: bound.then(|| tok(k + 3).to_string()),
+    })
+}
+
+/// The session a ballot note binds, as [`crate::panel_gate::session_key`]
+/// reads it. A note that does not parse but has six or more fields still
+/// names its session in the last two, so the cast gate holds whatever the
+/// choice text is. `None` when the note is not a ballot signature.
+#[must_use]
+pub fn note_session(note: &str) -> Option<(String, String)> {
+    if let Some(sig) = parse_note(note) {
+        return Some((
+            sig.harness.unwrap_or_default(),
+            sig.nonce.unwrap_or_default(),
+        ));
+    }
+    let rest = note.trim().strip_prefix(SIG_NOTE)?;
+    let at = spans(rest);
+    let n = at.len();
+    if n < 6 {
+        return None;
+    }
+    let tok = |i: usize| rest[at[i].0..at[i].1].to_string();
+    Some((tok(n - 2), tok(n - 1)))
+}
+
+/// Byte ranges of the whitespace-separated fields of `text`.
+fn spans(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if let Some(b) = start.take() {
+                out.push((b, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(b) = start {
+        out.push((b, text.len()));
+    }
+    out
+}
+
+fn is_hex_len(text: &str, len: usize) -> bool {
+    text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
@@ -823,6 +880,59 @@ mod tests {
         let new = sign_with(&a, "d-1", "a", "hold");
         let old = sign_with(&a, "d-1", "a", "ship");
         assert!(seat_problems("d-1", &[("a", "hold")], &[new, old], &pins).is_empty());
+    }
+
+    #[test]
+    fn a_choice_with_a_space_parses_whole_and_verifies() {
+        // The panel eval's unscored case: session spaced-1 cast
+        // `beside binary` as seat-a, then `xdg home`.
+        let k = key(5);
+        let bound = sign_bound(&k, "panel-spcd", "seat-a", "beside binary", "spaced-1", "-");
+        let parsed = parse_note(&bound).expect("a bound note with a spaced choice");
+        assert_eq!(parsed.voter, "seat-a");
+        assert_eq!(parsed.choice, "beside binary");
+        assert_eq!(parsed.harness.as_deref(), Some("spaced-1"));
+        assert_eq!(parsed.nonce.as_deref(), Some("-"));
+        assert!(verifies("panel-spcd", &parsed));
+        assert_eq!(
+            note_session(&bound),
+            Some(("spaced-1".to_string(), "-".to_string()))
+        );
+        // v1, three words: six fields, and still not read as a session.
+        let plain = sign_with(&k, "panel-spcd", "seat-a", "xdg home dir");
+        let parsed = parse_note(&plain).expect("a v1 note with a spaced choice");
+        assert_eq!(parsed.choice, "xdg home dir");
+        assert_eq!(parsed.harness, None);
+        assert!(verifies("panel-spcd", &parsed));
+        // Two spaces inside the choice stay two, so the signature holds.
+        let wide = sign_bound(&k, "panel-spcd", "seat-a", "xdg  home", "spaced-1", "-");
+        let parsed = parse_note(&wide).unwrap();
+        assert_eq!(parsed.choice, "xdg  home");
+        assert!(verifies("panel-spcd", &parsed));
+        let pins: BTreeMap<String, String> = [(
+            "seat-a".to_string(),
+            hex::encode(k.verifying_key().to_bytes()),
+        )]
+        .into();
+        assert!(seat_problems(
+            "panel-spcd",
+            &[("seat-a", "beside binary")],
+            &[bound],
+            &pins
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_note_that_does_not_parse_still_names_its_session() {
+        let odd = "ballot-sig: seat-a beside binary ab cd spaced-1 -";
+        assert_eq!(parse_note(odd), None);
+        assert_eq!(
+            note_session(odd),
+            Some(("spaced-1".to_string(), "-".to_string()))
+        );
+        assert_eq!(note_session("ballot-sig: seat-a ship ab"), None);
+        assert_eq!(note_session("finding: seat-a: nit: name the unit"), None);
     }
 
     #[test]
