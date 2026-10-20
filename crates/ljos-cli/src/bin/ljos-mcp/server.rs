@@ -237,6 +237,34 @@ fn supply_issue(arguments: &mut serde_json::Map<String, serde_json::Value>, sess
     }
 }
 
+/// Tools that run when the call's seat cannot be resolved: the guard,
+/// the consent form for a command the guard held, and tools that only
+/// read. Nothing here claims, sits, books, mails or writes under a seat,
+/// so none of them needs one. Every other tool still refuses an unknown
+/// seat.
+const SEAT_FREE_TOOLS: &[&str] = &[
+    "ljos_guard_check",
+    "ljos_request_approval",
+    "ljos_policy",
+    "ljos_recall",
+    "ljos_search",
+    "ljos_conflicts",
+    "ljos_evidence",
+    "ljos_current",
+    "ljos_timeline",
+    "ljos_cards",
+    "ljos_consensus",
+    "ljos_brief",
+    "ljos_doctor",
+    "ljos_personas",
+    "ljos_playbooks",
+    "ljos_due",
+];
+
+fn runs_without_seat(name: &str) -> bool {
+    SEAT_FREE_TOOLS.contains(&name)
+}
+
 /// The call's `seat`, when the bot passed one.
 fn seat_argument(
     args: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -3220,13 +3248,22 @@ impl ServerHandler for LjosServer {
             tokio::task::spawn_blocking(move || ljos_cli::resolve_call_seat(seat_text.as_deref()))
                 .await
                 .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
+        // The guard, the approval form and the reading tools act under no
+        // seat, so a seat this tracker does not know never stops them.
         let seat = match resolved {
-            Ok(seat) => seat,
+            Ok(seat) => Some(seat),
+            Err(e) if runs_without_seat(&name) => {
+                ljos_cli::bookkeep::log_line(&format!("{name}: ran without a seat: {e}"));
+                None
+            }
             Err(e) => {
                 return Ok(attach_next(&name, as_tool_error(refused(e))?));
             }
         };
-        bind_seat_env(&seat.seat);
+        let seated = seat.is_some();
+        if let Some(seat) = &seat {
+            bind_seat_env(&seat.seat);
+        }
         // A server spawned per call has no idle thread left running. The
         // seat's sitting is on disk: finish it when the last call is past
         // the idle window, then claim on a write.
@@ -3235,6 +3272,9 @@ impl ServerHandler for LjosServer {
         let args = request.arguments.clone();
         let writes = ljos_cli::bookkeep::mcp_tool_writes(&name);
         let _ = tokio::task::spawn_blocking(move || {
+            if !seated {
+                return;
+            }
             ljos_cli::bookkeep::resume_seat();
             if writes {
                 ljos_cli::bookkeep::before_mcp_write(&tool, args.as_ref());
@@ -3251,15 +3291,17 @@ impl ServerHandler for LjosServer {
             arguments.remove("seat");
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let response = ljos_cli::ballot_sig::scope_session(
-            session,
-            ljos_cli::as_thread(
-                thread,
-                ljos_cli::with_call_seat(seat, Self::tool_router().call(tcc)),
-            ),
-        )
-        .await
-        .or_else(as_tool_error)?;
+        let call = Self::tool_router().call(tcc);
+        let seated_call = async move {
+            match seat {
+                Some(seat) => ljos_cli::with_call_seat(seat, call).await,
+                None => call.await,
+            }
+        };
+        let response =
+            ljos_cli::ballot_sig::scope_session(session, ljos_cli::as_thread(thread, seated_call))
+                .await
+                .or_else(as_tool_error)?;
         Ok(attach_next(&name, response))
     }
 
@@ -3619,6 +3661,46 @@ mod tests {
             );
         });
         clear_call_queue();
+    }
+
+    /// A tool that runs with no seat only reads, or is the consent form
+    /// for a command the guard held. A claim, a sitting, mail and every
+    /// writer still need the seat.
+    #[test]
+    fn only_readers_and_the_guard_run_without_a_seat() {
+        let tools = LjosServer::tool_router().list_all();
+        for name in SEAT_FREE_TOOLS {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == *name)
+                .unwrap_or_else(|| panic!("{name} is not a tool"));
+            let read_only = tool
+                .annotations
+                .as_ref()
+                .and_then(|hints| hints.read_only_hint)
+                == Some(true);
+            assert!(
+                read_only || *name == "ljos_request_approval",
+                "{name} writes and runs without a seat"
+            );
+            assert!(!ljos_cli::bookkeep::mcp_tool_writes(name), "{name}");
+        }
+        assert!(runs_without_seat("ljos_guard_check"));
+        for name in [
+            "ljos_claim",
+            "ljos_sitting",
+            "ljos_start",
+            "ljos_finish",
+            "ljos_release",
+            "ljos_send",
+            "ljos_inbox",
+            "ljos_reply",
+            "ljos_vote",
+            "ljos_note",
+            "ljos_remember",
+        ] {
+            assert!(!runs_without_seat(name), "{name}");
+        }
     }
 
     /// Every tool is annotated, and the writers are the ones the contract names.
