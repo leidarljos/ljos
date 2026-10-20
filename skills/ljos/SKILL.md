@@ -147,7 +147,10 @@ the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `ljos sync --key` prints this machine's public key
 for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
 A repository with no `.ljos/sync.toml` is not synced, and the sitting and
-finish say nothing about it; only `ljos sync` names the missing file. An
+finish say nothing about it; only `ljos sync` names the missing file.
+The sitting and finish follow `LJOS_TRACKER_GIT`: `commit` commits the log
+and pushes nothing, and `off` leaves the tracker alone. `ljos sync` by hand
+always pulls and pushes. An
 atom goes to the scope its `scope:NAME` entity names, else the machine's
 `default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
 takes the scope of the repository its issue lives in, and a

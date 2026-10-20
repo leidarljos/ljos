@@ -180,7 +180,11 @@ every finish, so the seat remembers whether or not somebody asks it to.
 When the tracker is a git checkout, the claim and the finish each commit the
 ticket's `issues.org` (that file only) and push it, so another host sees
 both. `LJOS_TRACKER_GIT=commit` keeps it local; `off` skips
-it. `ljos doctor` counts the commits origin lacks, and it fails the tracker
+it. A tracker whose `.ljos/sync.toml` names a sync scope also gets this
+machine's memory from each finish, sealed with age to that file's recipients,
+committed as `.ljos/atoms/<host>.jsonl.age` and pushed with the branch.
+`LJOS_TRACKER_GIT` governs that commit and push too. A tracker with no
+`.ljos/sync.toml` is not synced. `ljos doctor` counts the commits origin lacks, and it fails the tracker
 row when that count stays above zero through the push wait.
 
 ## Claude Code plugin
