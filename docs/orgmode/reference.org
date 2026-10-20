@@ -356,7 +356,8 @@ forgotten with =ljos forget ID=, and the next push asks the forge again.
 |---+---|
 | a branch, to the person's own account, no other collaborator, no releases or tags | nothing; it runs |
 | a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name | =LJOS_CITE=ISSUE= where the seats that voted on =ISSUE= agree and one of them is not the seat pushing (persona and Jev ballots neither pass nor block it; open or closed does not matter); a deed cited alone is refused, since the pushing seat can mint one; the pass is noted on =ISSUE= |
-| a remote the person cannot push to, =--tags=, =--follow-tags=, =--mirror=, =--all=, =refs/tags/=, a force | the person runs it |
+| a remote the person cannot push to, =--mirror=, deleting a remote branch or tag, a force | the person runs it |
+| a tag (=--tags=, =--follow-tags=, =refs/tags/=) | nothing; it runs, as a branch push does |
 
 The remote is the one the command names, else the branch's upstream,
 else =origin=, read in the directory a =cd= or =git -C= before the push

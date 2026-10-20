@@ -1,7 +1,8 @@
 //! `ljos policy` on a push, with no seat rules and the ask pack switched off.
 //! Force, a `+refspec`, a `--force-with-lease` push onto main, master or
-//! develop, deleting a remote branch, and pushing tags ask. A plain branch
-//! push and a lease push onto a feature branch stay allowed.
+//! develop, deleting a remote branch or tag, and a mirror push ask. A plain
+//! branch push, a tag push and a lease push onto a feature branch stay
+//! allowed.
 
 use std::process::Command;
 
@@ -84,10 +85,17 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
             "git push origin :old",
             "deleting a remote branch removes what others may hold",
         ),
-        ("git push --tags", "tags and mirrors publish releases"),
         (
-            "git push --follow-tags origin main",
-            "tags and mirrors publish releases",
+            "git push origin :refs/tags/v1.0.0",
+            "deleting a remote branch removes what others may hold",
+        ),
+        (
+            "git push origin +refs/tags/v1.0.0",
+            "a force push rewrites what others may hold",
+        ),
+        (
+            "git push --mirror origin",
+            "a mirror push overwrites and deletes every ref on the remote",
         ),
     ];
     for (line, why) in cases {
@@ -114,6 +122,12 @@ fn a_plain_push_stays_allowed() {
         "git push --force-with-lease --force-if-includes origin feature/x",
         "git push --force-with-lease=feature:abc123 origin HEAD:feature",
         "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
+        "git push --tags",
+        "git push --follow-tags",
+        "git push --follow-tags origin main",
+        "git push origin v1.0.0",
+        "git push origin tag v1.0.0",
+        "git push origin refs/tags/v1.0.0",
     ] {
         let text = stdout_of(line);
         let heads = verdict_heads(&text);

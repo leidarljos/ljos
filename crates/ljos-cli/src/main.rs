@@ -2337,8 +2337,9 @@ fn run_command() -> Result<()> {
             } else {
                 None
             };
-            // An ordinary branch push is allowed. Force, a +refspec, a
-            // remote-branch delete and a tag push ask by default.
+            // An ordinary branch or tag push is allowed. Force, a
+            // +refspec, a remote-branch delete and a mirror push ask by
+            // default.
             let gated = ljos_cli::redirect_seat_verb(
                 ljos_cli::gate_push(
                     ljos_cli::ruled_verdict(&rules, &call.cue).as_ref(),

@@ -15851,10 +15851,10 @@ pub struct PushFacts {
     pub released: bool,
 }
 
-/// What the gate makes of a push, from its arguments. A branch push is
-/// free on any remote: an unreadable owner, a foreign account, a shared
-/// repository and a release do not ask or deny. Force, a remote-branch
-/// delete and a tag push are the person's to run. Pure, so the ladder is
+/// What the gate makes of a push, from its arguments. A branch or tag push
+/// is free on any remote: an unreadable owner, a foreign account, a shared
+/// repository and a release do not ask or deny. Force, a remote-branch or
+/// tag delete and a mirror push are the person's to run. Pure, so the ladder is
 /// tested without a repository. `facts` stays so a caller that already
 /// looked the remote up still compiles; it does not change the tier.
 #[must_use]
@@ -15873,12 +15873,16 @@ pub fn push_tier_in(args: &[String], facts: &PushFacts, dir: Option<&str>) -> Pu
     PushTier::Free
 }
 
-/// Force, deleting a remote branch, or publishing tags. A
+/// Force, deleting a remote branch, or a mirror push. A
 /// `--force-with-lease` push is force when [`lease_asks`] says so: onto
 /// main, master, develop or a protected branch, or onto a branch nobody can
 /// read. Anything else, including `-u`, a plain refspec, a lease push onto
 /// a feature branch and `--force-if-includes` alone, is an ordinary branch
-/// push. `dir` is the checkout the push runs in, when it is known.
+/// push. A tag push (`--tags`, `--follow-tags`, `refs/tags/v1`, `tag v1`)
+/// is ordinary too: it adds refs and replaces none, and a moved tag needs
+/// a force the first check already asks for. `--mirror` overwrites and
+/// deletes every ref on the remote, so it asks. `dir` is the checkout the
+/// push runs in, when it is known.
 fn dangerous_push_reason(args: &[String], dir: Option<&str>) -> Option<String> {
     if push_forces(args, dir) {
         return Some("a force push rewrites what others may hold".into());
@@ -15886,13 +15890,8 @@ fn dangerous_push_reason(args: &[String], dir: Option<&str>) -> Option<String> {
     if args.iter().any(|a| a == "--delete" || delete_refspec(a)) {
         return Some("deleting a remote branch removes what others may hold".into());
     }
-    if args.iter().any(|a| {
-        matches!(a.as_str(), "--tags" | "--follow-tags" | "--mirror") || a.contains("refs/tags/")
-    }) || args
-        .windows(2)
-        .any(|w| w[0] == "tag" && !w[1].starts_with('-'))
-    {
-        return Some("tags and mirrors publish releases".into());
+    if args.iter().any(|a| a == "--mirror") {
+        return Some("a mirror push overwrites and deletes every ref on the remote".into());
     }
     None
 }
@@ -16130,8 +16129,8 @@ pub fn repo_fact_text(owner: &str, repo: &str, facts: &Value) -> String {
         "an organisation's or another account's"
     };
     format!(
-        "{owner}/{repo} is {whose} repository; a branch push runs, and a force push, \
-         a remote-branch delete, or a tag push is the person's to run."
+        "{owner}/{repo} is {whose} repository; a branch or tag push runs, and a force \
+         push, a remote-branch delete, or a mirror push is the person's to run."
     )
 }
 
@@ -16939,7 +16938,8 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// The verdict the push gate makes of a line: `None` lets it run. An
 /// ordinary branch push is allowed, including when a seat rule says
 /// `git push*` and when the remote's owner cannot be read. Force, a
-/// `+refspec`, deleting a remote branch, and pushing tags ask by default.
+/// `+refspec`, deleting a remote branch, and a mirror push ask by default.
+/// A tag push is ordinary.
 /// That ask does not wait for a seat rule. A seat rule that denies the
 /// dangerous push still denies it. A rule about some other command on the
 /// same line is left as it is when the push itself is ordinary.
@@ -35130,8 +35130,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 "{access:?}"
             );
         }
+        assert_eq!(push_tier(&args(&["--tags"]), &unread), PushTier::Free);
+        assert_eq!(
+            push_tier(&args(&["--follow-tags", "origin", "main"]), &unread),
+            PushTier::Free
+        );
         assert!(matches!(
-            push_tier(&args(&["--tags"]), &unread),
+            push_tier(&args(&["--mirror", "origin"]), &unread),
             PushTier::Person(_)
         ));
         assert!(matches!(
@@ -35216,7 +35221,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let v = repo_facts_in(&[older, fact.clone()], "haozeke", "notes").unwrap();
         assert_eq!(access_of(&v), Access::Exclusive, "the latest claim answers");
         assert!(repo_facts_in(&[fact], "haozeke", "other").is_none());
-        assert!(repo_fact_text("HaoZeke", "notes", &v).contains("a branch push runs"));
+        assert!(repo_fact_text("HaoZeke", "notes", &v).contains("a branch or tag push runs"));
         let deny = Rule {
             pattern: "x".into(),
             verdict: "deny".into(),
@@ -35234,8 +35239,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "git push origin +main",
             "git push origin --delete old",
             "git push origin :old",
-            "git push --tags",
-            "git push --follow-tags origin main",
+            "git push --mirror origin",
+            "git push origin :refs/tags/v1",
         ] {
             let gated = gate_push(None, line, None);
             assert!(
@@ -35252,6 +35257,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         )
         .is_none());
         assert!(gate_push(None, "git push -u origin feature/x", None).is_none());
+        for tags in [
+            "git push --tags",
+            "git push --follow-tags",
+            "git push --follow-tags origin main",
+            "git push origin v1.0.0",
+            "git push origin tag v1.0.0",
+            "git push origin refs/tags/v1.0.0",
+        ] {
+            assert!(gate_push(None, tags, None).is_none(), "{tags}");
+        }
         let never = Rule {
             pattern: "*--force*".into(),
             verdict: "deny".into(),
