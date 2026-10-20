@@ -18,6 +18,8 @@ and Antigravity's `agy`.
 
 ## Five minutes
 
+[![Install to first recall](docs/demo/install-to-recall.gif)](docs/demo/install-to-recall.cast)
+
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
