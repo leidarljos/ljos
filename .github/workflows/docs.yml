@@ -2,7 +2,7 @@ name: docs
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, guard-lease-20261020]
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
     paths: ["docs/**", ".github/workflows/docs.yml", ".github/render-og-png.sh", ".impeccable/**"]
   # A pull request builds the docs and checks them; it never publishes.

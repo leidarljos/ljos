@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop, main, guard-lease-20261020]
   pull_request:
     branches: [develop, main]
   workflow_dispatch:
@@ -60,7 +60,7 @@ jobs:
   linux-archive:
     name: linux archive
     needs: test
-    if: github.event_name == 'push' && (github.ref_name == 'develop' || github.ref_name == 'main')
+    if: github.event_name == 'push' && (github.ref_name == 'develop' || github.ref_name == 'main' || github.ref_name == 'guard-lease-20261020')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
