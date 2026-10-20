@@ -1,0 +1,18 @@
+[package]
+name = "claimdag"
+version = "0.7.1"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/leidarljos/claimdag"
+homepage = "https://leidarljos.github.io/claimdag/"
+description = "CAS claim and complete on a DAG"
+publish = false
+
+# capnp 0.27 fixes RUSTSEC-2025-0143. schema/claimdag.capnp is the 0.7.1
+# schema, so a work.bin written by the crates.io crate still opens.
+[dependencies]
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+capnp = "0.27"
+memmap2 = "0.9"
+libc = "0.2"

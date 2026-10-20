@@ -685,20 +685,11 @@ dependencies = [
 
 [[package]]
 name = "capnp"
-version = "0.20.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053b81915c2ce1629b8fb964f578b18cb39b23ef9d5b24120d0dfc959569a1d9"
-dependencies = [
- "embedded-io 0.6.1",
-]
-
-[[package]]
-name = "capnp"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93f7ce2b1b49d58b2b754f9146ef07e3244f9b67e7563bc1292fbd5f01b142f0"
 dependencies = [
- "embedded-io 0.7.1",
+ "embedded-io",
 ]
 
 [[package]]
@@ -742,10 +733,8 @@ dependencies = [
 [[package]]
 name = "claimdag"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "275ab1028d44e4fd3fa9dd4ab5e793fc3b4ad3fe46514f9650da42002761bd2d"
 dependencies = [
- "capnp 0.20.6",
+ "capnp",
  "libc",
  "memmap2",
  "xxhash-rust",
@@ -1296,12 +1285,6 @@ name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
-
-[[package]]
-name = "embedded-io"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "embedded-io"
@@ -5606,7 +5589,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4db22f2c47705bbb393932276a84eb0c442d582a1c73326457ae23956cdae4"
 dependencies = [
  "anyhow",
- "capnp 0.27.2",
+ "capnp",
  "chrono",
  "daggy",
  "fs2",

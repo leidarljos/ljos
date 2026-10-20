@@ -1,0 +1,523 @@
+//! What the graph promises, probed from outside the crate.
+//!
+//! The rules in the README are claims about what cannot happen: a claim is
+//! CAS, terminal is sticky, a dependency is a hard one. These ask whether the
+//! paths that do not enforce a rule can be used to get around the paths that
+//! do.
+
+use std::collections::HashSet;
+
+use claimdag::{WorkFields, WorkGraph, WorkId, WorkKind, WorkRole, WorkStatus};
+
+fn actor(n: u64) -> WorkId {
+    WorkId { hi: n, lo: n }
+}
+
+/// A node with no dependencies, ready to claim.
+fn ready(graph: &mut WorkGraph, summary: &str) -> WorkId {
+    graph
+        .upsert(
+            WorkId::ZERO,
+            WorkFields {
+                kind: WorkKind::Task,
+                status: WorkStatus::Ready,
+                role: WorkRole::Implementor,
+                parent: WorkId::ZERO,
+                actor: actor(1),
+                summary,
+            },
+        )
+        .expect("upsert")
+}
+
+#[test]
+fn a_live_claim_survives_an_upsert() {
+    // upsert owns metadata and the three open statuses; claim owns the live
+    // ones. If upsert can put a claimed node back to Todo, one agent can take
+    // work another is holding without the claim ever failing.
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "the work");
+    let holder = actor(7);
+    graph.claim(node, holder, None).expect("claim");
+
+    let demoted = graph.upsert(
+        node,
+        WorkFields {
+            kind: WorkKind::Task,
+            status: WorkStatus::Todo,
+            role: WorkRole::Implementor,
+            parent: WorkId::ZERO,
+            actor: actor(1),
+            summary: "",
+        },
+    );
+    assert!(
+        demoted.is_err(),
+        "upsert put a claimed node back to Todo: {:?}",
+        graph.get(node).map(|n| (n.status, n.assignee))
+    );
+}
+
+#[test]
+fn only_the_assignee_starts_the_work() {
+    // complete refuses a stranger. set_running is the same access question and
+    // should answer the same way, or the ledger records the wrong agent as
+    // having started somebody else's node.
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "the work");
+    let holder = actor(7);
+    let stranger = actor(9);
+    graph.claim(node, holder, None).expect("claim");
+
+    assert!(
+        graph.set_running(node, stranger).is_err(),
+        "a stranger marked another agent's claim as running"
+    );
+    graph.set_running(node, holder).expect("the holder may");
+}
+
+#[test]
+fn a_terminal_summary_is_not_rewritable_by_a_stranger() {
+    // complete returns early for a terminal node and rewrites the summary
+    // before it ever reaches the assignee check.
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "the work");
+    let holder = actor(7);
+    graph.claim(node, holder, None).expect("claim");
+    graph
+        .complete(node, WorkStatus::Done, "what happened", holder, None)
+        .expect("complete");
+
+    let rewritten = graph.complete(node, WorkStatus::Done, "something else", actor(9), None);
+    let summary = graph
+        .get(node)
+        .map(|n| n.summary.clone())
+        .unwrap_or_default();
+    assert!(
+        rewritten.is_err() || summary == "what happened",
+        "a stranger rewrote a finished node's summary to {summary:?}"
+    );
+}
+
+#[test]
+fn ready_means_the_dependencies_are_done() {
+    // Status is what a reader trusts to decide what is workable. Setting it
+    // directly past an unsatisfied dependency makes it a lie, and claim
+    // rejecting the claim later does not help the reader who believed it.
+    let mut graph = WorkGraph::default();
+    let blocker = ready(&mut graph, "first");
+    let blocked = ready(&mut graph, "second");
+    graph.link_dep(blocker, blocked, actor(1)).expect("link");
+    assert_eq!(
+        graph.get(blocked).map(|n| n.status),
+        Some(WorkStatus::Todo),
+        "linking an unfinished dependency should take it out of Ready"
+    );
+
+    let forged = graph.upsert(
+        blocked,
+        WorkFields {
+            kind: WorkKind::Task,
+            status: WorkStatus::Ready,
+            role: WorkRole::Implementor,
+            parent: WorkId::ZERO,
+            actor: actor(1),
+            summary: "",
+        },
+    );
+    let status = graph.get(blocked).map(|n| n.status);
+    assert!(
+        forged.is_err() || status != Some(WorkStatus::Ready),
+        "a node with an unfinished dependency reports {status:?}"
+    );
+}
+
+#[test]
+fn a_cycle_cannot_be_built_by_any_route() {
+    // The direct case has a test. This is the long way round.
+    let mut graph = WorkGraph::default();
+    let a = ready(&mut graph, "a");
+    let b = ready(&mut graph, "b");
+    let c = ready(&mut graph, "c");
+    graph.link_dep(a, b, actor(1)).expect("b depends on a");
+    graph.link_dep(b, c, actor(1)).expect("c depends on b");
+    assert!(
+        graph.link_dep(c, a, actor(1)).is_err(),
+        "closed a three-node loop"
+    );
+    graph.verify().expect("the graph still verifies");
+}
+
+#[test]
+fn completing_a_dependency_readies_what_waited_on_it() {
+    let mut graph = WorkGraph::default();
+    let blocker = ready(&mut graph, "first");
+    let blocked = ready(&mut graph, "second");
+    graph.link_dep(blocker, blocked, actor(1)).expect("link");
+    let holder = actor(7);
+    graph.claim(blocker, holder, None).expect("claim");
+    graph
+        .complete(blocker, WorkStatus::Done, "", holder, None)
+        .expect("complete");
+    assert_eq!(
+        graph.get(blocked).map(|n| n.status),
+        Some(WorkStatus::Ready),
+        "the dependent was not promoted"
+    );
+}
+
+#[test]
+fn a_failed_dependency_does_not_ready_what_waited_on_it() {
+    // Done is the only terminal that satisfies a dependency: work that waited
+    // on something which failed is not workable, it is stuck.
+    let mut graph = WorkGraph::default();
+    let blocker = ready(&mut graph, "first");
+    let blocked = ready(&mut graph, "second");
+    graph.link_dep(blocker, blocked, actor(1)).expect("link");
+    let holder = actor(7);
+    graph.claim(blocker, holder, None).expect("claim");
+    graph
+        .complete(blocker, WorkStatus::Failed, "", holder, None)
+        .expect("complete");
+    assert_eq!(
+        graph.get(blocked).map(|n| n.status),
+        Some(WorkStatus::Todo),
+        "a failed dependency readied its dependent"
+    );
+    assert!(graph.claim(blocked, actor(8), None).is_err());
+}
+
+/// The zero actor used to mean "anyone" to release and complete, and it was
+/// the default on the command line. Now it is refused, and acting for nobody
+/// is its own call that the ledger names.
+#[test]
+fn the_zero_actor_is_refused_and_force_is_explicit() {
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "held");
+    let holder = actor(7);
+    let held_gen = graph.claim(node, holder, None).expect("claim");
+    let release = graph
+        .release(node, WorkId::ZERO)
+        .expect_err("zero released");
+    assert!(release.starts_with("release: no actor"), "{release}");
+    let done = graph
+        .complete(node, WorkStatus::Done, "", WorkId::ZERO, None)
+        .expect_err("zero completed");
+    assert!(done.starts_with("complete: no actor"), "{done}");
+    assert_eq!(graph.get(node).map(|n| n.assignee), Some(holder));
+
+    let (generation, was) = graph.release_forced(node).expect("forced release");
+    assert_eq!(was, holder);
+    assert!(
+        generation > held_gen,
+        "a forced release moves the generation"
+    );
+    assert_eq!(graph.get(node).map(|n| n.assignee), Some(WorkId::ZERO));
+
+    let next = actor(8);
+    let fresh = graph.claim(node, next, None).expect("claim again");
+    assert!(
+        graph
+            .complete_forced(node, WorkStatus::Done, "", Some(held_gen))
+            .is_err(),
+        "a forced complete skipped the fencing token"
+    );
+    let was = graph
+        .complete_forced(node, WorkStatus::Done, "", Some(fresh))
+        .expect("forced complete");
+    assert_eq!(was, next);
+}
+
+/// Done says the work is finished. A node whose dependency is still open is
+/// not, so `done` is refused and the refusal names what is open. Giving up
+/// with `failed` or `cancelled` does not need the dependency.
+#[test]
+fn done_waits_for_the_dependencies() {
+    let mut graph = WorkGraph::default();
+    let first = ready(&mut graph, "first");
+    let second = ready(&mut graph, "second");
+    let third = ready(&mut graph, "third");
+    graph.link_dep(first, second, actor(1)).expect("link");
+    let early = graph.complete(second, WorkStatus::Done, "", actor(7), None);
+    let err = early.expect_err("done went through with its dependency open");
+    assert!(
+        err.starts_with("complete: deps unfinished"),
+        "unexpected refusal: {err}"
+    );
+    assert!(
+        err.contains(&first.to_hex()),
+        "{err} does not name the dependency"
+    );
+    assert!(err.contains("(ready)"), "{err} does not give its status");
+    assert_eq!(graph.get(second).map(|n| n.status), Some(WorkStatus::Todo));
+
+    graph.link_dep(third, second, actor(1)).expect("link");
+    graph
+        .complete(second, WorkStatus::Cancelled, "dropped", actor(7), None)
+        .expect("cancel does not wait on dependencies");
+
+    let holder = actor(8);
+    graph.claim(first, holder, None).expect("claim");
+    graph
+        .complete(first, WorkStatus::Done, "", holder, None)
+        .expect("a node with no dependencies finishes");
+}
+
+/// The parent chain is a forest. A dependency edge is refused when it would
+/// close a loop, and the parent edge has to be refused for the same reason:
+/// every reader that draws the tree, or walks up from a node to find its root,
+/// runs forever on a chain that comes back to where it started.
+#[test]
+fn a_node_cannot_become_its_own_ancestor() {
+    let mut graph = WorkGraph::default();
+    let root = ready(&mut graph, "land the adapter");
+    let kid = graph
+        .upsert(
+            WorkId::ZERO,
+            WorkFields {
+                kind: WorkKind::Task,
+                status: WorkStatus::Todo,
+                role: WorkRole::Unset,
+                parent: root,
+                actor: actor(1),
+                summary: "write the tree",
+            },
+        )
+        .expect("child");
+
+    let point_at = |graph: &mut WorkGraph, id: WorkId, parent: WorkId| {
+        graph.upsert(
+            id,
+            WorkFields {
+                kind: WorkKind::Unset,
+                status: WorkStatus::Todo,
+                role: WorkRole::Unset,
+                parent,
+                actor: actor(1),
+                summary: "",
+            },
+        )
+    };
+
+    assert!(point_at(&mut graph, root, root).is_err(), "own parent");
+    assert!(point_at(&mut graph, root, kid).is_err(), "two-node loop");
+    assert_eq!(graph.get(root).expect("root").parent, WorkId::ZERO);
+    assert_eq!(graph.get(kid).expect("kid").parent, root);
+    graph.verify().expect("still a forest");
+}
+
+/// Reparenting sideways is ordinary and must keep working: the check refuses a
+/// loop, not a move.
+#[test]
+fn a_node_can_be_moved_under_a_different_parent() {
+    let mut graph = WorkGraph::default();
+    let first = ready(&mut graph, "land the adapter");
+    let second = ready(&mut graph, "write the tree");
+    let leaf = ready(&mut graph, "verify the tree");
+
+    let reparent = |graph: &mut WorkGraph, id: WorkId, parent: WorkId| {
+        graph
+            .upsert(
+                id,
+                WorkFields {
+                    kind: WorkKind::Unset,
+                    status: WorkStatus::Todo,
+                    role: WorkRole::Unset,
+                    parent,
+                    actor: actor(1),
+                    summary: "",
+                },
+            )
+            .expect("reparent");
+    };
+
+    reparent(&mut graph, leaf, first);
+    assert_eq!(graph.get(leaf).expect("leaf").parent, first);
+    reparent(&mut graph, leaf, second);
+    assert_eq!(graph.get(leaf).expect("leaf").parent, second);
+    graph.verify().expect("still a forest");
+}
+
+/// A worker that dies holding a claim must not take the node with it.
+///
+/// Without a lease the node stays `Claimed` forever with nobody on it, and the
+/// dead worker's id stays busy forever too, because occupancy allows one held
+/// node per assignee. One crash would cost a node and an identity permanently.
+#[test]
+fn a_claim_that_goes_quiet_comes_back() {
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "the work");
+    let holder = actor(7);
+    graph.claim(node, holder, None).expect("claim");
+
+    // Still held while the lease is alive.
+    assert!(graph.reclaim(3600).is_empty(), "reclaimed a live claim");
+    assert_eq!(graph.get(node).expect("node").status, WorkStatus::Claimed);
+
+    // A zero lease is every claim being past it, which is how this is tested
+    // without waiting: the graph's clock is the wall clock.
+    let handed = graph.reclaim(0);
+    assert_eq!(handed, vec![node]);
+    let back = graph.get(node).expect("node");
+    assert_eq!(back.status, WorkStatus::Ready);
+    assert!(back.assignee.is_zero(), "still assigned to the dead holder");
+
+    // And the identity is free again, which it was not before.
+    let other = ready(&mut graph, "more work");
+    graph
+        .claim(other, holder, None)
+        .expect("the holder is free");
+}
+
+/// The holder that wakes up after losing its lease cannot finish the work.
+///
+/// The assignee check alone does not stop it: a reclaim clears the assignee,
+/// and a cleared assignee is exactly what lets anybody speak for a node. The
+/// generation is the fence.
+#[test]
+fn a_holder_that_lost_its_lease_is_fenced_out() {
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "the work");
+    let holder = actor(7);
+    let held_gen = graph.claim(node, holder, None).expect("claim");
+
+    graph.reclaim(0);
+
+    // The token it was given no longer matches, so the stale finish is
+    // refused, and the node is still there for whoever takes it next.
+    let stale = graph.complete(node, WorkStatus::Done, "did it", holder, Some(held_gen));
+    assert!(stale.is_err(), "a fenced holder finished the work");
+    assert_eq!(graph.get(node).expect("node").status, WorkStatus::Ready);
+
+    // The next holder finishes with its own token.
+    let next = actor(8);
+    let fresh = graph.claim(node, next, None).expect("claim");
+    graph
+        .complete(node, WorkStatus::Done, "did it", next, Some(fresh))
+        .expect("the live holder finishes");
+}
+
+/// Renewal keeps a claim without changing hands, so the token stays good.
+#[test]
+fn renewing_holds_the_lease_without_moving_the_generation() {
+    let mut graph = WorkGraph::default();
+    let node = ready(&mut graph, "the work");
+    let holder = actor(7);
+    let held_gen = graph.claim(node, holder, None).expect("claim");
+
+    assert_eq!(graph.renew(node, holder).expect("renew"), held_gen);
+    // A stranger cannot renew somebody else's lease.
+    assert!(graph.renew(node, actor(9)).is_err());
+    // And the token still finishes the work.
+    graph
+        .complete(node, WorkStatus::Done, "", holder, Some(held_gen))
+        .expect("the renewed holder finishes");
+}
+
+/// `claim_next` guarantees the single-live-claim invariant per assignee across
+/// automated balanced dispatches.
+#[test]
+fn claim_next_respects_single_holder_occupancy_invariant() {
+    let mut graph = WorkGraph::default();
+    let n1 = ready(&mut graph, "task 1");
+    let n2 = ready(&mut graph, "task 2");
+    let worker = actor(42);
+
+    let (claimed1, gen1) = graph
+        .claim_next(worker, WorkRole::Implementor, 1)
+        .expect("claim 1");
+    assert_eq!(gen1, 2);
+    assert!(claimed1 == n1 || claimed1 == n2);
+
+    let err = graph
+        .claim_next(worker, WorkRole::Implementor, 1)
+        .expect_err("second claim must be refused");
+    assert!(err.contains("assignee busy"), "{err}");
+
+    // Completing frees the worker to claim again
+    graph
+        .complete(claimed1, WorkStatus::Done, "done", worker, Some(gen1))
+        .expect("complete");
+
+    let (claimed2, gen2) = graph
+        .claim_next(worker, WorkRole::Implementor, 1)
+        .expect("claim 2 after complete");
+    assert_ne!(claimed1, claimed2);
+    assert_eq!(gen2, 2);
+}
+
+/// Eight workers that read the ready list and then claim its head take one
+/// node between them. Eight that claim next under the directory lock take
+/// eight.
+#[test]
+fn eight_workers_claiming_next_at_once_take_eight_nodes() {
+    let dir = std::env::temp_dir().join(format!("claimdag-next-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut graph = WorkGraph::default();
+    for n in 0..8 {
+        ready(&mut graph, &format!("task {n}"));
+    }
+    graph.save_dir(&dir).expect("save");
+
+    let heads: Vec<WorkId> = (0..8).map(|_| graph.ready_view()[0].id).collect();
+    let won = heads
+        .iter()
+        .zip(10u64..)
+        .filter(|(head, n)| graph.claim(**head, actor(*n), None).is_ok())
+        .count();
+    assert_eq!(won, 1);
+
+    let taken: Vec<WorkId> = std::thread::scope(|s| {
+        let workers: Vec<_> = (20u64..28)
+            .map(|n| {
+                let dir = &dir;
+                s.spawn(move || {
+                    let _lock = claimdag::lock_dir(dir).expect("lock");
+                    let mut graph = WorkGraph::load_dir(dir);
+                    let (node, _) = graph
+                        .claim_next(actor(n), WorkRole::Implementor, 1)
+                        .expect("claim next");
+                    graph.save_dir(dir).expect("save");
+                    node
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().expect("worker"))
+            .collect()
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(taken.iter().collect::<HashSet<_>>().len(), 8, "{taken:?}");
+}
+
+/// A snapshot that does not parse stops a writer. The writer's old view of
+/// it was an empty graph, so the next save kept only the node being written
+/// and every other claim was gone.
+#[test]
+fn a_writer_refuses_a_snapshot_it_cannot_read() {
+    let dir = std::env::temp_dir().join(format!("claimdag-torn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Nothing there yet is a cold start, and a writer gets an empty graph.
+    assert_eq!(WorkGraph::load_for_write(&dir).unwrap().list().len(), 0);
+
+    let mut graph = WorkGraph::default();
+    for n in 0..5 {
+        ready(&mut graph, &format!("work {n}"));
+    }
+    graph.save_dir(&dir).unwrap();
+    assert_eq!(WorkGraph::load_for_write(&dir).unwrap().list().len(), 5);
+
+    let snapshot = dir.join(claimdag::SNAP_BIN);
+    let whole = std::fs::read(&snapshot).unwrap();
+    std::fs::write(&snapshot, &whole[..whole.len() / 3]).unwrap();
+    let err = match WorkGraph::load_for_write(&dir) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("a torn snapshot loaded for writing"),
+    };
+    assert!(err.contains("could not be read"), "{err}");
+    assert!(err.contains("No write saves over it"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

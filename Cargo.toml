@@ -28,4 +28,7 @@ vissue-core = "0.20"
 # ureq 2.12.1's tls feature pulls webpki-roots 0.26.11, which RUSTSEC-2026-0381
 # still flags. The patch depends on webpki-roots 1 instead.
 ureq = { path = "vendor/ureq" }
+# claimdag 0.7.1 depends on capnp 0.20 (RUSTSEC-2025-0143). This build uses
+# capnp 0.27 and the same schema.
+claimdag = { path = "vendor/claimdag" }
 
