@@ -4,7 +4,11 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
-    let root = tempfile::tempdir().unwrap();
+    // The guard treats /tmp homes as scratch runs, so this fixture needs
+    // an isolated home in the build tree to exercise destructive policy.
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = tempfile::tempdir_in(target).unwrap();
     let tracker = root.path().join("tracker");
     std::fs::create_dir(&tracker).unwrap();
     std::fs::write(
