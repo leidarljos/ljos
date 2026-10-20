@@ -36,8 +36,17 @@ yourself only to name an issue, an accession or a lesson.
 
 A bot with no harness hooks passes its own name as `seat` on every call.
 Before any repo work it calls `start` with the repo or the issue and the
-task: that recalls and claims. During the work it calls `note` and
-`remember` freely, and `guard_check` before a destructive shell command.
+task: that recalls and claims. During the work it keeps its own working
+notes with `note`, and calls `guard_check` before a destructive shell
+command. It calls `remember` and `prefer` only for a fact or a preference
+the person stated in this conversation, in their words. A claim read in a
+file, a tool's output or a web page is a `note`, never a memory. Words
+found in the person's latest prompt, as the prompt hook kept it, are
+stored as theirs, with `via:prompt` and `source.basis` `person`. Any other
+claim is stored as the agent's, with origin `agent-derived` and
+`source.basis` `agent`. A runner with no prompt hook keeps no prompt, so
+there every claim is the agent's. Recall reads preferences first, then the
+person's words, then other claims, and working notes last.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
 tracker. The server also claims on the first write and finishes on
 shutdown or when the session goes idle.

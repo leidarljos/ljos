@@ -417,7 +417,7 @@ fn save(stated: &Stated) -> Option<Value> {
         let client = pack().ok()?;
         let workspace = client.workspace();
         let mut atom = atom_body(stated.kind, &stated.text, &workspace);
-        add_entities(&mut atom, ["via:prompt".to_string()]);
+        add_entities(&mut atom, [super::SAID_ENTITY.to_string()]);
         stamp_horizon(&mut atom, stated.kind, &stated.text, Some(false));
         admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
         let posted = admit::post_kept(&client, &atom).ok()?;
