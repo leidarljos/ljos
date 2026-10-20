@@ -36,7 +36,10 @@ path = "src/bin.rs"
 anyhow.workspace = true
 clap.workspace = true
 ljos = { path = "../ljos-cli", version = "0.32.0" }
-claimdag = "0.7.1"
+# CI only: claimdag on capnp 0.27, from its branch until the release is on
+# crates.io. cargo publish refuses a git dependency, so this line goes back
+# to a crates.io version before ljos-hud is released.
+claimdag = { git = "https://github.com/leidarljos/claimdag", branch = "capnp-027-20261020" }
 iced = { version = "0.14", default-features = true, features = [
     "tokio",
     "advanced",
