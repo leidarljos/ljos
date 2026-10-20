@@ -445,6 +445,12 @@ fn on_push(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
     if class == PushClass::Skip {
         return Ok(());
     }
+    // No checkout has no tip and no gate file, so there is nothing for an
+    // evidence denial to name. A plain push is allowed. A force push, a
+    // tag push, or a delete still asks in the push gate.
+    if repo_root(&git.cwd).is_none() {
+        return Ok(());
+    }
     let cfg = repo_config(&git.cwd, "git-push-evidence")?;
     let current = if walk.branch_set {
         walk.branch.clone()
@@ -2896,6 +2902,28 @@ esac
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_push_outside_a_checkout_is_not_an_evidence_denial() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let plain = guard_verdict("git push origin main", Some(dir.path()), &[]);
+        assert!(plain.is_none(), "{plain:?}");
+        let forced = guard_verdict("git push --force origin main", Some(dir.path()), &[])
+            .expect("a force push asks");
+        assert_eq!(forced.verdict, "ask", "{}", forced.reason);
+        assert_eq!(forced.pattern, "git-force-push");
+        assert!(
+            forced.reason.starts_with("git-force-push:"),
+            "{}",
+            forced.reason
+        );
+        assert!(
+            !forced.reason.contains("git-push-evidence"),
+            "{}",
+            forced.reason
+        );
     }
 
     #[test]

@@ -1,0 +1,1 @@
+A push run outside a git checkout is not an evidence denial. There is no tip and no gate file to check, so a plain push is allowed and a force push asks, the same way it does in a checkout that sets no test command.
