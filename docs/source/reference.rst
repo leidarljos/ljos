@@ -240,7 +240,7 @@ Every seat on this machine reads it. The row does not decay and it is not review
 ``--why`` is required with ``--user``.
 ``--promote ID`` copies that lesson into a user rule and leaves the lesson in the pack.
 ``--forget ID`` leaves a tombstone so a later sync does not bring the row back.
-``--sync`` pulls and pushes user rules through the tracker repository.
+``--sync`` pulls and pushes user rules through the tracker repository. Nothing leaves the machine unless that repository's ``.ljos/sync.toml`` names a scope. Then each machine's rules are sealed with age to the scope's recipients as ``.ljos/user-rules/<host>.json.age``, and a plaintext ``<host>.json`` this machine wrote before is removed. Plaintext files other hosts left are still read. A write and the session start run the same pass and follow ``LJOS_TRACKER_GIT``; ``--sync`` always pushes.
 ``--deny-mention HANDLE``, ``--deny-name NAME``, ``--deny-reply-to HANDLE`` and ``--deny-reply-name NAME`` may be repeated.
 ``ljos rule --user PATTERN --verdict deny|ask --why TEXT`` writes the argv law into the same file instead of the seat pack.
 Without ``--user``, both commands keep writing the seat pack.
@@ -326,6 +326,9 @@ Variable                                                    Read by
 ``LJOS_HUD_SOCKET``                                         summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``
 ``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org``, and the sitting's and finish's sealed sync log, without pushing; ``off`` skips the commit and push, and the sync in passing; unset, commit and push. ``ljos sync`` by hand always pushes
 ``LJOS_TRACKER_PUSH_WAIT``                                  seconds the tracker push after a claim or finish waits; 5 when unset
+``LJOS_USER_RULES_SYNC``                                    ``off`` stops user rules from being pulled or pushed through any tracker, and ``ljos prefer --user --sync`` refuses; unset, they sync through a tracker whose ``.ljos/sync.toml`` names a scope
+``LJOS_USER_RULES_TRACKER``                                 the tracker checkout user rules sync through; unset, ``repos`` in ``~/.config/ljos/sync.toml``, then ``ISSUE_ROOT`` or ``VISSUE_ROOT``, then the seat's vissue config, then the working directory when it is a tracker
+``LJOS_USER_RULES_SYNC_MS``                                 milliseconds each user-rule sync may take; 4000 after a write, 1500 at session start, 8000 for ``--sync`` when unset
 ``LJOS_TRACK_WORK``                                         ``on`` makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else ``~/.config/ljos/env``; unset, they say nothing until it sits
 ``XDG_CONFIG_HOME``                                         where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset
 ``LJOS_PANE_TOOL``                                          the one ``[[tool]]`` persona panes open in; unset, the first of the file's tools and the built-in herdr and tmux shapes that answers
@@ -501,6 +504,7 @@ File                                            Contents
 =============================================== ==================================================================================================================
 ``.ljos/sync.toml`` (in the tracker repository) the repository's scope and its age recipients; a ``[projects]`` table sends one project's lessons to another scope
 ``.ljos/atoms/``                                one sealed log per machine
+``.ljos/user-rules/``                           one file of user rules per machine, sealed to the scope's recipients (``<host>.json.age``); a plaintext ``<host>.json`` is from before the seal
 =============================================== ==================================================================================================================
 
 Jev settings

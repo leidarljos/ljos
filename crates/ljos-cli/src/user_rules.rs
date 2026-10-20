@@ -464,7 +464,7 @@ fn sync_after_write() {
     let budget = std::time::Duration::from_millis(sync_budget_ms(4_000));
     let host = super::sync::host();
     for root in super::sync::user_rule_trackers() {
-        let _ = super::sync::exchange_user_rules(&root, &host, budget);
+        let _ = super::sync::exchange_user_rules(&root, &host, budget, false);
     }
 }
 
@@ -474,7 +474,7 @@ pub fn sync_for_hook() {
     let budget = std::time::Duration::from_millis(sync_budget_ms(1_500));
     let host = super::sync::host();
     for root in super::sync::user_rule_trackers() {
-        let _ = super::sync::exchange_user_rules(&root, &host, budget);
+        let _ = super::sync::exchange_user_rules(&root, &host, budget, false);
     }
 }
 
@@ -498,7 +498,9 @@ pub fn sync_now() -> Result<String> {
     let host = super::sync::host();
     let mut out = String::new();
     for root in roots {
-        out.push_str(&super::sync::exchange_user_rules(&root, &host, budget)?);
+        out.push_str(&super::sync::exchange_user_rules(
+            &root, &host, budget, true,
+        )?);
     }
     if out.is_empty() {
         out.push_str("sync: user rules: none\n");
@@ -1398,8 +1400,83 @@ mod tests {
         cfg_b: std::path::PathBuf,
     }
 
+    /// An age identity at `cfg/ljos/age.key`, where `identity_path` reads
+    /// it under that config home. Returns the public key.
+    fn age_identity(cfg: &std::path::Path) -> String {
+        let dir = cfg.join("ljos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("age.key");
+        let made = std::process::Command::new("age-keygen")
+            .arg("-o")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "age-keygen must be installed");
+        let public = std::process::Command::new("age-keygen")
+            .arg("-y")
+            .arg(&key)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&public.stdout).trim().to_string()
+    }
+
+    /// Sets one variable until dropped, then puts back what was there.
+    struct EnvVar(&'static str, Option<std::ffi::OsString>);
+
+    impl EnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let before = std::env::var_os(name);
+            unsafe { std::env::set_var(name, value) };
+            Self(name, before)
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(value) => unsafe { std::env::set_var(self.0, value) },
+                None => unsafe { std::env::remove_var(self.0) },
+            }
+        }
+    }
+
+    fn remote_paths(bare: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(bare)
+            .args(["ls-tree", "-r", "--name-only", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn head(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     impl Homes {
+        /// Two clones of one tracker whose `.ljos/sync.toml` seals to both
+        /// homes' identities.
         fn new() -> Self {
+            Self::with_scope(true)
+        }
+
+        /// Two clones of one tracker that names no scope.
+        fn unscoped() -> Self {
+            Self::with_scope(false)
+        }
+
+        fn bare(&self) -> std::path::PathBuf {
+            self.a.parent().unwrap().join("bare.git")
+        }
+
+        fn with_scope(scoped: bool) -> Self {
             let lock = super::super::test_env_lock();
             let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/user-rule-homes");
@@ -1410,6 +1487,20 @@ mod tests {
             git_ok(&seed, &["init", "-q", "-b", "main"]);
             prepare_clone(&seed);
             git_ok(&seed, &["commit", "--allow-empty", "-q", "-m", "init"]);
+            let cfg_a = root.path().join("cfg-a");
+            let cfg_b = root.path().join("cfg-b");
+            if scoped {
+                let a = age_identity(&cfg_a);
+                let b = age_identity(&cfg_b);
+                std::fs::create_dir_all(seed.join(".ljos")).unwrap();
+                std::fs::write(
+                    seed.join(".ljos/sync.toml"),
+                    format!("name = \"home\"\nrecipients = [\"{a}\", \"{b}\"]\n"),
+                )
+                .unwrap();
+                git_ok(&seed, &["add", ".ljos/sync.toml"]);
+                git_ok(&seed, &["commit", "-q", "-m", "scope"]);
+            }
             let bare = root.path().join("bare.git");
             let laptop = root.path().join("laptop");
             let shared = root.path().join("shared");
@@ -1443,14 +1534,14 @@ mod tests {
             );
             prepare_clone(&laptop);
             prepare_clone(&shared);
-            let cfg_a = root.path().join("cfg-a");
-            let cfg_b = root.path().join("cfg-b");
             unsafe {
                 std::env::set_var("LJOS_USER_RULES_SYNC", "off");
                 std::env::set_var("LJOS_HOLD", "rohit");
                 std::env::set_var("PACKSET_URL", "off");
                 std::env::set_var("HOME", root.path());
                 std::env::remove_var("LJOS_USER_RULES_TRACKER");
+                std::env::remove_var("LJOS_TRACKER_GIT");
+                std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
             }
             Self {
                 _lock: lock,
@@ -1468,13 +1559,144 @@ mod tests {
     }
 
     fn exchange(tracker: &std::path::Path, host: &str) {
+        exchange_said(tracker, host, false);
+    }
+
+    fn exchange_said(tracker: &std::path::Path, host: &str, asked: bool) -> String {
         let said = super::super::sync::exchange_user_rules(
             tracker,
             host,
             std::time::Duration::from_secs(8),
+            asked,
         )
         .unwrap_or_else(|err| panic!("sync {host}: {err:#}"));
         assert!(!said.contains("did not answer"), "{said}");
+        said
+    }
+
+    /// A tracker with a remote and no `.ljos/sync.toml` used to receive
+    /// every rule in plaintext on the first write.
+    #[test]
+    fn a_tracker_with_no_scope_gets_no_user_rules() {
+        let homes = Homes::unscoped();
+        homes.home(&homes.cfg_a);
+        let before = head(&homes.a);
+        let rule = write_preference(
+            "never post or reply to Alan (ocaisa)",
+            "he asked not to be pinged",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        exchange(&homes.a, "laptop");
+        let said = exchange_said(&homes.a, "laptop", true);
+        assert!(said.contains("names no scope"), "{said}");
+        assert_eq!(head(&homes.a), before, "no commit without a scope");
+        assert!(!homes.a.join(".ljos/user-rules").exists());
+        assert!(!remote_paths(&homes.bare()).contains("user-rules"));
+        assert_eq!(load().unwrap()[0].id, rule.id);
+    }
+
+    #[test]
+    fn user_rules_travel_sealed_to_the_scope() {
+        let homes = Homes::new();
+        homes.home(&homes.cfg_a);
+        write_preference(
+            "never post or reply to Alan (ocaisa)",
+            "he asked not to be pinged",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        let said = exchange_said(&homes.a, "laptop", false);
+        assert!(said.contains("sealed and pushed"), "{said}");
+        let paths = remote_paths(&homes.bare());
+        assert!(
+            paths.contains(".ljos/user-rules/laptop.json.age"),
+            "{paths}"
+        );
+        assert!(!paths.contains("laptop.json\n"), "{paths}");
+        let sealed = std::fs::read(homes.a.join(".ljos/user-rules/laptop.json.age")).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&sealed).contains("ocaisa"),
+            "the rule left in plaintext"
+        );
+        let pushed = head(&homes.a);
+        exchange(&homes.a, "laptop");
+        assert_eq!(
+            head(&homes.a),
+            pushed,
+            "unchanged rules are not sealed again"
+        );
+    }
+
+    /// Plaintext files from before the seal are still read, and this
+    /// machine's own is removed from the tracker when it seals.
+    #[test]
+    fn a_plaintext_rules_file_is_still_read_and_this_hosts_is_replaced() {
+        let homes = Homes::new();
+        homes.home(&homes.cfg_b);
+        let old = write_preference(
+            "the older plaintext rule",
+            "written before the seal",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(homes.cfg_b.join("ljos/user-rules.json")).unwrap();
+        let dir = homes.b.join(".ljos/user-rules");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old-host.json"), &text).unwrap();
+        std::fs::write(dir.join("laptop.json"), &text).unwrap();
+        git_ok(&homes.b, &["add", ".ljos/user-rules"]);
+        git_ok(&homes.b, &["commit", "-q", "-m", "plaintext rules"]);
+        git_ok(&homes.b, &["push", "-q"]);
+        homes.home(&homes.cfg_a);
+        exchange(&homes.a, "laptop");
+        assert!(load().unwrap().iter().any(|rule| rule.id == old.id));
+        let paths = remote_paths(&homes.bare());
+        assert!(paths.contains(".ljos/user-rules/old-host.json"), "{paths}");
+        assert!(
+            paths.contains(".ljos/user-rules/laptop.json.age"),
+            "{paths}"
+        );
+        assert!(!paths.contains(".ljos/user-rules/laptop.json\n"), "{paths}");
+    }
+
+    #[test]
+    fn user_rule_sync_follows_tracker_git() {
+        let homes = Homes::new();
+        homes.home(&homes.cfg_a);
+        write_preference(
+            "the standing line",
+            "a reason",
+            &People::default(),
+            &People::default(),
+        )
+        .unwrap();
+        let start = head(&homes.a);
+        {
+            let _off = EnvVar::set("LJOS_TRACKER_GIT", "off");
+            exchange(&homes.a, "laptop");
+            assert_eq!(head(&homes.a), start, "off leaves the tracker alone");
+        }
+        {
+            let _commit = EnvVar::set("LJOS_TRACKER_GIT", "commit");
+            let said = exchange_said(&homes.a, "laptop", false);
+            assert!(
+                said.contains("not pushed (LJOS_TRACKER_GIT=commit)"),
+                "{said}"
+            );
+            assert_ne!(head(&homes.a), start);
+            assert!(!remote_paths(&homes.bare()).contains("user-rules"));
+            let said = exchange_said(&homes.a, "laptop", true);
+            assert!(said.contains("sealed and pushed"), "{said}");
+        }
+        assert!(remote_paths(&homes.bare()).contains("laptop.json.age"));
+        let _sync_off = EnvVar::set("LJOS_USER_RULES_SYNC", "off");
+        let _tracker = EnvVar::set("LJOS_USER_RULES_TRACKER", homes.a.to_str().unwrap());
+        assert!(super::super::sync::user_rule_trackers().is_empty());
+        assert!(sync_now().is_err());
     }
 
     fn rewrite(id: &str, text: &str, author: &str, reason: &str, at: &str, deleted: bool) {
@@ -1645,6 +1867,13 @@ mod tests {
         });
         let url = format!("http://127.0.0.1:{port}/tracker.git");
         git_ok(&repo, &["remote", "add", "origin", &url]);
+        // A scope, so the sync reaches the fetch that does not answer.
+        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+        std::fs::write(
+            repo.join(".ljos/sync.toml"),
+            "name = \"home\"\nrecipients = []\n",
+        )
+        .unwrap();
         unsafe {
             // Unset is off under `cargo test`, so this test asks for a sync.
             std::env::set_var("LJOS_USER_RULES_SYNC", "on");

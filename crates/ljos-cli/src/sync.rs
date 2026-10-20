@@ -1097,7 +1097,14 @@ fn integrate_remote(root: &Path, deadline: std::time::Instant) -> Result<()> {
     )
 }
 
-fn commit_host(root: &Path, rel: &str, host: &str, deadline: std::time::Instant) -> Result<bool> {
+/// Commit `rels` alone, a deletion included, under the tracker's commit
+/// lock. False when none of them changed.
+fn commit_host(
+    root: &Path,
+    rels: &[String],
+    host: &str,
+    deadline: std::time::Instant,
+) -> Result<bool> {
     let common = git(root, &["rev-parse", "--git-common-dir"])
         .ok()
         .filter(|out| out.status.success())
@@ -1112,24 +1119,28 @@ fn commit_host(root: &Path, rel: &str, host: &str, deadline: std::time::Instant)
         })
         .unwrap_or_else(|| root.join(".git"));
     let held = crate::CommitLock::acquire(&common.join("ljos-commit.lock"));
-    let added = git_within(root, &["add", "--", rel], deadline)?;
+    let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
+    let mut add = vec!["add", "-A", "--"];
+    add.extend(&paths);
+    let added = git_within(root, &add, deadline)?;
     if !git_succeeded(&added) {
         bail!(
-            "sync: user rules: could not stage {rel}: {}",
+            "sync: user rules: could not stage {}: {}",
+            rels.join(", "),
             one_line(&added)
         );
     }
-    let staged = git_within(root, &["diff", "--cached", "--quiet", "--", rel], deadline)?;
+    let mut diff = vec!["diff", "--cached", "--quiet", "--"];
+    diff.extend(&paths);
+    let staged = git_within(root, &diff, deadline)?;
     if git_succeeded(&staged) {
         drop(held);
         return Ok(false);
     }
     let message = format!("chore(sync): {host} user rules");
-    let committed = git_within(
-        root,
-        &["commit", "-q", "--only", "-m", &message, "--", rel],
-        deadline,
-    )?;
+    let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
+    commit.extend(&paths);
+    let committed = git_within(root, &commit, deadline)?;
     drop(held);
     if git_succeeded(&committed) {
         Ok(true)
@@ -1168,21 +1179,160 @@ fn push_host(root: &Path, deadline: std::time::Instant) -> Result<()> {
     }
 }
 
-/// Fetch the tracker's user-rule files, merge them with the local file by
-/// id, and push this machine's file. `budget` bounds every git call. A
-/// fetch that does not return leaves the local file as it was.
+/// This host's sealed user-rule file in a tracker checkout.
+fn sealed_rules_rel(name: &str) -> String {
+    format!(".ljos/user-rules/{name}.json.age")
+}
+
+/// The plaintext file a host wrote before user rules were sealed.
+fn plain_rules_rel(name: &str) -> String {
+    format!(".ljos/user-rules/{name}.json")
+}
+
+/// Rows of every sealed user-rule file this machine can open, and how many
+/// it could not: sealed to other machines, or `age` missing.
+fn sealed_rows(root: &Path, identity: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
+    let dir = root.join(".ljos").join("user-rules");
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return (Vec::new(), 0);
+    };
+    let mut paths: Vec<PathBuf> = read
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().ends_with(".json.age"))
+        .collect();
+    paths.sort();
+    let mut rows = Vec::new();
+    let mut closed = 0;
+    for path in paths {
+        let opened = if identity.exists() {
+            open(&path, identity).ok().flatten()
+        } else {
+            None
+        };
+        match opened.and_then(|text| crate::user_rules::parse_rules(&text).ok()) {
+            Some(parsed) => rows.extend(parsed),
+            None => closed += 1,
+        }
+    }
+    (rows, closed)
+}
+
+/// Merge `rows` into the local file and return the merged rows. Nothing
+/// read and nothing local leaves the file untouched.
+fn merge_into_local(
+    rows: Vec<crate::user_rules::UserRule>,
+) -> Result<Vec<crate::user_rules::UserRule>> {
+    let local = crate::user_rules::read_all()?;
+    if rows.is_empty() {
+        return Ok(local);
+    }
+    let mut all = rows;
+    all.extend(local);
+    let merged = crate::user_rules::merge_rows(all);
+    crate::user_rules::replace_stored(&merged)?;
+    Ok(merged)
+}
+
+/// Where this machine remembers what it last sealed for a tracker, so an
+/// unchanged set of rules is not sealed and committed again. It stays on
+/// this machine: a digest of the rules in the tracker would say something
+/// about them.
+fn rules_stamp_path(root: &Path, name: &str) -> PathBuf {
+    state_dir()
+        .join("user-rules")
+        .join(crate::work_id(&root.display().to_string()))
+        .join(format!("{name}.digest"))
+}
+
+/// What sealing this host's rules did.
+#[derive(Debug, PartialEq, Eq)]
+enum Sealed {
+    Wrote,
+    Unchanged,
+    AgeMissing,
+}
+
+fn seal_rules(root: &Path, scope: &Scope, rendered: &str, name: &str) -> Result<Sealed> {
+    let out = root.join(sealed_rules_rel(name));
+    let stamp = rules_stamp_path(root, name);
+    let digest = format!(
+        "{} {}\n",
+        crate::work_id(rendered),
+        crate::work_id(&scope.recipients.join(","))
+    );
+    if out.is_file() && std::fs::read_to_string(&stamp).is_ok_and(|have| have == digest) {
+        return Ok(Sealed::Unchanged);
+    }
+    if !age_on_path() {
+        return Ok(Sealed::AgeMissing);
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Err(err) = seal(rendered, &scope.recipients, &out) {
+        if age_missing(&err) {
+            return Ok(Sealed::AgeMissing);
+        }
+        return Err(err);
+    }
+    if let Some(parent) = stamp.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&stamp, digest)?;
+    Ok(Sealed::Wrote)
+}
+
+fn tracked(root: &Path, rel: &str) -> bool {
+    git(root, &["ls-files", "--error-unmatch", "--", rel]).is_ok_and(|out| out.status.success())
+}
+
+/// Share user rules through a tracker checkout. Nothing leaves this
+/// machine unless the tracker's `.ljos/sync.toml` names a scope: then the
+/// tracker is fetched, every host's rules are merged with the local file by
+/// id, and this machine's rules are sealed with age to the scope's
+/// recipients, committed as `.ljos/user-rules/<host>.json.age` and pushed.
+/// A plaintext `<host>.json` this machine wrote before is removed in the
+/// same commit. Plaintext files from other hosts are still read. With no
+/// scope, or `LJOS_TRACKER_GIT=off` in passing, the rules already in the
+/// checkout are read and the tracker is not touched. `LJOS_TRACKER_GIT=commit`
+/// commits and pushes nothing. `asked` is `ljos prefer --user --sync`,
+/// which pushes whatever `LJOS_TRACKER_GIT` says. `budget` bounds every
+/// git call. A fetch that does not return leaves the local file as it was.
 ///
 /// # Errors
 ///
-/// The checkout is not git, the fetch did not answer, or the local file
-/// cannot be written.
-pub fn exchange_user_rules(root: &Path, host: &str, budget: std::time::Duration) -> Result<String> {
+/// The checkout is not git, the scope file does not parse, the fetch did
+/// not answer, age refused to seal, or the local file cannot be written.
+pub fn exchange_user_rules(
+    root: &Path,
+    host: &str,
+    budget: std::time::Duration,
+    asked: bool,
+) -> Result<String> {
     if !root.is_dir() {
         bail!("sync: user rules: {} is not a directory", root.display());
     }
     if !looks_like_git(root) {
         bail!("sync: user rules: {} is not a git checkout", root.display());
     }
+    let identity = identity_path();
+    let mode = tracker_git(asked);
+    let scope = scope_of_repo(root)?;
+    let Some(scope) = scope.filter(|_| mode != TrackerGit::Off) else {
+        let (mut rows, _) = sealed_rows(root, &identity);
+        rows.extend(repo_rows(root));
+        let merged = merge_into_local(rows)?;
+        if !asked {
+            return Ok(String::new());
+        }
+        let live = merged.iter().filter(|rule| !rule.deleted).count();
+        return Ok(format!(
+            "sync: user rules: {} names no scope, so they stay on this machine; write .ljos/sync.toml with name and recipients (`ljos sync --key` prints this machine's)\n\
+             sync: user rules: {live} on this machine\n",
+            root.display()
+        ));
+    };
     let deadline = std::time::Instant::now() + budget;
     let remote = git(root, &["remote"])
         .ok()
@@ -1190,33 +1340,60 @@ pub fn exchange_user_rules(root: &Path, host: &str, budget: std::time::Duration)
         .is_some_and(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty());
     if remote {
         integrate_remote(root, deadline)?;
-    } else {
-        let local_empty = crate::user_rules::read_all().is_ok_and(|rows| rows.is_empty());
-        if local_empty && repo_rows(root).is_empty() {
-            return Ok(String::new());
-        }
     }
-    let mut rows = repo_rows(root);
-    rows.extend(crate::user_rules::read_all()?);
-    let merged = crate::user_rules::merge_rows(rows);
-    crate::user_rules::replace_stored(&merged)?;
-    let name = machine_name(host);
-    let rel = format!(".ljos/user-rules/{name}.json");
-    let path = root.join(&rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, crate::user_rules::render_rules(&merged)?)?;
-    let committed = commit_host(root, &rel, &name, deadline)?;
+    let (mut rows, closed) = sealed_rows(root, &identity);
+    rows.extend(repo_rows(root));
+    let merged = merge_into_local(rows)?;
     let mut out = String::new();
     if remote {
         out.push_str("sync: user rules: fetched\n");
     }
-    if committed || (remote && commits_to_push(root)) {
-        push_host(root, deadline)?;
-        out.push_str("sync: user rules: pushed\n");
+    if closed > 0 {
+        out.push_str(&format!(
+            "sync: user rules: {closed} sealed file{} not opened on this machine\n",
+            if closed == 1 { "" } else { "s" }
+        ));
     }
     let live = merged.iter().filter(|rule| !rule.deleted).count();
+    if merged.is_empty() && !root.join(plain_rules_rel(&machine_name(host))).exists() {
+        out.push_str("sync: user rules: 0 on this machine\n");
+        return Ok(out);
+    }
+    let name = machine_name(host);
+    match seal_rules(
+        root,
+        &scope,
+        &crate::user_rules::render_rules(&merged)?,
+        &name,
+    )? {
+        Sealed::AgeMissing => {
+            out.push_str("sync: user rules: age is not installed, so they were not sealed or sent; install age to sync them\n");
+            out.push_str(&format!("sync: user rules: {live} on this machine\n"));
+            return Ok(out);
+        }
+        Sealed::Wrote | Sealed::Unchanged => {}
+    }
+    let mut rels = vec![sealed_rules_rel(&name)];
+    let plain = plain_rules_rel(&name);
+    if root.join(&plain).exists() {
+        std::fs::remove_file(root.join(&plain))?;
+    }
+    if tracked(root, &plain) {
+        rels.push(plain);
+    }
+    let committed = commit_host(root, &rels, &name, deadline)?;
+    match mode {
+        TrackerGit::Push if remote && (committed || commits_to_push(root)) => {
+            push_host(root, deadline)?;
+            out.push_str("sync: user rules: sealed and pushed\n");
+        }
+        TrackerGit::Commit if committed => {
+            out.push_str(
+                "sync: user rules: sealed and committed; not pushed (LJOS_TRACKER_GIT=commit)\n",
+            );
+        }
+        _ => {}
+    }
     out.push_str(&format!("sync: user rules: {live} on this machine\n"));
     Ok(out)
 }
