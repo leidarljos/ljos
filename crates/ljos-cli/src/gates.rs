@@ -193,6 +193,7 @@ struct CommitFields {
     author: Option<String>,
     signoff: bool,
     no_edit: bool,
+    amend: bool,
     dry: bool,
     help: bool,
     hidden: bool,
@@ -336,6 +337,19 @@ fn on_commit(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule
     }
     if fields.hidden {
         return Err(hidden_deny());
+    }
+    // `--amend --no-edit` keeps the message the last commit has, so there
+    // is no new text to read for a trailer, and no repository to read it
+    // from does not make it a hidden message.
+    if fields.amend
+        && fields.no_edit
+        && fields.messages.is_empty()
+        && fields.files.is_empty()
+        && fields.reuse.is_empty()
+        && fields.trailers.is_empty()
+    {
+        walk.fresh = true;
+        return Ok(());
     }
     let message = if !fields.messages.is_empty() {
         fields.messages.join("\n\n")
@@ -1245,6 +1259,7 @@ fn commit_fields(args: &[String]) -> CommitFields {
         author: None,
         signoff: false,
         no_edit: false,
+        amend: false,
         dry: false,
         help: false,
         hidden: false,
@@ -1304,6 +1319,7 @@ fn commit_fields(args: &[String]) -> CommitFields {
         match a.as_str() {
             "--signoff" => fields.signoff = true,
             "--no-edit" => fields.no_edit = true,
+            "--amend" => fields.amend = true,
             "--dry-run" => fields.dry = true,
             "--help" | "-h" => fields.help = true,
             _ if a.starts_with("--") => {}
@@ -2643,6 +2659,56 @@ esac
         );
         assert_denies(&refuse, "Co-authored-by");
         assert_denies(&refuse, "git commit -m TEXT");
+    }
+
+    /// `git commit --amend --no-edit` keeps the last message, so it runs in
+    /// a stock seat: in a repository with no commit yet (git refuses it
+    /// there itself) and after one. New text still goes through the gate:
+    /// `--amend -m`, `--amend --no-edit --trailer` and a bare `--amend`.
+    #[test]
+    fn an_amend_that_keeps_the_message_is_allowed() {
+        let dir = repo();
+        let cwd = dir.path();
+        assert!(
+            guard_verdict("git commit --amend --no-edit", Some(cwd), &[]).is_none(),
+            "no commit yet"
+        );
+        seed(cwd);
+        for line in [
+            "git commit --amend --no-edit",
+            "git commit --no-edit --amend",
+            "git commit -q --amend --no-edit",
+        ] {
+            assert!(guard_verdict(line, Some(cwd), &[]).is_none(), "{line}");
+        }
+        let worded = guard_verdict(
+            "git commit --amend -m \"Co-authored-by: Cursor <c@c>\"",
+            Some(cwd),
+            &[],
+        )
+        .expect("a new message is read");
+        assert!(
+            worded.reason.contains("Co-authored-by"),
+            "{}",
+            worded.reason
+        );
+        let trailer = guard_verdict(
+            "git commit --amend --no-edit --trailer \"Co-authored-by: Cursor <c@c>\"",
+            Some(cwd),
+            &[],
+        )
+        .expect("a new trailer is read");
+        assert!(
+            trailer.reason.contains("Co-authored-by"),
+            "{}",
+            trailer.reason
+        );
+        let bare = guard_verdict("git commit --amend", Some(cwd), &[]).expect("an editor");
+        assert!(
+            bare.reason.contains("git commit -m TEXT"),
+            "{}",
+            bare.reason
+        );
     }
 
     #[test]
