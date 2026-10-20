@@ -2649,6 +2649,17 @@ esac
     fn commit_identity_trailers_signoff_and_wrappers_say_what_passes() {
         let dir = repo();
         let cwd = dir.path();
+        // A runner that exports a git identity would stand in for the
+        // checkout's own, so the cases below read only what they name. The
+        // lock `repo` holds puts the environment back when it drops.
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ] {
+            crate::with_env_mutation(|| unsafe { std::env::remove_var(key) });
+        }
         let foreign = "GIT_AUTHOR_NAME=rig GIT_AUTHOR_EMAIL=rig@example.invalid GIT_COMMITTER_NAME=rig GIT_COMMITTER_EMAIL=rig@example.invalid git commit -m \"note the seat\"";
         assert!(
             guard_verdict(foreign, Some(cwd), &[]).is_none(),
