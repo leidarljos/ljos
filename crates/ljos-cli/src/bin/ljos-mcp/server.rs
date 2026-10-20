@@ -2958,6 +2958,15 @@ fn call_order(name: &str) -> Order {
     }
 }
 
+/// Initialization notifications and tool requests can run concurrently.
+/// Admission uses the peer's identity only after its connection is recorded.
+fn announce_client_once(client: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        announce_seat(client, runner_pid());
+    });
+}
+
 fn call_queue() -> std::sync::MutexGuard<'static, std::collections::VecDeque<QueuedCall>> {
     CALL_QUEUE.lock().unwrap_or_else(|err| err.into_inner())
 }
@@ -3215,10 +3224,17 @@ impl ServerHandler for LjosServer {
                 ));
             }
         };
-        let resolved =
-            tokio::task::spawn_blocking(move || ljos_cli::resolve_call_seat(seat_text.as_deref()))
-                .await
-                .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
+        let client = context
+            .peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone())
+            .unwrap_or_else(|| "runner".to_string());
+        let resolved = tokio::task::spawn_blocking(move || {
+            announce_client_once(&client);
+            ljos_cli::resolve_call_seat(seat_text.as_deref())
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
         let seat = match resolved {
             Ok(seat) => seat,
             Err(e) => {
@@ -3309,7 +3325,7 @@ impl ServerHandler for LjosServer {
             .peer_info()
             .map(|info| info.client_info.name.clone())
             .unwrap_or_else(|| "runner".to_string());
-        announce_seat(&client, runner_pid());
+        announce_client_once(&client);
     }
 
     /// The two cards and the protocol, and nothing else.
