@@ -120,8 +120,8 @@ struct RepoBook {
     #[serde(default)]
     issue: Option<String>,
     /// `ljos_start` claimed this row's issue. A hook in another sitting
-    /// takes over only such a row: a row another hook filed is that
-    /// session's own work.
+    /// takes over only such a row. Any other live row, one this sitting
+    /// filed or one it adopted from a hold record, is that conversation's.
     #[serde(default)]
     started: bool,
     /// A hook filed this row's issue for the sitting's first edit or
@@ -1124,7 +1124,11 @@ fn store_book(path: &Path, book: &Book) {
     }
     if let Err(e) = std::fs::write(path, text) {
         log_line(&format!("book: {e}"));
+        return;
     }
+    // The directory of books is the slow lookup. The file names the book
+    // that holds each live issue, so the next claim reads one path.
+    sync_claim_index(path, book);
 }
 
 /// Append one line to the seat's `book.log` under the runtime directory.
@@ -1389,8 +1393,17 @@ fn same_words(a: &str, b: &str) -> bool {
 /// (`ljos claim`) is taken as the row's issue. Either issue has to be
 /// STARTED in the tracker under this holder, in either form: the bare
 /// seat or `SEAT@TAG`.
+///
+/// A hold record is shared by every conversation of the runner. A live
+/// row in another conversation's book stays there, whether that row was
+/// filed or adopted. Only a started sitting moves, through
+/// [`take_started_row`]. The hook already holds `book.lock`; taking it
+/// again on this thread would wait on itself, so the decision and the
+/// write share [`claim_lock`].
 fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
+    let _claim = claim_lock();
     if take_started_row(book, own, repo) {
+        store_book(own, book);
         return true;
     }
     let project = project_for(repo);
@@ -1399,24 +1412,108 @@ fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
     }) else {
         return false;
     };
-    // A hold record is shared by the runner. An automatic claim in a
-    // different hook conversation belongs to that conversation; only a
-    // started sitting can transfer through take_started_row.
-    let claimed_elsewhere = book_files().into_iter().any(|path| {
-        path != own
-            && load_book(&path).repos.values().any(|row| {
-                row.filed
-                    && !row.started
-                    && !row.finished
-                    && row.issue.as_deref() == Some(issue.as_str())
-            })
-    });
-    if claimed_elsewhere {
+    if owned_elsewhere(own, &issue) {
         return false;
     }
     adopt_row(book, repo, &issue, RepoBook::default());
+    store_book(own, book);
     log_line(&format!("claim: kept {issue}, held by this seat"));
     true
+}
+
+/// Exclusive lock for the adopt decision. Distinct from `book.lock`,
+/// which the caller may already hold.
+fn claim_lock() -> super::CommitLock {
+    super::CommitLock::acquire(&super::runtime_dir().join("claim.lock"))
+}
+
+/// How many times the claim check read the book directory. The indexed
+/// book and the seat's book answer without that read.
+#[cfg(test)]
+static CLAIM_DIR_SCANS: AtomicU64 = AtomicU64::new(0);
+
+/// The file that names the book holding `issue`.
+fn claim_index(issue: &str) -> PathBuf {
+    super::runtime_dir().join(format!("claim-at-{}", super::session_tag(issue)))
+}
+
+fn remember_owner(issue: &str, path: &Path) {
+    let index = claim_index(issue);
+    if let Some(dir) = index.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(index, format!("{}\n", path.display()));
+}
+
+fn remembered_owner(issue: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(claim_index(issue)).ok()?;
+    let path = text.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn sync_claim_index(path: &Path, book: &Book) {
+    for row in book.repos.values() {
+        let Some(issue) = row
+            .issue
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if row.finished {
+            if remembered_owner(issue).as_deref() == Some(path) {
+                let _ = std::fs::remove_file(claim_index(issue));
+            }
+        } else {
+            remember_owner(issue, path);
+        }
+    }
+}
+
+/// A row that still holds `issue`. Filed and adopted rows both count;
+/// a finished row does not.
+fn live_claim(row: &RepoBook, issue: &str) -> bool {
+    !row.finished && row.issue.as_deref() == Some(issue)
+}
+
+fn book_holds_live(path: &Path, issue: &str) -> bool {
+    path.is_file()
+        && load_book(path)
+            .repos
+            .values()
+            .any(|row| live_claim(row, issue))
+}
+
+/// Whether another conversation's book holds `issue` live.
+///
+/// The index written with the book is one file. The seat's book is the
+/// other path this process can name without listing the directory. The
+/// directory is read only when neither of those holds the issue.
+fn owned_elsewhere(own: &Path, issue: &str) -> bool {
+    if let Some(path) = remembered_owner(issue) {
+        if path != own && book_holds_live(&path, issue) {
+            return true;
+        }
+    }
+    let seat = book_path(&sitting_key());
+    if seat != own && book_holds_live(&seat, issue) {
+        remember_owner(issue, &seat);
+        return true;
+    }
+    #[cfg(test)]
+    CLAIM_DIR_SCANS.fetch_add(1, Ordering::Relaxed);
+    for path in book_files() {
+        if path != own && path != seat && book_holds_live(&path, issue) {
+            remember_owner(issue, &path);
+            return true;
+        }
+    }
+    false
 }
 
 /// The book scan of [`take_held_issue`]: an `ljos_start` row another book
@@ -7998,6 +8095,238 @@ print(f"id={ident}")
             Some(auto.as_str())
         );
         assert_eq!(creates(&tracker), 1);
+    }
+
+    fn plant_hold(dir: &Path, holder: &str, seat: &str, issue: &str) {
+        let run = dir.join("run/ljos");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join(format!("hold-{holder}")),
+            format!("{holder}\n{seat}\n999999\nbash\n2026-10-20T00:00:00Z\n{issue}\n-\n"),
+        )
+        .unwrap();
+    }
+
+    fn issue_of(session: &str, repo: &Path) -> Option<String> {
+        hook_row(session, repo).issue
+    }
+
+    /// Two hook conversations, one seat, one shared hold record. The claim
+    /// conversation A filed stays in A's book. B files its own.
+    #[test]
+    fn a_second_conversation_of_one_seat_does_not_take_the_first_claim() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HOLD",
+            "LJOS_SEAT",
+            "CLAIMDAG_DIR",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "codex");
+            std::env::set_var("LJOS_HOLD", "codex-conv");
+            std::env::remove_var("CLAIMDAG_DIR");
+        }
+        let (raw, call) = payload(
+            "PostToolUse",
+            "conv-a",
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "README.md"}}),
+        );
+        let _ = observe(&raw, &call);
+        let issue_a = issue_of("conv-a", &repo).expect("conversation A filed");
+        assert!(
+            held_by_this_seat(&issue_a),
+            "the planted hold would not be eligible"
+        );
+        plant_hold(dir.path(), "codex-conv", "codex", &issue_a);
+        assert_eq!(
+            crate::held_issue().as_deref(),
+            Some(issue_a.as_str()),
+            "the shared hold did not name A's claim"
+        );
+        CLAIM_DIR_SCANS.store(0, Ordering::SeqCst);
+        let (raw, call) = payload(
+            "PostToolUse",
+            "conv-b",
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "NOTES.md"}}),
+        );
+        let _ = observe(&raw, &call);
+        let issue_b = issue_of("conv-b", &repo).expect("conversation B filed its own");
+        assert_ne!(issue_b, issue_a, "B took A's claim");
+        assert_eq!(issue_of("conv-a", &repo).as_deref(), Some(issue_a.as_str()));
+        assert_eq!(creates(&tracker), 2);
+        let log = std::fs::read_to_string(dir.path().join("run/ljos/book.log")).unwrap_or_default();
+        assert!(
+            !log.contains(&format!("claim: kept {issue_a}, held by this seat")),
+            "{log}"
+        );
+        assert_eq!(
+            CLAIM_DIR_SCANS.load(Ordering::SeqCst),
+            0,
+            "B read every book instead of the index"
+        );
+    }
+
+    /// A row adopted from the hold record has `filed` clear. It still
+    /// belongs to the conversation that adopted it.
+    #[test]
+    fn an_adopted_row_stays_with_its_conversation() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HOLD",
+            "LJOS_SEAT",
+            "CLAIMDAG_DIR",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "codex");
+            std::env::set_var("LJOS_HOLD", "codex-conv");
+            std::env::remove_var("CLAIMDAG_DIR");
+        }
+        let issue = "probe-0ad0";
+        let org = tracker.join("Software/probe");
+        std::fs::create_dir_all(&org).unwrap();
+        std::fs::write(
+            org.join("issues.org"),
+            format!("* STARTED [#C] adopted\n:PROPERTIES:\n:ID:         {issue}\n:END:\n"),
+        )
+        .unwrap();
+        plant_hold(dir.path(), "codex-conv", "codex", issue);
+        assert!(held_by_this_seat(issue), "the adopted issue is not held");
+        assert_eq!(crate::held_issue().as_deref(), Some(issue));
+        let repo_key = repo.display().to_string();
+        let mut adopted = Book::default();
+        adopted.repos.insert(
+            repo_key.clone(),
+            RepoBook {
+                issue: Some(issue.to_string()),
+                filed: false,
+                started: false,
+                finished: false,
+                ..RepoBook::default()
+            },
+        );
+        let path_a = book_path("conv-adopted");
+        std::fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        // Not store_book: that would write the index. The row has to be
+        // found by reading the book, the way a row adopted before the
+        // index existed is found.
+        std::fs::write(&path_a, serde_json::to_string(&adopted).unwrap()).unwrap();
+        CLAIM_DIR_SCANS.store(0, Ordering::SeqCst);
+        let path_b = book_path("conv-later");
+        let mut book_b = Book::default();
+        assert!(
+            !take_held_issue(&mut book_b, &path_b, &repo_key),
+            "the adopted row was taken"
+        );
+        assert!(book_b.repos.values().all(|row| row.issue.is_none()));
+        assert_eq!(
+            load_book(&path_a).repos[&repo_key].issue.as_deref(),
+            Some(issue)
+        );
+        assert!(
+            CLAIM_DIR_SCANS.load(Ordering::SeqCst) >= 1,
+            "an unindexed adopted row was not read from the books"
+        );
+    }
+
+    /// Two hooks decide together. One adopts; the other sees that row.
+    #[test]
+    fn two_hooks_cannot_both_adopt_one_claim() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HOLD",
+            "LJOS_SEAT",
+            "CLAIMDAG_DIR",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "codex");
+            std::env::set_var("LJOS_HOLD", "codex-conv");
+            std::env::remove_var("CLAIMDAG_DIR");
+        }
+        let issue = "probe-0ace";
+        let org = tracker.join("Software/probe");
+        std::fs::create_dir_all(&org).unwrap();
+        std::fs::write(
+            org.join("issues.org"),
+            format!("* STARTED [#C] race\n:PROPERTIES:\n:ID:         {issue}\n:END:\n"),
+        )
+        .unwrap();
+        plant_hold(dir.path(), "codex-conv", "codex", issue);
+        assert!(held_by_this_seat(issue));
+        assert_eq!(crate::held_issue().as_deref(), Some(issue));
+        let repo_key = repo.display().to_string();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut guards = Vec::new();
+        for session in ["race-conv-a", "race-conv-b"] {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let repo_key = repo_key.clone();
+            let session = session.to_string();
+            guards.push(std::thread::spawn(move || {
+                barrier.wait();
+                let path = book_path(&session);
+                let mut book = Book::default();
+                let adopted = take_held_issue(&mut book, &path, &repo_key);
+                (session, adopted)
+            }));
+        }
+        let mut adopted = Vec::new();
+        for guard in guards {
+            let (session, took) = guard.join().expect("adopt thread");
+            if took {
+                adopted.push(session);
+            }
+        }
+        assert_eq!(adopted.len(), 1, "both hooks adopted: {adopted:?}");
+        let holders: Vec<&str> = ["race-conv-a", "race-conv-b"]
+            .into_iter()
+            .filter(|session| {
+                load_book(&book_path(session))
+                    .repos
+                    .values()
+                    .any(|row| row.issue.as_deref() == Some(issue))
+            })
+            .collect();
+        assert_eq!(holders, [adopted[0].as_str()]);
     }
 
     /// The willma w5 shape: a prompt, then the session ends before any
