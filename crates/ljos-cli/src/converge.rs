@@ -6,6 +6,14 @@
 //! a grandchild unless the new objection is blocking. At the round limit,
 //! or when the budget is spent, the item closes as settled-with-notes and
 //! lists what remains. Nothing here waits on a person.
+//!
+//! `ljos consensus` files its children through [`record_dissents`], titled
+//! `Dissent holds TEXT` for a blocking objection and `Dissent holds OPTION`
+//! for a minority still held after a settled majority. A `fix:` child comes
+//! only from `ljos workflow --round` ([`file_fix`]). The round is where the
+//! tracker records it: a `panel rN` title that `ljos workflow --round`
+//! filed, else the `panel-round: N` note each filing `ljos consensus`
+//! writes.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -786,15 +794,68 @@ fn file_settled_minority(
     lines
 }
 
-/// File dissent children and note the rest for `issue`. A settled majority
-/// still files one `Dissent holds OPTION` child for each option a voter
-/// holds that is not the lead. A tie files none. A tracker that does not
-/// answer leaves the reading as it was: filing is a side effect.
+/// The note a filing `ljos consensus` writes for each round it sits.
+pub const ROUND_NOTE: &str = "panel-round:";
+
+/// The highest round noted on an issue JSON as `panel-round: N`, 0 with none.
+#[must_use]
+pub fn recorded_round(v: &Value) -> usize {
+    v["logbook"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["note"].as_str())
+        .filter_map(|n| {
+            n.trim()
+                .strip_prefix(ROUND_NOTE)?
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn is_closed(v: &Value) -> bool {
+    matches!(v["state"].as_str(), Some("DONE" | "CANCELLED"))
+}
+
+/// The round this reading sits on the issue, and whether to note it. A
+/// `panel rN` title is round N, as `ljos workflow --round` filed it, and
+/// needs no note. Any other title sits one round past the last
+/// `panel-round: N` note. A closed issue sits no new round.
+#[must_use]
+pub fn sitting_round(v: &Value) -> (usize, bool) {
+    if let Some(n) = crate::panel_round_number(v["title"].as_str().unwrap_or("")) {
+        return (n, false);
+    }
+    let last = recorded_round(v);
+    if is_closed(v) {
+        return (last, false);
+    }
+    (last + 1, true)
+}
+
+/// File dissent children and note the rest for `issue`. A blocking
+/// objection with a reason is one `Dissent holds TEXT` child. A settled
+/// majority still files one `Dissent holds OPTION` child for each option a
+/// voter holds that is not the lead. A tie files none. Each call sits one
+/// panel round ([`sitting_round`]), and at the round limit the issue closes
+/// as settled-with-notes. A tracker that does not answer leaves the reading
+/// as it was: filing is a side effect.
 #[must_use]
 pub fn record_dissents(issue: &str) -> Vec<String> {
     let Ok(v) = crate::issue_record(issue) else {
         return Vec::new();
     };
+    let closed = is_closed(&v);
+    let (round, note_round) = sitting_round(&v);
+    let mut round_lines = Vec::new();
+    if note_round {
+        if let Err(e) = note_issue(issue, &format!("{ROUND_NOTE} {round}")) {
+            round_lines.push(format!("dissent: round note refused: {e:#}"));
+        }
+    }
     let choices: Vec<(String, String)> = crate::ballot_rows(issue)
         .into_iter()
         .filter_map(|row| {
@@ -835,7 +896,7 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
         }
     }
     let state = PanelState {
-        round: crate::panel_round_number(v["title"].as_str().unwrap_or("")).unwrap_or(0),
+        round,
         passed,
         dissent_depth: dissent_depth(&v),
         children_filed,
@@ -848,7 +909,7 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
     };
     let limits = load_budget().panel;
     let disposal = dispose(&state, &limits);
-    let mut lines = Vec::new();
+    let mut lines = round_lines;
     let project = project_of(&v, issue);
     let depth = state.dissent_depth;
     for fate in disposal.fates {
@@ -880,7 +941,7 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
             )),
         }
     }
-    if disposal.close {
+    if disposal.close && !closed {
         match close_settled(issue, &disposal.summary) {
             Ok(said) => lines.push(said.trim().to_string()),
             Err(e) => lines.push(format!("dissent: close refused: {e:#}")),
@@ -981,8 +1042,10 @@ pub fn close_settled(id: &str, summary: &str) -> Result<String> {
     Ok(out)
 }
 
-/// File one `fix:` child for a blocking objection. The review of it is the
-/// next panel round, not a second child.
+/// File one `fix:` child for a blocking objection, for `ljos workflow
+/// --round`. The review of it is the next panel round, not a second child.
+/// `ljos consensus` does not call this: it files `Dissent holds TEXT`
+/// through [`record_dissents`].
 pub fn file_fix(parent: &str, project: &str, objection: &Objection) -> Result<String> {
     let title = format!("fix: {}", clip(&objection.text, 120));
     let id = crate::workflow_child(parent, project, "task", crate::Stage::Implement, &title)?;
@@ -1240,6 +1303,48 @@ mod tests {
 
     fn nit(n: usize) -> Objection {
         Objection::nit("ceo", &format!("comma in note {n}"), "anneal-z64x")
+    }
+
+    #[test]
+    fn the_round_comes_from_the_tracker_not_only_the_title() {
+        // The panel eval's twelve decisions had question titles, so the
+        // closer read round 0 and log-sink stayed TODO after three rounds.
+        let mut v = serde_json::json!({
+            "id": "panel-a7o4",
+            "title": "log-sink: where the log goes",
+            "state": "TODO",
+            "logbook": [],
+        });
+        assert_eq!(sitting_round(&v), (1, true));
+        v["logbook"] = serde_json::json!([
+            {"note": "panel-round: 2"},
+            {"note": "finding: keep: blocking: stderr is what ops reads :: keep stderr"},
+            {"note": "panel-round: 1"},
+        ]);
+        assert_eq!(recorded_round(&v), 2);
+        assert_eq!(sitting_round(&v), (3, true));
+        assert!(objections_in(&v, "panel-a7o4")
+            .iter()
+            .all(|o| !o.text.contains("panel-round")));
+        let mut state = PanelState::at_round(sitting_round(&v).0);
+        state.passed = true;
+        let disposal = dispose(&state, &ScopeBudget::panel());
+        assert!(disposal.close, "{disposal:?}");
+        assert_eq!(
+            disposal.summary,
+            "settled-with-notes: round 3 reached the limit of 3"
+        );
+        // A closed issue sits no new round.
+        v["state"] = serde_json::json!("DONE");
+        assert_eq!(sitting_round(&v), (2, false));
+        // A `panel rN` title is the round `ljos workflow --round` filed.
+        let titled = serde_json::json!({
+            "id": "panel-hrd5",
+            "title": "panel r3: cache place",
+            "state": "TODO",
+            "logbook": [{"note": "panel-round: 7"}],
+        });
+        assert_eq!(sitting_round(&titled), (3, false));
     }
 
     #[test]

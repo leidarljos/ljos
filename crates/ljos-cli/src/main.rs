@@ -889,13 +889,15 @@ enum Cmd {
         /// numbers can differ from the model crate's once trust rows exist.
         #[arg(long)]
         compare: bool,
-        /// Read only: do not note an objection or file a child. By default
-        /// a blocking objection with a reason is filed once, and so is a
-        /// minority a voter still holds after a settled majority (`Dissent
-        /// holds OPTION`, once). A tie files nothing. A nit, a wording note
-        /// or a style note is written on the issue. The same objection is
-        /// not filed again. At the panel's round limit the issue closes as
-        /// settled-with-notes.
+        /// Read only: do not note an objection, file a child, or sit a
+        /// round. By default a blocking objection with a reason is filed
+        /// once (`Dissent holds TEXT`), and so is a minority a voter still
+        /// holds after a settled majority (`Dissent holds OPTION`, once). A
+        /// tie files nothing. A nit, a wording note or a style note is
+        /// written on the issue. The same objection is not filed again.
+        /// Each filing reading is one panel round, noted as `panel-round:
+        /// N` (a `panel rN` title is round N). At the panel's round limit
+        /// the issue closes as settled-with-notes.
         #[arg(long)]
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and
@@ -2696,11 +2698,13 @@ fn run_command() -> Result<()> {
             // exist.
             let predictions = predictions_of(&atoms, &id);
             let panel = panel_steps(&id, on_path("ljos-consensus"), &trust, &predictions);
-            // A blocking objection with a reason is filed once. A nit, a
-            // wording note or a style note is written on the issue. A
-            // minority a voter still holds after a settled majority is
-            // filed once. A tie files nothing. `--no-file` keeps this a
-            // pure read. Filing never fails the reading.
+            // A blocking objection with a reason is filed once, as
+            // `Dissent holds TEXT`. A nit, a wording note or a style note
+            // is written on the issue. A minority a voter still holds after
+            // a settled majority is filed once, as `Dissent holds OPTION`.
+            // A tie files nothing. Each filing reading sits one panel round.
+            // `--no-file` keeps this a pure read. Filing never fails the
+            // reading.
             let dissent = if no_file || !on_path("vissue") {
                 Vec::new()
             } else {
