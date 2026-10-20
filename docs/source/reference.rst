@@ -324,7 +324,7 @@ Variable                                                    Read by
 ``LJOS_MCP_TOOLS``                                          the tools ``ljos-mcp`` lists; unset, the core set (see MCP tools); ``all`` lists every tool; else names split on commas or spaces
 ``LJOS_HUD_BIN``                                            path to ``ljos-hud``; else sibling of ``ljos``, then PATH
 ``LJOS_HUD_SOCKET``                                         summon socket; else ``$XDG_RUNTIME_DIR/ljos/hud.sock``
-``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org`` without pushing; ``off`` skips the commit and push; unset, commit and push
+``LJOS_TRACKER_GIT``                                        ``commit`` commits the ticket's ``issues.org``, and the sitting's and finish's sealed sync log, without pushing; ``off`` skips the commit and push, and the sync in passing; unset, commit and push. ``ljos sync`` by hand always pushes
 ``LJOS_TRACKER_PUSH_WAIT``                                  seconds the tracker push after a claim or finish waits; 5 when unset
 ``LJOS_TRACK_WORK``                                         ``on`` makes the hooks ask a conversation with no issue to open one and sit; read from the environment, else ``~/.config/ljos/env``; unset, they say nothing until it sits
 ``XDG_CONFIG_HOME``                                         where ``ljos/harnesses.toml`` is read from; ``~/.config`` when unset

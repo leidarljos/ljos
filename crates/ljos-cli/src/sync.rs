@@ -583,13 +583,14 @@ fn git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
 }
 
 /// Commit the log after an export. A skipped seal with no file yet has
-/// nothing to stage, and that is not a failure.
-fn commit_if_sealed(root: &Path, scope: &str, exported: &str) -> String {
+/// nothing to stage, and that is not a failure. `push` false keeps the
+/// commit on this machine.
+fn commit_if_sealed(root: &Path, scope: &str, exported: &str, push: bool) -> String {
     let age = log_dir(root).join(format!("{}.jsonl.age", host()));
     if exported.contains("age is not installed") && !age.is_file() {
         return String::new();
     }
-    commit_log(root, scope)
+    commit_log(root, scope, push)
 }
 
 /// Push commits this checkout has not sent. Atoms that did not change used
@@ -642,8 +643,9 @@ fn commits_to_push(root: &Path) -> bool {
 }
 
 /// Commit this host's log alone and push it to the upstream and every other
-/// remote that carries the branch.
-fn commit_log(root: &Path, scope: &str) -> String {
+/// remote that carries the branch. `push` false commits and pushes nothing,
+/// not even a commit already waiting.
+fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     let host = host();
     let files = [
         format!(".ljos/atoms/{host}.jsonl.age"),
@@ -667,9 +669,14 @@ fn commit_log(root: &Path, scope: &str) -> String {
     );
     if staged.is_ok_and(|o| o.status.success()) {
         // Atoms did not change. A commit already made in this checkout,
-        // such as the tracker's merge attributes, still has to leave.
+        // such as the tracker's merge attributes, still has to leave,
+        // unless pushes are off.
         drop(held);
-        return push_pending(root);
+        return if push {
+            push_pending(root)
+        } else {
+            String::new()
+        };
     }
     let message = format!("chore(sync): {host} {scope} atoms");
     let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
@@ -688,6 +695,9 @@ fn commit_log(root: &Path, scope: &str) -> String {
         Err(e) => return format!("sync: git: {e}\n"),
     }
     drop(held);
+    if !push {
+        return format!("sync: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
+    }
     let remotes = git(root, &["remote"])
         .ok()
         .filter(|o| o.status.success())
@@ -790,9 +800,50 @@ fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String
     Ok(out)
 }
 
+/// What a sync may do with the tracker's git.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackerGit {
+    /// Commit and push.
+    Push,
+    /// Commit, push nothing.
+    Commit,
+    /// Leave the checkout alone.
+    Off,
+}
+
+/// `LJOS_TRACKER_GIT` read as the tracker commit reads it: `off`, `0` or
+/// `false` is off, `commit` commits without pushing, anything else pushes.
+fn tracker_git_value(value: Option<&str>) -> TrackerGit {
+    match value {
+        Some("off" | "0" | "false") => TrackerGit::Off,
+        Some("commit") => TrackerGit::Commit,
+        _ => TrackerGit::Push,
+    }
+}
+
+/// The git a sync may do. A sync in passing, from the sitting, finish or
+/// the server's exit, follows `LJOS_TRACKER_GIT` as the ticket commit
+/// does. Its push carries the whole branch, so a commit that variable kept
+/// local left with the log. `ljos sync` run by hand does what it was asked.
+fn tracker_git(asked: bool) -> TrackerGit {
+    if asked {
+        return TrackerGit::Push;
+    }
+    tracker_git_value(std::env::var("LJOS_TRACKER_GIT").ok().as_deref())
+}
+
 fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
     let root = root.to_path_buf();
     let mut out = String::new();
+    let mode = tracker_git(asked);
+    if mode == TrackerGit::Off {
+        // No merge attributes, no pull, no commit. A repository with no
+        // scope stays quiet, as it does with git on.
+        return Ok(match scope_of_repo(&root)? {
+            Some(_) => "sync: off (LJOS_TRACKER_GIT); `ljos sync` runs it by hand\n".into(),
+            None => String::new(),
+        });
+    }
     // Every sync writes the tracker's merge attributes and registers the
     // atoms driver. A later conflict then unions org files and re-exports
     // this machine's atoms.
@@ -818,7 +869,12 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
         let atoms = crate::atoms_lean(&client, &client.workspace())?;
         let said = export(&root, &scope, &atoms)?;
         out.push_str(&said);
-        out.push_str(&commit_if_sealed(&root, &scope.name, &said));
+        out.push_str(&commit_if_sealed(
+            &root,
+            &scope.name,
+            &said,
+            mode == TrackerGit::Push,
+        ));
     }
     Ok(out)
 }
@@ -1220,12 +1276,12 @@ mod tests {
         let name = host();
         std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
         std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
-        let said = commit_log(root, "surf");
+        let said = commit_log(root, "surf", true);
         assert!(said.contains("no remote is configured"), "{said}");
         assert!(said.contains("remote add origin"), "{said}");
         assert!(said.contains("git push -u origin HEAD"), "{said}");
         assert!(!said.contains("pushed to nothing"), "{said}");
-        assert_eq!(commit_log(root, "surf"), "");
+        assert_eq!(commit_log(root, "surf", true), "");
     }
 
     /// Atoms that did not change still push a commit already waiting,
@@ -1280,7 +1336,7 @@ mod tests {
                 "chore(tracker): union org files and re-export atoms on merge",
             ],
         );
-        let said = commit_log(&root, "surf");
+        let said = commit_log(&root, "surf", true);
         assert!(
             said.contains("pushed pending commits"),
             "an unchanged atom log must still push: {said}"
@@ -1296,7 +1352,109 @@ mod tests {
             subjects.contains("union org files"),
             "the pending commit was not pushed: {subjects}"
         );
-        assert_eq!(commit_log(&root, "surf"), "");
+        assert_eq!(commit_log(&root, "surf", true), "");
+    }
+
+    #[test]
+    fn tracker_git_reads_as_the_ticket_commit_reads_it() {
+        assert_eq!(tracker_git_value(None), TrackerGit::Push);
+        assert_eq!(tracker_git_value(Some("")), TrackerGit::Push);
+        assert_eq!(tracker_git_value(Some("commit")), TrackerGit::Commit);
+        for off in ["off", "0", "false"] {
+            assert_eq!(tracker_git_value(Some(off)), TrackerGit::Off, "{off}");
+        }
+        assert_eq!(tracker_git(true), TrackerGit::Push);
+    }
+
+    /// `LJOS_TRACKER_GIT=commit` kept the ticket commit local, and the sync
+    /// at finish pushed it anyway with the log.
+    #[test]
+    fn a_commit_only_tracker_commits_the_log_and_pushes_nothing() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let root = dir.path().join("local");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare"]);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(root.join("README"), "seed\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(root.join("issues.org"), "* TODO kept local\n").unwrap();
+        git(&root, &["add", "issues.org"]);
+        git(&root, &["commit", "-q", "-m", "chore(issues): kept local"]);
+        let atoms = root.join(".ljos/atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        let name = host();
+        std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
+        std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
+        let said = commit_log(&root, "surf", false);
+        assert!(
+            said.contains("not pushed (LJOS_TRACKER_GIT=commit)"),
+            "{said}"
+        );
+        assert!(git(&root, &["log", "-1", "--format=%s"]).contains("chore(sync)"));
+        assert_eq!(commit_log(&root, "surf", false), "");
+        let subjects = git(&remote, &["log", "--format=%s"]);
+        assert!(!subjects.contains("kept local"), "{subjects}");
+        assert!(!subjects.contains("chore(sync)"), "{subjects}");
+    }
+
+    /// `LJOS_TRACKER_GIT=off` leaves the tracker as it is in passing: no
+    /// attributes, no commit, one line when a scope is set up.
+    #[test]
+    fn an_off_tracker_is_left_alone_in_passing() {
+        let _g = crate::test_env_lock();
+        let before = std::env::var_os("LJOS_TRACKER_GIT");
+        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let quiet = sync_one(root, true, true, false).unwrap();
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            "name = \"surf\"\nrecipients = []\n",
+        )
+        .unwrap();
+        let said = sync_one(root, true, true, false).unwrap();
+        match before {
+            Some(value) => std::env::set_var("LJOS_TRACKER_GIT", value),
+            None => std::env::remove_var("LJOS_TRACKER_GIT"),
+        }
+        assert_eq!(quiet, "");
+        assert!(said.contains("sync: off (LJOS_TRACKER_GIT)"), "{said}");
+        assert!(!root.join(".gitattributes").exists());
+        assert!(!root.join(".ljos/atoms").exists());
     }
 
     /// Finish's sync used to print an os error when `age` was not installed.
@@ -1314,7 +1472,7 @@ mod tests {
         assert!(!log_dir(root.path())
             .join(format!("{}.jsonl.age", host()))
             .is_file());
-        assert_eq!(commit_if_sealed(root.path(), "surf", &said), "");
+        assert_eq!(commit_if_sealed(root.path(), "surf", &said, true), "");
     }
 
     #[test]
