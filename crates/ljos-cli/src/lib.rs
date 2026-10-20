@@ -2860,14 +2860,17 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
 /// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`); a last part of three
 /// or four lowercase letters and digits with at least one digit is read
-/// as that tag, so `eessi-bot` and `disk-saver` stay whole seats.
+/// as that tag, so `eessi-bot` and `disk-saver` stay whole seats. An old
+/// tag comes back as `None`: the server that wrote it is gone and no
+/// conversation holds under it again, so the seat is its holder now and
+/// any conversation of that seat may finish or release the claim.
 #[must_use]
 pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     let holder = holder.trim();
     let (seat, tag) = match holder.split_once('@') {
         Some((seat, tag)) if !tag.is_empty() => (seat, Some(tag)),
         _ => match holder.rsplit_once('-') {
-            Some((seat, tag)) if !seat.is_empty() && legacy_tag(tag) => (seat, Some(tag)),
+            Some((seat, tag)) if !seat.is_empty() && legacy_tag(tag) => (seat, None),
             _ => (holder, None),
         },
     };
@@ -29843,13 +29846,15 @@ mod tests {
         assert!(same_holder("disk-saver", "disk-saver-t4t"));
         assert!(same_holder("ljosbot", "ljos-bot"));
         assert!(same_holder("ljos-bot", "ljosbot@q4s23e2cxd"));
-        assert!(!same_holder("inky-n9o", "inky-8zo"));
+        assert!(same_holder("inky-n9o", "inky@i1o6nf7w3i"));
+        assert!(same_holder("inky-n9o", "inky-8zo"));
         assert!(!same_holder("inky@abc", "inky@def"));
         assert!(!same_holder("eessi", "eessi-bot"));
         assert!(!same_holder("disk", "disk-saver"));
         assert_eq!(holder_parts("disk-saver"), ("disk-saver".to_string(), None));
+        assert_eq!(holder_parts("inky-14ao"), ("inky".to_string(), None));
         assert_eq!(
-            holder_parts("inky-14ao"),
+            holder_parts("inky@14ao"),
             ("inky".to_string(), Some("14ao".to_string()))
         );
     }
