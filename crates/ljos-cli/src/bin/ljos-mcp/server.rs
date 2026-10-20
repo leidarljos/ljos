@@ -2890,6 +2890,50 @@ async fn relay_forward_request(
         .map_err(|e| serde_json::json!({"code": -32603, "message": e.to_string()}))
 }
 
+/// The server answers each call on its own task, so two calls a client
+/// sends together run at once. opencode sent `ljos_note` and then
+/// `ljos_recall` 7 ms apart in willma-20261020f w7 and w11, and the recall
+/// answered before the note was stored. A call that changes what this seat
+/// reads back waits for every such call that reached the server before it,
+/// and a read waits for those too. Reads still run beside each other, and
+/// every other tool, the guard and approval included, waits for nothing.
+static CALL_ORDER: std::sync::LazyLock<tokio::sync::RwLock<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::RwLock::new(()));
+
+/// Tools whose effect a later recall, search or timeline shows.
+const ORDERED_WRITES: &[&str] = &[
+    "ljos_note",
+    "ljos_remember",
+    "ljos_prefer",
+    "ljos_forget",
+    "ljos_start",
+    "ljos_sitting",
+    "ljos_claim",
+    "ljos_finish",
+    "ljos_release",
+    "ljos_deed",
+];
+
+/// Reads that show what [`ORDERED_WRITES`] wrote.
+const ORDERED_READS: &[&str] = &["ljos_recall", "ljos_search", "ljos_timeline"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum Order {
+    Write,
+    Read,
+    Free,
+}
+
+fn call_order(name: &str) -> Order {
+    if ORDERED_WRITES.contains(&name) {
+        Order::Write
+    } else if ORDERED_READS.contains(&name) {
+        Order::Read
+    } else {
+        Order::Free
+    }
+}
+
 /// Answer one tool call with the installed binary, typed for the server.
 async fn forward_call(
     fresh: &Path,
@@ -2969,6 +3013,20 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        // Taken before this handler awaits anything else, so the queue is
+        // the order the calls reached the server. Held until the answer is
+        // built.
+        let order = call_order(&request.name);
+        let _written = if order == Order::Write {
+            Some(CALL_ORDER.write().await)
+        } else {
+            None
+        };
+        let _read = if order == Order::Read {
+            Some(CALL_ORDER.read().await)
+        } else {
+            None
+        };
         if let Some(fresh) = replaced_binary() {
             let init = context
                 .peer
@@ -3287,6 +3345,37 @@ mod tests {
         assert!(text.contains("no such issue"), "{text}");
         let bad = McpError::invalid_params("missing field `issue`", None);
         assert!(as_tool_error(bad).is_err());
+    }
+
+    /// The ordered writers are writers and the ordered reads are read-only,
+    /// so a read never queues behind a read and nothing else queues.
+    #[test]
+    fn ordered_calls_match_their_annotations() {
+        let tools = LjosServer::tool_router().list_all();
+        let hint = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is not a tool"))
+                .annotations
+                .as_ref()
+                .and_then(|a| a.read_only_hint)
+        };
+        for name in ORDERED_WRITES {
+            assert_eq!(hint(name), Some(false), "{name}");
+            assert_eq!(call_order(name), Order::Write);
+        }
+        for name in ORDERED_READS {
+            assert_eq!(hint(name), Some(true), "{name}");
+            assert_eq!(call_order(name), Order::Read);
+        }
+        for name in [
+            "ljos_guard_check",
+            "ljos_request_approval",
+            "ljos_consensus",
+        ] {
+            assert_eq!(call_order(name), Order::Free, "{name}");
+        }
     }
 
     /// Every tool is annotated, and the writers are the ones the contract names.
