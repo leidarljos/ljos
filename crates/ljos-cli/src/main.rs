@@ -18,7 +18,7 @@ use ljos_cli::{
     topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
     withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
     write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    POLICY_TCB, PROTOCOL,
+    PROTOCOL,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -27,7 +27,9 @@ use std::path::PathBuf;
 #[command(
     name = "ljos",
     version,
-    about = "One seat over cards, packset, deedar, vissue, claimdag, and policyd"
+    about = "Memory, a work tracker and a command guard for coding agents",
+    after_help = "Start with `ljos doctor`, `ljos prefer \"...\"`, `ljos policy -- COMMAND` and \
+                  `ljos onboard`. `ljos protocol` explains the rest."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -279,7 +281,7 @@ enum Cmd {
     },
     /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
-    /// Retire one atom by id. Tombstones it; the pack keeps the record.
+    /// Retire one memory by id. The record stays, marked retired.
     Forget {
         id: String,
         /// The deed accession that withdrew the claim. Refused if it is not one.
@@ -289,7 +291,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// What the seat knows about a topic, ranked. Empty means the pack holds nothing on it.
+    /// What ljos remembers about a topic, best match first. Empty means nothing is remembered on it.
     Search {
         query: Vec<String>,
         /// Most hits to print.
@@ -786,7 +788,7 @@ enum Cmd {
         #[arg(long)]
         assignee: Option<String>,
     },
-    /// Frozen working core. Read-only. Never extract-on-write.
+    /// The notes the person froze. Read-only.
     Cards {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -801,8 +803,8 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
-    /// Argv law kept in the pack: a glob over the command line with a verdict the hook and `policy` enforce.
-    /// `--user` keeps the same law in the user config, shared by every seat and never reviewed.
+    /// Add a command guard rule: a glob over the command line and a verdict (deny or ask).
+    /// `--user` keeps it in the user config, shared by every agent and never reviewed.
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
         pattern: String,
@@ -819,7 +821,7 @@ enum Cmd {
         #[arg(long)]
         user: bool,
     },
-    /// The seat rules the hook and `policy` judge by: verdict, pattern and reason, one a line.
+    /// The command guard's rules: verdict, pattern and reason, one a line.
     Rules {
         /// Print them as JSON.
         #[arg(long)]
@@ -830,15 +832,15 @@ enum Cmd {
         /// The request id printed by the hook. Approve only after the person agrees.
         id: String,
     },
-    /// Argv law: the line as it would run, then what the pack knows that bears on it.
+    /// What the command guard says about a command, then what ljos remembers about it. Runs nothing.
     Policy {
         /// Exit 1 when the answer is a deny. Without this flag the exit stays 0.
         #[arg(long)]
         fail_on_deny: bool,
         argv: Vec<String>,
     },
-    /// The memory hook a runner or a policy layer calls before an action: reads the
-    /// hook JSON (or plain text) on stdin, answers with the memories the action activates.
+    /// The hook a coding agent calls before it acts: hook JSON or plain text on stdin,
+    /// the memories it bears on and the guard's verdict out. `--prompt --text` prints them plainly.
     Hook {
         /// Most memories to inject per call; each is injected once between compactions.
         #[arg(long, default_value_t = 5)]
@@ -851,6 +853,10 @@ enum Cmd {
         /// Mail it shows is marked read.
         #[arg(long, conflicts_with = "event")]
         prompt: bool,
+        /// With --prompt, print what the agent would be told as plain text
+        /// instead of the runner's JSON.
+        #[arg(long, requires = "prompt")]
+        text: bool,
         /// Exit 1 when the answer is a deny. Without this flag the exit stays 0,
         /// so a runner that reads the JSON is unchanged.
         #[arg(long)]
@@ -946,7 +952,7 @@ enum Cmd {
     },
     /// Print the sitting protocol: which store answers what, and the order of verbs.
     Protocol,
-    /// Who is sitting: the seat this runner votes under, the holder this conversation claims under, and where the names came from.
+    /// The name this agent works under, the name its claims go under, and where each came from.
     Seat,
     /// Serve MCP over stdio: run the `ljos-mcp` installed beside this `ljos`, with these arguments. For a client that starts a server by its crate's name.
     Mcp {
@@ -954,7 +960,7 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
-    /// Print the one MCP server entry any runner takes; with --harness, register it with a runner named in ~/.config/ljos/harnesses.toml and install the protocol as its skill.
+    /// Connect ljos to a coding agent with `--harness NAME`, or print the MCP entry to paste into any agent.
     Onboard {
         /// A runner named in ~/.config/ljos/harnesses.toml or shipped with ljos; `all` onboards every runner found on this machine, and `json` prints the entry to paste anywhere. Absent: `all` at a terminal, `json` into a pipe.
         #[arg(long)]
@@ -1000,7 +1006,7 @@ enum Cmd {
         #[arg(long)]
         import: bool,
     },
-    /// The soonest eight atoms whose review is due, then one line on the state of the clock.
+    /// The eight memories due for review soonest, then one line on the review clock.
     Due {
         /// List every due atom to read; none of them is put up for grading.
         #[arg(long)]
@@ -1059,7 +1065,7 @@ enum Cmd {
         #[arg(long, default_value = "")]
         source: String,
     },
-    /// Open a sitting on an issue in the protocol's order: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim.
+    /// Start work on a ticket: the checks, what ljos remembers for it, and the claim.
     Sitting {
         /// The tracker id of the issue.
         issue: String,
@@ -1079,7 +1085,7 @@ enum Cmd {
         #[arg(long)]
         verbose: bool,
     },
-    /// Close a sitting: remember the lesson, fire the island, complete the node, learn from the outcome.
+    /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
     Finish {
         /// The tracker id of the issue.
         issue: String,
@@ -2126,7 +2132,6 @@ fn run_command() -> Result<()> {
             print!("{}", ljos_cli::approval::approve(&id)?);
         }
         Cmd::Policy { argv, fail_on_deny } => {
-            eprintln!("ljos: {POLICY_TCB}");
             let text = policy_with_memory(&argv)?;
             print!("{text}");
             if ljos_cli::shell_exit(fail_on_deny, &text) != 0 {
@@ -2138,12 +2143,16 @@ fn run_command() -> Result<()> {
             limit,
             event,
             prompt,
+            text,
             fail_on_deny,
             runner,
             git_commit,
             git_hook,
             brief_once,
         } => {
+            if text {
+                return prompt_as_text(limit);
+            }
             if git_commit {
                 return ljos_cli::git_hooks::run_git_commit(
                     git_hook.as_deref().unwrap_or("post-commit"),
@@ -3162,4 +3171,32 @@ fn quorum_or_exit(id: &str, n: usize, deadline: Option<&str>, json: bool) -> Res
             std::process::exit(3);
         }
     }
+}
+
+/// `ljos hook --prompt --text`: the same prompt hook, run as its own
+/// process so it books and marks mail exactly as a runner's call does,
+/// then its answer as the plain text the agent would read.
+fn prompt_as_text(limit: usize) -> Result<()> {
+    use std::io::{Read, Write};
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .args(["hook", "--prompt", "--limit", &limit.to_string()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    let said = ljos_cli::hook_text(&String::from_utf8_lossy(&out.stdout));
+    if said.is_empty() {
+        println!("Nothing remembered bears on this.");
+    } else {
+        print!("{said}");
+    }
+    if !out.status.success() {
+        std::process::exit(out.status.code().unwrap_or(1));
+    }
+    Ok(())
 }

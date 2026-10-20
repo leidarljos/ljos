@@ -205,7 +205,7 @@ Computing Base (TCB)
 .. code:: console
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (seat rule `ljos-policyd`)"}}
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: a force push rewrites history that others may already have pulled. Push without --force, use --force-with-lease to overwrite only your own last push, or ask the person to run it (ljos rule `ljos-policyd`)"}}
 
 An ``ask`` rule uses the caller's approval UI when that UI is supported.
 Otherwise the hook stops the command and prints a request id. Calling
@@ -259,7 +259,7 @@ A policy daemon does the same with the argv:
    - [lesson] The lme dense run needs 40G and sessions only; windows and sessions ran past four hours.
    $ ljos policy cargo test --release
    cargo test --release
-   What this seat already knows that bears on this ...
+   Remembered, oldest first (`ljos search` for more):
 
 Let Jev judge the prompt
 ========================

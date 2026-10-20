@@ -1,7 +1,7 @@
 #!/bin/sh
-# Install the ljos seat from its release tarballs, check each tarball
-# against the SHA-256 published beside it, and run `ljos onboard` for
-# every coding agent found on this machine.
+# Install ljos from its release tarballs, check each tarball against the
+# SHA-256 published beside it and its GitHub build attestation, and run
+# `ljos onboard` for every coding agent found on this machine.
 #
 #   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
@@ -21,17 +21,22 @@
 #   --version VER   install ljos VER (such as 0.29.0) instead of the latest
 #   --pin REPO=VER  install REPO at VER (such as packset=0.14.0); repeat
 #                   for each repository to hold
-#   --attest        refuse a tarball whose GitHub build attestation does
-#                   not verify (needs the gh CLI, signed in)
+#   --attest        refuse a tarball whose GitHub build attestation is
+#                   missing or does not verify
 #   --help          this text
 #
 # The checksum guards against a broken or truncated download. It comes
 # from the same release page as the tarball, so it does not prove who
-# built the tarball. With the gh CLI on PATH the script also checks each
-# tarball's build attestation, which says the release workflow of that
-# repository built it, and says when none verified (a release from before
-# attestations, or gh not signed in). --attest makes that stop the
-# install.
+# built the tarball. The build attestation does: a statement signed
+# through Sigstore that the repository's release workflow built that
+# exact file. The script checks it with whichever of these it finds:
+#   - gh 2.49 or newer, signed in: `gh attestation verify`
+#   - gh 2.49 or newer, not signed in, or cosign: the attestation is
+#     fetched from GitHub's public API (needs jq or python3 to read it)
+#     and checked offline
+# With none of them it says so once and goes on; --attest stops there.
+# An attestation that is found and does not verify is a warning, or
+# with --attest the end of the install. One line at the end sums up.
 #
 # A pinned version that has no release for this platform is built from
 # that version's crate, never from a newer one.
@@ -46,6 +51,7 @@ PINS=
 ATTEST=0
 
 say() { printf '%s\n' "$*"; }
+warn() { printf '  warning: %s\n' "$*"; }
 warn_embed() {
   say "  warning: no packset-embed for $TARGET in $1; search stays lexical."
   say "  Paraphrases that share no word with a memory are missed until an encoder is installed."
@@ -143,21 +149,120 @@ source_build() {
   cp "$TMP"/cargo/bin/* "$BIN_DIR"/
 }
 
-# Check FILE's build attestation from REPO's release workflow with the gh
-# CLI. Prints what it found; with --attest, anything but a pass stops.
+# What can check a build attestation here. gh gained `attestation` in
+# 2.49; an older gh is the same as none.
+GH_ATTEST=0
+GH_SIGNED_IN=0
+if command -v gh >/dev/null 2>&1 && gh attestation --help >/dev/null 2>&1; then
+  GH_ATTEST=1
+  gh auth status >/dev/null 2>&1 && GH_SIGNED_IN=1
+fi
+COSIGN=0
+command -v cosign >/dev/null 2>&1 && COSIGN=1
+JSON_TOOL=
+if command -v jq >/dev/null 2>&1; then
+  JSON_TOOL=jq
+elif command -v python3 >/dev/null 2>&1; then
+  JSON_TOOL=python3
+fi
+if [ "$GH_SIGNED_IN" = 1 ]; then
+  VERIFIER=gh
+elif [ -n "$JSON_TOOL" ] && [ "$GH_ATTEST" = 1 ]; then
+  VERIFIER=gh-bundle
+elif [ -n "$JSON_TOOL" ] && [ "$COSIGN" = 1 ]; then
+  VERIFIER=cosign
+else
+  VERIFIER=none
+fi
+[ "$ATTEST" = 0 ] || [ "$VERIFIER" != none ] ||
+  die "--attest needs gh 2.49 or newer (https://cli.github.com), or cosign with jq or python3"
+
+# GET URL into FILE and print the HTTP status, 000 when nothing answered.
+api_get() {
+  code=
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -sSL -o "$2" -w '%{http_code}' -H 'Accept: application/vnd.github+json' "$1" 2>/dev/null) || true
+  else
+    wget -q -S -O "$2" --header='Accept: application/vnd.github+json' "$1" 2>"$2.hdr" || true
+    code=$(sed -n 's/^  *HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$2.hdr" | tail -n 1)
+  fi
+  printf '%s' "${code:-000}"
+}
+
+# Each bundle of a GitHub attestations answer, one JSON document a line.
+bundles_of() {
+  case $JSON_TOOL in
+    jq) jq -c '.attestations[].bundle' "$1" ;;
+    python3) python3 -c 'import json, sys
+for a in json.load(open(sys.argv[1]))["attestations"]:
+    print(json.dumps(a["bundle"]))' "$1" ;;
+  esac
+}
+
+# Check FILE (whose SHA-256 is DIGEST) against the build attestations of
+# REPO's workflows. Prints one word: verified, missing (the release has
+# none), unchecked (nothing here can check one) or failed (found, and it
+# does not verify). --attest stops on anything but verified.
 attest() {
-  file=$1 repo=$2
-  if ! command -v gh >/dev/null 2>&1; then
-    [ "$ATTEST" = 0 ] || die "--attest needs the gh CLI (https://cli.github.com)"
-    printf 'no attestation check (gh not installed)'
-    return
+  file=$1 repo=$2 digest=$3
+  name=$(basename "$file")
+  case $VERIFIER in
+    none)
+      printf 'unchecked'
+      return ;;
+    gh)
+      if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$TMP/attest.err"; then
+        printf 'verified'
+      elif grep -qi 'no attestations found' "$TMP/attest.err"; then
+        [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
+        printf 'missing'
+      else
+        [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$TMP/attest.err")"
+        printf 'failed'
+      fi
+      return ;;
+  esac
+  answer="$TMP/attest-$repo-$digest.json"
+  code=$(api_get "https://api.github.com/repos/$OWNER/$repo/attestations/sha256:$digest" "$answer")
+  case $code in
+    200) ;;
+    404)
+      [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
+      printf 'missing'
+      return ;;
+    *)
+      [ "$ATTEST" = 0 ] || die "$name: GitHub's attestation API answered $code"
+      printf 'unchecked'
+      return ;;
+  esac
+  bundles_of "$answer" > "$answer.jsonl" 2>/dev/null || : > "$answer.jsonl"
+  ok=0
+  if [ "$VERIFIER" = gh-bundle ]; then
+    gh attestation verify "$file" --repo "$OWNER/$repo" --bundle "$answer.jsonl" >/dev/null 2>"$TMP/attest.err" && ok=1
+  else
+    # cosign 2.x reads this bundle format only behind --new-bundle-format;
+    # cosign 3 reads it by default and may drop the flag.
+    while IFS= read -r bundle; do
+      printf '%s\n' "$bundle" > "$answer.one"
+      for flag in --new-bundle-format ""; do
+        # shellcheck disable=SC2086
+        if cosign verify-blob-attestation $flag --bundle "$answer.one" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github\.com/$OWNER/$repo/\.github/workflows/" \
+            --type https://slsa.dev/provenance/v1 "$file" >/dev/null 2>"$TMP/attest.err"; then
+          ok=1
+          break
+        fi
+      done
+      [ "$ok" = 1 ] && break
+    done < "$answer.jsonl"
   fi
-  if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$TMP/attest.err"; then
-    printf 'attestation verified'
-    return
+  if [ "$ok" = 1 ]; then
+    printf 'verified'
+  else
+    [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
+    printf 'failed'
   fi
-  [ "$ATTEST" = 0 ] || die "$(basename "$file"): no build attestation from $OWNER/$repo verified: $(head -n 1 "$TMP/attest.err")"
-  printf 'no attestation verified'
 }
 
 install_one() {
@@ -171,7 +276,7 @@ install_one() {
       [ -x "$FROM_DIR/$p" ] || die "$FROM_DIR/$p is missing"
       cp "$FROM_DIR/$p" "$BIN_DIR/$p"
     done
-    say "  $repo: copied from $FROM_DIR"
+    printf '%s\n' "$repo" >> "$TMP/copied"
     return
   fi
   ver=$(pinned "$repo")
@@ -199,7 +304,8 @@ install_one() {
   want=$(sed 's/[ *].*//' "$TMP/$asset.sha256" | head -n 1)
   got=$(sha256 "$TMP/$asset")
   [ "$want" = "$got" ] || die "$asset: checksum mismatch (published $want, downloaded $got); nothing from it was installed"
-  attested=$(attest "$TMP/$asset" "$repo")
+  attested=$(attest "$TMP/$asset" "$repo" "$got")
+  printf '%s\n' "$attested" >> "$TMP/attested"
   mkdir -p "$TMP/x-$repo"
   case $asset in
     *.tar.xz) tar -xJf "$TMP/$asset" -C "$TMP/x-$repo" ;;
@@ -215,7 +321,10 @@ install_one() {
     cp "$found" "$BIN_DIR/$p"
     chmod 755 "$BIN_DIR/$p"
   done
-  say "  $repo $tag: checksum ok, $attested"
+  label=$repo
+  case $crate in *-mcp) label=$crate ;; esac
+  say "  $label $tag"
+  [ "$attested" != failed ] || warn "$asset: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
 }
 
 for pin in $PINS; do
@@ -223,13 +332,43 @@ for pin in $PINS; do
     die "--pin ${pin%%=*}: not one of the repositories this installs"
 done
 
-say "Installing the ljos seat into $BIN_DIR ($TARGET)"
+say "Installing ljos into $BIN_DIR ($TARGET)"
 printf '%s\n' "$COMPONENTS" | while read -r repo crate style progs; do
   if [ "$repo" = packset ] && [ "$WITH_EMBED" = 1 ]; then
     progs="$progs,packset-embed"
   fi
   install_one "$repo" "$crate" "$style" "$progs"
 done
+
+# One line for the whole install: what the checksums and the build
+# attestations said.
+count() {
+  n=$(grep -c "^$2\$" "$TMP/$1" 2>/dev/null) || true
+  printf '%s' "${n:-0}"
+}
+if [ -f "$TMP/copied" ]; then
+  say "  copied from $FROM_DIR; a local copy has no checksum or attestation to check"
+fi
+if [ -f "$TMP/attested" ]; then
+  total=$(wc -l < "$TMP/attested" | tr -d ' ')
+  verified=$(count attested verified)
+  missing=$(count attested missing)
+  failed=$(count attested failed)
+  unchecked=$(count attested unchecked)
+  line="Checksums match ($total downloads);"
+  if [ "$verified" = "$total" ]; then
+    line="$line build attestations verified for all $total."
+  elif [ "$unchecked" = "$total" ]; then
+    line="$line attestations not checked: install gh 2.49+ or cosign."
+  else
+    line="$line build attestations: $verified verified"
+    [ "$missing" = 0 ] || line="$line, $missing not published"
+    [ "$failed" = 0 ] || line="$line, $failed failed (see the warnings above)"
+    [ "$unchecked" = 0 ] || line="$line, $unchecked not checked"
+    line="$line."
+  fi
+  say "$line"
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -258,7 +397,7 @@ cline dir:Documents/Cline"
 
 found_any=0
 if [ "$ONBOARD" = 1 ]; then
-  say "Onboarding the coding agents found here"
+  say "Connecting the coding agents found here:"
   printf '%s\n' "$RUNNERS" > "$TMP/runners"
   while read -r name probes; do
     here=0
@@ -278,8 +417,8 @@ if [ "$ONBOARD" = 1 ]; then
     fi
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
-    say "  none found. Run \`ljos onboard --harness NAME\` once one is installed,"
-    say "  or \`ljos onboard --harness json\` for the entry to paste anywhere."
+    say "  none found. After you install one, run \`ljos onboard --harness NAME\`;"
+    say "  \`ljos onboard --harness json\` prints the entry for any other agent."
   fi
 fi
 
@@ -294,6 +433,14 @@ if [ -x "$BIN_DIR/packset-embed" ]; then
   fi
 fi
 
-say "Checking a command the guard refuses:"
+# A temporary HOME is a test sandbox to ljos: the guard and the memory
+# writer stay off there. Say so, so a trial in /tmp does not mislead.
+tmp_root=${TMPDIR:-/nonexistent}
+case "$(cd "$HOME" && pwd -P)/" in
+  /tmp/*|/var/tmp/*|/private/tmp/*|/dev/shm/*|"${tmp_root%/}"/*)
+    say "Note: HOME is a temporary directory, so the command guard and memory stay off;"
+    say "  \`ljos doctor\` says why. Install into a HOME outside /tmp to try them." ;;
+esac
+say "The guard asks before a force push:"
 ljos policy -- git push --force origin main || true
-say "Done in $(( $(date +%s) - START )) s. \`ljos doctor\` lists what each part says."
+say "Done in $(( $(date +%s) - START )) s. Next: \`ljos doctor\`."

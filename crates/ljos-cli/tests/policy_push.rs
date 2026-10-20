@@ -49,23 +49,23 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
     let cases = [
         (
             "git push --force origin main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push -f origin main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push origin +main",
-            "a force push rewrites what others may hold",
+            "a force push rewrites shared history",
         ),
         (
             "git push origin --delete old",
-            "deleting a remote branch removes what others may hold",
+            "deleting a remote branch removes shared work",
         ),
         (
             "git push origin :old",
-            "deleting a remote branch removes what others may hold",
+            "deleting a remote branch removes shared work",
         ),
         ("git push --tags", "tags and mirrors publish releases"),
         (
@@ -76,7 +76,8 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
     for (line, why) in cases {
         let text = stdout_of(line);
         assert!(
-            text.contains(&format!("ask: {why}")) && text.contains("built-in: dangerous push"),
+            text.contains(&format!("ask: {why}"))
+                && text.contains("(rule: built-in push)"),
             "{line}\n{text}"
         );
         assert!(

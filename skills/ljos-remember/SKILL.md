@@ -17,7 +17,7 @@ a prompt back to the agent. Three verbs write to it. Pick by what was said.
 Examples:
 
 ```
-ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos remember "The CI cache key ignores Cargo.lock. Bump it after a dependency change."
 ljos rule '*--force*' --verdict deny --why "Never force push."
 ```

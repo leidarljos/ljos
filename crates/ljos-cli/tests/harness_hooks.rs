@@ -579,7 +579,7 @@ server.serve_forever()
         "{warming}"
     );
     assert!(
-        !warming.contains("What this seat already knows"),
+        !warming.contains("Remembered, oldest first"),
         "{warming}"
     );
     ljos(
@@ -652,7 +652,7 @@ server.serve_forever()
     );
     let recalled = context(&recalled.stdout);
     assert!(
-        recalled.contains("What this seat already knows"),
+        recalled.contains("Remembered, oldest first"),
         "{recalled}"
     );
     assert!(recalled.contains("readme"), "{recalled}");
@@ -1684,7 +1684,7 @@ server.serve_forever()
         note.contains("The slugify helper keeps kebab words whole."),
         "{note}"
     );
-    assert!(note.contains("What this seat already knows"), "{note}");
+    assert!(note.contains("Remembered, oldest first"), "{note}");
     assert!(note.contains("probe-held"), "{note}");
     assert!(
         !note.contains("pack is loading its search model"),
