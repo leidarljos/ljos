@@ -53,9 +53,9 @@ const EDIT_TOOLS: &[&str] = &[
 
 /// MCP tools that write a habitat. The claim, the sitting and the finish
 /// are the bookkeeping verbs themselves, and `ljos_file` opens its own issue.
-/// MCP tools that write, so the server claims before they run. Mail
-/// (`ljos_send`, `ljos_reply`) is not on the list: a message is not work,
-/// and its text ("Hourly poke from Inky: ...") titled the claim it filed.
+/// Before one of these runs the server joins the issue this seat holds
+/// ([`before_mcp_write`]); it never files one. Mail (`ljos_send`,
+/// `ljos_reply`) and `ljos_note` are not on the list.
 const MCP_WRITES: &[&str] = &[
     "ljos_remember",
     "ljos_prefer",
@@ -444,56 +444,42 @@ fn claimed_recall(issue: &str, cached: &str) -> String {
     format!("{}{}", recall_line(issue), super::recall_memories(issue))
 }
 
-/// Whether this MCP tool writes a habitat, so the server claims before it runs.
+/// Whether this MCP tool writes a habitat, so the server joins the held issue first.
 #[must_use]
 pub fn mcp_tool_writes(name: &str) -> bool {
     MCP_WRITES.contains(&name)
 }
 
-/// File the session's claim before a write tool runs. The title comes from
-/// the arguments when the session has not heard a prompt yet.
+/// Attach a write tool's call to the issue this seat holds, before it runs.
+/// A write tool (`ljos_remember`, `ljos_prefer`, ...) never files or claims
+/// an issue: its text titled the claims it used to file. With an issue held
+/// in the checkout, by this book or another book of this seat (a hook's
+/// edit, `ljos_start`), the call joins that sitting. With none, it runs
+/// unattached.
 pub fn before_mcp_write(name: &str, args: Option<&serde_json::Map<String, Value>>) {
     if !mcp_tool_writes(name) {
         return;
     }
     let session = sitting_key();
-    if let Some(title) = args.and_then(arg_title) {
+    let explicit = args.and_then(|map| map.get("repo")).and_then(Value::as_str);
+    let Some(place) = place_for_claim(explicit) else {
+        log_line(&format!("{name}: no checkout here; ran unattached"));
+        return;
+    };
+    {
         let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
         let path = book_path(&session);
         let mut book = load_book(&path);
-        if book.prompt.trim().is_empty() {
-            book.prompt = collapse(&title).chars().take(4000).collect();
+        let open = book
+            .repos
+            .get(&place)
+            .is_some_and(|row| row.issue.is_some() && !row.finished);
+        if open || take_held_issue(&mut book, &path, &place) {
+            store_book(&path, &book);
+        } else {
+            log_line(&format!("{name}: nothing held in {place}; ran unattached"));
         }
-        store_book(&path, &book);
     }
-    // The tool's repo, else the last checkout this seat's git hook booked,
-    // else the working directory. A path that is not a checkout is not a
-    // project: filing there names the directory ("workspace") and the claim
-    // is junk.
-    let explicit = args.and_then(|map| map.get("repo")).and_then(Value::as_str);
-    let Some(place) = place_for_claim(explicit) else {
-        log_line("claim: refused a directory that is not a git checkout");
-        return;
-    };
-    // A hook's warm edit after Stop stays warm. An MCP write after the
-    // idle close files a new claim: the finished row is this sitting, and
-    // the next write is the next one.
-    reopen_finished(&session);
-    let cwd = place;
-    let raw = serde_json::json!({
-        "cwd": cwd,
-        "session_id": session,
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Write",
-    })
-    .to_string();
-    let call = super::HookCall {
-        event: "PreToolUse".into(),
-        cue: "Write note".into(),
-        session: Some(session.clone()),
-        shape: super::HookShape::Asks,
-    };
-    let _ = observe(&raw, &call);
     stamp_sitting(&session, unix_secs());
 }
 
@@ -1014,22 +1000,6 @@ fn claim_existing(issue: &str) -> Result<(), String> {
     }
 }
 
-fn reopen_finished(session: &str) {
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let raw = serde_json::json!({ "cwd": cwd });
-    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
-    let path = book_path(session);
-    let mut book = load_book(&path);
-    let repo = repo_key(&mut book, &raw);
-    if book.repos.get(&repo).is_some_and(|row| row.finished) {
-        book.repos.insert(repo, RepoBook::default());
-    }
-    store_book(&path, &book);
-}
-
 /// Finishes the MCP session's claims when the server process returns.
 /// Bind it to a name. `let _ = ShutdownFinish` drops it at that statement.
 pub struct ShutdownFinish;
@@ -1071,18 +1041,6 @@ fn mcp_session() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("mcp-{}", std::process::id()))
-}
-
-fn arg_title(args: &serde_json::Map<String, Value>) -> Option<String> {
-    for key in ["title", "text", "query", "body", "note"] {
-        if let Some(text) = args.get(key).and_then(Value::as_str) {
-            let text = text.trim();
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn session_key(call: &super::HookCall) -> String {
@@ -5342,8 +5300,11 @@ print(f"id={ident}")
         assert_eq!(logged.matches("claim:").count(), 1, "{logged}");
     }
 
+    /// A write tool files and claims nothing. With nothing held it runs
+    /// unattached; after a hook's edit claimed an issue in the checkout,
+    /// it joins that issue and still files nothing.
     #[test]
-    fn the_server_claims_on_a_write_and_finishes_when_it_stops() {
+    fn a_write_tool_files_no_issue_and_joins_the_held_one() {
         let _g = lock();
         let _saved = Restore::new(&[
             "PATH",
@@ -5357,7 +5318,7 @@ print(f"id={ident}")
             "LJOS_SESSION_ID",
             "LJOS_OFF",
         ]);
-        let (dir, tracker, _repo) = scratch();
+        let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         unsafe {
             std::env::set_var("LJOS_SESSION_ID", "mcp-session-9");
@@ -5366,32 +5327,33 @@ print(f"id={ident}")
         assert!(!mcp_tool_writes("ljos_file"));
         assert!(!mcp_tool_writes("ljos_finish"));
         assert!(mcp_tool_writes("ljos_remember"));
+        assert!(mcp_tool_writes("ljos_prefer"));
         let mut args = serde_json::Map::new();
         args.insert(
             "text".into(),
             Value::String("the readme stays short".into()),
         );
-        before_mcp_write("ljos_remember", Some(&args));
-        before_mcp_write("ljos_claim", Some(&args));
-        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
-        assert!(org.contains("the readme stays short"), "{org}");
-        mcp_shutdown();
-        let log = git_log(&tracker);
-        assert!(log.contains("claimed"), "{log}");
-        assert!(log.contains("finished"), "{log}");
-        mcp_shutdown();
-        assert_eq!(git_log(&tracker), log);
-        let before = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
+        args.insert("repo".into(), Value::String(repo.display().to_string()));
+        for tool in MCP_WRITES {
+            before_mcp_write(tool, Some(&args));
+        }
+        assert_eq!(creates(&tracker), 0, "a write tool filed an issue");
+        let logged =
+            std::fs::read_to_string(dir.path().join("run/ljos/book.log")).unwrap_or_default();
+        assert!(logged.contains("ran unattached"), "{logged}");
+        let session = "hook-edit-then-remember";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(creates(&tracker), 1);
         args.insert("text".into(), Value::String("the notes stay dated".into()));
         before_mcp_write("ljos_remember", Some(&args));
-        let after = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
-        let creates =
-            |log: &str| log.matches("\ncreate").count() + usize::from(log.starts_with("create"));
-        assert_eq!(
-            creates(&after),
-            creates(&before) + 1,
-            "a write after shutdown files a new claim\n{after}"
-        );
+        before_mcp_write("ljos_prefer", Some(&args));
+        assert_eq!(creates(&tracker), 1, "a write tool filed a second issue");
     }
 
     #[test]
@@ -5439,69 +5401,6 @@ print(f"id={ident}")
         assert!(
             !book.contains("Hourly poke"),
             "mail text became the prompt\n{book}"
-        );
-    }
-
-    #[test]
-    fn a_per_call_server_keeps_one_sitting_for_the_seat() {
-        let _g = lock();
-        let _saved = Restore::new(&[
-            "PATH",
-            "VISSUE_ROOT",
-            "VISSUE_NO_ROUTE",
-            "LJOS_TRACKER_GIT",
-            "LJOS_PROJECT",
-            "XDG_RUNTIME_DIR",
-            "LJOS_IN_HOOK",
-            "PACKSET_URL",
-            "LJOS_SESSION_ID",
-            "LJOS_SEAT",
-            "LJOS_MCP_IDLE",
-            "LJOS_OFF",
-        ]);
-        let (dir, tracker, _repo) = scratch();
-        let _bins = arm(dir.path(), &tracker);
-        unsafe {
-            std::env::set_var("LJOS_SEAT", "Disk Saver");
-            std::env::set_var("LJOS_SESSION_ID", "mcp-call-1");
-            std::env::set_var("LJOS_MCP_IDLE", "30m");
-        }
-        let mut args = serde_json::Map::new();
-        args.insert("text".into(), Value::String("note on rtrash-adz0".into()));
-        before_mcp_write("ljos_remember", Some(&args));
-        unsafe {
-            std::env::set_var("LJOS_SESSION_ID", "mcp-call-2");
-        }
-        args.insert(
-            "text".into(),
-            Value::String("still noting rtrash-adz0".into()),
-        );
-        before_mcp_write("ljos_remember", Some(&args));
-        let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
-        let creates =
-            |text: &str| text.matches("\ncreate").count() + usize::from(text.starts_with("create"));
-        assert_eq!(
-            creates(&log),
-            1,
-            "a second call from the same seat does not file another claim\n{log}"
-        );
-        assert!(
-            !git_log(&tracker).contains("finished"),
-            "the per-call exit has not happened"
-        );
-        stamp_sitting(&sitting_key(), 1_000);
-        resume_seat_at(1_000 + 30 * 60);
-        let finished = git_log(&tracker);
-        assert!(
-            finished.contains("finished"),
-            "the next start closes the idle sitting\n{finished}"
-        );
-        before_mcp_write("ljos_remember", Some(&args));
-        let after = std::fs::read_to_string(tracker.join("vissue.log")).unwrap();
-        assert_eq!(
-            creates(&after),
-            2,
-            "a write after the idle close files the next claim\n{after}"
         );
     }
 
