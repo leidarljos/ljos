@@ -35610,6 +35610,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// and file text shortened.
     #[test]
     fn an_agy_file_tool_names_its_path_to_the_guard() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         let write = hook_call(
             r##"{"artifactDirectoryPath":"/h/.gemini/antigravity-cli/brain/6839fd1e","conversationId":"6839fd1e","modelName":"gemini-3.1-pro-low","stepIdx":8,"toolCall":{"args":{"Content":"import re\n","Overwrite":false,"Path":"/h/work/slug.py"},"name":"write_file"},"transcriptPath":"/h/.gemini/antigravity-cli/brain/6839fd1e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/h/work"]}"##,
         );
