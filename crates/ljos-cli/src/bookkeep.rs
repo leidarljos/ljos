@@ -1123,7 +1123,8 @@ fn store_book(path: &Path, book: &Book) {
     }
 }
 
-pub(crate) fn log_line(line: &str) {
+/// Append one line to the seat's `book.log` under the runtime directory.
+pub fn log_line(line: &str) {
     let dir = super::runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
     let Ok(mut file) = std::fs::OpenOptions::new()
@@ -5527,6 +5528,81 @@ print(f"id={ident}")
         assert!(err.contains("inky"), "{err}");
         assert!(err.contains("disk-saver"), "{err}");
         assert!(err.contains("eessi"), "{err}");
+    }
+
+    /// Codex onboarded with `LJOS_SEAT=codex` on a tracker whose only
+    /// codex claims were `codex-vax0` (the `SEAT-TAG` of ljos 0.31) and
+    /// bare thread ids. Every call failed with "no seat named codex" and
+    /// a list of thread ids. A harness id and a name from the environment
+    /// are the seat; only a name the call made up is refused, briefly.
+    #[test]
+    fn a_harness_or_environment_seat_is_never_refused() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "HOME",
+            "VISSUE_ROOT",
+            "ISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "XDG_RUNTIME_DIR",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            dir.path().join("vissue.toml"),
+            "seats = [\"inky\", \"free-claude\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("Software/probe")).unwrap();
+        std::fs::write(
+            dir.path().join("Software/probe/issues.org"),
+            "* STARTED [#C] one\n:PROPERTIES:\n:ID:         probe-abcd\n:CLAIMED_BY: codex-vax0\n:END:\n\
+             * STARTED [#C] two\n:PROPERTIES:\n:ID:         probe-efgh\n\
+             :CLAIMED_BY: 01a0dab3-895e-7533-93ca-c9807d5cb680\n:END:\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("HOME", dir.path().join("home"));
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::set_var("XDG_RUNTIME_DIR", &run);
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+        }
+        let known = crate::tracker_known_seats();
+        assert!(known.contains("codex"), "{known:?}");
+        assert!(!known.contains("codex-vax0"), "{known:?}");
+        assert!(!known.iter().any(|s| s.contains("01a0dab3")), "{known:?}");
+        let seat = |name: &str| crate::resolve_call_seat(Some(name)).unwrap().seat;
+        assert_eq!(seat("codex"), "codex", "a legacy holder names the seat");
+        assert_eq!(seat("claude"), "free-claude", "the harness's one seat here");
+        assert_eq!(seat("opencode"), "opencode", "a harness with no seat here");
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "newbot");
+        }
+        assert_eq!(crate::resolve_call_seat(None).unwrap().seat, "newbot");
+        assert_eq!(
+            seat("codex"),
+            "newbot",
+            "LJOS_SEAT wins over the harness id"
+        );
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+        }
+        let err = crate::resolve_call_seat(Some("nobody"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("no seat named nobody on this tracker."),
+            "{err}"
+        );
+        assert!(err.contains("codex, free-claude, inky"), "{err}");
+        assert!(err.contains("LJOS_SEAT"), "{err}");
+        assert!(!err.contains("01a0dab3"), "{err}");
+        assert!(!err.contains("codex-vax0"), "{err}");
     }
 
     #[test]

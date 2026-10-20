@@ -2422,8 +2422,19 @@ fn collect_claimed_seats(dir: &Path, seats: &mut std::collections::BTreeSet<Stri
             let Some(rest) = line.trim().strip_prefix(":CLAIMED_BY:") else {
                 continue;
             };
-            insert_known_seat(seats, rest.trim());
+            insert_claimed_seat(seats, rest.trim());
         }
+    }
+}
+
+/// A `CLAIMED_BY` holder as the seat it holds for. `SEAT@TAG` and the
+/// `SEAT-TAG` of ljos 0.31 and earlier are the seat ([`holder_parts`]),
+/// so `codex-vax0` counts as `codex`. A bare conversation id an older
+/// ljos wrote as the holder names no seat and is left out.
+fn insert_claimed_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) {
+    let (seat, _) = holder_parts(raw);
+    if mail::named_seat(&seat) {
+        insert_known_seat(seats, &seat);
     }
 }
 
@@ -2507,25 +2518,30 @@ fn register_seat(slug: &str) -> Result<(), String> {
 /// replace that. A different worker named on the call still wins. With
 /// none of those, the call has to pass a seat.
 ///
-/// A tracker with no `seats` list gains this seat and the call sits. A
-/// note is logged. The call is not refused.
+/// Only a name the call passed is checked against the tracker's seats,
+/// to catch a typo. A name from the environment was set by the person
+/// or by `ljos onboard`, and is the seat even when no claim names it
+/// yet. A harness id the tracker does not list is that harness's one
+/// seat here when there is exactly one, else the harness id itself.
+/// A tracker with no `seats` list gains this seat. Each case logs a
+/// note; none is refused.
 ///
 /// # Errors
 ///
-/// No seat was passed and `LJOS_SEAT` is unset, or the name is not one
-/// the tracker lists.
+/// No seat was passed and `LJOS_SEAT` is unset, or the call passed a
+/// name that is neither a harness id nor a seat the tracker knows.
 pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     load_seat_env();
     let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
     let named = named_var("LJOS_SEAT").or_else(|| named_var("VISSUE_AGENT"));
-    let raw = match (from_call, named) {
+    let (raw, from_env) = match (from_call, named) {
         (Some(name), Some(seat))
-            if is_harness_name(name) && seat_slug(name) != seat_slug(&seat) =>
+            if is_harness_name(name) || seat_slug(name) == seat_slug(&seat) =>
         {
-            seat
+            (seat, true)
         }
-        (Some(name), _) => name.to_string(),
-        (None, Some(seat)) => seat,
+        (Some(name), _) => (name.to_string(), false),
+        (None, Some(seat)) => (seat, true),
         (None, None) => {
             bail!("pass seat, your own bot name, on every call: this server has no LJOS_SEAT")
         }
@@ -2534,18 +2550,27 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     if slug_source.is_empty() || omitted_actor_name(slug_source) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
-    let slug = seat_slug(slug_source);
-    if slug == "runner" || omitted_actor_name(&slug) {
+    let named_slug = seat_slug(slug_source);
+    if named_slug == "runner" || omitted_actor_name(&named_slug) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
-    let known = seat_roster(&slug);
-    if !known.contains(&slug) {
-        let guess = mail::closest_seat(&slug, &known)
-            .map(|seat| format!(" Did you mean {seat}?"))
-            .unwrap_or_default();
-        let list = known.into_iter().collect::<Vec<_>>().join(", ");
-        bail!("no seat named {slug} on this tracker.{guess} Known seats: {list}");
-    }
+    let known = seat_roster(&named_slug);
+    let slug = if known.contains(&named_slug) {
+        named_slug
+    } else if is_harness_name(&named_slug) {
+        let seat = harness_seat(&named_slug, &known).unwrap_or_else(|| named_slug.clone());
+        bookkeep::log_line(&format!(
+            "note: the tracker lists no seat {named_slug}; sitting {seat} for that harness"
+        ));
+        seat
+    } else if from_env {
+        bookkeep::log_line(&format!(
+            "note: the tracker lists no seat {named_slug}; sitting it as LJOS_SEAT names it"
+        ));
+        named_slug
+    } else {
+        bail!("{}", unknown_seat_error(&named_slug, &known));
+    };
     let (holder, source) = match session_holder(&slug) {
         Some((holder, keys)) => (holder, format!("the seat this call named; session {keys}")),
         None => (slug.clone(), "the seat this call named".to_string()),
@@ -2555,6 +2580,29 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         holder,
         source,
     })
+}
+
+/// The one seat in `known` that belongs to `harness`: the harness id
+/// itself, or the id joined to a word by a hyphen (`codex-laptop`,
+/// `free-codex`). `None` when no seat or more than one does.
+fn harness_seat(harness: &str, known: &std::collections::BTreeSet<String>) -> Option<String> {
+    let head = format!("{harness}-");
+    let tail = format!("-{harness}");
+    let mut mine = known
+        .iter()
+        .filter(|s| *s == harness || s.starts_with(&head) || s.ends_with(&tail));
+    let first = mine.next()?;
+    mine.next().is_none().then(|| first.clone())
+}
+
+/// What a call that named an unknown seat is told: the name, the seat
+/// it most likely meant and a few others, and the two ways to name it.
+#[must_use]
+pub fn unknown_seat_error(slug: &str, known: &std::collections::BTreeSet<String>) -> String {
+    format!(
+        "no seat named {slug} on this tracker. {} Pass your own seat name, or set LJOS_SEAT in this server's environment",
+        mail::seat_hint(slug, known)
+    )
 }
 
 /// Runners whose shells cannot see the runner's process, named by a

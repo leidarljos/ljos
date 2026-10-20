@@ -554,18 +554,53 @@ pub fn check_known(seat: &str, known: &BTreeSet<String>, new_seat: bool) -> Resu
     if new_seat || known.contains(seat) {
         return Ok(());
     }
-    let list = if known.is_empty() {
-        "none yet".to_string()
-    } else {
-        known.iter().cloned().collect::<Vec<_>>().join(", ")
-    };
-    let guess = closest_seat(seat, known)
-        .map(|s| format!("Did you mean {s}? "))
-        .unwrap_or_default();
     bail!(
         "send: no seat named {seat} has written to this pack, so the message would wait unread. \
-         {guess}Seats this pack knows: {list}. Pass --new-seat to write to a seat that has not started yet"
+         {} Pass --new-seat to write to a seat that has not started yet",
+        seat_hint(seat, known)
     )
+}
+
+/// The most seat names an error lists after its guess.
+const SEAT_HINT_MAX: usize = 4;
+
+/// Whether `name` reads as a seat name. A conversation id that an older
+/// ljos wrote as a holder does not: a UUID, a long hex run, or `sess-`
+/// and a hex run. Such a name helps nobody pick a seat.
+#[must_use]
+pub fn named_seat(name: &str) -> bool {
+    let name = name.trim();
+    let rest = name.strip_prefix("sess-").unwrap_or(name);
+    let hex: Vec<char> = rest.chars().filter(|c| *c != '-').collect();
+    !name.is_empty() && !(hex.len() >= 16 && hex.iter().all(char::is_ascii_hexdigit))
+}
+
+/// The hint an unknown seat gets: the seat it most likely meant, then a
+/// few other named seats. Conversation ids are left out
+/// ([`named_seat`]), and past [`SEAT_HINT_MAX`] the rest are counted.
+#[must_use]
+pub fn seat_hint(seat: &str, known: &BTreeSet<String>) -> String {
+    let named: BTreeSet<String> = known.iter().filter(|s| named_seat(s)).cloned().collect();
+    let guess = closest_seat(seat, &named).map(str::to_string);
+    let others: Vec<&String> = named
+        .iter()
+        .filter(|s| guess.as_deref() != Some(s.as_str()))
+        .collect();
+    let mut shown = others
+        .iter()
+        .take(SEAT_HINT_MAX)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if others.len() > SEAT_HINT_MAX {
+        shown.push_str(&format!(" and {} more", others.len() - SEAT_HINT_MAX));
+    }
+    match (guess, shown.is_empty()) {
+        (Some(g), true) => format!("Did you mean {g}?"),
+        (Some(g), false) => format!("Did you mean {g}? Other seats: {shown}."),
+        (None, false) => format!("Seats here: {shown}."),
+        (None, true) => "No named seat has started here yet.".to_string(),
+    }
 }
 
 /// The known seat a mistyped name most likely meant: one that starts with
@@ -1364,6 +1399,43 @@ mod tests {
         assert!(text.contains("2 more in ljos inbox"), "{text}");
         assert_eq!(ids.iter().filter(|id| id.starts_with("mail:")).count(), 8);
         assert!(!ids.iter().any(|id| id == "mail:m7" || id == "mail:m8"));
+    }
+
+    #[test]
+    fn a_seat_hint_names_a_few_seats_and_no_ids() {
+        let known: BTreeSet<String> = [
+            "alpha",
+            "bravo",
+            "charlie",
+            "delta",
+            "echo",
+            "foxtrot",
+            "saddle",
+            "01a0dab3-895e-7533-93ca-c9807d5cb680",
+            "sess-4f2a9c0d1e2b3a4f",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        assert!(named_seat("codex-vax0"));
+        assert!(named_seat("disk-saver"));
+        assert!(!named_seat("01a0dab3-895e-7533-93ca-c9807d5cb680"));
+        assert!(!named_seat("sess-4f2a9c0d1e2b3a4f"));
+        let hint = seat_hint("sadle", &known);
+        assert_eq!(
+            hint,
+            "Did you mean saddle? Other seats: alpha, bravo, charlie, delta and 2 more."
+        );
+        let hint = seat_hint("zzz", &known);
+        assert_eq!(hint, "Seats here: alpha, bravo, charlie, delta and 3 more.");
+        let ids: BTreeSet<String> = ["01a0dab3-895e-7533-93ca-c9807d5cb680".to_string()].into();
+        assert_eq!(
+            seat_hint("codex", &ids),
+            "No named seat has started here yet."
+        );
+        let err = check_known("sadle", &known, false).unwrap_err().to_string();
+        assert!(!err.contains("01a0dab3"), "{err}");
+        assert!(err.contains("Did you mean saddle?"), "{err}");
     }
 
     #[test]
