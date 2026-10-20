@@ -28,7 +28,12 @@ async fn main() -> anyhow::Result<()> {
     // Dropped when the process returns, including after the client closes.
     // A name, not `let _`, so the finish runs at the end of main.
     let _book_finish = ljos_cli::bookkeep::ShutdownFinish;
-    let running = server::LjosServer::from_env().serve(stdio()).await?;
+    // The order is the order the lines are read. rmcp then runs each call on
+    // its own task, which the runtime may poll newest first.
+    let (read, write) = stdio();
+    let running = server::LjosServer::from_env()
+        .serve((server::InboundOrder::new(read), write))
+        .await?;
     let ended = running.waiting().await;
     ljos_cli::retire_seat(ljos_cli::runner_pid());
     ended?;

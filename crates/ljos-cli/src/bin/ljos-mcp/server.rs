@@ -2893,12 +2893,17 @@ async fn relay_forward_request(
 /// The server answers each call on its own task, so two calls a client
 /// sends together run at once. opencode sent `ljos_note` and then
 /// `ljos_recall` 7 ms apart in willma-20261020f w7 and w11, and the recall
-/// answered before the note was stored. A call that changes what this seat
-/// reads back waits for every such call that reached the server before it,
-/// and a read waits for those too. Reads still run beside each other, and
-/// every other tool, the guard and approval included, waits for nothing.
-static CALL_ORDER: std::sync::LazyLock<tokio::sync::RwLock<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::RwLock::new(()));
+/// answered before the note was stored. A lock taken inside the task is not
+/// that order: the runtime may poll the later task first. The order is the
+/// order the lines were read, recorded in [`CALL_QUEUE`] before either task
+/// runs. A call that changes what this seat reads back waits for every such
+/// call read before it, and a read waits for those too. Reads still run
+/// beside each other, and every other tool, the guard and approval included,
+/// waits for nothing.
+static CALL_QUEUE: std::sync::Mutex<std::collections::VecDeque<QueuedCall>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+static CALL_WAKE: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
 
 /// Tools whose effect a later recall, search or timeline shows.
 const ORDERED_WRITES: &[&str] = &[
@@ -2917,11 +2922,30 @@ const ORDERED_WRITES: &[&str] = &[
 /// Reads that show what [`ORDERED_WRITES`] wrote.
 const ORDERED_READS: &[&str] = &["ljos_recall", "ljos_search", "ljos_timeline"];
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Order {
     Write,
     Read,
     Free,
+}
+
+struct QueuedCall {
+    id: RequestId,
+    kind: Order,
+}
+
+/// Held until the answer is built. Dropped if the call is cancelled while
+/// it waits, so a place in the queue does not stay forever.
+struct OrderPermit {
+    id: Option<RequestId>,
+}
+
+impl Drop for OrderPermit {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            release_call(&id);
+        }
+    }
 }
 
 fn call_order(name: &str) -> Order {
@@ -2931,6 +2955,140 @@ fn call_order(name: &str) -> Order {
         Order::Read
     } else {
         Order::Free
+    }
+}
+
+fn call_queue() -> std::sync::MutexGuard<'static, std::collections::VecDeque<QueuedCall>> {
+    CALL_QUEUE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn ensure_queued(id: &RequestId, order: Order) {
+    let mut queue = call_queue();
+    if queue.iter().any(|call| &call.id == id) {
+        return;
+    }
+    queue.push_back(QueuedCall {
+        id: id.clone(),
+        kind: order,
+    });
+}
+
+fn release_call(id: &RequestId) {
+    {
+        let mut queue = call_queue();
+        if let Some(pos) = queue.iter().position(|call| &call.id == id) {
+            queue.remove(pos);
+        }
+    }
+    CALL_WAKE.notify_waiters();
+}
+
+fn call_may_run(id: &RequestId, order: Order) -> bool {
+    let queue = call_queue();
+    let Some(pos) = queue.iter().position(|call| &call.id == id) else {
+        return false;
+    };
+    match order {
+        Order::Write => pos == 0,
+        Order::Read => queue.iter().take(pos).all(|call| call.kind == Order::Read),
+        Order::Free => true,
+    }
+}
+
+/// Wait until every ordered call read before this one has finished. A free
+/// tool does not queue. The permit is created before the wait, so cancelling
+/// the call gives the place up.
+async fn acquire_call_order(order: Order, id: &RequestId) -> OrderPermit {
+    if order == Order::Free {
+        return OrderPermit { id: None };
+    }
+    ensure_queued(id, order);
+    let mut permit = Some(OrderPermit {
+        id: Some(id.clone()),
+    });
+    loop {
+        let mut notified = std::pin::pin!(CALL_WAKE.notified());
+        notified.as_mut().enable();
+        if call_may_run(id, order) {
+            return permit.take().expect("order permit");
+        }
+        notified.await;
+    }
+}
+
+/// One JSON-RPC line from the client. A tool call that reads or writes the
+/// seat's notes joins the queue here, on the task that reads stdin, before
+/// rmcp spawns the call.
+fn register_inbound_line(line: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return;
+    };
+    if value.get("method").and_then(|method| method.as_str()) != Some("tools/call") {
+        return;
+    }
+    let Some(name) = value
+        .get("params")
+        .and_then(|params| params.get("name"))
+        .and_then(|name| name.as_str())
+    else {
+        return;
+    };
+    let order = call_order(name);
+    if order == Order::Free {
+        return;
+    }
+    let Some(id) = value
+        .get("id")
+        .cloned()
+        .and_then(|id| serde_json::from_value::<RequestId>(id).ok())
+    else {
+        return;
+    };
+    ensure_queued(&id, order);
+}
+
+/// Stdin, with ordered tool calls queued as each line arrives.
+pub struct InboundOrder<R> {
+    inner: R,
+    pending: Vec<u8>,
+}
+
+impl<R> InboundOrder<R> {
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            pending: Vec::new(),
+        }
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        self.drain_lines();
+    }
+
+    fn drain_lines(&mut self) {
+        while let Some(i) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = self.pending.drain(..=i).collect();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            register_inbound_line(&line);
+        }
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_read(cx, buf))?;
+        this.push_bytes(&buf.filled()[before..]);
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
@@ -3013,20 +3171,10 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
-        // Taken before this handler awaits anything else, so the queue is
-        // the order the calls reached the server. Held until the answer is
-        // built.
-        let order = call_order(&request.name);
-        let _written = if order == Order::Write {
-            Some(CALL_ORDER.write().await)
-        } else {
-            None
-        };
-        let _read = if order == Order::Read {
-            Some(CALL_ORDER.read().await)
-        } else {
-            None
-        };
+        // Queued when the line was read. This waits for the ordered calls
+        // ahead of it and holds the place until the answer is built. A free
+        // tool, the guard and approval included, waits for nothing.
+        let _order = acquire_call_order(call_order(&request.name), &context.id).await;
         if let Some(fresh) = replaced_binary() {
             let init = context
                 .peer
@@ -3376,6 +3524,100 @@ mod tests {
         ] {
             assert_eq!(call_order(name), Order::Free, "{name}");
         }
+    }
+
+    fn tool_line(id: i64, name: &str) -> String {
+        format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{name}\",\"arguments\":{{}}}}}}\n"
+        )
+    }
+
+    fn clear_call_queue() {
+        call_queue().clear();
+    }
+
+    fn queued_ids() -> Vec<RequestId> {
+        call_queue().iter().map(|call| call.id.clone()).collect()
+    }
+
+    /// One queue for the process, so these tests take turns.
+    static CALL_QUEUE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The runtime can poll the later task first. The recall is already in
+    /// the queue behind the note, so it waits even though it asks first.
+    #[test]
+    fn a_recall_queued_behind_a_note_waits_even_when_it_asks_first() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        clear_call_queue();
+
+        let mut inbound = InboundOrder::new(tokio::io::empty());
+        let guard = tool_line(7, "ljos_guard_check");
+        inbound.push_bytes(guard.as_bytes());
+        assert!(call_queue().is_empty(), "a guard is not an ordered call");
+        let mut split = tool_line(10, "ljos_note").into_bytes();
+        let recall = tool_line(11, "ljos_recall");
+        split.extend_from_slice(&recall.as_bytes()[..24]);
+        inbound.push_bytes(&split);
+        assert_eq!(queued_ids(), vec![RequestId::Number(10)]);
+        inbound.push_bytes(&recall.as_bytes()[24..]);
+        assert_eq!(
+            queued_ids(),
+            vec![RequestId::Number(10), RequestId::Number(11)]
+        );
+
+        let phase = std::sync::Arc::new(AtomicU8::new(0));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let phase_task = phase.clone();
+            tokio::spawn(async move {
+                phase_task.store(1, Ordering::SeqCst);
+                let _permit = acquire_call_order(Order::Read, &RequestId::Number(11)).await;
+                phase_task.store(2, Ordering::SeqCst);
+            });
+            for _ in 0..1000 {
+                if phase.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(phase.load(Ordering::SeqCst), 1, "recall task did not start");
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                phase.load(Ordering::SeqCst),
+                1,
+                "recall ran before the note"
+            );
+            let note = acquire_call_order(Order::Write, &RequestId::Number(10)).await;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                phase.load(Ordering::SeqCst),
+                1,
+                "recall ran during the note"
+            );
+            drop(note);
+            for _ in 0..1000 {
+                if phase.load(Ordering::SeqCst) == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                phase.load(Ordering::SeqCst),
+                2,
+                "recall did not follow the note"
+            );
+        });
+        clear_call_queue();
     }
 
     /// Every tool is annotated, and the writers are the ones the contract names.
