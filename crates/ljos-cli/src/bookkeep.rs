@@ -1395,6 +1395,21 @@ fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
     }) else {
         return false;
     };
+    // A hold record is shared by the runner. An automatic claim in a
+    // different hook conversation belongs to that conversation; only a
+    // started sitting can transfer through take_started_row.
+    let claimed_elsewhere = book_files().into_iter().any(|path| {
+        path != own
+            && load_book(&path).repos.values().any(|row| {
+                row.filed
+                    && !row.started
+                    && !row.finished
+                    && row.issue.as_deref() == Some(issue.as_str())
+            })
+    });
+    if claimed_elsewhere {
+        return false;
+    }
     adopt_row(book, repo, &issue, RepoBook::default());
     log_line(&format!("claim: kept {issue}, held by this seat"));
     true

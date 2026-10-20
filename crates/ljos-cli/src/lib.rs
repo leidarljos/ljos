@@ -2523,13 +2523,18 @@ fn register_seat(slug: &str) -> Result<(), String> {
 /// or by `ljos onboard`, and is the seat even when no claim names it
 /// yet. A harness id the tracker does not list is that harness's one
 /// seat here when there is exactly one, else the harness id itself.
+/// The initialized connection is recognised when it matches the seat
+/// announced at connect, so a write on that connection keeps its seat
+/// when the tracker has only historical holders. A different name still
+/// needs the roster, the harness rule or `LJOS_SEAT`.
 /// A tracker with no `seats` list gains this seat. Each case logs a
 /// note; none is refused.
 ///
 /// # Errors
 ///
 /// No seat was passed and `LJOS_SEAT` is unset, or the call passed a
-/// name that is neither a harness id nor a seat the tracker knows.
+/// name that is neither the announced seat, a harness id, nor a seat
+/// the tracker knows.
 pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     load_seat_env();
     let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
@@ -2555,7 +2560,14 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
     let known = seat_roster(&named_slug);
+    // The initialized connection names its own seat even when this tracker
+    // has only historical holders. A different name still needs the roster.
     let slug = if known.contains(&named_slug) {
+        named_slug
+    } else if ANNOUNCED.get().is_some_and(|seat| seat.seat == named_slug) {
+        bookkeep::log_line(&format!(
+            "note: the tracker lists no seat {named_slug}; sitting it as the client that connected"
+        ));
         named_slug
     } else if is_harness_name(&named_slug) {
         let seat = harness_seat(&named_slug, &known).unwrap_or_else(|| named_slug.clone());
@@ -9770,16 +9782,16 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 pub(crate) fn isolated_config_home() -> &'static Path {
     use std::sync::OnceLock;
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../target")
-            .join(format!("ljos-isolated-config-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
+        let dir = tempfile::Builder::new()
+            .prefix("ljos-isolated-config-")
+            .tempdir()
+            .expect("isolated config directory");
+        std::fs::create_dir_all(dir.path().join("ljos")).expect("isolated config dir");
         dir
     })
-    .as_path()
+    .path()
 }
 
 fn named_env(key: &str) -> Option<String> {
