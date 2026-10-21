@@ -10,7 +10,7 @@ over stdio:
 .. code:: console
 
    $ ljos onboard
-   {"mcpServers": {"ljos": {"type": "stdio", "command": "/home/you/.cargo/bin/ljos-mcp", "args": [], "env": {}}}}
+   {"mcpServers": {"ljos": {"type": "stdio", "command": "ljos-mcp", "args": [], "env": {}}}}
 
 Paste it where the runner keeps its MCP servers. The ``env`` is empty on
 purpose. The server names the seat after the client that connects, so a
@@ -58,7 +58,7 @@ from a config file, can be described once in
 .. code:: console
 
    $ ljos onboard --harness runner-with-a-command
-   ok  runner-with-a-command mcp   ran runner mcp add -s user ljos -- /home/you/.cargo/bin/ljos-mcp
+   ok  runner-with-a-command mcp   ran runner mcp add -s user ljos -- ljos-mcp
    ok  skill   wrote /home/you/.runner/skills/ljos/SKILL.md
 
 ``--dry-run`` reports what would be written.

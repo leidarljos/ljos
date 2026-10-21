@@ -202,7 +202,7 @@ one contended ticket.
      "mcpServers": {
        "ljos": {
          "type": "stdio",
-         "command": "/home/you/.cargo/bin/ljos-mcp",
+         "command": "ljos-mcp",
          "args": [],
          "env": {}
        }

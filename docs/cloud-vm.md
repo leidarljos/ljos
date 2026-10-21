@@ -1,6 +1,6 @@
 # A fresh machine
 
-`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`. It checks the SHA-256 sums, writes `~/.cursor/mcp.json` so the command is that `ljos-mcp`, and clones `LJOS_TRACKER_REMOTE`. Run it again and it only refreshes the clone and the MCP path.
+`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`. It checks the SHA-256 sums, writes `~/.cursor/mcp.json` so the command is `ljos-mcp` on PATH, and clones `LJOS_TRACKER_REMOTE`. Run it again and it only refreshes the clone and the MCP command.
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
@@ -67,4 +67,4 @@ Another repository, once a release contains `cloud up`:
 
 Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
 
-`cloud up` rewrites the harness MCP command to the `ljos-mcp` it installed. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
+`cloud up` rewrites the harness MCP command to `ljos-mcp` on PATH. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
