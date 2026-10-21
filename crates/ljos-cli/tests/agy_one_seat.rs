@@ -157,6 +157,12 @@ else:
 "#;
 
 fn habitat() -> Habitat {
+    habitat_with(&[SEAT, "free-claude"], SEAT)
+}
+
+/// A tracker whose `seats` roster is `roster`, and an env file that sits
+/// the hooks as `seat`.
+fn habitat_with(roster: &[&str], seat: &str) -> Habitat {
     let dir = tempfile::tempdir().unwrap();
     let tracker = dir.path().join("tracker");
     let repo = dir.path().join("repo");
@@ -176,12 +182,13 @@ fn habitat() -> Habitat {
     std::fs::write(repo.join("README.md"), "seed\n").unwrap();
     git(&repo, &["add", "README.md"]);
     git(&repo, &["commit", "-q", "-m", "seed"]);
+    let roster: Vec<String> = roster.iter().map(|s| format!("\"{s}\"")).collect();
     std::fs::write(
         tracker.join("vissue.toml"),
-        format!("seats = [\"{SEAT}\", \"free-claude\"]\n"),
+        format!("seats = [{}]\n", roster.join(", ")),
     )
     .unwrap();
-    std::fs::write(home.join(".config/ljos/env"), format!("LJOS_SEAT={SEAT}\n")).unwrap();
+    std::fs::write(home.join(".config/ljos/env"), format!("LJOS_SEAT={seat}\n")).unwrap();
     script(&bin, "vissue", VISSUE);
     script(&bin, "claimdag", CLAIMDAG);
     Habitat {
@@ -256,9 +263,15 @@ fn write_file_hook(hab: &Habitat) {
 /// One `ljos_finish` to the server as `ljos onboard` registers it for agy,
 /// `LJOS_SEAT=antigravity` in its entry, and the answer.
 fn mcp_finish(hab: &Habitat) -> serde_json::Value {
+    mcp_finish_as(hab, "antigravity", "antigravity")
+}
+
+/// [`mcp_finish`] from a server whose entry sets `LJOS_SEAT=seat`, to a
+/// client that names itself `client`.
+fn mcp_finish_as(hab: &Habitat, seat: &str, client: &str) -> serde_json::Value {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     agy_env(&mut cmd, hab);
-    cmd.env("LJOS_SEAT", "antigravity");
+    cmd.env("LJOS_SEAT", seat);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -274,7 +287,7 @@ fn mcp_finish(hab: &Habitat) -> serde_json::Value {
     for line in [
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
-            "clientInfo": {"name": "antigravity", "version": "1.4.3"}}}),
+            "clientInfo": {"name": client, "version": "1.4.3"}}}),
         serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": "ljos_finish", "arguments": {"lesson": "slug.py turns a title into a slug"}}}),
@@ -320,22 +333,55 @@ fn holder_of(hab: &Habitat, issue: &str) -> String {
         .to_string()
 }
 
-#[test]
-fn the_agy_server_finishes_the_claim_its_write_hook_took() {
-    let hab = habitat();
-    write_file_hook(&hab);
+/// The hook's Write claims `work-0001` under `seat`, and the agy server
+/// finishes it.
+fn the_server_finishes_the_write(hab: &Habitat, seat: &str) {
+    write_file_hook(hab);
     let held = "work-0001";
-    assert_eq!(state_of(&hab, held), "STARTED");
-    let hook_holder = holder_of(&hab, held);
+    assert_eq!(state_of(hab, held), "STARTED");
+    let hook_holder = holder_of(hab, held);
     assert!(
-        hook_holder.starts_with(&format!("{SEAT}@")),
+        hook_holder.starts_with(&format!("{seat}@")),
         "the hook holds under the seat the env file names: {hook_holder}"
     );
-    let answer = mcp_finish(&hab);
+    let answer = mcp_finish(hab);
     let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();
     let graph = std::fs::read_to_string(hab.run.join("claimdag.log")).unwrap_or_default();
     let context = format!("{answer}\nbook.log:\n{log}\nclaimdag:\n{graph}");
     assert_ne!(answer["result"]["isError"], true, "{context}");
-    assert_ne!(state_of(&hab, held), "STARTED", "{context}");
-    assert_eq!(holder_of(&hab, held), "", "{context}");
+    assert_ne!(state_of(hab, held), "STARTED", "{context}");
+    assert_eq!(holder_of(hab, held), "", "{context}");
+}
+
+#[test]
+fn the_agy_server_finishes_the_claim_its_write_hook_took() {
+    the_server_finishes_the_write(&habitat(), SEAT);
+}
+
+/// An old claim the server took as `antigravity`, before the hooks sat as
+/// `free-agy`, does not make the harness id a seat: only the `seats`
+/// roster decides that.
+#[test]
+fn an_old_antigravity_claim_does_not_keep_the_harness_id() {
+    let hab = habitat();
+    let board = hab.tracker.join("Software/work/issues.org");
+    std::fs::create_dir_all(board.parent().unwrap()).unwrap();
+    std::fs::write(
+        &board,
+        "* DONE [#C] older agy work\n:PROPERTIES:\n:ID:         work-00ff\n\
+         :CLAIMED_BY: antigravity@deadbeef\n:END:\n",
+    )
+    .unwrap();
+    the_server_finishes_the_write(&hab, SEAT);
+    assert_eq!(state_of(&hab, "work-00ff"), "DONE");
+}
+
+/// A roster that lists `antigravity` keeps it: the hooks and the server
+/// both sit as the harness id the person named.
+#[test]
+fn a_harness_id_on_the_roster_is_kept() {
+    let hab = habitat_with(&["antigravity", SEAT], "antigravity");
+    the_server_finishes_the_write(&hab, "antigravity");
+    let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();
+    assert!(!log.contains("for that harness"), "{log}");
 }
