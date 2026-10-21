@@ -17,7 +17,7 @@
 //! Minting another seat inside the same session does not make a second voter.
 
 use anyhow::{bail, Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -198,6 +198,10 @@ pub(crate) fn is_hex_len(text: &str, len: usize) -> bool {
 }
 
 /// Whether `sig_hex` is an ed25519 signature by `key_hex` over `message`.
+///
+/// The check is strict: a small-order key or `R` never verifies. The
+/// plain equation holds for the identity key, `R` the identity and
+/// `s = 0` over every message.
 #[must_use]
 pub fn signature_ok(key_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
     let (Ok(key), Ok(sig)) = (hex::decode(key_hex), hex::decode(sig_hex)) else {
@@ -210,8 +214,17 @@ pub fn signature_ok(key_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
         return false;
     };
     verifying
-        .verify(message, &Signature::from_bytes(&sig))
+        .verify_strict(message, &Signature::from_bytes(&sig))
         .is_ok()
+}
+
+/// Whether `key_hex` is an ed25519 point of small order.
+#[must_use]
+pub fn weak_key(key_hex: &str) -> bool {
+    let Ok(Ok(key)) = hex::decode(key_hex).map(<[u8; 32]>::try_from) else {
+        return false;
+    };
+    VerifyingKey::from_bytes(&key).is_ok_and(|key| key.is_weak())
 }
 
 /// Public key and signature, both lower-case hex, for `message` under `key`.

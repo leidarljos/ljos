@@ -161,6 +161,9 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
     if !crate::ballot_sig::is_hex_len(&entry.signature.sig, 128) {
         bail!("signature must be 128 hex chars");
     }
+    if crate::ballot_sig::weak_key(&entry.signature.key) {
+        bail!("signature key is a small-order point");
+    }
     if !crate::ballot_sig::signature_ok(&entry.signature.key, &entry.signature.sig, &payload) {
         bail!("entry signature does not verify");
     }
@@ -915,6 +918,39 @@ mod tests {
         assert!(
             err.to_string().contains("does not verify"),
             "edit never reached signature verification: {err}"
+        );
+    }
+
+    #[test]
+    fn a_small_order_key_is_refused() {
+        let _home = test_home();
+        let key = format!("01{}", "00".repeat(31));
+        let sig = format!("01{}", "00".repeat(63));
+        for stance in ["accept", "reject"] {
+            let mut unsigned = ballot_entry("alpha/seat-a", stance, "2026-10-21T10:00:00Z");
+            let Entry::Ballot(ballot) = &mut unsigned.entry else {
+                panic!("ballot");
+            };
+            ballot.id = Some(ballot_id(ballot).expect("id"));
+            let forged = SignedEntry {
+                schema: unsigned.schema,
+                entry: unsigned.entry,
+                signature: EntrySignature {
+                    key: key.clone(),
+                    sig: sig.clone(),
+                },
+            };
+            let err = check_value(&serde_json::to_value(&forged).expect("value"))
+                .expect_err("a small-order key passed record check");
+            assert!(
+                err_chain(&err).contains("small-order"),
+                "{stance}: {}",
+                err_chain(&err)
+            );
+        }
+        assert!(
+            !crate::ballot_sig::signature_ok(&key, &sig, b"any message"),
+            "the identity key verified a signature"
         );
     }
 
