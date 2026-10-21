@@ -11653,11 +11653,16 @@ pub fn packset_write_mcp(
 /// `source`, which the prose gate does not read, so shortening a sentence
 /// does not throw them away. `issue`, when the sitting has one, is a field
 /// of the record: the pack treats it as identity, so a lesson for another
-/// issue stays open beside this one.
+/// issue stays open beside this one. `supersedes` names the atom this one
+/// replaces, which the pack closes.
 ///
 /// # Errors
 ///
 /// An empty text, an unknown label, or the pack refusing the claim.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "A sitting's lesson keeps its prose, source fields, issue and the atom it replaces as separate arguments"
+)]
 pub(crate) fn packset_write_agent_sourced(
     label: &str,
     text: &str,
@@ -11666,10 +11671,11 @@ pub(crate) fn packset_write_agent_sourced(
     rule: &str,
     command: &str,
     issue: &str,
+    supersedes: Option<&str>,
 ) -> Result<Value> {
     let prefix = format!("{label}: POST /v1/atoms failed");
     let client = client_or_queue(&prefix, "lesson", text, issue)?;
-    let atom = agent_sourced_atom(
+    let mut atom = agent_sourced_atom(
         label,
         text,
         &client.workspace(),
@@ -11679,6 +11685,9 @@ pub(crate) fn packset_write_agent_sourced(
         command,
         issue,
     )?;
+    if let Some(id) = supersedes.map(str::trim).filter(|id| !id.is_empty()) {
+        atom["supersedes"] = Value::Array(vec![Value::String(id.to_string())]);
+    }
     store_agent_atom(&client, atom, &prefix)
 }
 
