@@ -996,3 +996,95 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
     assert!(!stdout.contains("reviewer-e"), "{said}");
     assert!(!stdout.contains("ignored"), "{said}");
 }
+
+#[test]
+fn a_seat_no_harness_names_is_an_unverified_session() {
+    // Two reviewers recorded from one coordinator that no harness id and
+    // no run id names: the seat is the session, and every output says so.
+    let world = World::new();
+    let issue = "demo-seat";
+    let unverified = ljos_cli::ballot_sig::unverified_sentence("ljosbot");
+    let first = world.ljos_env(
+        "ljosbot",
+        &[],
+        &[
+            "vote",
+            issue,
+            "--for",
+            "ship",
+            "--used",
+            "none",
+            "--as",
+            "reviewer-a",
+        ],
+    );
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    assert!(
+        said.contains("session ljosbot") && said.contains(&unverified),
+        "{said}"
+    );
+    let second = world.ljos_env(
+        "ljosbot",
+        &[],
+        &[
+            "vote",
+            issue,
+            "--for",
+            "hold",
+            "--used",
+            "none",
+            "--as",
+            "reviewer-b",
+        ],
+    );
+    let said = text(&second);
+    assert!(!second.status.success(), "{said}");
+    assert!(
+        said.contains("already cast")
+            && said.contains(&unverified)
+            && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    // A ballot that went around the cast gate, as `vissue vote` and a later
+    // signature on the same seat leave it.
+    let ballots_path = world.state.join("ballots.json");
+    let mut ballots: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ballots_path).unwrap()).unwrap();
+    ballots[issue]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"agent": "reviewer-b", "choice": "hold"}));
+    std::fs::write(&ballots_path, ballots.to_string()).unwrap();
+    let notes_path = world.state.join("notes.json");
+    let mut notes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&notes_path).unwrap()).unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+    let sig = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        issue,
+        "reviewer-b",
+        "hold",
+        "ljosbot",
+        ljos_cli::ballot_sig::SEAT_NONCE,
+    );
+    notes[issue]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!({ "note": sig }));
+    std::fs::write(&notes_path, notes.to_string()).unwrap();
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(
+        stdout.contains("reviewer-a  ship  (unverified session)"),
+        "{said}"
+    );
+    assert!(
+        stdout.contains("reviewer-b  ljosbot  (same session, unverified)"),
+        "{said}"
+    );
+    assert!(stdout.contains(&unverified), "{said}");
+}

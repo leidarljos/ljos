@@ -68,6 +68,14 @@ pub struct SigNote {
     pub nonce: Option<String>,
 }
 
+impl SigNote {
+    /// Whether only the seat named the session this ballot is bound to.
+    #[must_use]
+    pub fn seat_only(&self) -> bool {
+        self.nonce.as_deref() == Some(SEAT_NONCE)
+    }
+}
+
 /// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
 /// `HARNESS NONCE` when the ballot is bound to a session. The choice may
 /// hold spaces (`beside binary`): the key and signature are found by their
@@ -427,12 +435,35 @@ pub fn field(raw: &str) -> String {
 
 /// The harness session, and a nonce that is not a process id. The session
 /// comes from the MCP connection, the hook, or the environment, then from
-/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce stays `-`: one holder is one
-/// session across processes.
+/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce is `-`, or [`SEAT_NONCE`] when
+/// the seat stands in for the session: one holder is one session across
+/// processes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {
     pub harness: String,
     pub nonce: String,
+}
+
+/// The nonce of a session only the seat names: no harness session and no
+/// run id was found. [`crate::panel_gate::session_key`] reads the harness
+/// alone when one is set, so the key is still the seat.
+pub const SEAT_NONCE: &str = "seat";
+
+impl SessionIdentity {
+    /// Whether only the seat names this session.
+    #[must_use]
+    pub fn seat_only(&self) -> bool {
+        self.nonce == SEAT_NONCE
+    }
+}
+
+/// What a session only the seat names means, where a ballot is cast or
+/// counted.
+#[must_use]
+pub fn unverified_sentence(seat: &str) -> String {
+    format!(
+        "unverified session: nothing named the run but seat {seat}, so every run of that seat is one session"
+    )
 }
 
 tokio::task_local! {
@@ -612,16 +643,21 @@ fn named_session_actor(key: &str) -> Option<String> {
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
-    let harness = if !harness.is_empty() {
-        harness
-    } else {
-        named_session_actor("VISSUE_AGENT")
-            .or_else(|| named_session_actor("LJOS_SEAT"))
-            .unwrap_or_else(|| "-".into())
-    };
-    SessionIdentity {
-        harness,
-        nonce: "-".into(),
+    if !harness.is_empty() {
+        return SessionIdentity {
+            harness,
+            nonce: "-".into(),
+        };
+    }
+    match named_session_actor("VISSUE_AGENT").or_else(|| named_session_actor("LJOS_SEAT")) {
+        Some(seat) => SessionIdentity {
+            harness: seat,
+            nonce: SEAT_NONCE.into(),
+        },
+        None => SessionIdentity {
+            harness: "-".into(),
+            nonce: "-".into(),
+        },
     }
 }
 
@@ -691,10 +727,14 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
     } else {
         id.harness.clone()
     };
-    Ok(format!(
+    let mut said = format!(
         "ballot signed by {voter} with key {}… session {session}\n",
         &mine[..12.min(mine.len())]
-    ))
+    );
+    if id.seat_only() {
+        said.push_str(&format!("{}\n", unverified_sentence(&id.harness)));
+    }
+    Ok(said)
 }
 
 enum Resign {

@@ -325,13 +325,18 @@ pub fn session_cast_refusal(
         if other != key {
             continue;
         }
+        let session = if sig.seat_only() {
+            format!("{key}, {}", ballot_sig::unverified_sentence(key))
+        } else {
+            key.to_string()
+        };
         if cast_was_withdrawn(own, &sig.voter, key) {
             return Some(format!(
-                "this session already cast a ballot on {issue} ({key}), and that ballot was withdrawn. The first ballot stands. A seat argument does not make another voice. Nothing was cast"
+                "this session already cast a ballot on {issue} ({session}), and that ballot was withdrawn. The first ballot stands. A seat argument does not make another voice. Nothing was cast"
             ));
         }
         return Some(format!(
-            "this session already cast a ballot on {issue} ({key}). A seat argument does not make another voice. Nothing was cast"
+            "this session already cast a ballot on {issue} ({session}). A seat argument does not make another voice. Nothing was cast"
         ));
     }
     for note in own.iter().chain(family) {
@@ -459,6 +464,8 @@ pub struct IgnoredBallot {
     pub session: String,
     /// `same session` or `authored a candidate`.
     pub why: &'static str,
+    /// Only the seat named that session.
+    pub unverified: bool,
 }
 
 /// The ballots that count, and the ones a shared session or an author
@@ -481,6 +488,7 @@ pub fn tally_of(
     let oldest: Vec<&ballot_sig::SigNote> = sigs.iter().rev().collect();
     let mut first: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut voter_session: BTreeMap<String, String> = BTreeMap::new();
+    let mut seat_keys = std::collections::BTreeSet::new();
     let mut session_order = Vec::new();
     for sig in &oldest {
         let key = session_key(
@@ -489,6 +497,9 @@ pub fn tally_of(
         );
         if key.is_empty() {
             continue;
+        }
+        if sig.seat_only() {
+            seat_keys.insert(key.clone());
         }
         voter_session
             .entry(sig.voter.clone())
@@ -552,6 +563,7 @@ pub fn tally_of(
                 voter: voter.to_string(),
                 session: key.clone(),
                 why,
+                unverified: seat_keys.contains(key),
             });
             continue;
         }
@@ -570,8 +582,28 @@ pub fn counted_ballots(issue: &str, rows: &[Value]) -> Vec<Value> {
     tally_of(rows, &notes, &author_sessions(issue)).0
 }
 
+/// The seat of each voter whose first bound ballot only that seat named
+/// the session of. `notes` are newest first.
+fn seat_only_voters(notes: &[String]) -> BTreeMap<String, String> {
+    let mut first = BTreeMap::new();
+    for sig in notes.iter().rev().filter_map(|n| ballot_sig::parse_note(n)) {
+        if sig.harness.is_none() {
+            continue;
+        }
+        let seat = sig
+            .seat_only()
+            .then(|| sig.harness.clone().unwrap_or_default());
+        first.entry(sig.voter).or_insert(seat);
+    }
+    first
+        .into_iter()
+        .filter_map(|(voter, seat)| Some((voter, seat?)))
+        .collect()
+}
+
 /// The tally a reader sees: the ballots that count, then the ones left
 /// out because the session had already voted or had filed a candidate.
+/// A session only the seat named is said to be unverified.
 ///
 /// # Errors
 ///
@@ -582,6 +614,8 @@ pub fn tally_report(issue: &str) -> Result<String> {
         .map(|v| ballot_sig::notes_of(&v))
         .unwrap_or_default();
     let (counted, ignored) = tally_of(&raw, &notes, &author_sessions(issue));
+    let seat_only = seat_only_voters(&notes);
+    let mut unverified = std::collections::BTreeSet::new();
     let mut out = String::new();
     let n = counted.len();
     let word = if n == 1 {
@@ -598,22 +632,37 @@ pub fn tally_report(issue: &str) -> Result<String> {
             .find(|r| r["agent"].as_str().map(str::trim) == Some(agent))
             .and_then(|r| r["choice"].as_str())
             .unwrap_or("");
+        let mut tags = Vec::new();
         if !raw_choice.is_empty() && raw_choice != choice {
-            out.push_str(&format!(
-                "  {agent}  {choice}  (a later ballot on this session is ignored)\n"
-            ));
-        } else {
+            tags.push("a later ballot on this session is ignored");
+        }
+        if let Some(seat) = seat_only.get(agent) {
+            unverified.insert(seat.clone());
+            tags.push("unverified session");
+        }
+        if tags.is_empty() {
             out.push_str(&format!("  {agent}  {choice}\n"));
+        } else {
+            out.push_str(&format!("  {agent}  {choice}  ({})\n", tags.join("; ")));
         }
     }
     if !ignored.is_empty() {
         out.push_str("ignored, one session is one ballot:\n");
         for item in &ignored {
+            let unverified_tag = if item.unverified {
+                unverified.insert(item.session.clone());
+                ", unverified"
+            } else {
+                ""
+            };
             out.push_str(&format!(
-                "  {}  {}  ({})\n",
+                "  {}  {}  ({}{unverified_tag})\n",
                 item.voter, item.session, item.why
             ));
         }
+    }
+    for seat in &unverified {
+        out.push_str(&format!("{}\n", ballot_sig::unverified_sentence(seat)));
     }
     Ok(out)
 }
@@ -1276,6 +1325,34 @@ mod tests {
         assert!(
             msg.contains("all ballots trace to one session (nonce:same-nonce)"),
             "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_seat_only_session_keeps_the_seat_as_its_key() {
+        assert_eq!(
+            session_key("ljosbot", ballot_sig::SEAT_NONCE),
+            session_key("ljosbot", "-")
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        // A ballot the seat cast before the marker still holds its session.
+        let old = ballot_sig::sign_bound(&key, "demo-s", "alice", "ship", "ljosbot", "-");
+        let again = session_cast_refusal("demo-s", "ljosbot", "bea", &[old], &[]).unwrap();
+        assert!(again.contains("already cast"), "{again}");
+        assert!(!again.contains("unverified"), "{again}");
+        let marked = ballot_sig::sign_bound(
+            &key,
+            "demo-s",
+            "alice",
+            "ship",
+            "ljosbot",
+            ballot_sig::SEAT_NONCE,
+        );
+        let again = session_cast_refusal("demo-s", "ljosbot", "bea", &[marked], &[]).unwrap();
+        assert!(
+            again.contains("already cast")
+                && again.contains(&ballot_sig::unverified_sentence("ljosbot")),
+            "{again}"
         );
     }
 
