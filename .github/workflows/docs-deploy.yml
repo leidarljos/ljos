@@ -2,13 +2,13 @@ name: docs-deploy
 
 on:
   workflow_run:
+    # The job below refuses a run whose head is not this repository.
+    # zizmor: ignore[dangerous-triggers]
     workflows: ["docs"]
     types: [completed]
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # The github-pages environment allows the main branch only. This workflow
 # runs on the default branch. It checks out the tag the docs workflow built
@@ -25,6 +25,10 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       startsWith(github.event.workflow_run.head_branch, 'v') &&
       contains(github.event.workflow_run.head_branch, '.')
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,6 +45,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+          package-manager-cache: false
       # Exit 2 on any finding the .impeccable config does not ignore.
       - run: npx -y impeccable@4.5.2 detect docs/build
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
@@ -51,6 +56,9 @@ jobs:
           path: docs/build
   deploy:
     needs: build
+    permissions:
+      pages: write
+      id-token: write
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
