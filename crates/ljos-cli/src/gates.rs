@@ -2,7 +2,8 @@
 //!
 //! The checks are mechanical. A line that is not a commit, a push, or a
 //! merge is left to the seat guard and the pack's rules. A denial names
-//! the command that makes the same line pass.
+//! the command that makes the same line pass. A push is never refused for
+//! a missing test record: it runs, and the hook passes the warning on.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -14,6 +15,22 @@ use serde_json::Value;
 
 thread_local! {
     static GH_BIN: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// What the last judged push had to say without refusing it: its tip
+    /// has no passing test record, or the gate settings did not parse.
+    static PUSH_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The warning the last judged push left, once. The push ran either way.
+#[must_use]
+pub fn take_push_warning() -> Option<String> {
+    PUSH_WARNING.with(|slot| slot.borrow_mut().take())
+}
+
+fn warn_push(text: String) {
+    PUSH_WARNING.with(|slot| *slot.borrow_mut() = Some(text));
 }
 
 #[cfg(test)]
@@ -31,6 +48,7 @@ thread_local! {
 /// call back into the static guard or policyd.
 #[must_use]
 pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
+    PUSH_WARNING.with(|slot| *slot.borrow_mut() = None);
     let found = std::env::current_dir().ok();
     let base = cwd.or(found.as_deref());
     enforce(line, base, 0).err()
@@ -38,9 +56,10 @@ pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
 
 /// The static guard (seat, user rules, these gates, a dangerous push) and
 /// then the pack's rules, the same composition the hook uses. `None` lets
-/// the line run. A plain push is held for test evidence only when the
-/// checkout configures a `test` command and that tip has no passing record.
-/// A force-push still asks.
+/// the line run. A plain push runs. When the checkout sets `test` and the
+/// tip has no passing record, [`take_push_warning`] says so. A force,
+/// mirror or delete push asks, and so does a push onto a protected branch
+/// of a repository whose owner is not in `owners`.
 #[must_use]
 pub fn guard_verdict(line: &str, cwd: Option<&Path>, rules: &[super::Rule]) -> Option<super::Rule> {
     let fast = super::static_guard_in(line, cwd);
@@ -132,16 +151,6 @@ struct Walk {
     branch: Option<String>,
     branch_set: bool,
     fresh: bool,
-    pending: Option<Pending>,
-}
-
-#[derive(Debug, Clone)]
-struct Pending {
-    branch: String,
-    src: String,
-    sha: Option<String>,
-    not_ff: bool,
-    missing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +181,9 @@ struct GateConfig {
     test: Option<String>,
     signoff: bool,
     protected: Vec<String>,
+    /// The accounts and organisations whose repositories are the person's
+    /// own. Empty: every repository is.
+    owners: Vec<String>,
     identity: Option<Person>,
     /// The file that set [`GateConfig::identity`].
     identity_from: Option<PathBuf>,
@@ -197,13 +209,6 @@ struct CommitFields {
     dry: bool,
     help: bool,
     hidden: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PushClass {
-    Plain,
-    Held,
-    Skip,
 }
 
 struct ApiMerge {
@@ -304,7 +309,6 @@ fn enforce(line: &str, cwd: Option<&Path>, depth: usize) -> Result<(), super::Ru
 fn handle_git(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule> {
     match git.sub.as_str() {
         "commit" => on_commit(git, inv, walk),
-        "merge" => on_merge(git, walk),
         "checkout" | "switch" => {
             if git.args.iter().any(|a| a == "-") {
                 walk.branch = None;
@@ -402,172 +406,115 @@ fn on_commit(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule
     Ok(())
 }
 
-fn on_merge(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
-    let Some(src) = merge_source(&git.args) else {
+fn on_push(git: &GitCmd, walk: &Walk) -> Result<(), super::Rule> {
+    if is_dry(&git.args) || is_delete(&git.args) {
+        return Ok(());
+    }
+    // No checkout has no tip and no gate file. A plain push is allowed. A
+    // force push or a delete still asks in the push gate.
+    let Some(root) = repo_root(&git.cwd) else {
         return Ok(());
     };
-    let target = if walk.branch_set {
-        walk.branch.clone()
-    } else {
-        abbrev(&git.cwd)
+    let cfg = match load_config(&root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn_push(format!(
+                "ljos ran this push without reading the gate settings: {e}"
+            ));
+            return Ok(());
+        }
     };
-    let Some(target) = target else {
-        return Ok(());
-    };
-    let cfg = repo_config(&git.cwd, "git-merge-unready")?;
-    if !is_protected(&target, &cfg.protected) {
-        return Ok(());
-    }
-    if has_subst(&src) {
-        walk.pending = Some(Pending {
-            branch: target,
-            src,
-            sha: None,
-            not_ff: false,
-            missing: true,
-        });
-        return Ok(());
-    }
-    let sha = rev(&git.cwd, &src);
-    let already = sha
-        .as_deref()
-        .is_some_and(|_| is_ancestor(&git.cwd, &src, "HEAD"));
-    if already {
-        return Ok(());
-    }
-    let fast = sha
-        .as_deref()
-        .is_some_and(|_| is_ancestor(&git.cwd, "HEAD", &src));
-    let not_ff = sha.is_some() && (forces_no_ff(&git.args) || !fast);
-    walk.pending = Some(Pending {
-        branch: target,
-        src,
-        sha,
-        not_ff,
-        missing: false,
-    });
-    // A missing source is `sha == None` and `missing` stays false until the
-    // push. `missing` is set here when rev-parse failed.
-    if let Some(p) = walk.pending.as_mut() {
-        p.missing = p.sha.is_none();
-    }
-    Ok(())
-}
-
-fn on_push(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
-    let class = push_class(&git.args);
-    if class == PushClass::Skip {
-        return Ok(());
-    }
-    // No checkout has no tip and no gate file, so there is nothing for an
-    // evidence denial to name. A plain push is allowed. A force push, a
-    // tag push, or a delete still asks in the push gate.
-    if repo_root(&git.cwd).is_none() {
-        return Ok(());
-    }
-    let cfg = repo_config(&git.cwd, "git-push-evidence")?;
     let current = if walk.branch_set {
         walk.branch.clone()
     } else {
         abbrev(&git.cwd)
     };
     let dests = push_dests(&git.cwd, &git.args, current.as_deref());
-    if let Some(pending) = walk.pending.clone() {
-        if dests.iter().any(|d| d == &pending.branch) {
-            let action = format!(
-                "git merge {} into {} followed by push",
-                pending.src, pending.branch
-            );
-            if pending.missing {
-                return Err(deny(
-                    "merge-gate",
-                    "git-merge-unready",
-                    &format!(
-                        "Refusing `{action}`. Cannot read `{}`. Pass a branch that exists, wait until CI is green on its tip and every Cursor Bugbot thread is resolved or has a reply, then merge.",
-                        pending.src
-                    ),
-                ));
-            }
-            if pending.not_ff {
-                return Err(not_ff_deny(&pending.src, &pending.branch));
-            }
-            let sha = pending.sha.clone().unwrap_or_default();
-            let spec = pr_branch(&git.cwd, &pending.src);
-            review_pr(&git.cwd, &spec, None, Some(&sha), &action)?;
-            if cfg.test.is_some() {
-                evidence_ok(&git.cwd, &sha, &cfg)?;
-            }
-            return Ok(());
+    if let Some(rule) = foreign_protected(&git.cwd, &git.args, current.as_deref(), &dests, &cfg) {
+        return Err(rule);
+    }
+    // Evidence is a warning. A missing or stale record never holds a push,
+    // and neither does a commit made on the same line.
+    if let Some(test) = cfg.test.as_deref() {
+        if let Some(why) = evidence_gap(&git.cwd, &git.args, current.as_deref(), walk.fresh, test) {
+            warn_push(format!(
+                "This push runs without a passing test record. {why} Run `ljos evidence record -- {test}` to record one."
+            ));
         }
-    }
-    // Evidence is opt-in. A checkout with no `test` command has nothing to
-    // record, and a plain push runs. A force push still asks, later.
-    // A merge is reviewed only when the commit this push publishes is a
-    // merge. The checkout's HEAD being a merge does not make a push of
-    // another branch one.
-    if cfg.test.is_none() {
-        review_pushed_merges(
-            &git.cwd,
-            &git.args,
-            current.as_deref(),
-            &dests,
-            &cfg.protected,
-            walk.fresh,
-        )?;
-        return Ok(());
-    }
-    let specs = refspecs(&git.cwd, &git.args);
-    if specs.is_empty() && walk.fresh {
-        return Err(fresh_deny(cfg.test.as_deref()));
-    }
-    review_pushed_merges(
-        &git.cwd,
-        &git.args,
-        current.as_deref(),
-        &dests,
-        &cfg.protected,
-        walk.fresh,
-    )?;
-    let shas = published_shas(
-        &git.cwd,
-        &git.args,
-        current.as_deref(),
-        walk.fresh,
-        cfg.test.as_deref(),
-    )?;
-    if shas.is_empty() {
-        return Ok(());
-    }
-    for sha in &shas {
-        evidence_ok(&git.cwd, sha, &cfg)?;
     }
     Ok(())
 }
 
-/// Review a protected push whose published commit is a merge. A ref that
-/// cannot be read is left to the evidence check, which names that ref.
-fn review_pushed_merges(
+/// A push onto a protected branch of a repository the person does not
+/// own asks. `owners` in `ljos.toml` or `.ljos/gates.toml` names the
+/// accounts and organisations that are the person's own. With no `owners`
+/// set, or a remote whose owner cannot be read, the push runs.
+fn foreign_protected(
     cwd: &Path,
     args: &[String],
     current: Option<&str>,
     dests: &[String],
-    protected: &[String],
+    cfg: &GateConfig,
+) -> Option<super::Rule> {
+    if cfg.owners.is_empty() {
+        return None;
+    }
+    let branch = dests.iter().find(|d| is_protected(d, &cfg.protected))?;
+    let url = push_url(cwd, args, current)?;
+    let (owner, repo) = super::remote_slug(&url)?;
+    if cfg.owners.iter().any(|o| o.eq_ignore_ascii_case(&owner)) {
+        return None;
+    }
+    Some(super::Rule {
+        pattern: "push-gate".into(),
+        verdict: "ask".into(),
+        reason: format!(
+            "`{branch}` is a protected branch of {owner}/{repo}, and {owner} is not in `owners`; the agent asks you first"
+        ),
+    })
+}
+
+/// The URL a push goes to: a URL named in place of a remote, else the
+/// named remote's push URL, else the current branch's remote, else
+/// `origin`.
+fn push_url(cwd: &Path, args: &[String], current: Option<&str>) -> Option<String> {
+    let pos = positionals(args);
+    let names = remotes(cwd);
+    let remote = match pos.first() {
+        Some(first) if names.iter().any(|r| r == first) => first.clone(),
+        Some(first) if first.contains("://") || (first.contains('@') && first.contains(':')) => {
+            return Some(first.clone());
+        }
+        _ => current
+            .and_then(|c| git_config(cwd, &format!("branch.{c}.remote")))
+            .unwrap_or_else(|| "origin".to_string()),
+    };
+    git_text(cwd, &["remote", "get-url", "--push", &remote]).filter(|u| !u.is_empty())
+}
+
+/// Why the commits a push publishes have no passing record for `test`,
+/// or `None` when each one has.
+fn evidence_gap(
+    cwd: &Path,
+    args: &[String],
+    current: Option<&str>,
     fresh: bool,
-) -> Result<(), super::Rule> {
-    if fresh || !hits_protected(dests, protected) {
-        return Ok(());
+    test: &str,
+) -> Option<String> {
+    let specs = refspecs(cwd, args);
+    let pushes_head = specs.is_empty()
+        || specs
+            .iter()
+            .filter_map(|spec| src_of(spec))
+            .any(|src| pushing_current(&src, current));
+    if fresh && pushes_head {
+        return Some("The same command makes a new commit, so its tip has no record yet.".into());
     }
     let Some(shas) = shas_quietly(cwd, args, current) else {
-        return Ok(());
+        return Some("The commit this push publishes cannot be read.".into());
     };
-    for sha in shas {
-        if git_text(cwd, &["rev-parse", "--verify", &format!("{sha}^2")]).is_none() {
-            continue;
-        }
-        let action = format!("git push of merge commit {sha}");
-        review_sha(cwd, &sha, &action)?;
-    }
-    Ok(())
+    shas.iter()
+        .find_map(|sha| evidence_problem(cwd, sha, test).map(|why| format!("Tip {sha}: {why}")))
 }
 
 /// The commits a push would publish, or `None` when one of them cannot be
@@ -592,145 +539,32 @@ fn shas_quietly(cwd: &Path, args: &[String], current: Option<&str>) -> Option<Ve
     Some(out)
 }
 
-fn published_shas(
-    cwd: &Path,
-    args: &[String],
-    current: Option<&str>,
-    fresh: bool,
-    test: Option<&str>,
-) -> Result<Vec<String>, super::Rule> {
-    let specs = refspecs(cwd, args);
-    if specs.is_empty() {
-        if fresh {
-            return Err(fresh_deny(test));
-        }
-        return head_sha(cwd).map(|s| vec![s]).ok_or_else(|| {
-            deny(
-                "push-gate",
-                "git-push-evidence",
-                "This repository has no commit yet. Commit, run `ljos evidence record -- <test command>`, then push that sha.",
-            )
-        });
-    }
-    let mut out = Vec::new();
-    for spec in specs {
-        let Some(src) = src_of(&spec) else {
-            continue;
-        };
-        if pushing_current(&src, current) {
-            if fresh {
-                return Err(fresh_deny(test));
-            }
-            let sha = head_sha(cwd).ok_or_else(|| {
-                deny(
-                    "push-gate",
-                    "git-push-evidence",
-                    "This repository has no commit yet. Commit, run `ljos evidence record -- <test command>`, then push that sha.",
-                )
-            })?;
-            out.push(sha);
-        } else {
-            let sha = rev(cwd, &src).ok_or_else(|| {
-                deny(
-                    "push-gate",
-                    "git-push-evidence",
-                    &format!(
-                        "Cannot read `{src}`, so the tip this push publishes is unknown. Push a branch that exists, run `ljos evidence record -- <test command>` on its tip, then push that sha."
-                    ),
-                )
-            })?;
-            out.push(sha);
-        }
-    }
-    Ok(out)
-}
-
-fn fresh_deny(test: Option<&str>) -> super::Rule {
-    let run = match test {
-        Some(test) => format!("Commit, run `ljos evidence record -- {test}`,"),
-        None => "Add `test = \"cargo test --workspace\"` (or this repo's suite, such as `meson test --suite eon`) to `.ljos/gates.toml`, commit, run `ljos evidence record -- <that command>`,".to_string(),
-    };
-    deny(
-        "push-gate",
-        "git-push-evidence",
-        &format!(
-            "{run} then push that commit. This command creates a new commit, so the tip it would push has no evidence yet."
-        ),
-    )
-}
-
-fn not_ff_deny(src: &str, branch: &str) -> super::Rule {
-    deny(
-        "merge-gate",
-        "git-merge-unready",
-        &format!(
-            "Refusing `git merge {src}` into `{branch}` followed by a push. This merge is not a fast-forward, so the commit that would be pushed has no CI. Run `git merge --ff-only {src}` once `{src}` contains `{branch}`, wait until `gh pr checks` is green on that sha and every Cursor Bugbot thread is resolved or has a reply, then push. Or merge on the forge with `gh pr merge` once those are true."
-        ),
-    )
-}
-
-fn evidence_ok(cwd: &Path, sha: &str, cfg: &GateConfig) -> Result<(), super::Rule> {
-    let Some(test) = cfg.test.as_deref() else {
-        return Ok(());
-    };
+/// What is wrong with the stored record for `sha`, or `None` when it is a
+/// passing run of `test`.
+fn evidence_problem(cwd: &Path, sha: &str, test: &str) -> Option<&'static str> {
     let Some(path) = evidence_file(cwd, sha) else {
-        return Err(evidence_deny(
-            sha,
-            Some(test),
-            "The tip sha cannot be stored as evidence.",
-        ));
+        return Some("the tip sha cannot be stored as evidence.");
     };
     if !path.is_file() {
-        return Err(evidence_deny(
-            sha,
-            Some(test),
-            "No evidence file for this tip.",
-        ));
+        return Some("no evidence file for this tip.");
     }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => {
-            return Err(evidence_deny(
-                sha,
-                Some(test),
-                "The evidence file cannot be read.",
-            ))
-        }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Some("the evidence file cannot be read.");
     };
-    let rec: Stored = match serde_json::from_str(&text) {
-        Ok(rec) => rec,
-        Err(_) => {
-            return Err(evidence_deny(
-                sha,
-                Some(test),
-                "The evidence file is unreadable.",
-            ))
-        }
+    let Ok(rec) = serde_json::from_str::<Stored>(&text) else {
+        return Some("the evidence file is unreadable.");
     };
-    let why = if rec.sha != sha {
-        "The evidence file is for a different commit."
+    if rec.sha != sha {
+        Some("the evidence file is for a different commit.")
     } else if rec.exit != 0 {
-        "The stored run did not exit 0."
+        Some("the stored run did not exit 0.")
     } else if norm_cmd(&rec.command) != test {
-        "The stored command is not the `test` line in `.ljos/gates.toml`."
+        Some("the stored command is not the `test` line in `.ljos/gates.toml`.")
     } else if rec.ts.trim().is_empty() {
-        "The evidence file has no timestamp."
+        Some("the evidence file has no timestamp.")
     } else {
-        return Ok(());
-    };
-    Err(evidence_deny(sha, Some(test), why))
-}
-
-fn evidence_deny(sha: &str, test: Option<&str>, why: &str) -> super::Rule {
-    let run = match test {
-        Some(test) => format!("Run `ljos evidence record -- {test}`, then push {sha}."),
-        None => "Add `test = \"cargo test --workspace\"` (or this repo's suite, such as `meson test --suite eon`) to `.ljos/gates.toml`, run `ljos evidence record -- <that command>`, then push.".to_string(),
-    };
-    deny(
-        "push-gate",
-        "git-push-evidence",
-        &format!("Tip {sha}. {why} {run}"),
-    )
+        None
+    }
 }
 
 fn write_evidence(cwd: &Path, sha: &str, command: &str, ts: &str) -> Result<()> {
@@ -790,6 +624,7 @@ fn load_config(root: &Path) -> Result<GateConfig, String> {
         test: None,
         signoff: false,
         protected: default_protected(),
+        owners: Vec::new(),
         identity: None,
         identity_from: None,
     };
@@ -882,6 +717,13 @@ fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
         cfg.protected = req_strings(src, "protected_branches", path)?
             .into_iter()
             .map(|name| branch_of(&name))
+            .filter(|name| !name.is_empty())
+            .collect();
+    }
+    if src.contains_key("owners") {
+        cfg.owners = req_strings(src, "owners", path)?
+            .into_iter()
+            .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
             .collect();
     }
@@ -1001,10 +843,6 @@ fn is_protected(name: &str, protected: &[String]) -> bool {
     protected.iter().any(|p| p == &name)
 }
 
-fn hits_protected(dests: &[String], protected: &[String]) -> bool {
-    dests.iter().any(|d| is_protected(d, protected))
-}
-
 /// The branches a `--force-with-lease` push asks before it replaces:
 /// `main`, `master` and `develop`, and every branch `protected_branches`
 /// names in the config layers [`config_layers`] reads (the user and seat
@@ -1017,6 +855,7 @@ pub(crate) fn lease_protected(cwd: Option<&Path>) -> Option<Vec<String>> {
         test: None,
         signoff: false,
         protected: Vec::new(),
+        owners: Vec::new(),
         identity: None,
         identity_from: None,
     };
@@ -1101,18 +940,6 @@ fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
             .trim_end_matches(['\r', '\n'])
             .to_string(),
     )
-}
-
-fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 fn identity_ok(
@@ -1411,20 +1238,6 @@ fn reuse_messages(cwd: &Path, revs: &[String]) -> Option<String> {
     Some(out)
 }
 
-fn push_class(args: &[String]) -> PushClass {
-    if is_dry(args) || is_delete(args) {
-        PushClass::Skip
-    } else if is_force(args) || publishes_tags(args) {
-        PushClass::Held
-    } else {
-        PushClass::Plain
-    }
-}
-
-fn is_force(args: &[String]) -> bool {
-    args.iter().any(|a| super::push_rewrites(a))
-}
-
 fn is_dry(args: &[String]) -> bool {
     args.iter().any(|a| {
         a == "--dry-run"
@@ -1442,16 +1255,6 @@ fn is_delete(args: &[String]) -> bool {
         && pos
             .iter()
             .all(|p| p.strip_prefix('+').unwrap_or(p).starts_with(':'))
-}
-
-fn publishes_tags(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--tags" | "--follow-tags" | "--mirror" | "--all"
-        ) || a.starts_with("refs/tags/")
-            || a.starts_with("+refs/tags/")
-    })
 }
 
 fn positionals(args: &[String]) -> Vec<String> {
@@ -1542,69 +1345,6 @@ fn pushing_current(src: &str, current: Option<&str>) -> bool {
     current.is_some_and(|c| branch_of(c) == branch_of(src))
 }
 
-fn pr_branch(cwd: &Path, src: &str) -> String {
-    let names = remotes(cwd);
-    if let Some((remote, rest)) = src.split_once('/') {
-        if names.iter().any(|r| r == remote) && !rest.is_empty() {
-            return rest.to_string();
-        }
-    }
-    src.to_string()
-}
-
-fn merge_source(args: &[String]) -> Option<String> {
-    if is_help(args) {
-        return None;
-    }
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--abort" | "--continue" | "--quit"))
-    {
-        return None;
-    }
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--" {
-            return args.get(i + 1).cloned();
-        }
-        if matches!(
-            a.as_str(),
-            "-m" | "--message"
-                | "-s"
-                | "--strategy"
-                | "-X"
-                | "--strategy-option"
-                | "-F"
-                | "--file"
-                | "--into"
-        ) {
-            i += 2;
-            continue;
-        }
-        if a.starts_with("--message=")
-            || a.starts_with("--strategy=")
-            || a.starts_with("--into=")
-            || a.starts_with("--file=")
-            || a.starts_with("--strategy-option=")
-        {
-            i += 1;
-            continue;
-        }
-        if a.starts_with('-') {
-            i += 1;
-            continue;
-        }
-        return Some(a.clone());
-    }
-    None
-}
-
-fn forces_no_ff(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--no-ff" || a == "--squash" || a.starts_with("--no-ff"))
-}
-
 fn switched_branch(args: &[String]) -> Option<String> {
     if is_help(args) {
         return None;
@@ -1644,38 +1384,6 @@ fn switched_branch(args: &[String]) -> Option<String> {
 
 fn is_help(args: &[String]) -> bool {
     args.iter().any(|a| a == "--help" || a == "-h")
-}
-
-fn review_sha(cwd: &Path, sha: &str, action: &str) -> Result<(), super::Rule> {
-    let list = gh_json(
-        cwd,
-        &[
-            "pr".into(),
-            "list".into(),
-            "--search".into(),
-            sha.into(),
-            "--state".into(),
-            "all".into(),
-            "--json".into(),
-            "number,headRefOid,state".into(),
-            "--limit".into(),
-            "20".into(),
-        ],
-    )
-    .map_err(|e| merge_io(action, &e))?;
-    let rows = list
-        .as_array()
-        .ok_or_else(|| merge_io(action, "the pull request list was missing"))?;
-    let Some(hit) = rows.iter().find(|p| p["headRefOid"].as_str() == Some(sha)) else {
-        return Err(merge_deny(
-            action,
-            sha,
-            "",
-            "No pull request has this head sha.",
-        ));
-    };
-    let number = hit["number"].as_u64().unwrap_or(0).to_string();
-    review_pr(cwd, &number, None, Some(sha), action)
 }
 
 fn review_pr(
@@ -2129,7 +1837,7 @@ fn remote_hidden_at(line: &str, depth: usize) -> Option<super::Rule> {
                 return Some(deny(
                     "remote-gate",
                     "git-remote-hidden",
-                    "Run the git command in this checkout, then record evidence or merge here.",
+                    "Run the commit or the merge in this checkout, where the gate can read it.",
                 ));
             }
         }
@@ -2143,7 +1851,10 @@ fn gate_command(line: &str) -> bool {
             if git.shell.as_deref().is_some_and(gate_command) {
                 return true;
             }
-            if matches!(git.sub.as_str(), "commit" | "push" | "merge") {
+            // A push and a local merge are not held, so running them
+            // elsewhere hides nothing. A commit's message and a forge
+            // merge are.
+            if git.sub == "commit" {
                 return true;
             }
         }
@@ -2847,7 +2558,7 @@ esac
     }
 
     #[test]
-    fn a_plain_push_with_evidence_is_allowed_and_without_it_is_refused() {
+    fn a_plain_push_without_evidence_runs_and_says_so() {
         let dir = repo();
         seed(dir.path());
         gates(dir.path(), "test = \"true\"\n");
@@ -2856,12 +2567,19 @@ esac
             verdict: "ask".into(),
             reason: "A push needs consent.".into(),
         }];
-        let refused = answers("git push origin main", dir.path(), &rules);
-        assert_denies(&refused, "ljos evidence record -- true");
+        let _ = take_push_warning();
+        let unrecorded = answers("git push origin main", dir.path(), &rules);
+        assert_allows(&unrecorded);
+        let warned = take_push_warning().expect("a missing record is a warning");
+        assert!(warned.contains("ljos evidence record -- true"), "{warned}");
         record_in(dir.path(), &["true".into()]).unwrap();
         let allowed = answers("git push origin main", dir.path(), &rules);
         assert_allows(&allowed);
         assert!(guard_verdict("git push origin main", Some(dir.path()), &rules).is_none());
+        assert!(
+            take_push_warning().is_none(),
+            "a recorded tip has nothing to say"
+        );
         let forced = guard_verdict("git push --force origin main", Some(dir.path()), &rules)
             .expect("force still asks");
         assert_eq!(forced.verdict, "ask");
@@ -2874,20 +2592,40 @@ esac
             "git commit -m \"note the seat\" && git push origin main",
             Some(dir.path()),
             &[],
+        );
+        assert!(
+            fresh.is_none(),
+            "commit and push on one line runs: {fresh:?}"
+        );
+        let said = take_push_warning().expect("the new commit has no record");
+        assert!(said.contains("new commit"), "{said}");
+        let remote = guard_verdict("ssh host 'git push origin main'", Some(dir.path()), &[]);
+        assert!(
+            remote.is_none(),
+            "a push run elsewhere is a push: {remote:?}"
+        );
+        let commit = guard_verdict(
+            "ssh host 'git commit -m \"Co-authored-by: Cursor <c@c>\"'",
+            Some(dir.path()),
+            &[],
         )
-        .unwrap();
+        .expect("a commit run elsewhere hides its message");
         assert!(
-            fresh.reason.contains("ljos evidence record -- true"),
+            commit.reason.contains("git-remote-hidden"),
             "{}",
-            fresh.reason
+            commit.reason
         );
-        let remote =
-            guard_verdict("ssh host 'git push origin main'", Some(dir.path()), &[]).unwrap();
-        assert!(
-            remote.reason.contains("git-remote-hidden"),
-            "{}",
-            remote.reason
-        );
+    }
+
+    #[test]
+    fn a_broken_gate_file_warns_and_the_push_runs() {
+        let dir = repo();
+        seed(dir.path());
+        gates(dir.path(), "test = [\n");
+        let _ = take_push_warning();
+        assert!(guard_verdict("git push origin main", Some(dir.path()), &[]).is_none());
+        let said = take_push_warning().expect("the parse failure is a warning");
+        assert!(said.contains("gates.toml"), "{said}");
     }
 
     #[test]
@@ -2916,42 +2654,39 @@ esac
         assert!(guard_verdict(api, Some(dir.path()), &[]).is_none(), "{api}");
     }
 
+    /// A stub `gh` that fails every call: a push that reached for the
+    /// forge would be refused with its error.
+    fn silent_gh() -> GhHold {
+        stub_gh("not json", "not json", "not json")
+    }
+
     #[test]
-    fn a_local_merge_pushed_to_a_protected_branch_checks_the_published_sha() {
+    fn a_local_merge_pushed_to_the_persons_own_main_runs() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.path().join("g.txt"), "two\n").unwrap();
         git(dir.path(), &["add", "g.txt"]);
         git(dir.path(), &["commit", "-q", "-m", "note the feature"]);
-        let feature = tip(dir.path());
         gates(dir.path(), "test = \"true\"\n");
         record_in(dir.path(), &["true".into()]).unwrap();
         git(dir.path(), &["checkout", "-q", "main"]);
-        let _hold = stub_gh(&green_view(&feature), &threads(true, false), "[]");
+        let _hold = silent_gh();
         let line = "git merge feature && git push origin main";
-        let rows = answers(line, dir.path(), &[]);
-        assert_allows(&rows);
-        drop(_hold);
+        assert_allows(&answers(line, dir.path(), &[]));
 
         std::fs::write(dir.path().join("h.txt"), "three\n").unwrap();
         git(dir.path(), &["add", "h.txt"]);
         git(dir.path(), &["commit", "-q", "-m", "note main"]);
-        let diverged = guard_verdict(line, Some(dir.path()), &[]).unwrap();
+        let diverged = guard_verdict(line, Some(dir.path()), &[]);
         assert!(
-            diverged.reason.contains("not a fast-forward"),
-            "{}",
-            diverged.reason
-        );
-        assert!(
-            diverged.reason.contains("git merge --ff-only feature"),
-            "{}",
-            diverged.reason
+            diverged.is_none(),
+            "a merge commit onto the person's main runs: {diverged:?}"
         );
     }
 
     #[test]
-    fn pushing_a_merge_commit_uses_the_head_sha() {
+    fn pushing_a_merge_commit_does_not_wait_on_the_forge() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2962,21 +2697,41 @@ esac
         git(dir.path(), &["merge", "--no-ff", "--no-edit", "feature"]);
         let head = tip(dir.path());
         assert!(second_parent(dir.path()).is_some(), "{head}");
-        gates(dir.path(), "test = \"true\"\n");
-        record_in(dir.path(), &["true".into()]).unwrap();
         let list = format!(r#"[{{"number":7,"headRefOid":"{head}","state":"OPEN"}}]"#);
-        let _hold = stub_gh(&green_view(&head), &threads(true, false), &list);
+        let _hold = stub_gh(&red_view(&head), &threads(false, false), &list);
         assert_allows(&answers("git push origin main", dir.path(), &[]));
-        drop(_hold);
-
-        let _hold = stub_gh(&red_view(&head), &threads(true, false), &list);
-        let red = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
-        assert!(red.reason.contains("git-merge-unready"), "{}", red.reason);
-        assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+        assert!(guard_verdict("git push origin main", Some(dir.path()), &[]).is_none());
     }
 
     #[test]
-    fn a_push_of_another_branch_does_not_review_the_checkout_merge() {
+    fn a_protected_branch_of_someone_elses_repository_asks() {
+        let dir = repo();
+        seed(dir.path());
+        let _hold = silent_gh();
+        gates(dir.path(), "owners = [\"rgoswami\", \"leidarljos\"]\n");
+        let asked = guard_verdict("git push origin main", Some(dir.path()), &[])
+            .expect("acme is not one of the owners");
+        assert_eq!(asked.verdict, "ask");
+        assert_eq!(asked.pattern, "push-gate");
+        assert!(asked.reason.contains("acme/widgets"), "{}", asked.reason);
+        assert!(
+            guard_verdict("git push origin HEAD:feature", Some(dir.path()), &[]).is_none(),
+            "a feature branch of someone else's repository is an ordinary push"
+        );
+        gates(dir.path(), "owners = [\"ACME\"]\n");
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "owners match without case"
+        );
+        gates(dir.path(), "signoff = false\n");
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "no owners set: every repository is the person's"
+        );
+    }
+
+    #[test]
+    fn a_force_push_with_a_test_command_asks_and_is_not_an_evidence_refusal() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2990,17 +2745,17 @@ esac
         git(dir.path(), &["checkout", "-q", "merged"]);
         assert!(second_parent(dir.path()).is_some());
         gates(dir.path(), "test = \"true\"\n");
-        let refused = guard_verdict("git push --force origin main", Some(dir.path()), &[]).unwrap();
-        assert_eq!(refused.pattern, "push-gate");
+        let asked = guard_verdict("git push --force origin main", Some(dir.path()), &[]).unwrap();
+        assert_eq!(asked.verdict, "ask", "{}", asked.reason);
         assert!(
-            refused.reason.contains("git-push-evidence"),
+            !asked.reason.contains("git-push-evidence"),
             "{}",
-            refused.reason
+            asked.reason
         );
         assert!(
-            !refused.reason.contains("git-merge-unready"),
+            !asked.reason.contains("git-merge-unready"),
             "{}",
-            refused.reason
+            asked.reason
         );
     }
 
@@ -3090,12 +2845,28 @@ esac
             "a gates file with no test command does not ask for evidence"
         );
         gates(dir.path(), "test = \"true\"\n");
-        let refused = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
+        let _ = take_push_warning();
         assert!(
-            refused.reason.contains("ljos evidence record -- true"),
-            "{}",
-            refused.reason
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a test command with no record warns and the push runs"
         );
+        let said = take_push_warning().expect("a warning");
+        assert!(said.contains("ljos evidence record -- true"), "{said}");
+        let sha = tip(dir.path());
+        let path = evidence_file(dir.path(), &sha).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"command":"true","exit":1,"sha":"{sha}","ts":"2020-01-01T00:00:00Z"}}"#),
+        )
+        .unwrap();
+        let _ = take_push_warning();
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a stale record warns and the push runs"
+        );
+        let stale = take_push_warning().expect("a failing record is a warning");
+        assert!(stale.contains("did not exit 0"), "{stale}");
     }
 
     #[test]

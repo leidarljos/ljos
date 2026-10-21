@@ -187,13 +187,26 @@ struct RepoBook {
 }
 
 /// Whether the guard and the pack daemon should stay out of this process.
-/// A temp sandbox and `LJOS_OFF` are not seats: rtrash's tests delete
-/// branches in a temp repository, and a daemon must not write under a temp
-/// `HOME`. The book is not suspended here. A hook in a scratch directory
-/// still files its claim.
+/// `LJOS_OFF` and a temporary `HOME` are not seats: a test sandbox sets
+/// its own home, and a daemon must not write under it. A temporary working
+/// directory under a real home is a seat, so `cd /tmp && rm -rf ~/proj` is
+/// judged. `LJOS_GUARD=on` keeps the guard on under a temporary home. The
+/// book is not suspended here. A hook in a scratch directory still files
+/// its claim.
 #[must_use]
 pub fn guard_suspended() -> bool {
-    ljos_off() || home_or_cwd_is_temp()
+    ljos_off() || (temp_home().is_some() && !guard_forced_on())
+}
+
+/// `LJOS_GUARD` set to one of the on-switches: the guard judges commands
+/// under a temporary `HOME` too. Tests use it in place of a home moved out
+/// of `/tmp`. `LJOS_OFF` still wins.
+#[must_use]
+pub fn guard_forced_on() -> bool {
+    matches!(
+        std::env::var("LJOS_GUARD").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    )
 }
 
 /// `LJOS_OFF` set to one of the on-switches.
@@ -202,12 +215,6 @@ fn ljos_off() -> bool {
         std::env::var("LJOS_OFF").ok().as_deref(),
         Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
     )
-}
-
-fn home_or_cwd_is_temp() -> bool {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let cwd = std::env::current_dir().ok();
-    path_is_temp(home.as_deref()) || path_is_temp(cwd.as_deref())
 }
 
 /// Whether `LJOS_OFF` is set to one of its on-switches.
@@ -231,17 +238,14 @@ pub fn guard_off_reason() -> Option<String> {
     if ljos_off() {
         return Some("off: LJOS_OFF is set".to_string());
     }
-    if let Some(home) = temp_home() {
-        return Some(format!(
-            "off: HOME ({}) is a temporary directory, and ljos stays out of test sandboxes",
-            home.display()
-        ));
+    if guard_forced_on() {
+        return None;
     }
-    let cwd = std::env::current_dir().ok()?;
-    path_is_temp(Some(cwd.as_path())).then(|| {
+    temp_home().map(|home| {
         format!(
-            "off here: {} is a temporary directory, and ljos stays out of test sandboxes",
-            cwd.display()
+            "off: HOME ({}) is a temporary directory, and ljos stays out of test sandboxes. \
+             `LJOS_GUARD=on` keeps it on",
+            home.display()
         )
     })
 }
@@ -3644,7 +3648,7 @@ fn recall_line(issue: &str) -> String {
 /// in the same conversation prints nothing. A temp sandbox and `LJOS_OFF`
 /// print nothing. This does not wait on the pack when it is off.
 pub fn print_brief_once() {
-    if ljos_off() || home_or_cwd_is_temp() {
+    if guard_suspended() {
         return;
     }
     let path = brief_mark(&brief_key());
@@ -4848,9 +4852,10 @@ mod tests {
     #[test]
     fn ljos_off_and_a_temp_home_suspend_the_guard() {
         let _g = lock();
-        let _saved = Restore::new(&["HOME", "LJOS_OFF"]);
+        let _saved = Restore::new(&["HOME", "LJOS_OFF", "LJOS_GUARD"]);
         unsafe {
             std::env::remove_var("LJOS_OFF");
+            std::env::remove_var("LJOS_GUARD");
             std::env::set_var("HOME", "/home/ubuntu");
         }
         assert!(!guard_suspended(), "a normal home is a seat");
@@ -4865,7 +4870,16 @@ mod tests {
             std::env::set_var("HOME", "/tmp/ljos-not-a-seat");
         }
         assert!(guard_suspended(), "a temp HOME is not a seat");
-        unsafe { std::env::set_var("HOME", "/tmpfoo") };
+        unsafe { std::env::set_var("LJOS_GUARD", "on") };
+        assert!(!guard_suspended(), "LJOS_GUARD=on judges a temp HOME");
+        assert!(guard_off_reason().is_none());
+        unsafe { std::env::set_var("LJOS_OFF", "1") };
+        assert!(guard_suspended(), "LJOS_OFF wins over LJOS_GUARD");
+        unsafe {
+            std::env::remove_var("LJOS_OFF");
+            std::env::remove_var("LJOS_GUARD");
+            std::env::set_var("HOME", "/tmpfoo");
+        }
         assert!(!guard_suspended(), "/tmpfoo is a name, not /tmp");
     }
 

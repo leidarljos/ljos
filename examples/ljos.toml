@@ -8,8 +8,14 @@
 #
 # `name` and `email` may sit in an [identity] table, as here, or as keys of
 # .ljos/gates.toml. With none of these set, a commit is not checked for who
-# wrote it. A machine trailer is still refused. A plain push is allowed
-# unless the same file sets `test`.
+# wrote it. A machine trailer is still refused. A plain push always runs.
+# With `test` set, a push whose tip has no passing `ljos evidence record`
+# run carries a warning and still runs.
+#
+# `owners` names the accounts and organisations whose repositories are
+# yours. A push onto a protected branch of any other owner's repository
+# asks. Unset, every repository counts as yours.
+# owners = ["HaoZeke", "leidarljos"]
 
 [identity]
 name = "Rohit Goswami"

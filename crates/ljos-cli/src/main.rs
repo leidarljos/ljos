@@ -2329,11 +2329,18 @@ fn run_command() -> Result<()> {
             // in the directory the tool would run in. A directory that
             // cannot be resolved is not a refusal.
             let dir = cwd.as_deref();
-            let fast = on_tool
-                .then(|| ljos_cli::static_guard_in(&call.cue, dir))
-                .flatten()
-                .or(posted);
-            let (rules, preferences) = if on_tool && fast.is_none() {
+            // LJOS_OFF and a temporary HOME switch the guard off. The push
+            // gate and the pack's rules stay out too, as the shim does.
+            let suspended = on_tool && ljos_cli::bookkeep::guard_suspended();
+            let fast = if suspended {
+                None
+            } else {
+                on_tool
+                    .then(|| ljos_cli::static_guard_in(&call.cue, dir))
+                    .flatten()
+                    .or(posted)
+            };
+            let (rules, preferences) = if on_tool && fast.is_none() && !suspended {
                 ljos_cli::gate_read()
             } else {
                 (Vec::new(), Vec::new())
@@ -2408,9 +2415,16 @@ fn run_command() -> Result<()> {
                         String::new()
                     };
                     // A timed-out or crashed guard allowed this call. Say so.
-                    match ljos_cli::take_guard_note() {
+                    let note = match ljos_cli::take_guard_note() {
                         Some(guard) if note.is_empty() => guard,
                         Some(guard) => format!("{guard}\n{note}"),
+                        None => note,
+                    };
+                    // A push whose tip has no passing test record runs,
+                    // and the agent reads why it was not held.
+                    match ljos_cli::gates::take_push_warning() {
+                        Some(warning) if note.is_empty() => warning,
+                        Some(warning) => format!("{warning}\n{note}"),
                         None => note,
                     }
                 }

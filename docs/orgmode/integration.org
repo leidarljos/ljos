@@ -102,6 +102,12 @@ same everywhere and the envelope differs:
 | Roo Code, Kilo Code | skill | advisory: no tool hook | runner prompt | the extension's =mcp_settings.json= |
 | Grok Bot | the skill, then =ljos hook --prompt= | =ljos policy --fail-on-deny= exits 1 | the person runs the command | no MCP server and no hook file; source the env file =onboard= writes |
 
+Codex runs a hook only after you trust it. After =ljos onboard --harness codex=,
+open =/hooks= and trust each ljos hook before the guard runs, and trust it
+again after an upgrade rewrites one. Until then only the rm, git and find
+shims guard Codex's commands. =ljos doctor= reports an untrusted hook when
+it can see one.
+
 The runners from Copilot down call =ljos hook --runner NAME=. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.

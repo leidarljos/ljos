@@ -1303,8 +1303,7 @@ mod tests {
         }
         let force = json!({"tool_input": {"command": "git push --force origin main"}}).to_string();
         let started = std::time::Instant::now();
-        let refused =
-            early_answer(&force, "PreToolUse").expect("a push without evidence is refused");
+        let asked = early_answer(&force, "PreToolUse").expect("a force push asks");
         let plain = json!({"tool_input": {"command": "git status"}}).to_string();
         assert!(
             early_answer(&plain, "").is_none(),
@@ -1317,11 +1316,12 @@ mod tests {
             "the static check waited on the guard"
         );
         assert_eq!(
-            read_answer(&refused).decision.as_deref(),
-            Some("deny"),
-            "{refused}"
+            read_answer(&asked).decision.as_deref(),
+            Some("ask"),
+            "{asked}"
         );
-        assert!(refused.contains("git-push-evidence"), "{refused}");
+        assert!(asked.contains("git-force-push"), "{asked}");
+        assert!(!asked.contains("git-push-evidence"), "{asked}");
         assert_eq!(
             read_answer(&denied).decision.as_deref(),
             Some("deny"),
@@ -1331,7 +1331,7 @@ mod tests {
         // Gemini names the gate BeforeTool. A verdict rendered under that
         // name used to omit the decision, and Gemini allows an object
         // that has none.
-        let before = early_answer(&force, "BeforeTool").expect("BeforeTool is still a gate");
+        let before = early_answer(&rm, "BeforeTool").expect("BeforeTool is still a gate");
         assert_eq!(
             read_answer(&before).decision.as_deref(),
             Some("deny"),
@@ -1341,8 +1341,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("\"deny\""), "{out}");
         assert!(!out.contains("\"ask\""), "{out}");
-        let wind =
-            early_answer(&force, "pre_run_command").expect("pre_run_command is still a gate");
+        let wind = early_answer(&rm, "pre_run_command").expect("pre_run_command is still a gate");
         assert_eq!(
             read_answer(&wind).decision.as_deref(),
             Some("deny"),

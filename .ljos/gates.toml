@@ -1,4 +1,4 @@
-# What the commit, push, and merge gates read. A push is refused until
-# `ljos evidence record -- <test>` exits 0 for that exact tip.
-test = "cargo test --workspace"
+# What the commit and push gates read. There is no `test` line: a test
+# record is opt-in. With one, a push whose tip has no passing
+# `ljos evidence record -- <test>` run still runs, with a warning.
 protected_branches = ["main", "master"]

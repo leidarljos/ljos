@@ -1,0 +1,1 @@
+The README, the docs and `ljos onboard` tell Codex users to trust each ljos hook in `/hooks` before the guard runs, and again after an upgrade. `ljos doctor` reports an untrusted hook. Until then only the rm, git and find shims guard Codex's commands.

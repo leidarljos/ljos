@@ -63,6 +63,12 @@ from a config file, can be described once in
 
 ``--dry-run`` reports what would be written.
 
+Codex runs a hook only after you trust it. After ``ljos onboard --harness codex``,
+open ``/hooks`` and trust each ljos hook before the guard runs, and trust it
+again after an upgrade rewrites one. Until then only the rm, git and find
+shims guard Codex's commands. ``ljos doctor`` reports an untrusted hook when
+the trust file has no ``trusted_hash``, or is older than the hooks file.
+
 The example carries the runners this seat has carried through one piece
 of work, each in the shape it takes the server: a runner with an ``mcp
 add`` of its own by that command; ``grok`` and a runner with a TOML config
@@ -278,13 +284,24 @@ wildcard or ``--all``.
 
 Name more protected branches with ``protected_branches`` in ``ljos.toml`` (the
 user, seat or repository file) or in ``.ljos/gates.toml``. A later file
-replaces the list an earlier one set, and the merge gate reads the same
+replaces the list an earlier one set, and the owners check reads the same
 list. ``main``, ``master`` and ``develop`` ask whatever the list says.
 
 .. code:: toml
 
    # .ljos/gates.toml
    protected_branches = ["main", "release"]
+
+A plain push runs onto any branch of your own repositories, protected or
+not, and so does a merge you push there. To have the guard ask before a
+plain push onto a protected branch of someone else's repository, name your
+accounts and organisations with ``owners``. Unset, every repository counts
+as yours.
+
+.. code:: toml
+
+   # ~/.config/ljos/ljos.toml
+   owners = ["HaoZeke", "leidarljos"]
 
 Let Jev judge the prompt
 ========================
