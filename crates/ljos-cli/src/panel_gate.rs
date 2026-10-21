@@ -22,8 +22,9 @@ use crate::ballot_sig;
 pub const READS_FILE: &str = ".ljos-reads";
 
 /// What a refused ballot or settle tells the agent to do instead, so a
-/// coordinator does not fall back to reading its reviewers' verdicts.
-pub const OWN_BALLOT: &str = "Each reviewer votes from its own subagent or run: start one per reviewer and have each cast its own ballot, rather than reporting a verdict in prose";
+/// coordinator neither voices its panel with `--as` nor falls back to
+/// reading its reviewers' verdicts.
+pub const OWN_BALLOT: &str = "Each persona brief goes to its own subagent or run, which casts `ljos vote --as NAME` itself: one session does not voice a panel, and a verdict reported in prose is not a ballot";
 
 /// How a ballot traces to a session. An empty harness and nonce is a
 /// legacy ballot from before binding, and the gate leaves those alone

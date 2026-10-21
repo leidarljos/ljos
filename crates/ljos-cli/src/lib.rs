@@ -1317,9 +1317,11 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
 
 /// The conversation id a runner stamped into the environment, when there
 /// is one. Used to bind a ballot when no MCP call and no hook named a
-/// session of its own.
+/// session of its own. The holder an env file shares is not one.
 pub(crate) fn runner_session_id() -> Option<String> {
-    session_actor().map(|(id, _)| id)
+    session_actor()
+        .filter(|(id, keys)| !(keys == "LJOS_SESSION_ID" && is_shared_holder_id(id)))
+        .map(|(id, _)| id)
 }
 
 /// The holder for the conversation this process belongs to, named after
@@ -4259,6 +4261,16 @@ fn shared_holder_id(name: &str) -> String {
 
 /// The end of the holder a runner with no conversation id shares.
 const SHARED_HOLDER_SUFFIX: &str = "-shell";
+
+/// Whether `id` is a [`shared_holder_id`]: every conversation of a runner
+/// that stamps no id holds under it, so it names no run.
+pub(crate) fn is_shared_holder_id(id: &str) -> bool {
+    let mut id = id.trim();
+    while let Some(rest) = id.strip_suffix("-seat") {
+        id = rest;
+    }
+    id.ends_with(SHARED_HOLDER_SUFFIX)
+}
 
 /// The env file's session line: set `LJOS_SESSION_ID` to the shared
 /// holder only when neither it nor a runner's conversation id is set.
@@ -23999,7 +24011,8 @@ workflow. The stage and the next step, the same reading as `ljos workflow`.",
         name: "panel",
         optional: true,
         step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
-the issue speaks to. Start one subagent per brief.",
+the issue speaks to. Each brief goes to its own subagent or run, which\n   \
+casts `ljos vote --as NAME` itself.",
     },
     SittingSection {
         name: "recall",
@@ -27211,12 +27224,9 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 /// subagent's included. The seat argument is not copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
-    if ballot_sig::harness_session().is_empty() {
-        return;
-    }
-    let harness = ballot_sig::identity().harness;
-    if harness != "-" {
-        cmd.env("LJOS_HARNESS_SESSION", harness);
+    let id = ballot_sig::identity();
+    if id.harness != "-" && !id.seat_only() {
+        cmd.env("LJOS_HARNESS_SESSION", id.harness);
     }
 }
 
@@ -35270,6 +35280,9 @@ mod tests {
             "grokbot-shell"
         );
         assert_eq!(super::shared_holder_id("a"), "a-shell-seat");
+        assert!(super::is_shared_holder_id(&super::shared_holder_id("a")));
+        assert!(super::is_shared_holder_id("grokbot-shell"));
+        assert!(!super::is_shared_holder_id("runner-own-id"));
         // Other runners' ids in this test's own environment would join the
         // holder, so they are set aside while it reads.
         let others: Vec<(String, String)> = std::env::vars()

@@ -1,0 +1,1 @@
+A seat whose shell names no session, as on a shared box, no longer binds every subagent's ballot to the seat: `ljos vote` takes the session and the subagent the `PreToolUse` hook saw run that line, so each subagent counts once and the parent counts apart from them.

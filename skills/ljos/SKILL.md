@@ -21,7 +21,7 @@ as `ljos VERB` in the shell.
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
-| who votes with a view of its own | pack, persona atoms | `persona`, `vote --as` |
+| who votes with a view of its own | pack, persona atoms | `persona`; its own subagent or run casts `vote --as` |
 | which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
 | what another seat sent | pack, message atoms | `send`, `inbox`, `reply`, `read`, `group` |
 
@@ -119,7 +119,8 @@ sitting that gets that far.
 8. `== workflow`, left out when neither the issue nor its parent carries a
    workflow. The stage and the next step, the same reading as `ljos workflow`.
 9. `== panel`, left out unless the issue is a decision. One brief per persona
-   the issue speaks to. Start one subagent per brief.
+   the issue speaks to. Each brief goes to its own subagent or run, which
+   casts `ljos vote --as NAME` itself.
 10. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 11. `== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three
@@ -144,9 +145,11 @@ sitting that gets that far.
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
 binds the `company-panel` recipe, and the sitting writes one brief per
-persona the issue speaks to under `== panel`. Start one subagent per
-brief; each ends with `ljos vote ISSUE --for OPTION --as NAME`, then
-`ljos consensus ISSUE`. `ljos finish ISSUE --close` refuses a decision
+persona the issue speaks to under `== panel`. Each brief goes to its own
+subagent or run, which casts `ljos vote ISSUE --for OPTION --as NAME`
+itself; the seat then runs `ljos consensus ISSUE`. The seat does not cast
+`--as` for its personas: one session is one ballot, and its second `--as`
+is refused. `ljos finish ISSUE --close` refuses a decision
 with fewer than two ballots. Put any choice with more than one defensible
 answer on an issue this way before building it.
 
@@ -265,8 +268,9 @@ Every piece of work has an issue before it has a claim.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
-  `ljos personas` prints the roster in the pack. Then
-  `ljos vote ISSUE --for OPTION --as NAME` casts as it. The anchor in
+  `ljos personas` prints the roster in the pack. Each persona's brief
+  then goes to its own subagent or run, which casts
+  `ljos vote ISSUE --for OPTION --as NAME` itself. The anchor in
   `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
   carries that word; `learn` writes its rows scoped to what the issue's
@@ -274,9 +278,10 @@ Every piece of work has an issue before it has a claim.
   A panel is one subagent per persona, each started from
   `ljos brief NAME ISSUE` (the view, the bound playbook's full recipe,
   the five named principles, the arena rubric, what the seat knows on its
-  domains, the working set), each casting one ballot as itself, then
-  `ljos consensus`; over MCP the `run_a_panel` prompt orders it, and
-  without MCP `ljos panel ISSUE --out DIR` writes one brief per persona.
+  domains, the working set), each casting its own `ljos vote --as NAME`,
+  then the seat runs `ljos consensus`; over MCP the `run_a_panel` prompt
+  orders it, and without MCP `ljos panel ISSUE --out DIR` writes one brief
+  per persona.
   A panel is refused until a playbook is bound (`ljos playbook ISSUE NAME`
   or `ljos sitting ISSUE --playbook NAME`). Both seat the personas whose
   `--about` domains the issue's title or tags name. A persona the
@@ -287,9 +292,9 @@ Every piece of work has an issue before it has a claim.
   stops: write the voters it needs (`--about` takes one domain per flag,
   many after it, or a comma list). A panel that seats everyone is a
   count. Model names on a
-  playbook are optional spawn hints; every member still ends with
-  `ljos vote --as` then `ljos consensus`. One playbook step per
-  subagent; no resume across phases. Each brief is a file to start a
+  playbook are optional spawn hints; every member still casts its own
+  `ljos vote --as NAME`, then the seat runs `ljos consensus`. One playbook
+  step per subagent; no resume across phases. Each brief is a file to start a
   subagent from. A panel
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. A ballot
@@ -304,14 +309,17 @@ Every piece of work has an issue before it has a claim.
   ISSUE --for X --confidence C --used DEED`, never a verdict reported in prose.
   A subagent's ballot binds the parent session plus the subagent,
   `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
-  under its root session. An opencode subagent is a session of its own. Two
+  under its root session. An opencode subagent is a session of its own. A
+  seat whose shell names no session, as on a shared box, binds the session
+  and the subagent its hook saw run the line, not the seat. Two
   subagents of one session count twice, the parent and a subagent count as
   two, a subagent that votes again counts once, and a subagent that wrote a
   candidate cannot vote. A run on another machine has ljos installed there
   (`ljos cloud up`) and the tracker synced through the shared tracker
   repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
   names the run but the seat, every run of that seat is one session, and
-  `ljos vote` and the tally call it unverified. Persona ballots and Jev
+  `ljos vote` and the tally call it unverified; the `NAME-shell` holder a
+  shell runner's env file shares names no run either. Persona ballots and Jev
   ballots are advisory. The push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
@@ -397,7 +405,8 @@ lock exists before proceeding": the next seat cannot act on that.
 
 - A subagent works under its parent's sitting and opens none of its
   own. What it finds joins the parent's issue. A judgement between
-  options is `ljos vote ISSUE --for OPTION --as NAME`. A lesson still
+  options is `ljos vote ISSUE --for OPTION --as NAME`, cast by the
+  subagent itself; the parent never casts it for the subagent. A lesson still
   true next time is `ljos remember "..." --as NAME`, and a finding is
   `ljos note ISSUE "..."`. `NAME` is its persona, else its subagent
   type. On a runner that fires subagent events, the hook names the
