@@ -1037,6 +1037,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     }
     let row = book.repos.entry(place.clone()).or_default();
     row.last_unix = now;
+    clear_lesson_if_issue_changes(row, &issue_id);
     row.issue = Some(issue_id.clone());
     row.finished = false;
     row.started = true;
@@ -1773,6 +1774,7 @@ fn tracker_holder(issue: &str) -> Option<String> {
 /// row, which then holds `issue`.
 fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     let row = book.repos.entry(repo.to_string()).or_default();
+    clear_lesson_if_issue_changes(row, issue);
     row.issue = Some(issue.to_string());
     row.finished = false;
     row.claim_failed = false;
@@ -2833,12 +2835,12 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
             }
         }
         None if placeholder.is_some() => {
+            clear_lesson_if_issue_changes(row, issue);
             row.issue = Some(issue.to_string());
             row.named = true;
             row.filed = false;
             row.started = false;
             row.finished = false;
-            row.lesson = false;
             row.recall = recall_line(issue);
             row.elsewhere.retain(|seen| seen != head);
             if cited.is_ok() && !row.deeds.iter().any(|seen| seen == head) {
@@ -3314,6 +3316,17 @@ fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
     }
     book.prompt_repo = repo.to_string();
     book.prompt_unix = now;
+}
+
+/// A row that moves to another issue must not keep lesson linkage from the
+/// prior issue. Rewrites only supersede lessons from the same issue history.
+fn clear_lesson_if_issue_changes(row: &mut RepoBook, issue: &str) {
+    if row.issue.as_deref() == Some(issue) {
+        return;
+    }
+    row.lesson = false;
+    row.lesson_id = None;
+    row.lesson_title = None;
 }
 
 /// Copy `row.title` into `lesson_title` once, when a lesson already exists.
@@ -5115,20 +5128,6 @@ fn run_timed(bin: &str, args: &[&str], env: &[(&str, &str)]) -> anyhow::Result<S
     for (key, value) in env {
         cmd.env(key, value);
     }
-    if bin == "git" {
-        for key in crate::git_hooks::HOOK_GIT_ENV {
-            cmd.env_remove(key);
-        }
-        if let Some(dir) = args
-            .windows(2)
-            .find(|pair| pair[0] == "-C")
-            .map(|pair| Path::new(pair[1]))
-        {
-            if let Some(ceiling) = crate::checkout_ceiling(dir) {
-                cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
-            }
-        }
-    }
     crate::git_hooks::hook_child_env(&mut cmd);
     let mut child = cmd
         .args(args)
@@ -5246,6 +5245,113 @@ mod tests {
         assert!(
             queued.contains("atom-old"),
             "the queued rewrite names nothing it closes\n{queued}"
+        );
+    }
+
+    /// A row that once held another issue does not carry that issue's lesson
+    /// title or superseded atom into the next issue's rewrite.
+    #[test]
+    fn a_second_issue_does_not_rewrite_with_the_first_issue_lesson() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "XDG_STATE_HOME",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        // SAFETY: lock() restores the environment when the test returns.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", &state);
+            std::env::set_var("LJOS_SESSION_ID", "jld5-second-issue");
+        }
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] Add a slugify function
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Now add a kebab-case helper
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let old = head_sha(&repo_s).expect("head");
+        let new = "cccccccccccccccccccccccccccccccccccccccc".to_string();
+        let now = unix_secs();
+        let mut book = Book {
+            prompt: "Add a slugify function".into(),
+            prompt_repo: repo_s.clone(),
+            prompt_unix: now,
+            last_unix: now,
+            ..Book::default()
+        };
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                title: Some("Add a slugify function".into()),
+                deeds: vec![old.clone()],
+                finished: true,
+                lesson: true,
+                lesson_id: Some("atom-a".into()),
+                lesson_title: Some("Add a slugify function".into()),
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path("jld5-second-issue"), &book);
+
+        let said = start_work(
+            Some("probe-00ab"),
+            Some(repo.to_str().unwrap()),
+            "Now add a kebab-case helper",
+        )
+        .expect("start the second issue");
+        assert!(said.contains("probe-00ab"), "{said}");
+
+        let path = book_path("jld5-second-issue");
+        let mut switched = load_book(&path);
+        switched.prompt = "Now add a kebab-case helper".into();
+        bind_prompt(&mut switched, &repo_s, unix_secs());
+        let row = switched.repos.get_mut(&repo_s).expect("repo row");
+        row.title = Some("Now add a kebab-case helper".into());
+        row.deeds = vec![old.clone()];
+        row.finished = true;
+        row.lesson = true;
+        store_book(&path, &switched);
+
+        repoint_commits(&repo_s, &[(old, new)]);
+        let queued =
+            std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
+        assert!(
+            queued.contains("kebab case helper"),
+            "the second issue title was lost\n{queued}"
+        );
+        assert!(
+            !queued.contains("slugify"),
+            "the first issue title leaked into the rewrite\n{queued}"
+        );
+        assert!(
+            !queued.contains("atom-a"),
+            "the second issue rewrite superseded the first issue atom\n{queued}"
         );
     }
 
@@ -5556,8 +5662,8 @@ mod tests {
         // git_toplevel looks git up with which(), so this holds the same
         // lock as the other PATH readers.
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-place-test");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-place-test");
         let repo = root.join("repo");
         let other = root.join("other");
         let plain = root.join("plain");
@@ -5589,7 +5695,6 @@ mod tests {
             place_for_claim_in(None, None, Some(&repo)).as_deref(),
             Some(top.as_str())
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -5597,8 +5702,8 @@ mod tests {
         // The remote lookup runs git through which(), so this holds the
         // same lock as the other PATH readers.
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-project-test");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-project-test");
         let tracker = root.join("tracker");
         let repo = root.join("workspace");
         std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
@@ -5631,7 +5736,6 @@ mod tests {
             "bare",
             "no remote and more than one project uses the basename"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A clone in a folder named for the job (`bench-w18b-tfn7`) files on
@@ -5640,8 +5744,8 @@ mod tests {
     #[test]
     fn a_clone_folder_is_not_the_project_when_origin_names_the_repo() {
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-clone-folder");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-clone-folder");
         let tracker = root.join("tracker");
         std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
         std::fs::write(tracker.join("Software/ljos/issues.org"), "* TODO ljos\n").unwrap();
@@ -5712,7 +5816,30 @@ mod tests {
         ] {
             assert_eq!(remote_repo_name(url).as_deref(), name, "{url}");
         }
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A checkout that really tracks `target/arm` is still that checkout.
+    /// The row key and saved prompt repository must stay on the repo root.
+    #[test]
+    fn a_real_target_subtree_keeps_the_checkout_root() {
+        let _g = lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("qemu");
+        let arm = root.join("target/arm");
+        std::fs::create_dir_all(&arm).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        std::fs::write(arm.join("cpu.c"), "int cpu(void) { return 0; }\n").unwrap();
+        git(&root, &["add", "target/arm/cpu.c"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+
+        let root_s = root.canonicalize().unwrap().display().to_string();
+        assert_eq!(git_toplevel(&arm).as_deref(), Some(root_s.as_str()));
+
+        let mut book = Book::default();
+        let raw = serde_json::json!({"cwd": arm.display().to_string()});
+        assert_eq!(repo_key(&mut book, &raw), root_s);
     }
 
     /// A job folder such as `ljos-rohit-main-audit` is not the project.
@@ -5735,8 +5862,8 @@ mod tests {
             "GIT_DIR",
             "GIT_WORK_TREE",
         ]);
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-job-folder");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-job-folder");
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("git"), "#!/bin/sh\nexit 1\n").unwrap();
@@ -5896,7 +6023,6 @@ mod tests {
             normalize_remote("example.com/user@host/repo"),
             "example.com/user@host/repo"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A URL in a project's notes is not its remote. promo's board mentions
@@ -5907,8 +6033,8 @@ mod tests {
         // The remote lookup runs git through which(), so this holds the
         // same lock as the other PATH readers.
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-decoy-remote");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-decoy-remote");
         let tracker = root.join("tracker");
         let repo = root.join("workspace");
         std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
@@ -5950,7 +6076,6 @@ mod tests {
             "atlas",
             "the recorded remote lost to a note"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn git(dir: &Path, args: &[&str]) {
