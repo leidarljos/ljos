@@ -58,6 +58,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to r
 `gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush`, `cline`,
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
+A fresh machine runs `ljos cloud up`, or `sh scripts/install.sh --cloud`.
+The binaries land in `~/.local/bin`, that file points at the `ljos-mcp` on this machine, and `LJOS_TRACKER_REMOTE` is cloned as the shared tracker. `docs/cloud-vm.md` has the environment file, the push mode, and a job step.
 Codex runs a hook only once you trust it. After `ljos onboard`, open
 `/hooks` in Codex and trust each ljos hook before the guard runs, and
 trust it again after an upgrade rewrites one. Until then only the `rm`,
@@ -188,9 +190,8 @@ both. `LJOS_TRACKER_GIT=commit` keeps it local; `off` skips
 it. A tracker whose `.ljos/sync.toml` names a sync scope also gets this
 machine's memory from each finish, sealed with age to that file's recipients,
 committed as `.ljos/atoms/<host>.jsonl.age` and pushed with the branch.
-`LJOS_TRACKER_GIT` governs that commit and push too. A tracker with no
-`.ljos/sync.toml` is not synced. `ljos doctor` counts the commits origin lacks, and it fails the tracker
-row when that count stays above zero through the push wait.
+`LJOS_TRACKER_GIT` governs that commit and push too. `=push` commits, rebases with the per-issue field merge, and pushes; a failed push stays queued for the next write and the end of the session. A tracker with no
+`.ljos/sync.toml` is not synced. `ljos doctor` counts the commits origin lacks and warns while any remain unpushed.
 
 ## Claude Code plugin
 

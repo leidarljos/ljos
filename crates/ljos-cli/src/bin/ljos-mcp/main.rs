@@ -17,6 +17,9 @@ use rmcp::{transport::stdio, ServiceExt};
 async fn main() -> anyhow::Result<()> {
     ljos_cli::normalize_tracker_env();
     ljos_cli::load_seat_env();
+    if let Some(line) = ljos_cli::cloud::missing_mcp_line() {
+        eprintln!("{line}");
+    }
     // One process is one connection. A later seat argument cannot mint a
     // second session for a ballot.
     ljos_cli::ballot_sig::pin_connection_session(None);

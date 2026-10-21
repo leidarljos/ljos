@@ -15,9 +15,11 @@ if [ -n "$home" ]; then
     fi
   done
 fi
-# The binary is missing. Say how to install it, in words a person and an
-# agent can both act on, and keep the agent working: a missing seat is no
-# guard, not a reason to stop every shell command.
+# The binary is missing. The first line is the one a client shows when the
+# server never starts and the tool list stays empty. The next line says
+# how to install it. A missing seat is no guard, not a reason to stop
+# every shell command.
+printf '%s: not installed, so the MCP server has no tools\n' "$name" >&2
 hint="ljos plugin: $name is not installed, so the ljos memory and command guard are off. Install with: cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus (or ask the agent to use the ljos-setup skill). Then run: ljos doctor"
 printf '%s\n' "$hint" >&2
 if [ "$name" = ljos ] && [ "${1:-}" = hook ]; then

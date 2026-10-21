@@ -55,6 +55,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+vissue-core.workspace = true
 # Not used by the binary. ureq 2 reaches webpki-roots 1 through the 0.26
 # shim, and this floor keeps the lock off a 1.0 release that still trusts
 # the emSign root RUSTSEC-2026-0381 names. tests/tls_roots.rs checks it.

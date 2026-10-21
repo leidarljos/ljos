@@ -1,0 +1,5 @@
+{
+  "name": "ljos",
+  "install": "sh scripts/install.sh --cloud",
+  "start": "\"$HOME/.local/bin/ljos\" cloud up"
+}
