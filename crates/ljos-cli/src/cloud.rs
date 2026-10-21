@@ -27,6 +27,7 @@ const OPTIONAL_BINS: &[&str] = &[
     "ljos-consensus",
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
+const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 
 /// Install binaries, point the harness at them, and clone the shared tracker.
 ///
@@ -93,6 +94,7 @@ pub fn up(force: bool) -> Result<String> {
             std::env::set_var(k, v);
         }
     });
+    lines.push(ensure_cloud_guard_rules()?);
     lines.extend(ensure_wakes()?);
     let reaped = reap_gone_owners(crate::lease_secs());
     if !reaped.trim().is_empty() {
@@ -169,6 +171,46 @@ pub fn mcp_row() -> crate::Habitat {
     }
 }
 
+/// What `ljos doctor` says about the cloud guard refusals cloud seats need.
+#[must_use]
+pub fn guard_row() -> crate::Habitat {
+    let Some(path) = cloud_guard_rules_path() else {
+        return crate::Habitat {
+            name: "cloud guard",
+            state: "no config home for cloud guard rules".into(),
+            ok: false,
+        };
+    };
+    let wanted = cloud_guard_rules();
+    let have = crate::kept_rules(&path);
+    if have == wanted {
+        return crate::Habitat {
+            name: "cloud guard",
+            state: format!(
+                "{} denies cursor/* pushes and `gh pr create|merge`",
+                path.display()
+            ),
+            ok: true,
+        };
+    }
+    let state = if have.is_empty() {
+        format!(
+            "missing in {}; run `ljos cloud up` to install the cloud seat refusals",
+            path.display()
+        )
+    } else {
+        format!(
+            "{} differs from the cloud seat refusals; run `ljos cloud up`",
+            path.display()
+        )
+    };
+    crate::Habitat {
+        name: "cloud guard",
+        state,
+        ok: false,
+    }
+}
+
 /// The stderr line when a configured MCP command does not exist.
 /// `None` when there is no config, or the command is there.
 #[must_use]
@@ -177,6 +219,17 @@ pub fn missing_mcp_line() -> Option<String> {
         McpProblem::Missing(state) => Some(state),
         McpProblem::None | McpProblem::Ready(_) | McpProblem::Warn(_) => None,
     }
+}
+
+/// Cloud-up refusals over shell commands, in the seat rule format.
+#[must_use]
+pub(crate) fn guard_line(line: &str) -> Option<crate::Rule> {
+    let path = cloud_guard_rules_path()?;
+    let denies: Vec<crate::Rule> = crate::kept_rules(&path)
+        .into_iter()
+        .filter(|rule| rule.verdict == "deny")
+        .collect();
+    crate::verdict_for(&denies, line).cloned()
 }
 
 /// git's org merge driver. The merged text replaces `ours`.
@@ -1121,6 +1174,60 @@ fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
         ensure_path_file(&home.join(".bashrc"), bin_dir, true)?,
     ];
     Ok(notes.join("; "))
+}
+
+fn ensure_cloud_guard_rules() -> Result<String> {
+    let path =
+        cloud_guard_rules_path().context("cloud up: no config home for cloud guard rules")?;
+    let wanted = cloud_guard_rules();
+    let have = crate::kept_rules(&path);
+    if have == wanted {
+        return Ok(format!(
+            "guard: {} already has cloud seat refusals",
+            path.display()
+        ));
+    }
+    crate::keep_rules(&path, &wanted);
+    let wrote = crate::kept_rules(&path);
+    if wrote != wanted {
+        bail!(
+            "cloud up: could not write {} with the cloud seat refusals",
+            path.display()
+        );
+    }
+    Ok(format!(
+        "guard: {} now denies cursor/* pushes and `gh pr create|merge`",
+        path.display()
+    ))
+}
+
+fn cloud_guard_rules_path() -> Option<PathBuf> {
+    Some(
+        crate::config_base()?
+            .join("ljos")
+            .join(CLOUD_GUARD_RULES_FILE),
+    )
+}
+
+fn cloud_guard_rules() -> Vec<crate::Rule> {
+    vec![
+        crate::Rule {
+            pattern: "re:git push(?:\\s+\\S+)*\\s(?:\\S*:)?(?:refs/heads/)?cursor/\\S+(?:\\s|$)"
+                .into(),
+            verdict: "deny".into(),
+            reason: "cloud seat rule: never push to cursor/* refs from this machine".into(),
+        },
+        crate::Rule {
+            pattern: "gh* pr create*".into(),
+            verdict: "deny".into(),
+            reason: "cloud seat rule: never open pull requests from this machine".into(),
+        },
+        crate::Rule {
+            pattern: "gh* pr merge*".into(),
+            verdict: "deny".into(),
+            reason: "cloud seat rule: never merge pull requests from this machine".into(),
+        },
+    ]
 }
 
 fn path_export_line(bin_dir: &Path) -> String {
