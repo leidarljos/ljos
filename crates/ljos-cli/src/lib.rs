@@ -9963,12 +9963,11 @@ fn harness_rows() -> Vec<Habitat> {
             .map(|d| expand(d).join("ljos").join("SKILL.md"));
         if h.shell {
             let env_path = env_path_for(&path, h);
-            let written = std::fs::read_to_string(&env_path).ok();
-            let ready = written.as_deref() == Some(seat_env_text(&h.name).as_str());
+            let (env_ok, env_state) = runner_env::doctor_env(&h.name, &env_path);
             rows.push(Habitat {
                 name: "runner env",
-                state: runner_env::state(&h.name, &env_path, ready, written.is_some()),
-                ok: ready,
+                state: env_state,
+                ok: env_ok,
             });
         } else {
             let registered = is_registered(h, &server) == Some(true);
@@ -20897,10 +20896,10 @@ fn optional_bin(name: &str) -> bool {
 }
 
 /// `ok` when the row answers, `warn` when the policy row names an
-/// `ljos-policyd` without phronesis or a runner skill is stale or edited
-/// by hand, `info` when the row is optional and absent, `no` when a
-/// required row failed. A stale skill ljos wrote is a warning `ljos doctor
-/// --fix` rewrites, not a failure.
+/// `ljos-policyd` without phronesis or a runner skill or runner env ljos
+/// wrote is stale or edited by hand, `info` when the row is optional and
+/// absent, `no` when a required row failed. A stale skill or env ljos
+/// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "tracker" && names_unpushed(&row.state) {
@@ -20916,6 +20915,7 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         "info"
     } else if (row.name == "runner skill" && runner_skills::is_skill_warning(&row.state))
+        || (row.name == "runner env" && runner_env::is_env_warning(&row.state))
         || WARN_ROWS.contains(&row.name)
         || row.name == "guard"
     {
@@ -36844,6 +36844,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ok: false,
         };
         assert_eq!(super::doctor_word(&absent), "no");
+    }
+
+    #[test]
+    fn a_stale_runner_env_is_a_warning_not_a_failure() {
+        let stale = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env is stale; ljos doctor --fix".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&stale), "warn");
+        assert!(super::healthy(std::slice::from_ref(&stale)));
+        let edited = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env was edited by hand; ljos left it".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&edited), "warn");
+        let foreign = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env was not written by ljos; ljos left it"
+                .into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&foreign), "no");
+        let none = super::Habitat {
+            name: "runner env",
+            state: "grokbot: no ljos env file; ljos onboard --harness grokbot".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&none), "no");
     }
 
     #[test]

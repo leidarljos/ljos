@@ -978,7 +978,7 @@ enum Cmd {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
-        /// Refresh runner skills this ljos wrote. A skill edited by hand is left in place.
+        /// Refresh runner skills and runner env files this ljos wrote. A skill edited by hand, and an env file ljos did not write, are left in place.
         #[arg(long)]
         fix: bool,
     },
@@ -1239,9 +1239,12 @@ fn run_command() -> Result<()> {
     }
     let cmd = Cli::parse().cmd;
     // The first run of a new version refreshes skills and runner env
-    // files ljos wrote. `ljos doctor` does not.
+    // files ljos wrote. Doctor stays read-only unless `--fix` is set.
     match &cmd {
-        Cmd::Doctor { fix: true, .. } => ljos_cli::runner_skills::refresh_for_fix(),
+        Cmd::Doctor { fix: true, .. } => {
+            ljos_cli::runner_skills::refresh_for_fix();
+            ljos_cli::runner_env::refresh_for_fix();
+        }
         Cmd::Doctor { .. } => {}
         _ => {
             ljos_cli::runner_skills::refresh_on_new_version();

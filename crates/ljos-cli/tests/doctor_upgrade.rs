@@ -341,9 +341,13 @@ fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
     let env = row(&text, "runner env");
     let skill_row = row(&text, "runner skill");
     assert!(
-        env.starts_with("no\t") && env.contains("grokbot") && env.contains("stale"),
+        env.starts_with("warn\t")
+            && env.contains("grokbot")
+            && env.contains("is stale")
+            && env.contains("ljos doctor --fix"),
         "{text}"
     );
+    assert!(!env.starts_with("no\t"), "{text}");
     assert!(
         skill_row.starts_with("warn\t")
             && skill_row.contains("grokbot")
@@ -503,4 +507,95 @@ fn the_mcp_server_refreshes_a_stale_env_on_start() {
     assert!(fs::read_to_string(&env_path)
         .unwrap()
         .contains("export LJOS_GIT_HOOKS="));
+}
+
+#[test]
+fn doctor_warns_about_a_stale_env_and_fix_refreshes_it() {
+    let home = Home::new();
+    let config = home.root.join("config/ljos");
+    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(home.root.join("home")).unwrap();
+    fs::write(
+        config.join("harnesses.toml"),
+        "[[harness]]\nname = \"grokbot\"\n",
+    )
+    .unwrap();
+    let env_path = config.join("grokbot.env");
+    let stale = format!("{OLD_ENV}export BOX_NOTES=keep-me\n");
+    fs::write(&env_path, &stale).unwrap();
+
+    let out = home.ljos(&["doctor"], "120");
+    assert_eq!(fs::read(&env_path).unwrap(), stale.as_bytes());
+    assert!(!home.root.join("share/ljos/env-refresh-version").exists());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let env = row(&text, "runner env");
+    assert!(
+        env.starts_with("warn\t") && env.contains("is stale") && env.contains("ljos doctor --fix"),
+        "{text}"
+    );
+    assert!(!text.contains("no\trunner env"), "{text}");
+
+    let fixed = home.ljos(&["doctor", "--all", "--fix"], "120");
+    let err = String::from_utf8_lossy(&fixed.stderr);
+    assert!(
+        err.contains("refreshed grokbot:")
+            && err.contains("LJOS_GIT_HOOKS")
+            && err.contains("BOX_NOTES"),
+        "{err}"
+    );
+    let got = fs::read_to_string(&env_path).unwrap();
+    assert!(
+        got.contains("export LJOS_GIT_HOOKS=") && got.contains("export BOX_NOTES=keep-me\n"),
+        "{got}"
+    );
+    let after = String::from_utf8(fixed.stdout).unwrap();
+    assert!(row(&after, "runner env").starts_with("ok\t"), "{after}");
+
+    fs::write(&env_path, &stale).unwrap();
+    let _ = fs::remove_file(env_record(&env_path));
+    let quiet = home.ljos(&["protocol"], "30");
+    assert!(!String::from_utf8_lossy(&quiet.stderr).contains("refreshed"));
+    assert_eq!(fs::read(&env_path).unwrap(), stale.as_bytes());
+    let again = home.ljos(&["doctor", "--all", "--fix"], "120");
+    assert!(String::from_utf8_lossy(&again.stderr).contains("refreshed grokbot:"));
+    assert!(fs::read_to_string(&env_path)
+        .unwrap()
+        .contains("export LJOS_GIT_HOOKS="));
+}
+
+#[test]
+fn doctor_leaves_an_env_ljos_did_not_write() {
+    let home = Home::new();
+    let config = home.root.join("config/ljos");
+    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(home.root.join("home")).unwrap();
+    fs::write(
+        config.join("harnesses.toml"),
+        "[[harness]]\nname = \"grokbot\"\n",
+    )
+    .unwrap();
+    let env_path = config.join("grokbot.env");
+    let kept = "# written by an older ljos\nexport BOX_NOTES=keep-me\n";
+    fs::write(&env_path, kept).unwrap();
+
+    let doctor = home.ljos(&["doctor", "--all"], "120");
+    let text = String::from_utf8(doctor.stdout).unwrap();
+    let env = row(&text, "runner env");
+    assert!(
+        env.starts_with("no\t") && env.contains("was not written by ljos"),
+        "{env}"
+    );
+    let fixed = home.ljos(&["doctor", "--fix"], "120");
+    assert!(String::from_utf8_lossy(&fixed.stderr).contains("was not written by ljos"));
+    assert_eq!(fs::read(&env_path).unwrap(), kept.as_bytes());
+    assert!(!env_record(&env_path).exists());
+    let onboard = home.ljos(&["onboard", "--harness", "grokbot"], "120");
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&onboard.stdout),
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    assert!(said.contains("did not write"), "{said}");
+    assert_eq!(fs::read(&env_path).unwrap(), kept.as_bytes());
+    assert!(!env_record(&env_path).exists());
 }

@@ -3,9 +3,14 @@
 //! `onboard` writes the file and records those bytes in
 //! `.<filename>.ljos-wrote`. The first run of a new ljos rewrites a file
 //! that is still those bytes, keeps lines the user added, and leaves a
-//! file it did not write alone.
+//! file it did not write alone. `ljos doctor` warns when a file it wrote
+//! is stale, and `ljos doctor --fix` rewrites it.
 
 use std::path::{Path, PathBuf};
+
+const STALE_MARK: &str = " is stale; ljos doctor --fix";
+const EDITED_MARK: &str = " was edited by hand; ljos left it";
+const FOREIGN_MARK: &str = " was not written by ljos; ljos left it";
 
 fn step(detail: String, ok: bool) -> crate::Step {
     crate::Step {
@@ -214,17 +219,25 @@ pub(crate) fn install(path: &Path, name: &str, dry: bool) -> crate::Step {
     }
 }
 
-/// Doctor's `runner env` row. A file that is not the text this ljos writes
-/// is stale, not missing. `ljos onboard` rewrites it.
-pub(crate) fn state(name: &str, env_path: &Path, ready: bool, exists: bool) -> String {
-    match (ready, exists) {
-        (true, _) => format!("{name}: source {}", env_path.display()),
-        (false, true) => format!(
-            "{name}: {} is stale, an older ljos wrote it; ljos onboard --harness {name}",
-            env_path.display()
+/// Doctor's `runner env` row. A stale file ljos wrote, and a hand edit,
+/// are warnings ([`is_env_warning`]). A missing file, and a file ljos
+/// did not write, are not.
+pub(crate) fn doctor_env(name: &str, path: &Path) -> (bool, String) {
+    let template = crate::seat_env_text(name);
+    match classify(path, &template) {
+        Kind::Missing => (
+            false,
+            format!("{name}: no ljos env file; ljos onboard --harness {name}"),
         ),
-        (false, false) => format!("{name}: no ljos env file; ljos onboard --harness {name}"),
+        Kind::Current => (true, format!("{name}: source {}", path.display())),
+        Kind::Stale(_) => (false, format!("{name}: {}{STALE_MARK}", path.display())),
+        Kind::Hand => (false, format!("{name}: {}{EDITED_MARK}", path.display())),
+        Kind::Foreign => (false, format!("{name}: {}{FOREIGN_MARK}", path.display())),
     }
+}
+
+pub(crate) fn is_env_warning(state: &str) -> bool {
+    state.contains(STALE_MARK) || state.contains(EDITED_MARK)
 }
 
 fn refresh_one(name: &str, path: &Path) -> bool {
@@ -246,15 +259,9 @@ fn refresh_one(name: &str, path: &Path) -> bool {
             change_suffix(&before, &after, &template)
         );
     } else if done.detail.contains("edited by hand") {
-        eprintln!(
-            "ljos: {name}: {} was edited by hand; ljos left it",
-            path.display()
-        );
+        eprintln!("ljos: {name}: {}{EDITED_MARK}", path.display());
     } else if done.detail.contains("did not write") {
-        eprintln!(
-            "ljos: {name}: {} was not written by ljos; ljos left it",
-            path.display()
-        );
+        eprintln!("ljos: {name}: {}{FOREIGN_MARK}", path.display());
     }
     true
 }
@@ -290,22 +297,34 @@ fn stamp_path() -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// The first run of this version. Later runs do nothing. `ljos doctor`
-/// does not call this.
-pub fn refresh_on_new_version() {
+fn write_stamp() {
     let Some(path) = stamp_path() else {
         return;
     };
-    if std::fs::read_to_string(&path).is_ok_and(|text| text.trim() == env!("CARGO_PKG_VERSION")) {
-        return;
-    }
-    if !refresh_installed() {
-        return;
-    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, format!("{}\n", env!("CARGO_PKG_VERSION")));
+}
+
+/// The first run of this version. Later runs do nothing. `ljos doctor`
+/// does not call this.
+pub fn refresh_on_new_version() {
+    if stamp_path().is_some_and(|path| {
+        std::fs::read_to_string(path).is_ok_and(|text| text.trim() == env!("CARGO_PKG_VERSION"))
+    }) {
+        return;
+    }
+    if refresh_installed() {
+        write_stamp();
+    }
+}
+
+/// `ljos doctor --fix`: refresh even when this version already ran.
+pub fn refresh_for_fix() {
+    if refresh_installed() {
+        write_stamp();
+    }
 }
 
 #[cfg(test)]
@@ -313,12 +332,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stale_runner_env_is_not_called_missing() {
-        let path = Path::new("/h/.config/ljos/grokbot.env");
-        assert!(state("grokbot", path, true, true).contains("source /h/"));
-        let stale = state("grokbot", path, false, true);
-        assert!(stale.contains("is stale") && stale.contains("ljos onboard --harness grokbot"));
-        assert!(state("grokbot", path, false, false).contains("no ljos env file"));
+    fn a_missing_env_is_not_called_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grokbot.env");
+        let (ok, state) = doctor_env("grokbot", &path);
+        assert!(!ok, "{state}");
+        assert!(state.contains("no ljos env file"), "{state}");
+        assert!(!state.contains("is stale"), "{state}");
     }
 
     #[test]
