@@ -25038,20 +25038,27 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// Put `- {Verb} by {seat} [timestamp]` at the top of the issue's logbook.
 /// The line is the seat, with no `:Seat:` property. A file that does not
 /// hold the issue is left alone.
+///
+/// vissue's own writers hold the file's issues lock and replace the file
+/// whole, and so does this. Rewritten in place, the stamp could drop a
+/// ballot another seat wrote between the read and the write, and a `git
+/// add` hashing the file meanwhile dies on unstable object data.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
     let entry = format!(
         "- {} by {} {}",
         verb_heading(verb),
         seat.trim(),
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
-    let Some(next) = insert_logbook_line(&text, issue, &entry) else {
-        return false;
-    };
-    std::fs::write(path, next).is_ok()
+    vissue_core::store::with_issues_lock(path, || {
+        let text = std::fs::read_to_string(path)?;
+        let Some(next) = insert_logbook_line(&text, issue, &entry) else {
+            return Ok(false);
+        };
+        vissue_core::store::replace_file_atomically(path, &next)?;
+        Ok(true)
+    })
+    .unwrap_or(false)
 }
 
 /// `git log` subjects on the tracker that name a seat, optionally one seat.
@@ -31213,6 +31220,36 @@ mod tests {
         // Nothing installed, nothing found; shell runners never are.
         let empty = tempfile::tempdir().unwrap();
         assert!(detect_runners(&shapes.harness, empty.path(), &|_| false).is_empty());
+    }
+
+    #[test]
+    fn a_logbook_stamp_waits_for_the_issue_lock_and_replaces_the_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, "* TODO ship it\n:PROPERTIES:\n:ID: demo-a\n:END:\n").unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let held = CommitLock::acquire(Path::new(&lock));
+        assert!(held.0.is_some(), "the issues lock opens");
+        let target = path.clone();
+        let stamper =
+            std::thread::spawn(move || stamp_seat_logbook(&target, "demo-a", "voted", "alice"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("by alice"),
+            "the stamp waits for the writer that holds the issue"
+        );
+        drop(held);
+        assert!(stamper.join().unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(":LOGBOOK:\n- Voted by alice ["), "{text}");
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            before,
+            "a git add hashing the old file keeps reading the old file"
+        );
     }
 
     #[test]
