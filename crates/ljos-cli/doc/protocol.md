@@ -220,8 +220,10 @@ Every piece of work has an issue before it has a claim.
   comes back to it first in its next brief; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
   session, the MCP call's session, a `*_SESSION_ID` in the environment, else
-  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and
-  a nonce of that process, and the signature covers both. `ljos consensus`
+  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and a marker, `-`, or
+  `seat` when only the seat named the session; the signature covers both.
+  No nonce of the process goes in: every process of one session signs the
+  same binding. `ljos consensus`
   refuses to settle when one session authored more than one ballot, when a
   session authored a candidate and also voted, or when every ballot traces to
   one session: a seat minted inside a session does not multiply its vote.
@@ -239,7 +241,24 @@ Every piece of work has an issue before it has a claim.
   repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
   names the run but the seat, every run of that seat is one session, and
   `ljos vote` and the tally call it unverified; the `NAME-shell` holder a
-  shell runner's env file shares names no run either. Persona ballots and Jev
+  shell runner's env file shares names no run either. The binding stops an
+  honest but careless agent from voicing a panel from one session: minting
+  seats, passing another `--as`, running a line again, or setting another
+  session id between casts. A cast records, in the runtime directory, the
+  shell that ran `ljos` and the harness whose hook saw the line, each by pid
+  and start time; that shell casts on an issue as one session, and that
+  harness as one root session and its subagents, so a harness that clears
+  its conversation and votes again on the issue is refused. A hook's call
+  record names a session only for an `ljos` under the harness that ran the
+  hook. A process running as the same user that rewrites the tracker, the
+  seat keys, the runtime directory or another process's environment is out
+  of scope, and nothing here stops it: the call records are not signed, and
+  one written by hand naming a live ancestor of a later `ljos` still binds.
+  Within scope, three cases are not caught: a runner that starts each
+  command in a fresh shell under one shared daemon with no hook, as a cloud
+  box does, since nothing below the daemon tells its conversations apart; a
+  program other than a shell that runs `ljos` itself; and a cast on another
+  machine, whose processes are not compared. Persona ballots and Jev
   ballots are advisory. The push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own

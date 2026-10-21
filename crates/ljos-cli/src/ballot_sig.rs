@@ -10,9 +10,10 @@
 //! when its latest signature covers exactly that voter, issue and choice
 //! under the pinned key.
 //!
-//! A ballot carries the harness session and a nonce (`ljos-ballot/v2`).
-//! The session is the harness id, else `VISSUE_AGENT`, else `LJOS_SEAT`,
-//! else the MCP connection. It is never a fresh nonce of this process.
+//! A ballot carries the harness session and a marker (`ljos-ballot/v2`):
+//! `-`, or [`SEAT_NONCE`] when only the seat named the session. The
+//! session is the harness id, else `VISSUE_AGENT`, else `LJOS_SEAT`, else
+//! the MCP connection. It is never a fresh nonce of this process.
 //! Minting another seat inside the same session does not make a second voter.
 
 use anyhow::{bail, Context, Result};
@@ -29,8 +30,8 @@ pub const WITHDRAWN_NOTE: &str = "ballot-withdrawn: ";
 pub const PIN_FILE: &str = ".ljos-seat-keys";
 
 /// The bytes a ballot signature covers. v1 is the choice alone. v2 also
-/// covers the harness session and the process nonce, so a later edit of
-/// either fails the check.
+/// covers the harness session and its marker, so a later edit of either
+/// fails the check.
 #[must_use]
 pub fn message(issue: &str, voter: &str, choice: &str) -> Vec<u8> {
     format!(
@@ -339,7 +340,7 @@ pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> St
     )
 }
 
-/// The note text for a ballot bound to a harness session and a process nonce.
+/// The note text for a ballot bound to a harness session and its marker.
 #[must_use]
 pub fn sign_bound(
     key: &SigningKey,
@@ -690,7 +691,8 @@ fn random_hex(n: usize) -> String {
 
 static PROCESS_NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// The nonce of this process. Seats this process mints share it.
+/// The nonce of this process, handed to a child `ljos`. No ballot carries
+/// it: [`identity`] binds the session alone.
 #[must_use]
 pub fn process_nonce() -> String {
     if let Some(s) = env_token("LJOS_PROCESS_NONCE") {
