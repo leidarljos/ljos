@@ -300,13 +300,19 @@ Every piece of work has an issue before it has a claim.
   refuses to settle when one session authored more than one ballot, when a
   session authored a candidate and also voted, or when every ballot traces to
   one session: a seat minted inside a session does not multiply its vote.
-  Each reviewer casts its own ballot from its own run, `ljos vote ISSUE --for X
-  --confidence C --used DEED`, with ljos installed on its machine (`ljos cloud
-  up`) and the tracker synced through the shared tracker repository
-  (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing names the run
-  but the seat, every run of that seat is one session, and `ljos vote` and the
-  tally call it unverified. Persona ballots and Jev ballots are advisory. The
-  push gate counts seat ballots from another seat. A
+  Each reviewer casts its own ballot from its own subagent or run, `ljos vote
+  ISSUE --for X --confidence C --used DEED`, never a verdict reported in prose.
+  A subagent's ballot binds the parent session plus the subagent,
+  `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
+  under its root session. An opencode subagent is a session of its own. Two
+  subagents of one session count twice, the parent and a subagent count as
+  two, a subagent that votes again counts once, and a subagent that wrote a
+  candidate cannot vote. A run on another machine has ljos installed there
+  (`ljos cloud up`) and the tracker synced through the shared tracker
+  repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
+  names the run but the seat, every run of that seat is one session, and
+  `ljos vote` and the tally call it unverified. Persona ballots and Jev
+  ballots are advisory. The push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
   session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a

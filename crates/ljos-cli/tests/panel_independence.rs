@@ -206,12 +206,66 @@ printf '%s' "$2" > "$d/$id.prompt"
 
     /// `ljos` as `seat`, with only the harness variables in `env`.
     fn ljos_env(&self, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
+        self.command(seat, env, args).output().unwrap()
+    }
+
+    /// `ljos hook` fed `payload` on stdin, as a runner's hook is run.
+    fn hook(&self, env: &[(&str, &str)], payload: &serde_json::Value) -> Output {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = self
+            .command("ljosbot", env, &["hook"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(payload.to_string().as_bytes()).unwrap();
+        drop(stdin);
+        child.wait_with_output().unwrap()
+    }
+
+    /// `ljos-mcp` sent `calls` after the handshake, each answer by its id.
+    fn mcp(&self, env: &[(&str, &str)], calls: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = self
+            .program(env!("CARGO_BIN_EXE_ljos-mcp"), "ljosbot", env, &[])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let handshake = [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "claude-code", "version": "0"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        ];
+        for line in handshake.iter().chain(calls) {
+            writeln!(stdin, "{line}").unwrap();
+        }
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    fn command(&self, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Command {
+        self.program(env!("CARGO_BIN_EXE_ljos"), seat, env, args)
+    }
+
+    fn program(&self, exe: &str, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Command {
         let path = format!(
             "{}:{}",
             self.bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = Command::new(exe);
         cmd.args(args)
             .current_dir(&self.bin)
             .env_clear()
@@ -229,7 +283,7 @@ printf '%s' "$2" > "$d/$id.prompt"
             .env("LJOS_SEAT", seat)
             .env("VISSUE_AGENT", seat)
             .envs(env.iter().copied());
-        cmd.output().unwrap()
+        cmd
     }
 }
 
@@ -995,6 +1049,221 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
     }
     assert!(!stdout.contains("reviewer-e"), "{said}");
     assert!(!stdout.contains("ignored"), "{said}");
+}
+
+#[test]
+fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
+    // A coordinator in one Claude Code session starts its reviewers as
+    // subagents. Every reviewer's shell carries the parent's session id;
+    // only the hook payload names the agent.
+    let world = World::new();
+    let issue = "demo-subagents";
+    let parent = "5f0c8e2a-parent";
+    let env: &[(&str, &str)] = &[("CLAUDE_CODE_SESSION_ID", parent)];
+    let hook = |tool_use: &str, agent: Option<&str>, args: &[&str]| {
+        let mut payload = serde_json::json!({
+            "session_id": parent,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": tool_use,
+            "tool_input": {"command": format!("ljos {}", args.join(" "))},
+        });
+        if let Some(agent) = agent {
+            payload["agent_id"] = agent.into();
+            payload["agent_type"] = "reviewer".into();
+        }
+        let out = world.hook(env, &payload);
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(!said.contains("deny"), "{said}");
+    };
+    let cast = |tool_use: &str, agent: Option<&str>, name: &str, choice: &str| {
+        let args = [
+            "vote", issue, "--for", choice, "--used", "none", "--as", name,
+        ];
+        hook(tool_use, agent, &args);
+        world.ljos_env("ljosbot", env, &args)
+    };
+    for (tool_use, agent, name) in [
+        ("toolu_01a", Some("agent-a1"), "reviewer-a"),
+        ("toolu_01b", Some("agent-b2"), "reviewer-b"),
+    ] {
+        let out = cast(tool_use, agent, name, "ship");
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        let session = format!("session {parent}:{}\n", agent.unwrap());
+        assert!(said.contains(&session), "{said}");
+    }
+    // A subagent call the hook saw but that never ran is not the parent's.
+    let coordinator = [
+        "vote",
+        issue,
+        "--for",
+        "ship",
+        "--used",
+        "none",
+        "--as",
+        "coordinator",
+    ];
+    hook("toolu_01z", Some("agent-z9"), &coordinator);
+    let out = cast("toolu_01p", None, "coordinator", "ship");
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(&format!("session {parent}\n")), "{said}");
+    let again = cast("toolu_01c", Some("agent-a1"), "reviewer-c", "hold");
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast") && said.contains(&format!("({parent}:agent-a1)")),
+        "{said}"
+    );
+    assert!(
+        said.contains("Each reviewer votes from its own subagent or run"),
+        "{said}"
+    );
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("3 ballots count"), "{said}");
+    for name in ["reviewer-a", "reviewer-b", "coordinator"] {
+        assert!(stdout.contains(&format!("{name}  ship")), "{said}");
+    }
+    assert!(!stdout.contains("reviewer-c"), "{said}");
+    assert!(!stdout.contains("ignored"), "{said}");
+}
+
+#[test]
+fn claude_subagents_voting_over_mcp_each_count() {
+    // One ljos-mcp answers the parent and both subagents. Only the hook
+    // payload names the agent; the call carries the tool use id.
+    let world = World::new();
+    let issue = "demo-mcp-subagents";
+    let parent = "5f0c8e2a-mcp-parent";
+    let env: &[(&str, &str)] = &[("CLAUDE_CODE_SESSION_ID", parent)];
+    for (tool_use, agent) in [
+        ("toolu_m1", "agent-m1"),
+        ("toolu_m2", "agent-m2"),
+        ("toolu_m4", "agent-m1"),
+    ] {
+        let hook = world.hook(
+            env,
+            &serde_json::json!({
+                "session_id": parent,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "mcp__plugin_ljos_ljos__ljos_vote",
+                "tool_use_id": tool_use,
+                "agent_id": agent,
+                "agent_type": "reviewer",
+                "tool_input": {"issue": issue, "choice": "ship"},
+            }),
+        );
+        assert!(hook.status.success(), "{}", text(&hook));
+        assert!(hook.stdout.is_empty(), "{}", text(&hook));
+    }
+    let vote = |id: u64, tool_use: &str, name: &str, choice: &str| {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "ljos_vote",
+            "arguments": {"issue": issue, "choice": choice, "used": "none", "as": name},
+            "_meta": {"claudecode/toolUseId": tool_use, "progressToken": id}}})
+    };
+    // A server answers a batch in any order; each call waits for the last.
+    let answers: Vec<serde_json::Value> = [
+        vote(3, "toolu_m1", "reviewer-a", "ship"),
+        vote(4, "toolu_m2", "reviewer-b", "ship"),
+        vote(5, "toolu_m3", "coordinator", "ship"),
+        vote(6, "toolu_m4", "reviewer-c", "hold"),
+        vote(7, "toolu_m1", "reviewer-d", "hold"),
+    ]
+    .iter()
+    .flat_map(|call| world.mcp(env, std::slice::from_ref(call)))
+    .collect();
+    let answer = |id: u64| {
+        let found = answers
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap_or_else(|| panic!("no answer {id}: {answers:?}"));
+        let said = found["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        let said = serde_json::from_str::<serde_json::Value>(said)
+            .ok()
+            .and_then(|v| v["text"].as_str().map(str::to_string))
+            .unwrap_or_else(|| said.to_string());
+        (found["result"]["isError"] == true, said)
+    };
+    for (id, session) in [
+        (3, format!("{parent}:agent-m1")),
+        (4, format!("{parent}:agent-m2")),
+        (5, parent.to_string()),
+    ] {
+        let (error, said) = answer(id);
+        assert!(!error, "{said}");
+        assert!(said.contains(&format!("session {session}\n")), "{said}");
+    }
+    let (error, said) = answer(6);
+    assert!(
+        error
+            && said.contains(&format!(
+                "already cast a ballot on {issue} ({parent}:agent-m1)"
+            )),
+        "{said}"
+    );
+    let (error, said) = answer(7);
+    assert!(
+        error && said.contains(&format!("({parent})")),
+        "a tool use id names its agent once: {said}"
+    );
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("3 ballots count"), "{}", text(&tally));
+    assert!(!stdout.contains("reviewer-c") && !stdout.contains("reviewer-d"));
+}
+
+#[test]
+fn codex_subagent_threads_each_count_under_their_root_session() {
+    // Codex gives a subagent's shell its own thread id and the root's
+    // session id. The root thread's id is the session's.
+    let world = World::new();
+    let issue = "demo-codex-threads";
+    let root = "019a7c3e-root-0001";
+    let runs = [
+        (
+            "reviewer-a",
+            "019a7c3e-thread-a",
+            format!("{root}:019a7c3e-thread-a"),
+        ),
+        (
+            "reviewer-b",
+            "019a7c3e-thread-b",
+            format!("{root}:019a7c3e-thread-b"),
+        ),
+        ("coordinator", root, root.to_string()),
+    ];
+    let cast = |name: &str, thread: &str, choice: &str| {
+        world.ljos_env(
+            "ljosbot",
+            &[("CODEX_SESSION_ID", root), ("CODEX_THREAD_ID", thread)],
+            &[
+                "vote", issue, "--for", choice, "--used", "none", "--as", name,
+            ],
+        )
+    };
+    for (name, thread, session) in &runs {
+        let out = cast(name, thread, "ship");
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains(&format!("session {session}\n")), "{said}");
+    }
+    let again = cast("reviewer-c", "019a7c3e-thread-a", "hold");
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(said.contains("already cast"), "{said}");
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("3 ballots count"), "{said}");
+    assert!(!stdout.contains("reviewer-c"), "{said}");
 }
 
 #[test]

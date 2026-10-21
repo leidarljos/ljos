@@ -35,6 +35,7 @@ pub mod plugin;
 pub mod reap;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod subagent;
 pub mod sync;
 pub mod tools;
 mod tracker_push;
@@ -1414,7 +1415,7 @@ pub fn conversation_tag(pid: u32) -> String {
 
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
-fn runtime_dir() -> PathBuf {
+pub(crate) fn runtime_dir() -> PathBuf {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
@@ -4768,6 +4769,22 @@ fn hook_matcher(event: &str) -> &'static str {
         .map_or("*", |(_, m)| m)
 }
 
+/// The seat's MCP tools as Claude Code names them. The hook reads which
+/// subagent calls one, so the server can bind that ballot to it. A
+/// matcher with a `^` is a regular expression, unanchored unless written
+/// so; joined to the tool list, it would make `Write` match `TodoWrite`.
+/// So it is a `PreToolUse` group of its own.
+pub const SEAT_MCP_MATCHER: &str = "^mcp__.+__ljos_.+$";
+
+/// The matchers of the seat's further groups on `event`.
+fn extra_hook_matchers(event: &str) -> &'static [&'static str] {
+    if event == "PreToolUse" {
+        &[SEAT_MCP_MATCHER]
+    } else {
+        &[]
+    }
+}
+
 /// The events a runner's table asks for, or the default.
 fn hook_events_of(h: &Harness) -> Vec<String> {
     if h.name == "grok" {
@@ -4880,7 +4897,9 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
         };
         let block = fail_closed.contains(event);
         let want = hook_matcher(event);
+        let extra = extra_hook_matchers(event);
         let mut present = false;
+        let mut found = Vec::new();
         let mut shut = false;
         let mut grew = false;
         for group in groups.iter_mut() {
@@ -4890,20 +4909,26 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
             if !seat {
                 continue;
             }
+            let further = extra
+                .iter()
+                .find(|m| group["matcher"].as_str() == Some(**m));
             // A group that also carries someone else's hook keeps its matcher.
             // Widening it would fire that other hook on apply_patch.
             let only_seat = group["hooks"]
                 .as_array()
                 .is_some_and(|hs| !hs.is_empty() && hs.iter().all(is_seat_hook));
-            if only_seat && group["matcher"].as_str() != Some(want) {
+            if further.is_none() && only_seat && group["matcher"].as_str() != Some(want) {
                 group["matcher"] = want.into();
                 grew = true;
+            }
+            match further {
+                Some(m) => found.push(*m),
+                None => present = true,
             }
             let Some(hooks) = group["hooks"].as_array_mut() else {
                 continue;
             };
             for hook in hooks.iter_mut().filter(|h| is_seat_hook(h)) {
-                present = true;
                 if block && hook["onFailure"] != "block" {
                     hook["onFailure"] = "block".into();
                     shut = true;
@@ -4916,17 +4941,24 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
         if grew {
             widened.push(event.clone());
         }
-        if present {
+        let missing: Vec<&str> = (!present)
+            .then_some(want)
+            .into_iter()
+            .chain(extra.iter().copied().filter(|m| !found.contains(m)))
+            .collect();
+        if missing.is_empty() {
             continue;
         }
         let mut hook = serde_json::json!({"type": "command", "command": command, "timeout": 20});
         if block {
             hook["onFailure"] = "block".into();
         }
-        groups.push(serde_json::json!({
-            "matcher": hook_matcher(event),
-            "hooks": [hook]
-        }));
+        for matcher in missing {
+            groups.push(serde_json::json!({
+                "matcher": matcher,
+                "hooks": [hook.clone()]
+            }));
+        }
         added.push(event.clone());
     }
     for (event, groups) in hooks.iter_mut() {
@@ -15647,6 +15679,40 @@ fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
                 if !out.contains(&norm) {
                     out.push(norm);
                 }
+            }
+        }
+    }
+    out
+}
+
+/// The words after the name of each `ljos` the shell runs for `line`, as
+/// the process gets them: quotes resolved, assignments, wrappers and
+/// redirections off. Two runs of one line are two entries.
+pub(crate) fn ljos_invocations(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for sub in nested_lines(line, 0) {
+        for raw in raw_segments(&sub) {
+            let words = shell_words(&strip_prefixes(&raw).join(" "));
+            let Some((name, rest)) = words.split_first() else {
+                continue;
+            };
+            if name.rsplit('/').next() != Some("ljos") {
+                continue;
+            }
+            let mut argv = Vec::new();
+            let mut skip = false;
+            for word in rest {
+                if std::mem::take(&mut skip) {
+                    continue;
+                }
+                if word == ">" || (!word.is_empty() && word.chars().all(|c| c == '<')) {
+                    skip = true;
+                } else if !word.starts_with('<') {
+                    argv.push(word.clone());
+                }
+            }
+            if !argv.is_empty() {
+                out.push(argv);
             }
         }
     }
@@ -27141,12 +27207,15 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 }
 
 /// Give a child this process's connection. A nested `ljos vote` then signs
-/// with the same session instead of minting a nonce of its own. The seat
-/// argument is not copied onto the session.
+/// with the same session instead of minting a nonce of its own, a
+/// subagent's included. The seat argument is not copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
-    let harness = ballot_sig::harness_session();
-    if !harness.is_empty() && harness != "-" {
+    if ballot_sig::harness_session().is_empty() {
+        return;
+    }
+    let harness = ballot_sig::identity().harness;
+    if harness != "-" {
         cmd.env("LJOS_HARNESS_SESSION", harness);
     }
 }
@@ -28532,7 +28601,8 @@ mod tests {
     }
 
     /// An onboard that already wrote the seat's PreToolUse hook picks up
-    /// apply_patch on the next run, and a second run still says the hook is there.
+    /// apply_patch and a group for the seat's MCP tools on the next run, and
+    /// a second run still says the hook is there.
     #[test]
     fn an_old_pre_tool_matcher_grows_apply_patch() {
         let dir = tempfile::tempdir().unwrap();
@@ -28550,6 +28620,8 @@ mod tests {
             v["hooks"]["PreToolUse"][0]["matcher"],
             "Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch"
         );
+        assert_eq!(v["hooks"]["PreToolUse"][1]["matcher"], SEAT_MCP_MATCHER);
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         let again = hook_step(&file, &events, &[], false);
         assert!(
             again.detail.contains("carries the memory hook"),
@@ -32437,8 +32509,8 @@ mod tests {
         assert_eq!(v["theme"], "dark", "the rest of the file is kept");
         assert_eq!(
             v["hooks"]["PreToolUse"].as_array().unwrap().len(),
-            2,
-            "the other hook stays"
+            3,
+            "the other hook stays beside the tool group and the MCP group"
         );
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         // Narrowing to the default drops the seat's tool-call group and
@@ -32495,7 +32567,11 @@ mod tests {
             v["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"],
             "block"
         );
-        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            v["hooks"]["PreToolUse"][2]["hooks"][0]["onFailure"],
+            "block"
+        );
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -40546,6 +40622,33 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(command_segments("stdbuf -oL tail -f log"), ["tail -f log"]);
     }
 
+    /// A hook reads each `ljos` a shell line runs as its process will get
+    /// the words, so the process can find the call the hook saw.
+    #[test]
+    fn each_ljos_a_line_runs_is_read_as_its_argv() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            ljos_invocations(
+                r#"cd /x && FOO=1 ~/.cargo/bin/ljos vote demo-a --for ship --used none --as "reviewer a" 2>&1 | tee log"#
+            ),
+            [argv(&[
+                "vote",
+                "demo-a",
+                "--for",
+                "ship",
+                "--used",
+                "none",
+                "--as",
+                "reviewer a"
+            ])]
+        );
+        assert_eq!(
+            ljos_invocations("sh -c 'ljos recall demo-a < /dev/null'; ljos recall demo-a"),
+            [argv(&["recall", "demo-a"]), argv(&["recall", "demo-a"])]
+        );
+        assert!(ljos_invocations("echo ljos vote demo-a; ljos-mcp; ljos").is_empty());
+    }
+
     #[test]
     fn a_rule_sees_every_command_a_line_runs_and_no_quoted_text() {
         assert_eq!(
@@ -43800,16 +43903,25 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let obj = hooks["hooks"].as_object().expect("hooks object");
         assert_eq!(obj.keys().cloned().collect::<Vec<_>>(), events);
         for event in &events {
-            let group = &obj[event][0];
-            assert_eq!(group["matcher"], super::hook_matcher(event));
-            let hook = &group["hooks"][0];
-            assert_eq!(hook["type"], "command");
-            assert_eq!(hook["timeout"], 20);
-            let command = hook["command"].as_str().unwrap();
-            assert!(
-                command.contains("CLAUDE_PLUGIN_ROOT") && command.ends_with("ljos hook"),
-                "{command}"
-            );
+            let groups = obj[event].as_array().expect("matcher groups");
+            let matchers: Vec<&str> = groups
+                .iter()
+                .map(|g| g["matcher"].as_str().unwrap_or(""))
+                .collect();
+            let want: Vec<&str> = std::iter::once(super::hook_matcher(event))
+                .chain(super::extra_hook_matchers(event).iter().copied())
+                .collect();
+            assert_eq!(matchers, want, "{event}");
+            for group in groups {
+                let hook = &group["hooks"][0];
+                assert_eq!(hook["type"], "command");
+                assert_eq!(hook["timeout"], 20);
+                let command = hook["command"].as_str().unwrap();
+                assert!(
+                    command.contains("CLAUDE_PLUGIN_ROOT") && command.ends_with("ljos hook"),
+                    "{command}"
+                );
+            }
         }
 
         let plugin: Value = serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();

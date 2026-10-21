@@ -468,6 +468,7 @@ pub fn unverified_sentence(seat: &str) -> String {
 
 tokio::task_local! {
     static CALL_SESSION: String;
+    static CALL_AGENT: String;
 }
 
 std::thread_local! {
@@ -483,12 +484,56 @@ pub fn call_session() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Run `f` as an MCP call that named `session`.
-pub async fn scope_session<F: std::future::Future>(session: Option<String>, f: F) -> F::Output {
+/// Run `f` as an MCP call that named `session`, made by the subagent
+/// `agent`. One server answers a parent and all its subagents, so a call
+/// that names no agent is the parent's, whatever this process holds.
+pub async fn scope_session<F: std::future::Future>(
+    session: Option<String>,
+    agent: Option<String>,
+    f: F,
+) -> F::Output {
+    let agent = agent
+        .map(|a| field(&a))
+        .filter(|a| a != "-")
+        .unwrap_or_default();
+    let f = CALL_AGENT.scope(agent, f);
     match session.map(|s| field(&s)).filter(|s| s != "-") {
         Some(s) => CALL_SESSION.scope(s, f).await,
         None => f.await,
     }
+}
+
+static PROCESS_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Name the subagent a hook payload says this hook process runs for.
+pub fn hook_agent(agent: Option<String>) {
+    let _ = PROCESS_AGENT.set(agent);
+}
+
+/// The subagent this process or MCP call runs for under `parent`, when the
+/// harness named one: the agent a hook saw make this call, else a Codex
+/// thread under its root session. The command line takes no agent, so a
+/// parent cannot cast as its subagent.
+fn subagent(parent: &str) -> Option<String> {
+    if let Ok(agent) = CALL_AGENT.try_with(Clone::clone) {
+        return (!agent.is_empty()).then_some(agent);
+    }
+    PROCESS_AGENT
+        .get_or_init(|| {
+            crate::subagent::claim_command(parent)
+                .filter(|a| !a.is_empty())
+                .map(|a| field(&a))
+                .or_else(|| codex_thread(parent))
+        })
+        .clone()
+}
+
+/// The thread Codex runs a subagent in, under the root session:
+/// `CODEX_THREAD_ID` when it is not `CODEX_SESSION_ID`, the root's.
+fn codex_thread(parent: &str) -> Option<String> {
+    let root = env_token("CODEX_SESSION_ID")?;
+    let thread = env_token("CODEX_THREAD_ID")?;
+    (root == parent && thread != root).then_some(thread)
 }
 
 /// Remember the hook payload's session for this process, and export it for
@@ -565,8 +610,10 @@ pub fn harness_session() -> String {
     const PREFER: &[&str] = &[
         "CURSOR_SESSION_ID",
         "CLAUDE_SESSION_ID",
-        "CODEX_THREAD_ID",
+        // A Codex subagent's thread is not its session: [`codex_thread`]
+        // names it under the root.
         "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
         "GROK_SESSION_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",
@@ -640,10 +687,15 @@ fn named_session_actor(key: &str) -> Option<String> {
 }
 
 /// This process's session identity. Stable across processes of one holder.
+/// A subagent the harness named is `SESSION:AGENT`, a session of its own.
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
     if !harness.is_empty() {
+        let harness = match subagent(&harness) {
+            Some(agent) => format!("{harness}:{agent}"),
+            None => harness,
+        };
         return SessionIdentity {
             harness,
             nonce: "-".into(),
@@ -1202,5 +1254,22 @@ mod tests {
         )]
         .into();
         assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
+    /// One server answers a parent and its subagents: each call is the
+    /// session plus the agent it names, and a call that names none is the
+    /// parent's.
+    #[tokio::test]
+    async fn an_mcp_call_from_a_subagent_is_a_session_of_its_own() {
+        let call = |agent: Option<&str>| {
+            scope_session(
+                Some("sess-mcp-0001".into()),
+                agent.map(str::to_string),
+                async { identity().harness },
+            )
+        };
+        assert_eq!(call(Some("thread-a")).await, "sess-mcp-0001:thread-a");
+        assert_eq!(call(Some("thread-b")).await, "sess-mcp-0001:thread-b");
+        assert_eq!(call(None).await, "sess-mcp-0001");
     }
 }
