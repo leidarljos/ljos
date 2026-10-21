@@ -1487,7 +1487,8 @@ mod tests {
         let rel = hooked_repo(root, "#!/bin/sh\nexit 0\n");
         let held = crate::tracker_commit_lock(root);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-        let waited = commit_host(root, &[rel.clone()], "probe-host", deadline).unwrap_err();
+        let waited =
+            commit_host(root, std::slice::from_ref(&rel), "probe-host", deadline).unwrap_err();
         assert!(
             format!("{waited:#}").contains("past the budget"),
             "{waited:#}"
