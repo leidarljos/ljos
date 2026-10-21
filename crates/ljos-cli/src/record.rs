@@ -179,15 +179,18 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Any entry fails validation or signature verification, voter-key pinning
-/// detects a mismatch, or two unreplaced ballots from one voter share an
-/// hour.
+/// Any entry fails validation or signature verification, a pin file voter
+/// is not spelled the way the check looks it up, voter-key pinning detects
+/// a mismatch, or two unreplaced ballots from one voter share an hour.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     let mut report = CheckReport {
         entries: entries.len(),
         ..CheckReport::default()
     };
     let (mut pins, pin_source) = crate::ballot_sig::pins_for_check()?;
+    for voter in pins.keys() {
+        validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
+    }
     let tracker_pins = pins.clone();
     let mut ballots = Vec::new();
     for entry in entries {
@@ -216,6 +219,24 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     }
     report.questions_with_live_ballots = tally(&ballots)?.len();
     Ok(report)
+}
+
+/// Refuse a pin row the lookups would never match. Nothing is stripped:
+/// a BOM or a zero-width space before `seat-a` would leave that seat's
+/// pin unread. A row naming a tracker voter no record voter can spell,
+/// such as `judge:<model>`, is left alone.
+fn validate_pin_voter(voter: &str) -> Result<()> {
+    if !voter.bytes().all(|b| b.is_ascii_graphic()) {
+        bail!("pin voter {voter:?} is not printable ASCII");
+    }
+    if voter.contains('/') {
+        return validate_voter_id(voter).with_context(|| format!("pin voter `{voter}`"));
+    }
+    let seat = crate::seat_slug(voter);
+    if valid_voter_part(voter) && seat != voter {
+        bail!("pin voter `{voter}` is not a canonical seat; the seat is `{seat}`");
+    }
+    Ok(())
 }
 
 fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
@@ -1525,6 +1546,44 @@ mod tests {
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
         assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
+    }
+
+    #[test]
+    fn a_pin_voter_that_is_not_canonical_is_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let entry = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let key = &pinned.signature.key;
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        for voter in ["\u{feff}seat-a", "\u{200b}seat-a", "Seat-a", "seat_a"] {
+            std::fs::write(&pin_path, format!("{voter} {key}\n")).expect("pin");
+            let Err(err) = check_entries(std::slice::from_ref(&entry)) else {
+                panic!("the {voter:?} pin row was skipped");
+            };
+            assert!(
+                err_chain(&err).contains("pin voter"),
+                "{voter:?}: {}",
+                err_chain(&err)
+            );
+        }
+        std::fs::write(
+            &pin_path,
+            format!("judge:model-1.5 {key}\ninky@39u {key}\nseat-b {key}\nalpha/run-101 {key}\n"),
+        )
+        .expect("pin");
+        check_entries(std::slice::from_ref(&entry))
+            .expect("tracker-only voters are not record seats");
     }
 
     #[test]
