@@ -67,8 +67,9 @@ Ballot id is:
 ## Canonical JSON and signatures
 
 Canonical JSON is the typed entry re-serialised: keys sorted, no
-insignificant whitespace. The file's canonical JSON without `signature`
-must equal the typed form, so an extra field is unsigned and refused.
+insignificant whitespace. Record check also canonicalises the unsigned
+payload from the file (without `signature`) and requires it to match the
+typed form, so an extra field is unsigned and refused.
 Key order and whitespace may differ.
 
 Numbers use the typed spelling. `1e0`, `10E-1` and `1.0` are one value
@@ -91,8 +92,10 @@ matching, and key pinning:
 - every voter id is pinned to one key, including a question's `opened_by`
   and a seat
 - a run is `<identity>/run-<id>`; `run/<id>` has no identity and is refused
-- the tracker pin file wins when it already names that voter; otherwise
-  the first key seen in the check is the pin
+- the tracker pin file wins when it already names that voter
+- with no stored row for that voter, the first key seen in this check is the
+  pin for this check only
+- ingesting pins durably is what makes that pin persist across checks
 - a later entry from the same voter under another key is rejected
 
 ## Tally rule
