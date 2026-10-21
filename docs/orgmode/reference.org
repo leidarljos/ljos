@@ -362,6 +362,18 @@ stdin is an argv line and answered in plain lines.
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (=decision: block=, or =followup_message= in Cursor) and receipts it |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
 
+The hook's book names the runner that owns its sitting, and the next
+session or MCP call finishes the sitting once that process is gone. The
+owner is the nearest harness ljos knows by name above the hook, else the
+nearest program that is neither a shell nor a wrapper, else the outermost
+shell. The walk stops below a terminal, a multiplexer or init, none of
+which owns a sitting. The book keeps the owner's pid and start time, so a
+pid used again by another process is gone. The walk reads =/proc= and
+holds on Linux only. On macOS and other systems the hook's parent owns
+the sitting: a runner starts the hook through =sh -c=, which exits with
+it, so there the next MCP call finishes the hook's sitting, and
+=ljos_start= files a new claim instead of keeping the one a Write took.
+
 * What a rule reads
 
 A rule is tried on every command a line runs, the first and the rest. The

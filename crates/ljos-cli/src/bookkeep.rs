@@ -2264,7 +2264,8 @@ fn next_owner(event: &str, current: (u32, u64), incoming: (u32, u64)) -> (u32, u
 /// that exits with the hook, so the parent alone is gone by the next
 /// call. A terminal, a multiplexer or init outlives every sitting under
 /// it and never owns one: when one of those ran the hook itself, the hook
-/// is the owner, and its sitting is orphaned once it exits.
+/// is the owner, and its sitting is orphaned once it exits. With no
+/// `/proc` (macOS) the walk is empty and the parent is the owner.
 fn hook_owner() -> (u32, u64) {
     let chain = super::proc_tree::ancestors();
     if chain.is_empty() {
