@@ -58,8 +58,20 @@ pub fn skill_text() -> String {
 consensus through ljos. On a runner that hides MCP tools, the pack is use_tool \
 ljos__ljos_search, ljos__ljos_remember, and ljos__ljos_prefer. Search the pack \
 before answering from memory. Load before any work that touches an issue, a memory, \
-a deed, a claim or a vote.\n---\n\n{PROTOCOL}"
+a deed, a claim or a vote.\n---\n\n{}",
+        protocol_text()
     )
+}
+
+/// The protocol with the sitting's section list filled in from
+/// [`SITTING_SECTIONS`], the same order `ljos sitting` prints.
+#[must_use]
+pub fn protocol_text() -> String {
+    const MARK: &str = "@@SITTING_SECTIONS@@\n";
+    match PROTOCOL.split_once(MARK) {
+        Some((head, tail)) => format!("{head}{}{tail}", render_sitting_steps()),
+        None => PROTOCOL.to_string(),
+    }
 }
 
 /// One step an onboarding took, or would take.
@@ -12352,7 +12364,7 @@ pub const RUBRIC: &str = "\
 const SIT_BODY: &str = "\
 A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
 
-1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, reclaim, claim.
+1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, blockers, this recipe, recall, timeline, reclaim, claim.
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Lessons are `ljos remember` in two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
@@ -23132,10 +23144,228 @@ fn civil_of_days(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Open a sitting on an issue, in the protocol's order, and stop at the
-/// first habitat that does not answer: doctor, cards, the review clock,
-/// the island the issue's title activates, the working set, the timeline,
-/// the claim.
+/// One section `ljos sitting` prints. [`sitting_gated`] emits these names in
+/// this order, and [`protocol_text`] numbers the same list.
+struct SittingSection {
+    /// The name after `== `. `island` prints as `== island: TITLE`.
+    name: &'static str,
+    /// Left out when it has nothing to say. The others are always printed.
+    optional: bool,
+    /// The protocol step, continuation lines indented three spaces.
+    step: &'static str,
+}
+
+/// The sections a sitting prints, in print order. Optional sections are
+/// omitted when empty; the ones that print stay in this order.
+const SITTING_SECTIONS: &[SittingSection] = &[
+    SittingSection {
+        name: "doctor",
+        optional: false,
+        step: "`== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;\n   \
+`packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.\n   \
+A `warn` on `host` means the kernel killed a process within a day. The\n   \
+sitting opens; run one build or test suite at a time.",
+    },
+    SittingSection {
+        name: "sync",
+        optional: true,
+        step: "`== sync`, left out when the repository names no scope. The sitting pulls\n   \
+the other machines' logs for this scope and takes them before the island\n   \
+is walked. `ljos sync` runs the same pull and push by hand.",
+    },
+    SittingSection {
+        name: "cards",
+        optional: false,
+        step: "`== cards`. `ljos cards`. What the human froze. Read, never write.",
+    },
+    SittingSection {
+        name: "due",
+        optional: false,
+        step: "`== due`. `ljos due`. What is due for review: the soonest eight and the total.\n   \
+The verb prints a page; it does not grade. Grade it after the sitting:\n   \
+check a shown claim against the work, then run `ljos graded ID`\n   \
+(`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the\n   \
+last hour, so a saved list cannot be graded unread; `ljos due --all`\n   \
+lists everything to read and puts none of it up. The review clock\n   \
+moves only when you grade, and a backlog is left due, not drained.",
+    },
+    SittingSection {
+        name: "island",
+        optional: false,
+        step: "`== island`. `ljos island` on the issue's title. The sitting takes the strongest\n   \
+eight. The number on a row is the activation spread along links.\n   \
+`--as NAME` walks that persona's weights. `--fire` after the island\n   \
+was used rewrites those weights, and the next walk follows them. A\n   \
+weak island does not fire. `ljos search TOPIC` and a full\n   \
+`ljos island TASK` are during the work, not this opening.",
+    },
+    SittingSection {
+        name: "blockers",
+        optional: false,
+        step: "`== blockers`. The issue's blockers, read from the tracker. An issue whose\n   \
+blockers are still open is refused before anything is claimed, because the\n   \
+graph says it is not workable; `--anyway` sits on it regardless and says so.",
+    },
+    SittingSection {
+        name: "playbook",
+        optional: false,
+        step: "`== playbook`. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The\n   \
+six built-in recipes are `sit`, `arena`, `land`, `company-panel`,\n   \
+`overnight`, `feature`. Kind `playbook`, weighed not recalled. Pack\n   \
+latest per name is the copy; built-in bodies seed only when the pack\n   \
+has no live atom of that name. Write, list, bind, and copy refuse any\n   \
+other name. `ljos playbooks` lists the six. Absent a name, the sitting\n   \
+matches the title (any name but `feature`) or binds `sit`. Mid-sitting\n   \
+turns re-read the same note; a new task is a new sitting. Finish and\n   \
+release write `playbook:` so the next sitting does not reprint the\n   \
+previous recipe. Sitting always binds one of the closed set before\n   \
+claim. A panel is refused until one is bound. The name lives on the\n   \
+tracker as a `playbook:` note until `finish` or `release`. Feature work runs on a parent issue:\n   \
+`ljos workflow PARENT --start feature` files its design child, and\n   \
+`ljos workflow PARENT` prints the stage and the next step. A sitting\n   \
+on the parent or a child prints the same in `== workflow`, and\n   \
+`ljos finish PARENT --close` is refused until the panel passed.\n   \
+`ljos workflow PARENT --round` files the next panel. Once the substance\n   \
+has settled, a nit, a wording note or a style note stays on the issue.\n   \
+A blocking finding with a reason is one `fix:` child. The same objection\n   \
+is not filed again. At the round limit the parent closes as\n   \
+settled-with-notes and does not wait.",
+    },
+    SittingSection {
+        name: "workflow",
+        optional: true,
+        step: "`== workflow`, left out when neither the issue nor its parent carries a\n   \
+workflow. The stage and the next step, the same reading as `ljos workflow`.",
+    },
+    SittingSection {
+        name: "panel",
+        optional: true,
+        step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
+the issue speaks to. Start one subagent per brief.",
+    },
+    SittingSection {
+        name: "recall",
+        optional: false,
+        step: "`== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has\n   \
+cited so far.",
+    },
+    SittingSection {
+        name: "timeline",
+        optional: false,
+        step: "`== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three\n   \
+stores; `ljos timeline` without a sitting prints them all.",
+    },
+    SittingSection {
+        name: "reclaim",
+        optional: false,
+        step: "`== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900\n   \
+seconds when unset; 0 turns the step off) go back to ready when their\n   \
+conversation is gone, or when no hold record on this host names them. A\n   \
+claim whose runner is still alive is kept. Printed before `== claim`.",
+    },
+    SittingSection {
+        name: "claim",
+        optional: false,
+        step: "`== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:\n   \
+two conversations hold two tickets. The same issue is still one\n   \
+holder. `busy` on a named worker means that name still has another\n   \
+node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so\n   \
+`vissue claims` answers who has it; a tracker that refuses the name\n   \
+refuses the sitting, and `ljos release` frees the claim graph.\n   \
+A background worker you start sits under its own conversation's\n   \
+name and the same seat. The conversation that started it can\n   \
+complete, finish or release the worker's claim, and the worker can\n   \
+finish a claim its parent took.\n   \
+Another seat's claim is still refused, and the refusal names who\n   \
+has it.",
+    },
+];
+
+/// The numbered sitting steps `ljos protocol` prints, from [`SITTING_SECTIONS`].
+fn render_sitting_steps() -> String {
+    let mut out = String::from(
+        "It prints these sections, in this order. Each one is a step the sitting\n\
+runs, and each answers something the next one needs. A section that is left\n\
+out when it has nothing to say says so; the others are printed on every\n\
+sitting that gets that far.\n\n",
+    );
+    for (index, section) in SITTING_SECTIONS.iter().enumerate() {
+        let mut lines = section.step.lines();
+        let first = lines.next().unwrap_or("");
+        out.push_str(&format!("{}. {first}\n", index + 1));
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Walks [`SITTING_SECTIONS`] as `ljos sitting` prints headings, so a heading
+/// that is not the next name in that list does not compile into a quiet drift.
+struct SectionCursor {
+    next: usize,
+}
+
+impl SectionCursor {
+    fn new() -> Self {
+        Self { next: 0 }
+    }
+
+    fn advance(&mut self, name: &str) {
+        while self.next < SITTING_SECTIONS.len() && SITTING_SECTIONS[self.next].name != name {
+            assert!(
+                SITTING_SECTIONS[self.next].optional,
+                "sitting skipped required section {}",
+                SITTING_SECTIONS[self.next].name
+            );
+            self.next += 1;
+        }
+        assert!(
+            self.next < SITTING_SECTIONS.len(),
+            "sitting has no section {name}"
+        );
+        self.next += 1;
+    }
+
+    fn heading(&mut self, out: &mut String, name: &str) {
+        self.advance(name);
+        out.push_str("== ");
+        out.push_str(name);
+        out.push('\n');
+    }
+
+    fn heading_titled(&mut self, out: &mut String, name: &str, title: &str) {
+        self.advance(name);
+        out.push_str(&format!("== {name}: {title}\n"));
+    }
+
+    /// The block already carries its `== name` line. An empty block leaves
+    /// the optional section out.
+    fn block(&mut self, name: &str, block: &str) {
+        if !block.is_empty() {
+            assert!(
+                block.starts_with(&format!("== {name}\n"))
+                    || block.starts_with(&format!("== {name}:")),
+                "sitting block {name} does not open with its heading"
+            );
+            self.advance(name);
+        }
+    }
+
+    fn finish(&self) {
+        for section in &SITTING_SECTIONS[self.next..] {
+            assert!(
+                section.optional,
+                "sitting omitted required section {}",
+                section.name
+            );
+        }
+    }
+}
+
+/// Open a sitting on an issue, in [`SITTING_SECTIONS`] order, and stop at the
+/// first habitat that does not answer.
 /// One verb, so the loop that makes the seat a memory runs every time and
 /// not only when somebody remembers to run it.
 ///
@@ -23189,8 +23419,9 @@ pub fn sitting_gated(
     playbook: Option<&str>,
 ) -> Result<String> {
     let mut out = String::new();
+    let mut sections = SectionCursor::new();
     let rows = doctor_seat();
-    out.push_str("== doctor\n");
+    sections.heading(&mut out, "doctor");
     out.push_str(&format_doctor(&rows));
     let down = failing_for_sitting(&rows);
     if !down.is_empty() {
@@ -23216,16 +23447,16 @@ pub fn sitting_gated(
     let synced =
         sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
     if !synced.is_empty() {
-        out.push_str("== sync\n");
+        sections.heading(&mut out, "sync");
         out.push_str(&synced);
     }
-    out.push_str("== cards\n");
+    sections.heading(&mut out, "cards");
     out.push_str(&cards(cards_dir)?);
     let title = issue_title(issue)?;
     let island = packset_island(&title, false)?;
-    out.push_str("== due\n");
+    sections.heading(&mut out, "due");
     out.push_str(&sitting_due_report(&island)?);
-    out.push_str(&format!("== island: {title}\n"));
+    sections.heading_titled(&mut out, "island", &title);
     // The strongest eight: a sitting wants orientation, not the whole
     // cluster; `ljos island` prints it all.
     let mut top = island.clone();
@@ -23233,7 +23464,7 @@ pub fn sitting_gated(
         rows.truncate(8);
     }
     out.push_str(&format_island(&top));
-    out.push_str("== blockers\n");
+    sections.heading(&mut out, "blockers");
     let blockers = open_blockers(issue);
     if blockers.is_empty() {
         out.push_str("none open; the issue is workable\n");
@@ -23262,11 +23493,15 @@ pub fn sitting_gated(
         },
         _ => resolve_sitting_playbook(issue, &title, playbook)?,
     };
-    out.push_str("== playbook\n");
+    sections.heading(&mut out, "playbook");
     out.push_str(&copy_playbook(issue, &name)?);
-    out.push_str(&workflow_sitting_block(issue));
+    let workflow = workflow_sitting_block(issue);
+    if !workflow.is_empty() {
+        sections.block("workflow", &workflow);
+        out.push_str(&workflow);
+    }
     if decision {
-        out.push_str("== panel\n");
+        sections.heading(&mut out, "panel");
         let dir = runtime_dir().join(format!("panel-{issue}"));
         match panel(issue, &dir) {
             Ok(said) => out.push_str(&format!(
@@ -23275,19 +23510,20 @@ pub fn sitting_gated(
             Err(e) => out.push_str(&format!("{issue} is a decision, and the panel could not be written: {e:#}\n")),
         }
     }
-    out.push_str("== recall\n");
+    sections.heading(&mut out, "recall");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     // The last twelve dated events across the three stores; `ljos
     // timeline` prints them all.
-    out.push_str("== timeline\n");
+    sections.heading(&mut out, "timeline");
     out.push_str(&timeline(issue, SITTING_TIMELINE)?);
     // A lease runs out only when somebody hands it back, and nothing else
     // in the seat does, so the sitting does it before it takes work.
-    out.push_str("== reclaim\n");
+    sections.heading(&mut out, "reclaim");
     out.push_str(&reclaim_expired(lease_secs()));
-    out.push_str("== claim\n");
+    sections.heading(&mut out, "claim");
     out.push_str(&claim(issue, assignee)?);
     out.push_str(&persist_tracker(issue, "claimed"));
+    sections.finish();
     Ok(out)
 }
 
@@ -30702,6 +30938,49 @@ mod tests {
     fn sitting_caps_are_the_protocol_numbers() {
         assert_eq!(SITTING_DUE, 8);
         assert_eq!(SITTING_TIMELINE, 12);
+    }
+
+    /// `ljos protocol` numbers the sections `ljos sitting` prints, in that
+    /// order, reclaim before claim. The marker the file keeps is filled in
+    /// before anything is printed.
+    #[test]
+    fn the_protocol_names_sitting_sections_in_print_order() {
+        let protocol = protocol_text();
+        assert!(!protocol.contains("@@SITTING_SECTIONS@@"));
+        assert!(!protocol.contains("nine sections"));
+        let names = sitting_sections_in(&protocol);
+        let printed: Vec<&str> = SITTING_SECTIONS
+            .iter()
+            .map(|section| section.name)
+            .collect();
+        assert_eq!(names, printed);
+        let reclaim = names.iter().position(|n| *n == "reclaim").unwrap();
+        let claim = names.iter().position(|n| *n == "claim").unwrap();
+        assert_eq!(reclaim + 1, claim);
+    }
+
+    /// Numbered steps between the sitting heading and the next heading.
+    /// A continuation that mentions another `== name` is not its own step.
+    fn sitting_sections_in(protocol: &str) -> Vec<&str> {
+        let start = protocol
+            .find("## Before the work")
+            .expect("the sitting heading");
+        let rest = &protocol[start..];
+        let end = rest.find("\n## ").expect("the next heading");
+        let mut names = Vec::new();
+        for line in rest[..end].lines() {
+            let line = line.trim();
+            let Some((left, right)) = line.split_once(". `== ") else {
+                continue;
+            };
+            if left.is_empty() || !left.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let name = right.split(['`', ',', ' ', '.']).next().unwrap_or("");
+            assert!(!name.is_empty(), "{line}");
+            names.push(name);
+        }
+        names
     }
 
     #[test]

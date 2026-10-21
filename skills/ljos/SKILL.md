@@ -66,36 +66,36 @@ does not answer:
 ljos sitting ISSUE --assignee NAME [--playbook NAME]
 ```
 
-It prints nine sections, and each one is a step you would otherwise run by
-hand. Each answers something the next one needs. Between the island and the
-recall it reads the issue's blockers from the tracker: an issue whose
-blockers are still open is refused before anything is claimed, because the
-graph says it is not workable; `--anyway` sits on it regardless and says so.
-Then it copies one playbook into `== playbook` before recall: `--playbook`
-names it, else a name already bound on the issue, else a closed-set token
-in the title, else `sit`. Sitting always binds one of the five before
-claim. A panel is refused until one is bound. The name lives on the
-tracker as a `playbook:` note until `finish` or `release`.
+It prints these sections, in this order. Each one is a step the sitting
+runs, and each answers something the next one needs. A section that is left
+out when it has nothing to say says so; the others are printed on every
+sitting that gets that far.
 
-1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
+1. `== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
    A `warn` on `host` means the kernel killed a process within a day. The
    sitting opens; run one build or test suite at a time.
-2. `ljos cards`. What the human froze. Read, never write.
-3. `ljos due`. What is due for review: the soonest eight and the total.
+2. `== sync`, left out when the repository names no scope. The sitting pulls
+   the other machines' logs for this scope and takes them before the island
+   is walked. `ljos sync` runs the same pull and push by hand.
+3. `== cards`. `ljos cards`. What the human froze. Read, never write.
+4. `== due`. `ljos due`. What is due for review: the soonest eight and the total.
    The verb prints a page; it does not grade. Grade it after the sitting:
    check a shown claim against the work, then run `ljos graded ID`
    (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the
    last hour, so a saved list cannot be graded unread; `ljos due --all`
    lists everything to read and puts none of it up. The review clock
    moves only when you grade, and a backlog is left due, not drained.
-4. `ljos island` on the issue's title. The sitting takes the strongest
+5. `== island`. `ljos island` on the issue's title. The sitting takes the strongest
    eight. The number on a row is the activation spread along links.
    `--as NAME` walks that persona's weights. `--fire` after the island
    was used rewrites those weights, and the next walk follows them. A
    weak island does not fire. `ljos search TOPIC` and a full
    `ljos island TASK` are during the work, not this opening.
-5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
+6. `== blockers`. The issue's blockers, read from the tracker. An issue whose
+   blockers are still open is refused before anything is claimed, because the
+   graph says it is not workable; `--anyway` sits on it regardless and says so.
+7. `== playbook`. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
    six built-in recipes are `sit`, `arena`, `land`, `company-panel`,
    `overnight`, `feature`. Kind `playbook`, weighed not recalled. Pack
    latest per name is the copy; built-in bodies seed only when the pack
@@ -104,7 +104,9 @@ tracker as a `playbook:` note until `finish` or `release`.
    matches the title (any name but `feature`) or binds `sit`. Mid-sitting
    turns re-read the same note; a new task is a new sitting. Finish and
    release write `playbook:` so the next sitting does not reprint the
-   previous recipe.    Feature work runs on a parent issue:
+   previous recipe. Sitting always binds one of the closed set before
+   claim. A panel is refused until one is bound. The name lives on the
+   tracker as a `playbook:` note until `finish` or `release`. Feature work runs on a parent issue:
    `ljos workflow PARENT --start feature` files its design child, and
    `ljos workflow PARENT` prints the stage and the next step. A sitting
    on the parent or a child prints the same in `== workflow`, and
@@ -114,11 +116,19 @@ tracker as a `playbook:` note until `finish` or `release`.
    A blocking finding with a reason is one `fix:` child. The same objection
    is not filed again. At the round limit the parent closes as
    settled-with-notes and does not wait.
-6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
+8. `== workflow`, left out when neither the issue nor its parent carries a
+   workflow. The stage and the next step, the same reading as `ljos workflow`.
+9. `== panel`, left out unless the issue is a decision. One brief per persona
+   the issue speaks to. Start one subagent per brief.
+10. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
-7. `ljos timeline ISSUE`. The last twelve dated events across the three
+11. `== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three
    stores; `ljos timeline` without a sitting prints them all.
-8. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
+12. `== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900
+   seconds when unset; 0 turns the step off) go back to ready when their
+   conversation is gone, or when no hold record on this host names them. A
+   claim whose runner is still alive is kept. Printed before `== claim`.
+13. `== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
    two conversations hold two tickets. The same issue is still one
    holder. `busy` on a named worker means that name still has another
    node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so

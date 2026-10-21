@@ -13,12 +13,12 @@ use ljos_cli::{
     now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
     packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
     personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
-    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about, run,
-    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
-    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    PROTOCOL,
+    prompt_hook_stdout, protocol_text, read_campaign, receive, release, remember_findings,
+    rows_about, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
+    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
+    uncite_deed, with_discount, withdraw_prediction, write_outcome, write_persona_as,
+    write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust,
+    HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -2838,7 +2838,7 @@ fn run_command() -> Result<()> {
                 install_desktop,
             }));
         }
-        Cmd::Protocol => print!("{PROTOCOL}"),
+        Cmd::Protocol => print!("{}", protocol_text()),
         Cmd::Seat => print!("{}", format_seat_command()),
         Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
         Cmd::Onboard {

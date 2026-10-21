@@ -83,7 +83,7 @@ Smoke
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"echo"}}' | ljos hook
    $ echo '{"hookEventName":"pre_tool_use","toolInput":{"command":"git push --force"}}' | ljos hook
-   {"decision":"deny","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"},"reason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"}
+   {"decision":"ask","reason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
    $ echo '{"hook_event_name":"PostToolUse","session_id":"s"}' | ljos hook
 
 An allow prints nothing unless a prompt has already kept pack text.
