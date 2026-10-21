@@ -584,13 +584,28 @@ fn git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
 
 /// Commit the log after an export. A skipped seal with no file yet has
 /// nothing to stage, and that is not a failure. `push` false keeps the
-/// commit on this machine.
+/// commit on this machine, and says so when a commit is waiting: the
+/// ticket commit and this log share one branch, and a silent return was
+/// how a later push of the log carried the ticket off the machine.
 fn commit_if_sealed(root: &Path, scope: &str, exported: &str, push: bool) -> String {
     let age = log_dir(root).join(format!("{}.jsonl.age", host()));
     if exported.contains("age is not installed") && !age.is_file() {
-        return String::new();
+        return if push {
+            String::new()
+        } else {
+            kept_local(root)
+        };
     }
     commit_log(root, scope, push)
+}
+
+/// The line finish prints when commit-only mode leaves the branch here.
+fn kept_local(root: &Path) -> String {
+    if commits_to_push(root) {
+        "sync: not pushed (LJOS_TRACKER_GIT=commit)\n".into()
+    } else {
+        String::new()
+    }
 }
 
 /// Push commits this checkout has not sent. Atoms that did not change used
@@ -670,12 +685,13 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     if staged.is_ok_and(|o| o.status.success()) {
         // Atoms did not change. A commit already made in this checkout,
         // such as the tracker's merge attributes, still has to leave,
-        // unless pushes are off.
+        // unless pushes are off. Commit-only mode names that, the same
+        // way the ticket commit does, instead of returning nothing.
         drop(held);
         return if push {
             push_pending(root)
         } else {
-            String::new()
+            kept_local(root)
         };
     }
     let message = format!("chore(sync): {host} {scope} atoms");
@@ -823,8 +839,9 @@ fn tracker_git_value(value: Option<&str>) -> TrackerGit {
 
 /// The git a sync may do. A sync in passing, from the sitting, finish or
 /// the server's exit, follows `LJOS_TRACKER_GIT` as the ticket commit
-/// does. Its push carries the whole branch, so a commit that variable kept
-/// local left with the log. `ljos sync` run by hand does what it was asked.
+/// does. Commit mode neither fetches nor pushes: both carry the branch,
+/// and the pull then reads the pack. `ljos sync` run by hand does what it
+/// was asked.
 fn tracker_git(asked: bool) -> TrackerGit {
     if asked {
         return TrackerGit::Push;
@@ -861,8 +878,18 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
         return Ok(out);
     };
     if pull_import {
-        out.push_str(&catch_up(&root));
-        out.push_str(&import(&root, &scope)?);
+        if mode == TrackerGit::Commit {
+            // The sitting's half of the same sync finish pushes. Fetching
+            // the tracker is a network pull of the pack log, and the import
+            // then reads and posts this seat's pack. A pack that does not
+            // answer in time is ureq's "timed out reading response", which
+            // the sitting prints as cause 3 of that error. `ljos sync` by
+            // hand still fetches and imports.
+            out.push_str("sync: not fetched (LJOS_TRACKER_GIT=commit)\n");
+        } else {
+            out.push_str(&catch_up(&root));
+            out.push_str(&import(&root, &scope)?);
+        }
     }
     if export_log {
         let client = crate::pack()?;
@@ -1594,10 +1621,99 @@ mod tests {
             "{said}"
         );
         assert!(git(&root, &["log", "-1", "--format=%s"]).contains("chore(sync)"));
-        assert_eq!(commit_log(&root, "surf", false), "");
+        assert_eq!(
+            commit_log(&root, "surf", false),
+            "sync: not pushed (LJOS_TRACKER_GIT=commit)\n"
+        );
         let subjects = git(&remote, &["log", "--format=%s"]);
         assert!(!subjects.contains("kept local"), "{subjects}");
         assert!(!subjects.contains("chore(sync)"), "{subjects}");
+    }
+
+    /// Sitting's pack sync fetches the tracker and then reads the pack.
+    /// Commit-only mode does neither: a fetch is the pull of the same log
+    /// finish would push, and the import is the read that times out.
+    #[test]
+    fn a_commit_only_sitting_does_not_fetch_or_read_the_pack() {
+        let _g = crate::test_env_lock();
+        let before = std::env::var_os("LJOS_TRACKER_GIT");
+        let config_before = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        std::fs::write(config.join("ljos/age.key"), "not a key\n").unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let remote = dir.path().join("remote.git");
+        let root = dir.path().join("local");
+        let other = dir.path().join("other");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(root.join("README"), "seed\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["clone", "-q", remote.to_str().unwrap(), "."]);
+        git(&other, &["config", "user.email", "seat@example.invalid"]);
+        git(&other, &["config", "user.name", "seat"]);
+        git(&other, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(other.join("README"), "theirs\n").unwrap();
+        git(&other, &["add", "README"]);
+        git(&other, &["commit", "-q", "-m", "from the other machine"]);
+        git(&other, &["push", "-q", "origin", "HEAD"]);
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            "name = \"surf\"\nrecipients = [\"age1test\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".ljos/atoms/otherhost.jsonl.age"), "sealed\n").unwrap();
+        let said = sync_one(&root, true, false, false).unwrap();
+        let local = git(&root, &["log", "--format=%s"]);
+        match before {
+            Some(value) => std::env::set_var("LJOS_TRACKER_GIT", value),
+            None => std::env::remove_var("LJOS_TRACKER_GIT"),
+        }
+        match config_before {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        assert!(
+            said.contains("not fetched (LJOS_TRACKER_GIT=commit)"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("timed out"),
+            "commit mode still read the pack: {said}"
+        );
+        assert!(
+            !local.contains("from the other machine"),
+            "sitting fetched the pack log: {local}"
+        );
     }
 
     /// `LJOS_TRACKER_GIT=off` leaves the tracker as it is in passing: no
