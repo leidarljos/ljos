@@ -169,6 +169,17 @@ pub fn calling_shell(chain: &[Proc]) -> Option<&Proc> {
     Some(top)
 }
 
+/// The program that ran the process whose ancestors are `chain`: the
+/// nearest one that is neither a shell nor a wrapper. A chain of shells
+/// alone ends at its outermost shell.
+#[must_use]
+pub fn runner(chain: &[Proc]) -> Option<&Proc> {
+    chain
+        .iter()
+        .find(|p| !is_shell(p) && !is_wrapper(p))
+        .or_else(|| chain.last())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +246,21 @@ mod tests {
         assert_eq!(calling_shell(&[harness.clone(), named(5, "bash")]), None);
         assert_eq!(calling_shell(&[named(3, "env"), harness]), None);
         assert_eq!(calling_shell(&[]), None);
+    }
+
+    #[test]
+    fn the_runner_is_above_the_shells_and_wrappers_it_started() {
+        let chain = [
+            named(4, "sh"),
+            named(3, "timeout"),
+            named(5, "bash"),
+            named(10, "claude"),
+            named(2, "tmux"),
+        ];
+        assert_eq!(runner(&chain).map(|p| p.pid), Some(10));
+        assert_eq!(runner(&chain[3..]).map(|p| p.pid), Some(10));
+        let shells = [named(4, "sh"), named(5, "bash")];
+        assert_eq!(runner(&shells).map(|p| p.pid), Some(5));
+        assert_eq!(runner(&[]), None);
     }
 }

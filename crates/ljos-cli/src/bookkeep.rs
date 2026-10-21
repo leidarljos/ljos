@@ -2248,8 +2248,14 @@ fn next_owner_pid(event: &str, current: u32, incoming: u32) -> u32 {
 }
 
 /// The runner that spawned this hook. When it is gone, the next session
-/// finishes the claims this book still has open.
+/// finishes the claims this book still has open. A runner starts the hook
+/// command through `sh -c` or a wrapper that exits with the hook, so the
+/// parent alone is gone by the next call.
 fn hook_owner() -> u32 {
+    let chain = super::proc_tree::ancestors();
+    if let Some(runner) = super::proc_tree::runner(&chain) {
+        return runner.pid;
+    }
     // SAFETY: getppid only reads the parent pid.
     unsafe { libc::getppid() as u32 }
 }
