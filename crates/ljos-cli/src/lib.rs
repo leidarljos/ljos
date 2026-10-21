@@ -29937,6 +29937,118 @@ mod tests {
         issues
     }
 
+    /// A checkout that really contains `target/arm` still resolves to its
+    /// own repository. Locking and committing from that subtree must work,
+    /// and a lease push onto a feature branch must stay ordinary.
+    #[test]
+    fn a_target_arm_checkout_keeps_git_discovery() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("qemu");
+        let arm = repo.join("target/arm");
+        std::fs::create_dir_all(&arm).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(arm.join("kconfig"), "CONFIG_ARM=y\n").unwrap();
+        run(&["add", "target/arm/kconfig"]);
+        run(&["commit", "-q", "-m", "seed"]);
+        run(&["checkout", "-q", "-b", "feature/arm"]);
+        std::fs::write(arm.join("kconfig"), "CONFIG_ARM=y\nCONFIG_NEON=y\n").unwrap();
+
+        let lock_path = super::tracker_lock_path(&arm).expect("the checkout is still discovered");
+        assert_eq!(lock_path, repo.join(TRACKER_LOCK));
+        let held = tracker_commit_lock(&arm);
+        assert!(held.0.is_some(), "the lock is taken in the checkout root");
+        assert_eq!(commit_paths(&arm, &["kconfig"], "arm update"), PathCommit::Made);
+
+        let cwd = arm.display().to_string();
+        assert!(
+            gate_push(
+                None,
+                "git push --force-with-lease origin feature/arm",
+                Some(&cwd)
+            )
+            .is_none(),
+            "a lease push onto a feature branch in target/arm is ordinary"
+        );
+    }
+
+    /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout keeps its lock and push
+    /// semantics. `git -C` in that worktree must still see the configured repo.
+    #[test]
+    fn a_dotfiles_git_dir_checkout_keeps_locks_and_lease_pushes() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("dotfiles.git");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "bare init: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .env("GIT_DIR", &bare)
+                .env("GIT_WORK_TREE", &home)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["config", "user.email", "seat@example.invalid"]);
+        git(&["config", "user.name", "seat"]);
+        std::fs::write(home.join(".vimrc"), "set number\n").unwrap();
+        git(&["add", ".vimrc"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        git(&["checkout", "-q", "-b", "feature/dots"]);
+        std::fs::write(home.join(".vimrc"), "set number\nset list\n").unwrap();
+
+        std::env::set_var("GIT_DIR", &bare);
+        std::env::set_var("GIT_WORK_TREE", &home);
+        let lock_path = super::tracker_lock_path(&home).expect("GIT_DIR checkout stays visible");
+        assert_eq!(lock_path, home.join(TRACKER_LOCK));
+        let held = tracker_commit_lock(&home);
+        assert!(held.0.is_some(), "dotfiles checkout still locks");
+        assert_eq!(commit_paths(&home, &[".vimrc"], "dot update"), PathCommit::Made);
+        let cwd = home.display().to_string();
+        assert!(
+            gate_push(
+                None,
+                "git push --force-with-lease origin feature/dots",
+                Some(&cwd)
+            )
+            .is_none(),
+            "a feature lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
+        );
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+    }
+
     /// Paths HEAD already holds, as another seat's commit leaves them, are
     /// not a refusal: git's "nothing to commit" came back as `On branch
     /// master`.

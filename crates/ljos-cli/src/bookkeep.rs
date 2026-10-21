@@ -5542,8 +5542,8 @@ mod tests {
         // git_toplevel looks git up with which(), so this holds the same
         // lock as the other PATH readers.
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-place-test");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-place-test");
         let repo = root.join("repo");
         let other = root.join("other");
         let plain = root.join("plain");
@@ -5575,7 +5575,6 @@ mod tests {
             place_for_claim_in(None, None, Some(&repo)).as_deref(),
             Some(top.as_str())
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -5583,8 +5582,8 @@ mod tests {
         // The remote lookup runs git through which(), so this holds the
         // same lock as the other PATH readers.
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-project-test");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-project-test");
         let tracker = root.join("tracker");
         let repo = root.join("workspace");
         std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
@@ -5617,7 +5616,6 @@ mod tests {
             "bare",
             "no remote and more than one project uses the basename"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A clone in a folder named for the job (`bench-w18b-tfn7`) files on
@@ -5626,8 +5624,8 @@ mod tests {
     #[test]
     fn a_clone_folder_is_not_the_project_when_origin_names_the_repo() {
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-clone-folder");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-clone-folder");
         let tracker = root.join("tracker");
         std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
         std::fs::write(tracker.join("Software/ljos/issues.org"), "* TODO ljos\n").unwrap();
@@ -5698,7 +5696,30 @@ mod tests {
         ] {
             assert_eq!(remote_repo_name(url).as_deref(), name, "{url}");
         }
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A checkout that really tracks `target/arm` is still that checkout.
+    /// The row key and saved prompt repository must stay on the repo root.
+    #[test]
+    fn a_real_target_subtree_keeps_the_checkout_root() {
+        let _g = lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("qemu");
+        let arm = root.join("target/arm");
+        std::fs::create_dir_all(&arm).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        std::fs::write(arm.join("cpu.c"), "int cpu(void) { return 0; }\n").unwrap();
+        git(&root, &["add", "target/arm/cpu.c"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+
+        let root_s = root.canonicalize().unwrap().display().to_string();
+        assert_eq!(git_toplevel(&arm).as_deref(), Some(root_s.as_str()));
+
+        let mut book = Book::default();
+        let raw = serde_json::json!({"cwd": arm.display().to_string()});
+        assert_eq!(repo_key(&mut book, &raw), root_s);
     }
 
     /// A job folder such as `ljos-rohit-main-audit` is not the project.
@@ -5721,8 +5742,8 @@ mod tests {
             "GIT_DIR",
             "GIT_WORK_TREE",
         ]);
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-job-folder");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-job-folder");
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("git"), "#!/bin/sh\nexit 1\n").unwrap();
@@ -5882,7 +5903,6 @@ mod tests {
             normalize_remote("example.com/user@host/repo"),
             "example.com/user@host/repo"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A URL in a project's notes is not its remote. promo's board mentions
@@ -5893,8 +5913,8 @@ mod tests {
         // The remote lookup runs git through which(), so this holds the
         // same lock as the other PATH readers.
         let _g = lock();
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ljos-decoy-remote");
-        let _ = std::fs::remove_dir_all(&root);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ljos-decoy-remote");
         let tracker = root.join("tracker");
         let repo = root.join("workspace");
         std::fs::create_dir_all(tracker.join("Software/ljos")).unwrap();
@@ -5936,7 +5956,6 @@ mod tests {
             "atlas",
             "the recorded remote lost to a note"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn git(dir: &Path, args: &[&str]) {
