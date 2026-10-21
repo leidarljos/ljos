@@ -2,6 +2,7 @@
 //! stand in for two cloud VMs. Nothing here talks to GitHub.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -526,6 +527,196 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
         before,
         "a second cloud up rewrote cloud guard rules"
     );
+}
+
+#[test]
+fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    std::env::remove_var("LJOS_CLOUD_AGE_SECRET");
+    std::env::remove_var("LJOS_CLOUD_AGE_KEY");
+
+    let bare = ljos_cli::cloud::up(false).unwrap();
+    assert!(bare.contains("LJOS_CLOUD_AGE_SECRET is unset"), "{bare}");
+    let path = ljos_cli::sync::cloud_identity_path();
+    assert!(
+        path.starts_with(&home),
+        "identity left the test home: {}",
+        path.display()
+    );
+    assert!(
+        !path.exists(),
+        "an unset secret still wrote {}",
+        path.display()
+    );
+    let unset = ljos_cli::cloud::cloud_age_row();
+    assert_eq!(ljos_cli::doctor_word(&unset), "info");
+    assert!(ljos_cli::failing(std::slice::from_ref(&unset)).is_empty());
+
+    let made = Command::new("age-keygen")
+        .arg("-o")
+        .arg(root.path().join("id.txt"))
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "age-keygen must be installed: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let identity = fs::read_to_string(root.path().join("id.txt")).unwrap();
+    let secret_line = identity
+        .lines()
+        .find(|line| line.starts_with("AGE-SECRET-KEY-"))
+        .unwrap()
+        .to_string();
+    let public = Command::new("age-keygen")
+        .arg("-y")
+        .arg(root.path().join("id.txt"))
+        .output()
+        .unwrap();
+    assert!(public.status.success());
+    let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+
+    std::env::set_var("LJOS_CLOUD_AGE_SECRET", &identity);
+    let pasted = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(pasted.contains("holds an age identity"), "{pasted}");
+    assert!(!pasted.contains(&secret_line), "{pasted}");
+    assert!(!path.exists());
+
+    std::env::set_var("LJOS_CLOUD_AGE_SECRET", "LJOS_CLOUD_AGE_KEY");
+    let missing = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(missing.contains("LJOS_CLOUD_AGE_KEY is unset"), "{missing}");
+    let row = ljos_cli::cloud::cloud_age_row();
+    assert!(!row.ok, "{row:?}");
+    assert_eq!(ljos_cli::doctor_word(&row), "no");
+    assert!(row.state.contains("LJOS_CLOUD_AGE_KEY"), "{row:?}");
+    assert!(!row.state.contains(&secret_line), "{row:?}");
+    assert_eq!(
+        ljos_cli::failing(std::slice::from_ref(&row)),
+        vec!["cloud age"]
+    );
+
+    std::env::set_var("LJOS_CLOUD_AGE_KEY", "nope");
+    let bad = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(bad.contains("is not an age identity"), "{bad}");
+    assert!(!path.exists());
+
+    let outside = root.path().join("outside");
+    fs::write(&outside, b"keep\n").unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    std::env::set_var("LJOS_CLOUD_AGE_KEY", &identity);
+    let wrote = ljos_cli::cloud::up(false).unwrap();
+    assert!(wrote.contains("wrote"), "{wrote}");
+    assert!(wrote.contains("0600"), "{wrote}");
+    assert!(!wrote.contains(&secret_line), "{wrote}");
+    assert_eq!(fs::read(&outside).unwrap(), b"keep\n");
+    let meta = fs::symlink_metadata(&path).unwrap();
+    assert!(meta.file_type().is_file(), "the symlink was followed");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    let stored = fs::read_to_string(&path).unwrap();
+    assert!(stored.contains(&secret_line));
+    assert!(!home.join(".config/ljos/age.key").exists());
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(!env.contains("AGE-SECRET-KEY-"), "{env}");
+    assert!(!mcp.contains("AGE-SECRET-KEY-"), "{mcp}");
+    assert!(!env.contains("cloud.age"), "{env}");
+
+    let sealed = root.path().join("msg.age");
+    let mut child = Command::new("age")
+        .args(["-r", &public, "-o"])
+        .arg(&sealed)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"scope cloud\n")
+        .unwrap();
+    let done = child.wait_with_output().unwrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let opened = Command::new("age")
+        .args(["-d", "-i"])
+        .arg(&path)
+        .arg(&sealed)
+        .output()
+        .unwrap();
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_eq!(opened.stdout, b"scope cloud\n");
+
+    let good = ljos_cli::cloud::cloud_age_row();
+    assert!(good.ok, "{good:?}");
+    assert_eq!(ljos_cli::doctor_word(&good), "ok");
+    assert!(good.state.contains("0600"), "{good:?}");
+    assert!(!good.state.contains(&secret_line), "{good:?}");
+    assert!(ljos_cli::failing(&[good]).is_empty());
+
+    let bytes = fs::read(&path).unwrap();
+    let again = ljos_cli::cloud::up(false).unwrap();
+    assert!(again.contains("already holds"), "{again}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let loose = ljos_cli::cloud::cloud_age_row();
+    assert!(!loose.ok, "{loose:?}");
+    assert_eq!(ljos_cli::doctor_word(&loose), "no");
+    assert!(loose.state.contains("0644"), "{loose:?}");
+    assert_eq!(ljos_cli::failing(&[loose]), vec!["cloud age"]);
+    let fixed = ljos_cli::cloud::up(false).unwrap();
+    assert!(fixed.contains("mode 0600"), "{fixed}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    std::env::set_var("LJOS_CLOUD_AGE_KEY", "nope");
+    let refused = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(refused.contains("is not an age identity"), "{refused}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    std::env::remove_var("LJOS_CLOUD_AGE_SECRET");
+    std::env::remove_var("LJOS_CLOUD_AGE_KEY");
+    let left = ljos_cli::cloud::up(false).unwrap();
+    assert!(left.contains("is unset"), "{left}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let still = ljos_cli::cloud::cloud_age_row();
+    assert!(still.ok, "{still:?}");
+    assert_eq!(ljos_cli::doctor_word(&still), "ok");
 }
 
 #[test]
