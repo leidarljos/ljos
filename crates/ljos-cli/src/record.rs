@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -523,11 +524,104 @@ fn signing_payload(unsigned: &UnsignedEntry) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
+struct NoDuplicateKeys(Value);
+
+impl<'de> Deserialize<'de> for NoDuplicateKeys {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ValueVisitor;
+
+        impl<'de> Visitor<'de> for ValueVisitor {
+            type Value = Value;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> std::result::Result<Value, E> {
+                Ok(Value::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> std::result::Result<Value, E>
+            where
+                E: de::Error,
+            {
+                let number = serde_json::Number::from_f64(value)
+                    .ok_or_else(|| E::custom("JSON number is not finite"))?;
+                Ok(Value::Number(number))
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Value, E> {
+                Ok(Value::String(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Value, E> {
+                Ok(Value::String(value))
+            }
+
+            fn visit_none<E>(self) -> std::result::Result<Value, E> {
+                Ok(Value::Null)
+            }
+
+            fn visit_unit<E>(self) -> std::result::Result<Value, E> {
+                Ok(Value::Null)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut items = Vec::new();
+                while let Some(value) = seq.next_element::<NoDuplicateKeys>()? {
+                    items.push(value.0);
+                }
+                Ok(Value::Array(items))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut out = serde_json::Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if out.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate key `{key}`")));
+                    }
+                    let value = map.next_value::<NoDuplicateKeys>()?;
+                    out.insert(key, value.0);
+                }
+                Ok(Value::Object(out))
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor).map(Self)
+    }
+}
+
+fn parse_json_without_duplicate_keys(raw: &str) -> Result<Value> {
+    let mut de = serde_json::Deserializer::from_str(raw);
+    let value = NoDuplicateKeys::deserialize(&mut de)
+        .map(|value| value.0)
+        .context("record entry is not JSON")?;
+    de.end().context("record entry is not JSON")?;
+    Ok(value)
+}
+
 /// Parse one record file. Unknown keys are not dropped before the reserved
 /// name walk, and the canonical bytes without `signature` must be the typed
 /// entry. A field added after signing then fails instead of riding along.
 fn parse_signed_json(raw: &str) -> Result<SignedEntry> {
-    let value: Value = serde_json::from_str(raw).context("record entry is not JSON")?;
+    let value = parse_json_without_duplicate_keys(raw)?;
     reject_reserved_plain_fields(&value)?;
     let entry: SignedEntry =
         serde_json::from_value(value.clone()).context("record entry does not match schema v1")?;
@@ -1096,6 +1190,36 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_json_keys_are_refused() {
+        let _home = test_home();
+        let signed = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            8,
+        );
+        let text = serde_json::to_string(&signed).expect("json");
+
+        let dup_stance =
+            text.replacen("\"stance\":\"accept\",", "\"stance\":\"accept\",\"stance\":\"accept\",", 1);
+        assert_ne!(dup_stance, text, "duplicate stance fixture");
+        let err = check_raw(&dup_stance).expect_err("duplicate stance");
+        assert!(
+            err_chain(&err).contains("duplicate key `stance`"),
+            "duplicate stance was not refused as duplicate: {}",
+            err_chain(&err)
+        );
+
+        let sig = format!("\"sig\":\"{}\"", signed.signature.sig);
+        let dup_sig = text.replacen(&sig, &format!("{sig},{sig}"), 1);
+        assert_ne!(dup_sig, text, "duplicate signature fixture");
+        let err = check_raw(&dup_sig).expect_err("duplicate signature");
+        assert!(
+            err_chain(&err).contains("duplicate key `sig`"),
+            "duplicate signature key was not refused as duplicate: {}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
     fn a_pin_file_rejects_a_different_run_key() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
@@ -1124,6 +1248,12 @@ mod tests {
             serde_json::to_vec(value).expect("json"),
         )
         .expect("write");
+        check_dir(dir.path())
+    }
+
+    fn check_raw(raw: &str) -> anyhow::Result<CheckReport> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("entry.json"), raw).expect("write");
         check_dir(dir.path())
     }
 }
