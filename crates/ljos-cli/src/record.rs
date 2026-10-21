@@ -902,6 +902,24 @@ mod tests {
     }
 
     #[test]
+    fn each_voter_signs_with_its_own_key_file() {
+        let _home = test_home();
+        let at = "2026-10-21T10:00:00Z";
+        let one = sign_entry(ballot_entry("a/b_c", "accept", at), "a/b_c").expect("a/b_c");
+        let two = sign_entry(ballot_entry("a_b/c", "accept", at), "a_b/c").expect("a_b/c");
+        assert_ne!(
+            one.signature.key, two.signature.key,
+            "a/b_c and a_b/c signed with one key file"
+        );
+        let names = ["a/b_c", "a_b/c", "a_b_c", "a:b_c", "a%2fb_c", "", ".", ".."];
+        let files: BTreeSet<PathBuf> = names
+            .iter()
+            .map(|name| crate::ballot_sig::seat_key_file(name).expect("path"))
+            .collect();
+        assert_eq!(files.len(), names.len(), "{files:?}");
+    }
+
+    #[test]
     fn sign_entry_refuses_a_signer_not_named_on_the_entry() {
         let _home = test_home();
         let err = sign_entry(
