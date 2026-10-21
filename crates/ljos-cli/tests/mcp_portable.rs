@@ -282,6 +282,12 @@ fn onboard_writes_an_absolute_command_when_path_cannot_find_ljos_mcp() {
         pasted["mcpServers"]["ljos"]["command"],
         bin.join("ljos-mcp").display().to_string()
     );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("PATH does not resolve ljos-mcp"),
+        "stderr: {err}\nstdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 #[test]

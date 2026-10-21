@@ -1282,6 +1282,11 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 pub fn server_entry() -> Result<Value> {
     let server = server_path()?;
     let plan = server_command_plan(&server, "onboard");
+    // `--harness json` prints this value alone on stdout so it parses.
+    // The reason for an absolute path goes to stderr.
+    if let Some(note) = &plan.note {
+        eprintln!("{note}");
+    }
     Ok(serde_json::json!({
         "mcpServers": {
             "ljos": {
