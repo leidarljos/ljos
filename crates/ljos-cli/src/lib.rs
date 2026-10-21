@@ -11539,10 +11539,12 @@ pub fn mcp_claim_atom(
     Ok(atom)
 }
 
-/// Write a claim an agent hands over through MCP. Words from the person's
-/// latest prompt are written as theirs; any other claim is the agent's,
-/// written at once like [`packset_write_agent`], and `ljos memories review`
-/// prunes it later.
+/// Write an MCP `remember` or `prefer` only when it is the person's own
+/// words from their latest prompt.
+///
+/// A claim read in a file, a tool's output or a web page is not the
+/// person's words and is refused here; the caller should record it with
+/// `ljos_note` as the agent's own working note.
 ///
 /// # Errors
 ///
@@ -11554,25 +11556,27 @@ pub fn packset_write_mcp(
     transient: Option<bool>,
 ) -> Result<Value> {
     let basis = Basis::of(text);
-    let kind = atom_kind(label)?;
-    let prefix = format!("{label}: POST /v1/atoms failed");
-    let client = if basis == Basis::Agent {
-        client_or_queue(&prefix, kind, text.trim(), "")?
-    } else {
-        pack()?
-    };
-    let atom = mcp_claim_atom(label, text, &client.workspace(), persona, transient, basis)?;
-    match basis {
-        Basis::Person => {
-            let posted = with_writer(|| {
-                admit::post_kept(&client, &atom)
-                    .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
-            })?;
-            admit::satisfy_text(text.trim());
-            Ok(posted)
-        }
-        Basis::Agent => store_agent_atom(&client, atom, &prefix),
+    let _ = atom_kind(label)?;
+    if basis == Basis::Agent {
+        bail!(
+            "{label}: the text is not in the person's latest prompt; call ljos_note for your own working note"
+        );
     }
+    let client = pack()?;
+    let atom = mcp_claim_atom(
+        label,
+        text,
+        &client.workspace(),
+        persona,
+        transient,
+        Basis::Person,
+    )?;
+    let posted = with_writer(|| {
+        admit::post_kept(&client, &atom)
+            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
+    })?;
+    admit::satisfy_text(text.trim());
+    Ok(posted)
 }
 
 /// [`packset_write_agent`] for a sitting's lesson. `text` is the gated
@@ -41806,12 +41810,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(note.contains("always use bun, never yarn"), "{note}");
     }
 
-    /// An MCP write of the person's words from their latest prompt is
-    /// theirs: origin `user-declared`, standing, `via:prompt` and basis
-    /// `person`. A claim the agent read in a file is its own, whatever it
-    /// says about who said it, and so is a preference it wrote itself.
+    /// An MCP `remember` or `prefer` writes only the person's words from the
+    /// latest prompt. Any other text is refused and should be a note.
     #[test]
-    fn an_mcp_write_keeps_whose_words_it_holds() {
+    fn an_mcp_write_keeps_only_the_persons_words() {
         let _env = env_guard();
         let state = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
@@ -41833,26 +41835,21 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(Basis::of(person), Basis::Person);
         assert_eq!(Basis::of(read), Basis::Agent);
         packset_write_mcp("Remember", person, None, None).unwrap();
-        packset_write_mcp("Remember", read, None, Some(false)).unwrap();
-        packset_write_mcp("Prefer", rule, None, Some(false)).unwrap();
+        let read_err = packset_write_mcp("Remember", read, None, Some(false)).unwrap_err();
+        let read_top = format!("{read_err:#}");
+        assert!(read_top.contains("call ljos_note"), "{read_top}");
+        let rule_err = packset_write_mcp("Prefer", rule, None, Some(false)).unwrap_err();
+        let rule_top = format!("{rule_err:#}");
+        assert!(rule_top.contains("call ljos_note"), "{rule_top}");
         let live = stored.lock().unwrap().clone();
-        assert_eq!(live.len(), 3, "{live:?}");
-        let tags = |i: usize| live[i]["entities"].to_string();
+        assert_eq!(live.len(), 1, "{live:?}");
+        let tags = live[0]["entities"].to_string();
 
         assert_eq!(live[0]["text"], person);
         assert_eq!(live[0]["origin"], "user-declared");
         assert_eq!(live[0]["source"]["basis"], "person");
-        assert!(tags(0).contains(SAID_ENTITY), "{}", tags(0));
-        assert!(tags(0).contains("horizon:standing"), "{}", tags(0));
-
-        assert_eq!(live[1]["origin"], "agent-derived");
-        assert_eq!(live[1]["source"]["basis"], "agent");
-        assert!(!tags(1).contains(SAID_ENTITY), "{}", tags(1));
-
-        assert_eq!(live[2]["kind"], "preference");
-        assert_eq!(live[2]["origin"], "agent-derived");
-        assert_eq!(live[2]["source"]["basis"], "agent");
-        assert!(!tags(2).contains(SAID_ENTITY), "{}", tags(2));
+        assert!(tags.contains(SAID_ENTITY), "{tags}");
+        assert!(tags.contains("horizon:standing"), "{tags}");
     }
 
     /// Without a kept prompt nothing is the person's: an agent's lesson
