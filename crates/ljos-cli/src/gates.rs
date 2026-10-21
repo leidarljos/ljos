@@ -3063,6 +3063,25 @@ esac
         assert_denies(&refuse, "git commit -m TEXT");
     }
 
+    /// The detail a gate adds after the rule's reason is its own sentence,
+    /// in the verdict and in every harness's answer.
+    #[test]
+    fn a_refusal_puts_a_full_stop_before_its_detail() {
+        let dir = repo();
+        let line = "git commit -m \"Co-authored-by: Cursor <cursoragent@cursor.com>\"";
+        let rule = guard_verdict(line, Some(dir.path()), &[]).expect("a trailer is refused");
+        assert!(
+            rule.reason
+                .contains("`git commit -m TEXT`. Remove Co-authored-by from the message"),
+            "{}",
+            rule.reason
+        );
+        assert_denies(
+            &answers(line, dir.path(), &[]),
+            "`git commit -m TEXT`. Remove Co-authored-by",
+        );
+    }
+
     /// `git commit --amend --no-edit` keeps the last message, so it runs in
     /// a stock seat: in a repository with no commit yet (git refuses it
     /// there itself) and after one. New text still goes through the gate:
