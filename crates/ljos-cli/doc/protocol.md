@@ -142,8 +142,10 @@ pushes this machine's. `ljos sync --key` prints this machine's public key
 for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
 A repository with no `.ljos/sync.toml` is not synced, and the sitting and
 finish say nothing about it; only `ljos sync` names the missing file.
-The sitting and finish follow `LJOS_TRACKER_GIT`: `commit` commits the log
-and pushes nothing, and `off` leaves the tracker alone. `ljos sync` by hand
+The sitting and finish follow `LJOS_TRACKER_GIT`: `push` commits, rebases
+with the per-issue field merge, and pushes; `commit` commits the log and
+pushes nothing; `off` leaves the tracker alone. A push that fails stays
+queued for the next write and the end of the session. `ljos sync` by hand
 always pulls and pushes. An
 atom goes to the scope its `scope:NAME` entity names, else the machine's
 `default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
@@ -408,11 +410,11 @@ Whatever the outcome, the claim and the finish commit the ticket when the
 tracker is a git checkout. `sitting` commits after its claim and `finish` at the end of the work.
 Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a
 `tracker git:` line. A claim or a closure that stays in one
-working tree does not exist for any other host. `LJOS_TRACKER_GIT=commit`
-keeps it local; `=off` skips it. A refused push is reported, not raised:
-push the tracker yourself before you leave. `ljos doctor` names how many
-commits origin lacks, and fails the tracker row when that count sits
-through the push wait; a leftover refused-push log is named on the row.
+working tree does not exist for any other host. `LJOS_TRACKER_GIT=push`
+commits, rebases with the per-issue field merge, and pushes, and never
+forces. A failed push stays queued. `=commit` keeps it local; `=off` skips
+it. `ljos doctor` warns while commits are still unpushed, and a leftover
+refused-push log is named on the row.
 
 `ljos handover --out DIR --issue ISSUE [--to user@host:path]` is a separate
 verb for when another seat takes over. The receiver runs `ljos receive DIR`,

@@ -23,6 +23,13 @@
 #                   for each repository to hold
 #   --attest        refuse a tarball whose GitHub build attestation is
 #                   missing or does not verify
+#   --cloud         install the binaries, skip onboarding and the encoder,
+#                   then run `ljos cloud up` (clone LJOS_TRACKER_REMOTE,
+#                   write the harness MCP command). Idempotent: when the
+#                   binaries are already installed and `ljos cloud up`
+#                   answers, that command is all that runs
+#   --force         with --cloud, download again instead of reusing the
+#                   binaries already in --bin-dir
 #   --help          this text
 #
 # The checksum guards against a broken or truncated download. It comes
@@ -49,6 +56,8 @@ ONBOARD=1
 OWNER=leidarljos
 PINS=
 ATTEST=0
+CLOUD=0
+FORCE=0
 
 say() { printf '%s\n' "$*"; }
 warn() { printf '  warning: %s\n' "$*"; }
@@ -70,6 +79,8 @@ while [ $# -gt 0 ]; do
     --pin) [ $# -ge 2 ] || die "--pin needs REPO=VER"; PINS="$PINS $2"; shift 2 ;;
     --pin=*) PINS="$PINS ${1#--pin=}"; shift ;;
     --attest) ATTEST=1; shift ;;
+    --cloud) CLOUD=1; ONBOARD=0; WITH_EMBED=0; shift ;;
+    --force) FORCE=1; shift ;;
     --help|-h) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
   esac
@@ -92,6 +103,14 @@ for pin in $PINS; do
   printf '%s' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
     die "${pin%%=*}: $ver is not a version such as 0.29.0"
 done
+
+# The binaries are already here and this ljos knows `cloud up`. Skip the
+# download. A later boot only refreshes the tracker clone and the MCP path.
+if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ -z "$FROM_DIR" ] \
+  && [ -x "$BIN_DIR/ljos" ] && [ -x "$BIN_DIR/ljos-mcp" ] && [ -x "$BIN_DIR/ljos-policyd" ] \
+  && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
+  exec "$BIN_DIR/ljos" cloud up
+fi
 
 START=$(date +%s)
 
@@ -124,6 +143,20 @@ esac
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ljos-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p "$BIN_DIR"
+
+# A release published before `cloud up` exists cannot bootstrap itself.
+# This script, run from the ljos tree, builds that command from the tree
+# and the download below leaves the new binary in place.
+if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ -z "$FROM_DIR" ]; then
+  if ! { [ -x "$BIN_DIR/ljos" ] && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; }; then
+    script_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+    if [ -f "$script_root/crates/ljos-cli/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+      say "Building ljos from this tree so cloud up is available"
+      cargo install --locked --force --path "$script_root/crates/ljos-cli" \
+        --root "$(CDPATH= cd -- "$(dirname "$BIN_DIR")" && pwd)"
+    fi
+  fi
+fi
 
 # repository, crate, tarball style, programs
 COMPONENTS="ljos ljos v ljos,ljos-mcp
@@ -334,6 +367,11 @@ done
 
 say "Installing ljos into $BIN_DIR ($TARGET)"
 printf '%s\n' "$COMPONENTS" | while read -r repo crate style progs; do
+  if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ "$repo" = ljos ] && [ -x "$BIN_DIR/ljos" ] \
+    && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
+    say "  ljos already provides cloud up; left in place"
+    continue
+  fi
   if [ "$repo" = packset ] && [ "$WITH_EMBED" = 1 ]; then
     progs="$progs,packset-embed"
   fi
@@ -443,4 +481,11 @@ case "$(cd "$HOME" && pwd -P)/" in
 esac
 say "The guard asks before a force push:"
 ljos policy -- git push --force origin main || true
+if [ "$CLOUD" = 1 ]; then
+  if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
+    "$BIN_DIR/ljos" cloud up
+  else
+    die "$BIN_DIR/ljos has no cloud up. Run scripts/install.sh from the ljos tree, or a release that includes it."
+  fi
+fi
 say "Done in $(( $(date +%s) - START )) s. Next: \`ljos doctor\`."

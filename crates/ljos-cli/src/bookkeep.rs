@@ -551,6 +551,10 @@ pub fn mcp_shutdown() {
         Err(e) => log_line(&format!("sync: {e:#}")),
         Ok(_) => {}
     }
+    let drained = super::drain_tracker_pushes();
+    if !drained.trim().is_empty() {
+        log_line(drained.trim());
+    }
 }
 
 /// Note that a tool ran, so the idle watcher waits another window.

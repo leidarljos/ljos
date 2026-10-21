@@ -1,0 +1,70 @@
+# A fresh machine
+
+`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`. It checks the SHA-256 sums, writes `~/.cursor/mcp.json` so the command is that `ljos-mcp`, and clones `LJOS_TRACKER_REMOTE`. Run it again and it only refreshes the clone and the MCP path.
+
+`sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
+
+## Environment
+
+`LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on.
+
+`LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not push. `off` skips the commit.
+
+`LJOS_SEAT` is the seat name. `ljos cloud up` appends the run id when one is present, at most 16 characters. On GitHub Actions that id is `GITHUB_RUN_ID`. Otherwise it is `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID`, `AGENT_ID`, `CURSOR_CONVERSATION_ID`, or `CODESPACE_NAME`. `LJOS_SEAT=ridley-ci-a` with run `555001` is the seat `ridley-ci-a-555001`. Unset, the seat is the harness name and that id, or the machine name when there is no id. A seat left in `~/.config/ljos/env` by an earlier boot does not hide a new id.
+
+Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SEAT/ballot.key`. `cloud up` points `LJOS_SEAT_KEY` and `DEEDAR_HOST_SIGNING_KEY` at that file, and writes `VISSUE_AGENT` as the same seat. The machine key `~/.config/deedar/host.key` stays where it is. A later process on that machine does not sign a ballot or a handover that already has a signature.
+
+`LJOS_TRACKER_DIR` is the clone. The default is `~/.local/share/ljos/tracker`. `LJOS_BIN_DIR` is the binary directory. The default is `~/.local/bin`. `LJOS_RELEASE_DIR` is an offline directory of binaries and a `SHA256SUMS` file. `LJOS_TRACKER_PUSH_WAIT` is how many seconds `ljos doctor` waits before an unpushed commit counts as stuck. The default is 5.
+
+`ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that is not a file on this machine fails the `mcp` row.
+
+A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when `ljos cloud up` or a sitting runs under `LJOS_TRACKER_GIT=push`. The release is pushed with the other tracker writes. A claim this machine still holds is kept.
+
+## A job step
+
+A GitHub Actions job, including a self-hosted ephemeral runner, uses the same bootstrap as a cloud agent. The job environment sets the stable seat name and the tracker URL. `GITHUB_RUN_ID` is already set. After `cloud up`, `~/.config/ljos/env` holds the suffixed seat. `vissue` reads the process environment, so that file is sourced before the vote. `ljos note` signs the ballot this seat cast and pushes the issue.
+
+```yaml
+- name: Seat on the shared tracker
+  env:
+    LJOS_SEAT: ridley-ci-a
+    LJOS_TRACKER_REMOTE: ${{ secrets.LJOS_TRACKER_REMOTE }}
+  run: |
+    curl -fsSL -o /tmp/ljos-install.sh https://github.com/leidarljos/ljos/releases/latest/download/install.sh
+    sh /tmp/ljos-install.sh --cloud
+    set -a
+    . "$HOME/.config/ljos/env"
+    set +a
+    vissue vote ISSUE --for ship --confidence 0.8 --used none
+    ljos note ISSUE "the job result"
+```
+
+On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
+
+## Cloud agent environment
+
+`install` runs once, on the image build. `start` runs on every boot. The harness can sync an MCP config from another machine over the file `install` wrote, and the tracker clone has to be fetched again, so `start` runs `ljos cloud up` as well. Nothing waits on `start`.
+
+This repository:
+
+```json
+{
+  "name": "ljos",
+  "install": "sh scripts/install.sh --cloud",
+  "start": "\"$HOME/.local/bin/ljos\" cloud up"
+}
+```
+
+Another repository, once a release contains `cloud up`:
+
+```json
+{
+  "name": "ljos",
+  "install": "curl -fsSL -o /tmp/ljos-install.sh https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh /tmp/ljos-install.sh --cloud",
+  "start": "\"$HOME/.local/bin/ljos\" cloud up"
+}
+```
+
+Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
+
+A private clone through the machine's credential helper, the MCP process starting after a synced config is rewritten, a claim from the machine landing on the shared tracker, and a `STARTED` claim from a machine that is gone being released after the lease, are what a boot of that machine still has to show.

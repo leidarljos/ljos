@@ -213,6 +213,16 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
 }
 
 #[derive(Subcommand)]
+enum CloudCmd {
+    /// Install the release binaries, write the harness MCP command, and clone `LJOS_TRACKER_REMOTE`.
+    Up {
+        /// Download the release again.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
     Remember {
@@ -341,6 +351,22 @@ enum Cmd {
         current: PathBuf,
         /// The path in the tracker (`%P`).
         path: String,
+    },
+    /// Field-merge one issue org file. git calls this as the `ljos-org`
+    /// merge driver (`%O` `%A` `%B`). The merged text replaces `ours`.
+    #[command(hide = true)]
+    MergeOrg {
+        /// The common ancestor (`%O`).
+        base: PathBuf,
+        /// The file git keeps (`%A`).
+        ours: PathBuf,
+        /// The other side (`%B`).
+        theirs: PathBuf,
+    },
+    /// Put this machine on the shared tracker.
+    Cloud {
+        #[command(subcommand)]
+        cmd: CloudCmd,
     },
     /// What this seat's memory turns on: the claims most linked to, by a weighted PageRank over the pack's links.
     Hubs {
@@ -1182,6 +1208,7 @@ fn main() -> Result<()> {
 }
 
 fn run_command() -> Result<()> {
+    ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
@@ -1394,6 +1421,12 @@ fn run_command() -> Result<()> {
         Cmd::MergeAtoms { current, path } => {
             ljos_cli::merge_atoms(&current, &path)?;
         }
+        Cmd::MergeOrg { base, ours, theirs } => {
+            ljos_cli::cloud::merge_org_cli(&base, &ours, &theirs)?;
+        }
+        Cmd::Cloud { cmd } => match cmd {
+            CloudCmd::Up { force } => print!("{}", ljos_cli::cloud::up(force)?),
+        },
         Cmd::Sync {
             key,
             import,
@@ -1640,6 +1673,10 @@ fn run_command() -> Result<()> {
             }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
+            }
+            match ljos_cli::ballot_sig::sign_own_ballot(&issue) {
+                Ok(line) => print!("{line}"),
+                Err(e) => eprintln!("ljos note: {e:#}"),
             }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
@@ -2309,6 +2346,7 @@ fn run_command() -> Result<()> {
                 // Finish or release after extract. A bookkeeping error stays
                 // off the answer: this event has nothing to say.
                 let _ = ljos_cli::bookkeep::observe(&input, &call);
+                let _ = ljos_cli::drain_tracker_pushes();
                 return Ok(());
             }
             // On a tool call the pack's rules give a verdict; on a prompt

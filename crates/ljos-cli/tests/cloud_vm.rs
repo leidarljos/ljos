@@ -1,0 +1,903 @@
+//! A fresh machine shares one tracker. Two clones of a local bare remote
+//! stand in for two cloud VMs. Nothing here talks to GitHub.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+static ENV: Mutex<()> = Mutex::new(());
+
+struct Guard {
+    saved: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Guard {
+    fn new() -> Self {
+        let lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::vars_os().collect();
+        Self { saved, _lock: lock }
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let keep: Vec<_> = self.saved.iter().map(|(k, _)| k.clone()).collect();
+        for (k, _) in std::env::vars_os() {
+            if !keep.iter().any(|have| have == &k) {
+                std::env::remove_var(&k);
+            }
+        }
+        for (k, v) in &self.saved {
+            std::env::set_var(k, v);
+        }
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn identity(dir: &Path) {
+    let hooks = dir.join("no-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    for (key, value) in [
+        ("user.email", "seat@example.invalid"),
+        ("user.name", "seat"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(dir, &["config", key, value]);
+    }
+    git(dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+}
+
+fn isolate_git(root: &Path) {
+    let cfg = root.join("gitconfig");
+    fs::write(&cfg, b"").unwrap();
+    std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
+    std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
+    std::env::set_var("GIT_TERMINAL_PROMPT", "0");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+}
+
+fn issue_block(id: &str, state: &str, props: &str, notes: &[&str]) -> String {
+    let mut s = format!("* {state} [#A] Work on {id}\n:PROPERTIES:\n:ID:       {id}\n");
+    if !props.is_empty() {
+        s.push_str(props);
+        if !props.ends_with('\n') {
+            s.push('\n');
+        }
+    }
+    s.push_str(":END:\n");
+    if !notes.is_empty() {
+        s.push_str(":LOGBOOK:\n");
+        for note in notes {
+            s.push_str(note);
+            s.push('\n');
+        }
+        s.push_str(":END:\n");
+    }
+    s
+}
+
+fn board(blocks: &[String]) -> String {
+    format!(
+        "#+VISSUE: 1\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n{}",
+        blocks.join("\n")
+    )
+}
+
+fn write_project(repo: &Path, project: &str, body: &str) -> PathBuf {
+    let dir = repo.join("Software").join(project);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("issues.org");
+    fs::write(&path, body).unwrap();
+    path
+}
+
+fn init_bare(root: &Path) -> PathBuf {
+    let origin = root.join("origin.git");
+    git(
+        root,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(&origin, &["config", "receive.denyNonFastForwards", "true"]);
+    origin
+}
+
+fn seed(root: &Path, origin: &Path, body: &str) {
+    let repo = root.join("seed");
+    git(
+        root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    identity(&repo);
+    write_project(&repo, "probe", body);
+    fs::write(
+        repo.join(".gitattributes"),
+        "*.org merge=ljos-org\n.ljos/atoms/* merge=ljos-atoms\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+    git(&repo, &["push", "-q", "-u", "origin", "HEAD"]);
+}
+
+fn clone_of(root: &Path, origin: &Path, name: &str) -> PathBuf {
+    let dest = root.join(name);
+    git(
+        root,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+    );
+    identity(&dest);
+    dest
+}
+
+fn show(origin: &Path, file: &str) -> String {
+    git(origin, &["show", &format!("HEAD:{file}")])
+}
+
+fn state_of(text: &str, id: &str) -> String {
+    let holds = |block: &str| {
+        block.lines().any(|line| {
+            let mut words = line.split_whitespace();
+            words.next() == Some(":ID:") && words.next() == Some(id)
+        })
+    };
+    let mut state = String::new();
+    let mut block = String::new();
+    for line in text.lines() {
+        if line.starts_with("* ") {
+            if holds(&block) {
+                return state;
+            }
+            state = line.split_whitespace().nth(1).unwrap_or("").to_string();
+            block.clear();
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    if holds(&block) {
+        state
+    } else {
+        panic!("missing {id} in {text}")
+    }
+}
+
+fn executable(path: &Path, body: &str) {
+    fs::write(path, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn sha256(path: &Path) -> String {
+    let out = Command::new("sha256sum").arg(path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn sums(dir: &Path, names: &[&str]) -> String {
+    let mut out = String::new();
+    for name in names {
+        out.push_str(&sha256(&dir.join(name)));
+        out.push_str("  ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn a_checksum_mismatch_installs_nothing() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let rel = root.path().join("rel");
+    let bins = root.path().join("bins");
+    fs::create_dir_all(&rel).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\necho ok\n");
+    }
+    let mut listed = sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]);
+    listed = listed.replacen(
+        &sha256(&rel.join("ljos-mcp")),
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        1,
+    );
+    fs::write(rel.join("SHA256SUMS"), listed).unwrap();
+    std::env::set_var("HOME", root.path().join("home"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("LJOS_BIN_DIR", &bins);
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(err.contains("nothing was installed"), "{err}");
+    assert!(
+        !bins.join("ljos").exists(),
+        "a bad sum still copied a binary"
+    );
+    assert!(!bins.join("ljos-mcp").exists());
+}
+
+#[test]
+fn cloud_up_installs_points_the_harness_and_clones() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let origin = init_bare(root.path());
+    seed(
+        root.path(),
+        &origin,
+        &board(&[issue_block(
+            "probe-seed",
+            "TODO",
+            "",
+            &["- Note: \"seed\" [2026-01-01 Thu 00:00]"],
+        )]),
+    );
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    fs::write(home.join(".config/ljos/env"), "LJOS_SEAT=baked-seat\n").unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd", "packsetd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\necho ok\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    let runtime = root.path().join("run");
+    fs::create_dir_all(&runtime).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("LJOS_TRACKER_REMOTE", &origin);
+    std::env::set_var("LJOS_SEAT", "baked-seat");
+    std::env::set_var("CURSOR_AGENT_ID", "abcdef012345");
+    let host_key = home.join(".config/deedar/host.key");
+    fs::create_dir_all(host_key.parent().unwrap()).unwrap();
+    fs::write(&host_key, [9u8; 32]).unwrap();
+    let first = ljos_cli::cloud::up(false).unwrap();
+    assert!(first.contains("checksums match"), "{first}");
+    assert!(first.contains("cursor-abcdef012345"), "{first}");
+    assert!(!first.contains("push queued"), "{first}");
+    let server = home.join(".local/bin/ljos-mcp");
+    assert!(server.is_file(), "ljos-mcp was not installed");
+    assert!(home.join(".local/bin/packsetd").is_file());
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(mcp.contains(&server.display().to_string()), "{mcp}");
+    assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_SEAT=cursor-abcdef012345\n"), "{env}");
+    assert!(env.contains("VISSUE_AGENT=cursor-abcdef012345\n"), "{env}");
+    assert!(env.contains("LJOS_TRACKER_GIT=push\n"), "{env}");
+    assert!(env.contains("VISSUE_ROOT="), "{env}");
+    let signing = env
+        .lines()
+        .find(|line| line.starts_with("DEEDAR_HOST_SIGNING_KEY="))
+        .unwrap_or("");
+    assert!(signing.contains("ballot.key"), "{env}");
+    assert!(!signing.contains("host.key"), "{env}");
+    assert_eq!(fs::read(&host_key).unwrap(), vec![9u8; 32]);
+    let profile = fs::read_to_string(home.join(".profile")).unwrap();
+    assert!(profile.contains(".local/bin"), "{profile}");
+    let tracker = home.join(".local/share/ljos/tracker");
+    assert_eq!(
+        git(&tracker, &["rev-parse", "--is-inside-work-tree"]).trim(),
+        "true"
+    );
+    let second = ljos_cli::cloud::up(false).unwrap();
+    assert!(second.contains("tracker:"), "{second}");
+}
+
+#[test]
+fn two_vms_land_different_issues_and_merge_notes_on_one() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("LJOS_ORG_DRIVER", "false");
+    std::env::set_var("XDG_RUNTIME_DIR", root.path().join("run"));
+    let origin = init_bare(root.path());
+    seed(
+        root.path(),
+        &origin,
+        &board(&[issue_block(
+            "probe-note",
+            "TODO",
+            "",
+            &["- Note: \"base\" [2026-01-01 Thu 00:00]"],
+        )]),
+    );
+
+    let a = clone_of(root.path(), &origin, "vm-a");
+    let b = clone_of(root.path(), &origin, "vm-b");
+    let alpha = write_project(
+        &a,
+        "alpha",
+        &board(&[issue_block("alpha-aaaa", "TODO", "", &[])]),
+    );
+    let beta = write_project(
+        &b,
+        "beta",
+        &board(&[issue_block("beta-bbbb", "TODO", "", &[])]),
+    );
+    let left =
+        std::thread::spawn(move || ljos_cli::persist_tracker_file(&alpha, "alpha-aaaa", "noted"));
+    let right =
+        std::thread::spawn(move || ljos_cli::persist_tracker_file(&beta, "beta-bbbb", "noted"));
+    let left = left.join().unwrap();
+    let right = right.join().unwrap();
+    assert!(left.contains("pushed"), "{left}");
+    assert!(right.contains("pushed"), "{right}");
+    let remote_alpha = show(&origin, "Software/alpha/issues.org");
+    let remote_beta = show(&origin, "Software/beta/issues.org");
+    assert!(
+        remote_alpha.contains(":ID:       alpha-aaaa"),
+        "{remote_alpha}"
+    );
+    assert!(
+        remote_beta.contains(":ID:       beta-bbbb"),
+        "{remote_beta}"
+    );
+
+    let a = clone_of(root.path(), &origin, "vm-c");
+    let b = clone_of(root.path(), &origin, "vm-d");
+    let note_a = a.join("Software/probe/issues.org");
+    let note_b = b.join("Software/probe/issues.org");
+    let add = |path: &Path, line: &str| {
+        let text = fs::read_to_string(path).unwrap();
+        let next = text.replacen(":LOGBOOK:\n", &format!(":LOGBOOK:\n{line}\n"), 1);
+        fs::write(path, next).unwrap();
+    };
+    add(&note_a, "- Note: \"from vm-a only\" [2026-02-01 Sun 01:00]");
+    add(&note_b, "- Note: \"from vm-b only\" [2026-02-01 Sun 02:00]");
+    let left =
+        std::thread::spawn(move || ljos_cli::persist_tracker_file(&note_a, "probe-note", "noted"));
+    let right =
+        std::thread::spawn(move || ljos_cli::persist_tracker_file(&note_b, "probe-note", "noted"));
+    let left = left.join().unwrap();
+    let right = right.join().unwrap();
+    assert!(
+        left.contains("pushed") && right.contains("pushed"),
+        "a: {left}\nb: {right}"
+    );
+    let merged = show(&origin, "Software/probe/issues.org");
+    assert!(merged.contains("from vm-a only"), "{merged}");
+    assert!(merged.contains("from vm-b only"), "{merged}");
+    assert!(merged.contains("base"), "{merged}");
+    assert_eq!(merged.matches("* TODO").count(), 1, "{merged}");
+    assert!(!merged.contains("<<<<<<<"), "{merged}");
+}
+
+#[test]
+fn a_refused_push_stays_queued_until_the_next_drain() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let origin = init_bare(root.path());
+    seed(
+        root.path(),
+        &origin,
+        &board(&[issue_block(
+            "probe-queue",
+            "TODO",
+            "",
+            &["- Note: \"base\" [2026-01-01 Thu 00:00]"],
+        )]),
+    );
+    let hook = origin.join("hooks/pre-receive");
+    executable(&hook, "#!/bin/sh\nexit 1\n");
+    let vm = clone_of(root.path(), &origin, "vm");
+    let issues = vm.join("Software/probe/issues.org");
+    let text = fs::read_to_string(&issues).unwrap();
+    fs::write(
+        &issues,
+        text.replacen(
+            ":LOGBOOK:\n",
+            ":LOGBOOK:\n- Note: \"queued on the vm\" [2026-03-01 Sun 03:00]\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let home = root.path().join("home");
+    let runtime = root.path().join("run");
+    let cache = root.path().join("cache");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    fs::create_dir_all(cache.join("ljos")).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "ljos-consensus",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+        "ljos-hud",
+    ] {
+        fs::write(cache.join("ljos").join(format!("crate-{name}")), "9.9.9\n").unwrap();
+    }
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("XDG_CACHE_HOME", &cache);
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("VISSUE_ROOT", &vm);
+    std::env::set_var("ISSUE_ROOT", &vm);
+    std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "0");
+    std::env::set_var("PACKSET_URL", "off");
+    let said = ljos_cli::persist_tracker_file(&issues, "probe-queue", "noted");
+    assert!(said.contains("push queued"), "{said}");
+    assert!(
+        !show(&origin, "Software/probe/issues.org").contains("queued on the vm"),
+        "a refused push still updated the remote"
+    );
+
+    let doctor = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .arg("doctor")
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("PATH", "/usr/bin:/bin")
+        .env("VISSUE_ROOT", &vm)
+        .env("ISSUE_ROOT", &vm)
+        .env("LJOS_TRACKER_GIT", "push")
+        .env("LJOS_TRACKER_PUSH_WAIT", "0")
+        .env("PACKSET_URL", "off")
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_SYSTEM", root.path().join("gitconfig"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        stdout.contains("unpushed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    assert!(stdout.contains("does not exist"), "{stdout}");
+    assert!(!doctor.status.success(), "doctor exited 0:\n{stdout}");
+
+    fs::remove_file(&hook).unwrap();
+    let drained = ljos_cli::drain_tracker_pushes();
+    assert!(drained.contains("pushed"), "{drained}");
+    let remote = show(&origin, "Software/probe/issues.org");
+    assert!(remote.contains("queued on the vm"), "{remote}");
+}
+
+#[test]
+fn a_gone_vm_does_not_keep_a_started_claim() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let origin = init_bare(root.path());
+    let fresh = Command::new("date")
+        .args(["+%Y-%m-%d %a %H:%M"])
+        .output()
+        .unwrap();
+    let fresh = format!("[{}]", String::from_utf8_lossy(&fresh.stdout).trim());
+    let old = ":CLAIMED_BY: vm-dead\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
+    let now = format!(":CLAIMED_BY: vm-live\n:CLAIMED_AT: {fresh}\n");
+    let kept = ":CLAIMED_BY: vm-kept\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
+    seed(
+        root.path(),
+        &origin,
+        &board(&[
+            issue_block("probe-old1", "STARTED", old, &[]),
+            issue_block("probe-new1", "STARTED", &now, &[]),
+            issue_block("probe-kept", "STARTED", kept, &[]),
+        ]),
+    );
+    let vm = clone_of(root.path(), &origin, "vm");
+    let runtime = root.path().join("run");
+    fs::create_dir_all(runtime.join("ljos")).unwrap();
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let open = stat.find('(').unwrap();
+    let close = stat.rfind(')').unwrap();
+    let comm = &stat[open + 1..close];
+    fs::write(
+        runtime.join("ljos").join("hold-vm-kept"),
+        format!(
+            "vm-kept\nseat\n{}\n{comm}\n2020-01-01T00:00:00Z\nprobe-kept\n-\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    std::env::set_var("HOME", root.path().join("home"));
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("VISSUE_ROOT", &vm);
+    std::env::set_var("ISSUE_ROOT", &vm);
+    let said = ljos_cli::cloud::reap_gone_owners(900);
+    assert!(said.contains("probe-old1"), "{said}");
+    let local = fs::read_to_string(vm.join("Software/probe/issues.org")).unwrap();
+    assert_eq!(state_of(&local, "probe-old1"), "TODO", "{local}");
+    assert_eq!(state_of(&local, "probe-new1"), "STARTED", "{local}");
+    assert_eq!(state_of(&local, "probe-kept"), "STARTED", "{local}");
+    let remote = show(&origin, "Software/probe/issues.org");
+    assert_eq!(state_of(&remote, "probe-old1"), "TODO", "{remote}");
+}
+
+#[test]
+fn doctor_warns_on_unpushed_commits_and_not_on_zero() {
+    let row = |state: &str, ok: bool| ljos_cli::Habitat {
+        name: "tracker",
+        state: state.into(),
+        ok,
+    };
+    assert_eq!(ljos_cli::doctor_word(&row("1 unpushed", true)), "warn");
+    assert_eq!(ljos_cli::doctor_word(&row("10 unpushed", true)), "warn");
+    assert_eq!(
+        ljos_cli::doctor_word(&row("vissue missing; 2 unpushed", false)),
+        "warn"
+    );
+    assert_eq!(ljos_cli::doctor_word(&row("0 unpushed", true)), "ok");
+}
+
+#[test]
+fn a_missing_mcp_binary_is_named() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(line.contains("does not exist"), "{line}");
+    assert!(line.contains("ljos cloud up"), "{line}");
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(!row.ok);
+    assert_eq!(ljos_cli::doctor_word(&row), "no");
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let plugin = repo.join("bin/ljos-plugin");
+    let out = Command::new("sh")
+        .arg(&plugin)
+        .arg("ljos-mcp")
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.lines()
+            .next()
+            .unwrap()
+            .contains("ljos-mcp: not installed, so the MCP server has no tools"),
+        "{err}"
+    );
+    assert!(!out.status.success());
+}
+
+#[test]
+fn install_sh_cloud_reuses_binaries_that_already_answer() {
+    let root = tempfile::tempdir().unwrap();
+    let bins = root.path().join("bin");
+    fs::create_dir_all(&bins).unwrap();
+    let marker = root.path().join("ran");
+    executable(
+        &bins.join("ljos"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = cloud ] && [ \"$2\" = up ] && [ \"$3\" = --help ]; then exit 0; fi\nif [ \"$1\" = cloud ] && [ \"$2\" = up ]; then echo ran > '{}'; exit 0; fi\nexit 1\n",
+            marker.display()
+        ),
+    );
+    executable(&bins.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    executable(&bins.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.sh");
+    let help = Command::new("sh")
+        .arg(&script)
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(help_text.contains("--cloud"), "{help_text}");
+    let out = Command::new("sh")
+        .arg(&script)
+        .arg("--cloud")
+        .arg("--bin-dir")
+        .arg(&bins)
+        .env("HOME", root.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(marker.is_file(), "cloud up did not run: {said}");
+    assert!(!said.contains("Installing ljos"), "{said}");
+}
+
+fn clear_agent_ids() {
+    for key in [
+        "CURSOR_AGENT_ID",
+        "CURSOR_AGENT",
+        "CURSOR_CONVERSATION_ID",
+        "CURSOR_AGENT_SOCKET",
+        "CLOUD_AGENT_ID",
+        "AGENT_ID",
+        "CODESPACE_NAME",
+        "GITHUB_RUN_ID",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CODESPACES",
+        "LJOS_SEAT",
+        "LJOS_SEAT_KEY",
+        "VISSUE_AGENT",
+        "DEEDAR_HOST_SIGNING_KEY",
+    ] {
+        std::env::remove_var(key);
+    }
+}
+
+#[test]
+fn a_run_id_suffixes_an_explicit_seat() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    std::env::set_var("LJOS_SEAT", "ridley-ci-a");
+    assert_eq!(ljos_cli::cloud::default_seat(), "ridley-ci-a");
+
+    std::env::set_var("GITHUB_ACTIONS", "true");
+    std::env::set_var("GITHUB_RUN_ID", "555001");
+    std::env::set_var("CURSOR_AGENT_ID", "should-not-win");
+    assert_eq!(ljos_cli::cloud::default_seat(), "ridley-ci-a-555001");
+
+    std::env::remove_var("GITHUB_ACTIONS");
+    std::env::remove_var("GITHUB_RUN_ID");
+    std::env::set_var("CURSOR_AGENT_ID", "cafebabe0001abcd");
+    assert_eq!(
+        ljos_cli::cloud::default_seat(),
+        "ridley-ci-a-cafebabe0001abcd"
+    );
+    std::env::set_var("LJOS_SEAT", "ridley-ci-a-cafebabe0001abcd");
+    assert_eq!(
+        ljos_cli::cloud::default_seat(),
+        "ridley-ci-a-cafebabe0001abcd"
+    );
+}
+
+fn sig_key(text: &str) -> String {
+    text.split_whitespace()
+        .find(|word| word.len() == 64 && word.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or("")
+        .to_string()
+}
+
+struct Cast<'a> {
+    dir: &'a str,
+    seat: &'a str,
+    project: &'a str,
+    issue: &'a str,
+    note: &'a str,
+    confidence: &'a str,
+}
+
+fn land(root: &Path, origin: &Path, cast: Cast<'_>) {
+    let repo = clone_of(root, origin, cast.dir);
+    std::env::set_var("VISSUE_ROOT", &repo);
+    std::env::set_var("ISSUE_ROOT", &repo);
+    std::env::set_var("LJOS_SEAT", cast.seat);
+    std::env::set_var("VISSUE_AGENT", cast.seat);
+    std::env::remove_var("LJOS_SEAT_KEY");
+    std::env::remove_var("DEEDAR_HOST_SIGNING_KEY");
+    let path = write_project(
+        &repo,
+        cast.project,
+        &board(&[issue_block(cast.issue, "TODO", "", &[])]),
+    );
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    let voted = vissue_core::ops::vote_with(
+        &layout,
+        cast.issue,
+        Some("ship"),
+        cast.seat,
+        Some("none"),
+        Some(cast.confidence),
+    )
+    .unwrap();
+    assert!(voted.contains("voted"), "{voted}");
+    vissue_core::ops::note(&layout, cast.issue, cast.note).unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot(cast.issue).unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+    let pushed = ljos_cli::persist_tracker_file(&path, cast.issue, "noted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+}
+
+#[test]
+fn a_ci_seat_and_a_cloud_seat_vote_note_and_push_and_the_box_does_not_re_sign() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    clear_agent_ids();
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("LJOS_ORG_DRIVER", "false");
+    std::env::set_var("HOME", root.path().join("home"));
+    std::env::set_var("XDG_RUNTIME_DIR", root.path().join("run"));
+    std::env::remove_var("XDG_DATA_HOME");
+    fs::create_dir_all(root.path().join("run")).unwrap();
+    let origin = init_bare(root.path());
+    seed(
+        root.path(),
+        &origin,
+        &board(&[issue_block("probe-seed", "TODO", "", &[])]),
+    );
+
+    std::env::set_var("GITHUB_ACTIONS", "true");
+    std::env::set_var("GITHUB_RUN_ID", "555001");
+    std::env::set_var("LJOS_SEAT", "ridley-ci-a");
+    let ci_seat = ljos_cli::cloud::default_seat();
+    assert_eq!(ci_seat, "ridley-ci-a-555001");
+    land(
+        root.path(),
+        &origin,
+        Cast {
+            dir: "ci",
+            seat: &ci_seat,
+            project: "cijob",
+            issue: "probe-ci",
+            note: "built on the runner",
+            confidence: "0.8",
+        },
+    );
+
+    clear_agent_ids();
+    std::env::set_var("CURSOR_AGENT_ID", "cafebabe0001abcd");
+    std::env::set_var("LJOS_SEAT", "ridley-ci-a");
+    let cloud_seat = ljos_cli::cloud::default_seat();
+    assert_eq!(cloud_seat, "ridley-ci-a-cafebabe0001abcd");
+    land(
+        root.path(),
+        &origin,
+        Cast {
+            dir: "agent",
+            seat: &cloud_seat,
+            project: "agentjob",
+            issue: "probe-agent",
+            note: "built on the agent",
+            confidence: "0.6",
+        },
+    );
+
+    let ci = show(&origin, "Software/cijob/issues.org");
+    let agent = show(&origin, "Software/agentjob/issues.org");
+    assert!(ci.contains("confidence=0.8"), "{ci}");
+    assert!(ci.contains("built on the runner"), "{ci}");
+    assert!(ci.contains("ballot-sig:"), "{ci}");
+    assert!(agent.contains("confidence=0.6"), "{agent}");
+    assert!(agent.contains("built on the agent"), "{agent}");
+    let ci_key = sig_key(&ci);
+    let agent_key = sig_key(&agent);
+    assert_ne!(ci_key, agent_key);
+    assert_eq!(ci_key.len(), 64);
+    let pins = show(&origin, ".ljos-seat-keys");
+    assert!(pins.contains(&format!("{ci_seat} {ci_key}")), "{pins}");
+    assert!(
+        pins.contains(&format!("{cloud_seat} {agent_key}")),
+        "{pins}"
+    );
+
+    let box_repo = clone_of(root.path(), &origin, "box");
+    std::env::set_var("VISSUE_ROOT", &box_repo);
+    std::env::set_var("ISSUE_ROOT", &box_repo);
+    std::env::set_var("XDG_DATA_HOME", root.path().join("box-data"));
+    std::env::set_var("LJOS_SEAT", "box");
+    std::env::set_var("VISSUE_AGENT", "box");
+    let host = root.path().join("box-config/deedar/host.key");
+    fs::create_dir_all(host.parent().unwrap()).unwrap();
+    fs::write(&host, [4u8; 32]).unwrap();
+    std::env::set_var("LJOS_SEAT_KEY", &host);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &host);
+    let issues = box_repo.join("Software/cijob/issues.org");
+    let before = fs::read(&issues).unwrap();
+    let err = ljos_cli::ballot_sig::sign_ballot("probe-ci", &ci_seat, "ship")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("will not re-sign"), "{err}");
+    assert_eq!(fs::read(&issues).unwrap(), before);
+    assert_eq!(fs::read(&host).unwrap(), vec![4u8; 32]);
+}
+
+#[test]
+fn a_signed_handover_is_not_signed_again_by_the_machine_key() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    clear_agent_ids();
+    let home = root.path().join("home");
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::set_var("LJOS_SEAT", "ridley-ci-a-555001");
+    let seat_key = ljos_cli::cloud::prepare_seat_key("ridley-ci-a-555001").unwrap();
+    let host = home.join(".config/deedar/host.key");
+    fs::create_dir_all(host.parent().unwrap()).unwrap();
+    fs::write(&host, [8u8; 32]).unwrap();
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &host);
+
+    let bag = root.path().join("bag");
+    fs::create_dir_all(&bag).unwrap();
+    let manifest = bag.join("manifest-sha256.txt");
+    fs::write(&manifest, b"abc\n").unwrap();
+    let sig = bag.join("manifest-sha256.txt.sig");
+    fs::write(&sig, b"seat-sig\n").unwrap();
+    let log = root.path().join("deedar.log");
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("deedar"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$DEEDAR_HOST_SIGNING_KEY\" > '{}'\necho signed\n",
+            log.display()
+        ),
+    );
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+
+    let said = ljos_cli::sign_handover_manifest(&manifest).unwrap();
+    assert!(said.contains("left unchanged"), "{said}");
+    assert_eq!(fs::read(&sig).unwrap(), b"seat-sig\n");
+    assert!(!log.exists(), "deedar signed an existing manifest");
+
+    fs::remove_file(&sig).unwrap();
+    let said = ljos_cli::sign_handover_manifest(&manifest).unwrap();
+    assert!(said.contains("signed"), "{said}");
+    let used = fs::read_to_string(&log).unwrap();
+    assert_eq!(used.trim(), seat_key.display().to_string());
+    assert_ne!(used.trim(), host.display().to_string());
+    assert_eq!(fs::read(&host).unwrap(), vec![8u8; 32]);
+}

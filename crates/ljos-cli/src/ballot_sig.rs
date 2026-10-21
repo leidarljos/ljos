@@ -164,14 +164,25 @@ fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
 /// signature.
 pub const SIGNING_SINCE: i64 = 1_791_984_778;
 
-/// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when set, else
+/// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when that path is this
+/// seat's own key and not the machine key, else
 /// `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (`~/.local/share` when unset).
-/// Seats that share one HOME still get one key each.
+/// Seats that share one HOME still get one key each. The machine key at
+/// `~/.config/deedar/host.key` is never used.
 #[must_use]
 pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
+        let path = PathBuf::from(p);
+        if !is_box_host_key(&path) && seat_may_use_override(seat) {
+            return Some(path);
+        }
     }
+    seat_key_file(seat)
+}
+
+/// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
+#[must_use]
+pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -193,6 +204,28 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
             .join(name)
             .join("ballot.key"),
     )
+}
+
+/// The machine deed key. A seat key must not be this file.
+#[must_use]
+pub fn is_box_host_key(path: &std::path::Path) -> bool {
+    path.ends_with("deedar/host.key")
+}
+
+fn seat_may_use_override(seat: &str) -> bool {
+    let seat = seat.trim();
+    let own = |key: &str| std::env::var(key).ok().is_some_and(|v| v.trim() == seat);
+    match (
+        std::env::var("LJOS_SEAT")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+        std::env::var("VISSUE_AGENT")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+    ) {
+        (None, None) => true,
+        _ => own("LJOS_SEAT") || own("VISSUE_AGENT"),
+    }
 }
 
 /// The key at `path`, made on first use: 32 random bytes, mode 0600.
@@ -574,10 +607,25 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
 /// No seat key, a key that does not match the pin, or a tracker write that
 /// failed.
 pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
+    if let Some(existing) = newest_sig(issue, voter) {
+        if verifies(issue, &existing) {
+            match resign_of(&existing, choice, voter) {
+                Resign::Keep => {
+                    return Ok(format!("ballot already signed by {voter}\n"));
+                }
+                Resign::Refuse => {
+                    bail!("will not re-sign {voter}'s ballot");
+                }
+                Resign::Sign => {}
+            }
+        }
+    }
     let (key, mine) = signing_key(voter)?;
     let id = identity();
     let note = sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce);
-    crate::run_captured("vissue", &["note", issue, &note])?;
+    if write_sig_note(issue, &note).is_err() {
+        crate::run_captured("vissue", &["note", issue, &note])?;
+    }
     let session = if id.harness == "-" {
         format!("nonce {}", &id.nonce[..12.min(id.nonce.len())])
     } else {
@@ -587,6 +635,80 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
         "ballot signed by {voter} with key {}… session {session}\n",
         &mine[..12.min(mine.len())]
     ))
+}
+
+enum Resign {
+    Keep,
+    Refuse,
+    Sign,
+}
+
+/// A signature that already verifies stays. The same key may sign a new
+/// choice. Any other key, including the machine key, does not sign again.
+fn resign_of(existing: &SigNote, choice: &str, voter: &str) -> Resign {
+    let mine = current_public_hex(voter);
+    if mine.as_deref() == Some(existing.key.as_str()) {
+        if existing.choice == choice {
+            Resign::Keep
+        } else {
+            Resign::Sign
+        }
+    } else {
+        Resign::Refuse
+    }
+}
+
+fn current_public_hex(voter: &str) -> Option<String> {
+    let path = seat_key_path(voter)?;
+    let key = key_from_file(&path).ok()?;
+    Some(hex::encode(key.verifying_key().to_bytes()))
+}
+
+fn newest_sig(issue: &str, voter: &str) -> Option<SigNote> {
+    let layout = vissue_core::Layout::resolve(None, None).ok()?;
+    let (heading, _, _) = vissue_core::store::find_by_id(&layout, issue).ok()??;
+    heading.logbook.iter().find_map(|entry| {
+        let text = entry.note.as_deref()?;
+        let sig = parse_note(text)?;
+        (sig.voter == voter).then_some(sig)
+    })
+}
+
+fn write_sig_note(issue: &str, note: &str) -> Result<()> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    vissue_core::ops::note(&layout, issue, note)?;
+    Ok(())
+}
+
+/// Sign the ballot this process's seat cast on `issue`, when it has one.
+///
+/// # Errors
+///
+/// The tracker cannot be read, or the ballot is already signed by another key.
+pub fn sign_own_ballot(issue: &str) -> Result<String> {
+    let voter = std::env::var("VISSUE_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("LJOS_SEAT")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let Some(voter) = voter else {
+        return Ok(String::new());
+    };
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    let ballots = vissue_core::ops::ballots(&layout, issue)?;
+    let Some(choice) = ballots
+        .iter()
+        .find(|b| b.agent == voter)
+        .map(|b| b.choice.clone())
+    else {
+        return Ok(String::new());
+    };
+    sign_ballot(issue, &voter, &choice)
 }
 
 /// The note prefix a design candidate's signature rides under.

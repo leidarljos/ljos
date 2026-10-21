@@ -1,0 +1,1 @@
+A GitHub Actions run and a cloud agent take `LJOS_SEAT` plus the run id as the seat. That seat signs its vote and its handover with its own key, and a later process on the machine does not sign them again.

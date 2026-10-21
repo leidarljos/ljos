@@ -17,6 +17,7 @@ pub mod ask_pack;
 pub mod ballot_sig;
 pub mod bookkeep;
 pub mod capture;
+pub mod cloud;
 pub mod command_prefs;
 pub mod converge;
 pub mod extract;
@@ -19395,6 +19396,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    out.push(cloud::mcp_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
     wake_writer();
@@ -19555,6 +19557,19 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 state: said.stdout.lines().next().unwrap_or("").to_string(),
                 ok: true,
             },
+            Err(e) if name == "tracker" => {
+                let mut state = e.to_string().lines().next().unwrap_or("").to_string();
+                if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
+                    if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
+                        state = format!("{state}; {extra}");
+                    }
+                }
+                Habitat {
+                    name,
+                    state,
+                    ok: false,
+                }
+            }
             Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
                 let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
                 Habitat {
@@ -20085,7 +20100,11 @@ pub fn pack_token_row(
 pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
         .filter(|h| {
-            !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack" || h.name == "pack token")
+            !h.ok
+                && (REQUIRED.contains(&h.name)
+                    || h.name == "pack"
+                    || h.name == "pack token"
+                    || h.name == "mcp")
         })
         .map(|h| h.name)
         .collect()
@@ -20146,6 +20165,9 @@ fn optional_bin(name: &str) -> bool {
 /// absent, `no` when a required row failed.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
+    if row.name == "tracker" && names_unpushed(&row.state) {
+        return "warn";
+    }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
         "warn"
     } else if row.ok {
@@ -20160,6 +20182,17 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     } else {
         "no"
     }
+}
+
+/// `1 unpushed` and `12 unpushed` count. `0 unpushed` does not.
+fn names_unpushed(state: &str) -> bool {
+    state.split(';').any(|part| {
+        let mut words = part.split_whitespace();
+        let Some(n) = words.next() else {
+            return false;
+        };
+        words.next() == Some("unpushed") && n != "0"
+    })
 }
 
 pub fn format_doctor(rows: &[Habitat]) -> String {
@@ -20495,23 +20528,72 @@ pub fn handover(
             .trim_end()
             .to_string(),
     );
-    // The key deedar signs with is the one doctor reports: the variable, or
-    // the seat's own at ~/.config/deedar/host.key. `off` signs nothing.
-    if host_key_path().is_some() {
-        let manifest = out.join("manifest-sha256.txt");
-        let said = run_captured(
-            "deedar",
-            &["vouch", "sign", &manifest.display().to_string()],
-        )?;
-        lines.push(said.stdout.trim_end().to_string());
-    } else {
-        lines.push(
-            "unsigned: no host key at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
-             `ljos onboard` writes one"
-                .into(),
-        );
-    }
+    let manifest = out.join("manifest-sha256.txt");
+    lines.push(sign_handover_manifest(&manifest)?);
     Ok(lines)
+}
+
+/// Sign a handover manifest with this seat's key. A manifest that already
+/// has a signature is left as it is: the machine key does not sign it again.
+///
+/// # Errors
+///
+/// `deedar vouch sign` fails.
+pub fn sign_handover_manifest(manifest: &Path) -> Result<String> {
+    let sig = manifest.with_extension("txt.sig");
+    if sig.is_file() {
+        return Ok("already signed; left unchanged".into());
+    }
+    if let Some(key) = seat_handover_key() {
+        let said = vouch_sign(manifest, Some(&key))?;
+        return Ok(said.stdout.trim_end().to_string());
+    }
+    if host_key_path().is_some() {
+        let said = vouch_sign(manifest, None)?;
+        return Ok(said.stdout.trim_end().to_string());
+    }
+    Ok(
+        "unsigned: no host key at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
+         `ljos onboard` writes one"
+            .into(),
+    )
+}
+
+fn seat_handover_key() -> Option<PathBuf> {
+    let seat = std::env::var("LJOS_SEAT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let path = ballot_sig::seat_key_path(&seat)?;
+    (path.is_file() && !ballot_sig::is_box_host_key(&path)).then_some(path)
+}
+
+fn vouch_sign(manifest: &Path, key: Option<&Path>) -> Result<Said> {
+    use std::process::{Command, Stdio};
+    let bin = which::which("deedar").context("deedar not on PATH")?;
+    let mut cmd = Command::new(bin);
+    if let Some(key) = key {
+        cmd.env("DEEDAR_HOST_SIGNING_KEY", key);
+    }
+    cmd.args(["vouch", "sign", &manifest.display().to_string()]);
+    git_hooks::hook_child_env(&mut cmd);
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("deedar: could not start")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        let why = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        bail!("deedar exited {}: {why}", out.status);
+    }
+    Ok(Said { stdout, stderr })
 }
 
 /// Put the bridge from a log of `size` entries to this store's head into
@@ -23248,9 +23330,13 @@ fn reclaim_expired(lease: u64) -> String {
     if lease == 0 {
         return "off (LJOS_LEASE_SECS=0)\n".to_string();
     }
+    let mut out = cloud::reap_gone_owners(lease);
     let listed = match run_captured("claimdag", &["list", "--json"]) {
         Ok(said) => said.stdout,
-        Err(e) => return format!("skipped: the claim graph did not list: {e:#}\n"),
+        Err(e) => {
+            out.push_str(&format!("skipped: the claim graph did not list: {e:#}\n"));
+            return out;
+        }
     };
     let rows: Vec<Value> = serde_json::from_str(listed.trim()).unwrap_or_default();
     let now = std::time::SystemTime::now()
@@ -23258,9 +23344,9 @@ fn reclaim_expired(lease: u64) -> String {
         .map_or(0, |d| d.as_secs());
     let expired = expired_claims(&rows, now, lease);
     if expired.is_empty() {
-        return format!("no claim quiet longer than {lease}s\n");
+        out.push_str(&format!("no claim quiet longer than {lease}s\n"));
+        return out;
     }
-    let mut out = String::new();
     for e in expired {
         let name = if e.summary.is_empty() {
             &e.id
@@ -24048,6 +24134,38 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
     out
 }
 
+/// Commit `.ljos-seat-keys` when a ballot pin is still unpushed. The issue
+/// commit names one file; the pin is the seat's public key and has to travel
+/// with it.
+fn commit_seat_pin(start: &Path, seat: &str) {
+    let root = tracker_push::repo_root(start);
+    let name = ballot_sig::PIN_FILE;
+    if !root.join(name).is_file() {
+        return;
+    }
+    let run = |args: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(&root)
+            .args(args)
+            .stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        cmd.output()
+    };
+    let Ok(status) = run(&["status", "--porcelain", "--", name]) else {
+        return;
+    };
+    if !status.status.success() || status.stdout.is_empty() {
+        return;
+    }
+    match run(&["add", "--", name]) {
+        Ok(out) if out.status.success() => {}
+        _ => return,
+    }
+    let message = format!("chore(issues): pin {seat} key");
+    let _ = run(&["commit", "-q", "--only", "-m", &message, "--", name]);
+}
+
 /// Commit the tracker file that holds `issue` and push it, when the tracker
 /// is a git checkout. A write that stays in one working tree is lost to
 /// every other host and to a rebuilt one; closures made on one laptop and
@@ -24056,7 +24174,9 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
 /// an error: the verb already happened, and the line says what did not.
 /// An ignored file is named with its ignore rule. It is not a clean tree
 /// and it is not force-added. `LJOS_TRACKER_GIT=off` skips it; `=commit`
-/// commits without pushing. The subject names the seat, and the logbook
+/// commits without pushing; `=push` commits, rebases with the per-issue
+/// field merge, and pushes. A push that fails stays committed and is tried
+/// again on the next write. The subject names the seat, and the logbook
 /// gains `- {Verb} by {seat} [timestamp]`.
 pub fn persist_tracker(issue: &str, verb: &str) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -24189,7 +24309,9 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     }
     drop(_held);
     match committed {
-        Ok(o) if o.status.success() => {}
+        Ok(o) if o.status.success() => {
+            commit_seat_pin(dir, &seat);
+        }
         Ok(o) => {
             return format!(
                 "tracker git: commit refused: {}\n",
@@ -24210,6 +24332,18 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     if remotes.is_some_and(|o| o.stdout.iter().all(u8::is_ascii_whitespace)) {
         return format!("tracker git: committed {message}; no remote, kept local\n");
     }
+    if mode == "push" {
+        return match tracker_push::publish(dir) {
+            Ok(()) => {
+                clear_push_refusal();
+                format!("tracker git: committed and pushed {message}\n")
+            }
+            Err(e) => {
+                record_push_refusal(&e);
+                format!("tracker git: committed {message}; push queued: {e}\n")
+            }
+        };
+    }
     // A push can run a repository's pre-push hook that publishes data first
     // and takes minutes. The sitting waits a bounded time; a push still going
     // after that finishes on its own and writes its log where the line says.
@@ -24225,7 +24359,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let mirrors = tracker_upstream(dir)
         .and_then(|up| tracker_mirrors(dir, &up))
         .unwrap_or_default();
-    // Another bot's push is fetched and rebased, not merged and not forced.
+    // Another seat's push is fetched and rebased, not merged and not forced.
     // The first attempt is this script. A non-fast-forward comes back here
     // and [`tracker_push::push_checkout`] unions the org headings, then
     // retries. A branch with no upstream is pushed with `-u origin <branch>`.
@@ -24279,6 +24413,91 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             }
             Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
         }
+    }
+}
+
+/// Push commits `LJOS_TRACKER_GIT=push` left behind. Empty when push mode
+/// is off, the tracker root is unset, or nothing is waiting.
+///
+/// The root is `VISSUE_ROOT` or `ISSUE_ROOT`. A guessed working directory
+/// is left alone: this process may be standing in some other checkout.
+#[must_use]
+pub fn drain_tracker_pushes() -> String {
+    load_seat_env();
+    if std::env::var("LJOS_TRACKER_GIT").ok().as_deref() != Some("push") {
+        return String::new();
+    }
+    let Some(root) = std::env::var_os("VISSUE_ROOT")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("ISSUE_ROOT").filter(|v| !v.is_empty()))
+        .map(PathBuf::from)
+    else {
+        return String::new();
+    };
+    let Some(up) = tracker_upstream(&root) else {
+        return String::new();
+    };
+    let range = format!("{up}..HEAD");
+    let Some(count) = git_ok_stdout(&root, &["rev-list", "--count", &range]) else {
+        return String::new();
+    };
+    let count = count.trim();
+    if count.is_empty() || count == "0" {
+        return String::new();
+    }
+    match tracker_push::publish(&root) {
+        Ok(()) => {
+            clear_push_refusal();
+            format!("tracker git: pushed {count} queued\n")
+        }
+        Err(e) => {
+            record_push_refusal(&e);
+            format!("tracker git: push queued: {e}\n")
+        }
+    }
+}
+
+/// A pid that is not this process and is not running, for a queued-push log.
+/// The log name is a pid. A live pid reads as a push still in flight.
+fn refusal_pid() -> u32 {
+    let mut pid = 3_000_017_u32;
+    for _ in 0..64 {
+        if pid != std::process::id() && !pid_alive(pid) {
+            return pid;
+        }
+        pid = pid.saturating_add(2);
+    }
+    3_000_017
+}
+
+fn record_push_refusal(why: &str) {
+    let dir = runtime_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let log = dir.join(format!("tracker-push-{}.log", refusal_pid()));
+    let _ = std::fs::write(log, format!("{why}\n"));
+}
+
+fn clear_push_refusal() {
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return;
+    };
+    for ent in entries.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name
+            .strip_prefix("tracker-push-")
+            .and_then(|s| s.strip_suffix(".log"))
+        else {
+            continue;
+        };
+        let Ok(pid) = rest.parse::<u32>() else {
+            continue;
+        };
+        if push_still_running(&ent.path(), pid) {
+            continue;
+        }
+        let _ = std::fs::remove_file(push_child_record(&ent.path()));
+        let _ = std::fs::remove_file(ent.path());
     }
 }
 
