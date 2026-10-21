@@ -1064,8 +1064,20 @@ mod tests {
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalized.contains("first key seen in this check is the pin for this check only"),
-            "record-v1.md must state that first-seen pins are check-local"
+            normalized.contains(
+                "none for its seat, the first key seen in this check is the pin for this check only"
+            ),
+            "record-v1.md must state that first-seen pins are check-local and yield to a seat pin"
+        );
+    }
+
+    #[test]
+    fn docs_name_the_deleted_withdrawal_limit() {
+        let doc = include_str!("../doc/record-v1.md");
+        let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("A deleted withdrawal revives the earlier ballot"),
+            "record-v1.md must say the check cannot see a deleted withdrawal"
         );
     }
 
