@@ -11733,7 +11733,7 @@ pub fn packset_write_agent(
     }
     let kind = atom_kind(label)?;
     let prefix = format!("{label}: POST /v1/atoms failed");
-    let client = client_or_queue(&prefix, kind, trimmed, "")?;
+    let client = client_or_queue(&prefix, kind, trimmed, "", &[])?;
     let workspace = client.workspace();
     let mut atom = atom_body(kind, trimmed, &workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
@@ -11845,7 +11845,7 @@ pub fn packset_write_mcp(
     let kind = atom_kind(label)?;
     let prefix = format!("{label}: POST /v1/atoms failed");
     let client = if basis == Basis::Agent {
-        client_or_queue(&prefix, kind, text.trim(), "")?
+        client_or_queue(&prefix, kind, text.trim(), "", &[])?
     } else {
         pack()?
     };
@@ -11889,7 +11889,12 @@ pub(crate) fn packset_write_agent_sourced(
     supersedes: Option<&str>,
 ) -> Result<Value> {
     let prefix = format!("{label}: POST /v1/atoms failed");
-    let client = client_or_queue(&prefix, "lesson", text, issue)?;
+    let closes = supersedes
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| vec![id.to_string()])
+        .unwrap_or_default();
+    let client = client_or_queue(&prefix, "lesson", text, issue, &closes)?;
     let mut atom = agent_sourced_atom(
         label,
         text,
@@ -11964,7 +11969,8 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
             if !copies.is_empty() {
                 let issue = atom["issue"].as_str().unwrap_or("");
                 let workspace = atom["workspace"].as_str().unwrap_or("");
-                let _ = queue_copies(issue, &copies, workspace, "lesson");
+                let closes = atom_supersedes(&atom);
+                let _ = queue_copies(issue, &copies, workspace, "lesson", &closes);
             }
             Err(with_post_failure(prefix, e))
         }
@@ -11972,19 +11978,41 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
     }
 }
 
-/// The pack client, or a queued lesson when the pack is off.
-fn client_or_queue(prefix: &str, kind: &str, text: &str, issue: &str) -> Result<PacksetClient> {
+/// The pack client, or a queued lesson when the pack is off. `supersedes`
+/// is the atoms that lesson closes. A note passes none.
+fn client_or_queue(
+    prefix: &str,
+    kind: &str,
+    text: &str,
+    issue: &str,
+    supersedes: &[String],
+) -> Result<PacksetClient> {
     match pack() {
         Ok(client) => Ok(client),
         Err(e) if kind == "lesson" && note_can_wait(&e) => {
             let copies = pack_copy::pack_copies(text);
             if !copies.is_empty() {
-                let _ = queue_copies(issue, &copies, "", "lesson");
+                let _ = queue_copies(issue, &copies, "", "lesson", supersedes);
             }
             Err(with_post_failure(prefix, e))
         }
         Err(e) => Err(e),
     }
+}
+
+/// Ids in `atom["supersedes"]`, dropping blanks.
+fn atom_supersedes(atom: &Value) -> Vec<String> {
+    atom.get("supersedes")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A progress note, as an agent memory the default list shows. The tracker
@@ -12005,7 +12033,7 @@ pub fn packset_write_note(issue: &str, text: &str) -> Result<NoteMemory> {
         Ok(client) => write_note_with(&client, issue, text, true),
         Err(e) if note_can_wait(&e) => {
             let copies = pack_copy::pack_copies(text);
-            let queued = queue_copies(issue, &copies, "", "note")?;
+            let queued = queue_copies(issue, &copies, "", "note", &[])?;
             Ok(NoteMemory {
                 body: None,
                 queued,
@@ -12047,6 +12075,7 @@ fn write_note_with(
                         &posting[at..],
                         &client.workspace(),
                         "note",
+                        &[],
                     )?)
                 } else {
                     None
@@ -12243,6 +12272,7 @@ fn queue_copies(
     texts: &[String],
     workspace: &str,
     kind: &str,
+    supersedes: &[String],
 ) -> Result<Option<bool>> {
     let mut seen = false;
     let mut newly = false;
@@ -12251,14 +12281,20 @@ fn queue_copies(
             continue;
         }
         seen = true;
-        if queue_memory(issue, text, workspace, kind)? {
+        if queue_memory(issue, text, workspace, kind, supersedes)? {
             newly = true;
         }
     }
     Ok(seen.then_some(newly))
 }
 
-pub(crate) fn queue_memory(issue: &str, text: &str, workspace: &str, kind: &str) -> Result<bool> {
+pub(crate) fn queue_memory(
+    issue: &str,
+    text: &str,
+    workspace: &str,
+    kind: &str,
+    supersedes: &[String],
+) -> Result<bool> {
     let text = text.trim();
     if !pack_copy::pack_copy_ok(text) {
         bail!("queue: the pack would refuse this copy");
@@ -12274,6 +12310,12 @@ pub(crate) fn queue_memory(issue: &str, text: &str, workspace: &str, kind: &str)
             workspace: memory_workspace(workspace),
             at,
             kind: kind.to_string(),
+            supersedes: supersedes
+                .iter()
+                .map(|id| id.trim())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect(),
         },
     )
 }
@@ -12287,7 +12329,7 @@ pub(crate) fn queue_memory(issue: &str, text: &str, workspace: &str, kind: &str)
 /// The queue file cannot be written.
 pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
     let copies = pack_copy::pack_copies(text);
-    match queue_copies(issue, &copies, "", "note")? {
+    match queue_copies(issue, &copies, "", "note", &[])? {
         Some(newly) => Ok(newly),
         None => Ok(false),
     }
@@ -12312,12 +12354,7 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
                 text,
                 ..note.clone()
             };
-            if out.iter().any(|seen: &note_queue::Queued| {
-                seen.issue.trim() == item.issue.trim()
-                    && seen.text.trim() == item.text.trim()
-                    && seen.workspace == item.workspace
-                    && seen.kind == item.kind
-            }) {
+            if out.iter().any(|seen: &note_queue::Queued| seen.same(&item)) {
                 continue;
             }
             out.push(item);
@@ -12373,6 +12410,10 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
     let mut atom = atom_body("lesson", text, &client.workspace());
     stamp_issue(&mut atom, &note.issue);
     stamp_horizon(&mut atom, "lesson", text, Some(false));
+    if !note.supersedes.is_empty() {
+        atom["supersedes"] =
+            Value::Array(note.supersedes.iter().cloned().map(Value::String).collect());
+    }
     with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
@@ -12450,7 +12491,7 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
     }
     let kind = atom_kind(label)?;
     let prefix = format!("{label}: POST /v1/atoms failed");
-    let client = client_or_queue(&prefix, kind, trimmed, "")?;
+    let client = client_or_queue(&prefix, kind, trimmed, "", &[])?;
     let workspace = client.workspace();
     let mut atom = atom_body(kind, trimmed, &workspace);
     stamp_horizon(&mut atom, kind, trimmed, Some(true));
@@ -37791,6 +37832,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 workspace: "ws".into(),
                 at: 1,
                 kind: "note".into(),
+                supersedes: Vec::new(),
             },
         )
         .unwrap();
@@ -37803,6 +37845,33 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
     }
 
+    /// A lesson queued while the pack is down still names the atom it closes.
+    #[test]
+    fn a_queued_lesson_keeps_the_atom_it_supersedes() {
+        let _env = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe {
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("XDG_STATE_HOME", tmp.path());
+        }
+        let err = super::packset_write_agent_sourced(
+            "Remember",
+            "Slugify keeps the original title.",
+            Some(false),
+            "Add a slugify function",
+            "",
+            "",
+            "probe-00aa",
+            Some("atom-old"),
+        );
+        assert!(err.is_err(), "the pack was off");
+        let queued =
+            std::fs::read_to_string(tmp.path().join("ljos/note-queue.jsonl")).unwrap_or_default();
+        assert!(queued.contains("atom-old"), "{queued}");
+        assert!(queued.contains("lesson"), "{queued}");
+    }
+
     fn queued_note(dir: &std::path::Path, text: &str) {
         crate::note_queue::push_in(
             dir,
@@ -37812,6 +37881,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 workspace: "ws".into(),
                 at: 1,
                 kind: "note".into(),
+                supersedes: Vec::new(),
             },
         )
         .unwrap();
