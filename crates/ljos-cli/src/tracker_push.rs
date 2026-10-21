@@ -669,8 +669,10 @@ pub(crate) fn repo_root(start: &Path) -> PathBuf {
 
 fn git(dir: &Path, args: &[&str]) -> Output {
     use std::os::unix::process::ExitStatusExt;
-    let mut cmd = crate::git_at(dir);
-    cmd.args(args)
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")

@@ -352,6 +352,9 @@ enum Cmd {
         /// Only write and push this machine's log.
         #[arg(long)]
         export: bool,
+        /// Fold a gone host's atoms into this host's log and drop that host's log file.
+        #[arg(long, value_name = "HOST", conflicts_with_all = ["key", "import", "export"])]
+        adopt: Option<String>,
     },
     /// Re-export this machine's atoms over a conflicted tracker log. git calls
     /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
@@ -560,9 +563,12 @@ enum Cmd {
     },
     /// How mail wakes a seat that is idle: a command this machine runs or a
     /// webhook it posts to, which `ljos send` and `ljos reply` start without
-    /// waiting. Alone, show the seat's wake.
+    /// waiting. A name ending in `-` matches every longer seat that starts
+    /// with it. Alone, show the seat's wake.
     Wake {
-        /// The seat. Absent: this seat.
+        /// The seat. Absent: this seat. A name ending in `-` is a prefix:
+        /// mail to a longer seat that starts with it uses this wake unless
+        /// that seat has its own. The longest prefix wins.
         seat: Option<String>,
         /// Run this shell line, with `LJOS_SEAT` set to the seat, when mail
         /// reaches it. The guard judges it now and on every run.
@@ -1498,8 +1504,11 @@ fn run_command() -> Result<()> {
             key,
             import,
             export,
+            adopt,
         } => {
-            if key {
+            if let Some(host) = adopt {
+                print!("{}", ljos_cli::sync::adopt(&host)?);
+            } else if key {
                 println!("{}", ljos_cli::sync::public_key()?);
             } else {
                 let both = !import && !export;
