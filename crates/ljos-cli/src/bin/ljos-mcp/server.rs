@@ -4325,39 +4325,20 @@ mod tests {
         );
     }
 
-    /// Puts PATH back when dropped, so the two deedar cases do not depend
-    /// on the PATH this process was started with.
-    struct PathSet(Option<std::ffi::OsString>);
-
-    impl PathSet {
-        fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
-            let prev = std::env::var_os("PATH");
-            unsafe { std::env::set_var("PATH", path) };
-            Self(prev)
-        }
-    }
-
-    impl Drop for PathSet {
-        fn drop(&mut self) {
-            unsafe {
-                match self.0.take() {
-                    Some(value) => std::env::set_var("PATH", value),
-                    None => std::env::remove_var("PATH"),
-                }
-            }
-        }
-    }
-
     /// A missing deed is an error, not a success carrying an error message.
     /// With deedar absent the seat says it is not on PATH. With deedar
     /// present and refusing, the seat says the exit code. Neither answer
     /// depends on whatever else is on PATH.
     #[tokio::test]
     async fn a_refusal_is_an_error() {
+        let _env_lock = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _saved = RestoreEnv::new(&["PATH"]);
         let cards = tempfile::tempdir().unwrap();
         let server = LjosServer::at(cards.path().to_path_buf());
         let missing = tempfile::tempdir().unwrap();
-        let _gone = PathSet::set(missing.path());
+        unsafe { std::env::set_var("PATH", missing.path()) };
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
@@ -4368,17 +4349,13 @@ mod tests {
         };
         let said = format!("{err:?}");
         assert!(said.contains("not on PATH"), "{said}");
-        drop(_gone);
 
         let bin = tempfile::tempdir().unwrap();
         let program = bin.path().join("deedar");
         std::fs::write(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut next = std::ffi::OsString::from(bin.path());
-        next.push(":");
-        next.push(std::env::var_os("PATH").unwrap_or_default());
-        let _fake = PathSet::set(next);
+        unsafe { std::env::set_var("PATH", bin.path()) };
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
