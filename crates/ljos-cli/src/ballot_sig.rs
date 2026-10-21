@@ -260,7 +260,7 @@ fn key_prefix(key: &str) -> &str {
     &key[..12.min(key.len())]
 }
 
-fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
+pub(crate) fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
     let raw = std::fs::read(path).with_context(|| format!("seat key {}", path.display()))?;
     let seed: [u8; 32] = raw
         .get(..32)
@@ -1024,7 +1024,7 @@ fn newest_sig(issue: &str, voter: &str) -> Option<(SigNote, bool)> {
     Some((sig, withdrawn))
 }
 
-fn write_sig_note(issue: &str, note: &str) -> Result<()> {
+pub(crate) fn write_sig_note(issue: &str, note: &str) -> Result<()> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     vissue_core::ops::note(&layout, issue, note)?;
     Ok(())
@@ -1036,17 +1036,7 @@ fn write_sig_note(issue: &str, note: &str) -> Result<()> {
 ///
 /// The tracker cannot be read, or the ballot is already signed by another key.
 pub fn sign_own_ballot(issue: &str) -> Result<String> {
-    let voter = std::env::var("VISSUE_AGENT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("LJOS_SEAT")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
-    let Some(voter) = voter else {
+    let Some(voter) = own_voter() else {
         return Ok(String::new());
     };
     let layout = vissue_core::Layout::resolve(None, None)?;
@@ -1059,6 +1049,18 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
         return Ok(String::new());
     };
     sign_ballot(issue, &voter, &choice)
+}
+
+/// The name this process's seat casts and signs under: `VISSUE_AGENT`,
+/// else `LJOS_SEAT`.
+#[must_use]
+pub fn own_voter() -> Option<String> {
+    ["VISSUE_AGENT", "LJOS_SEAT"].iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
 }
 
 /// Leave `ballot-withdrawn: VOTER HARNESS NONCE` on `issue` for this session.
