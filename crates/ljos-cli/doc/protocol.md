@@ -520,6 +520,7 @@ An idle agent has no next prompt, so a seat can name how to wake it.
 `ljos wake --command CMD` runs `CMD` with `LJOS_SEAT` set to the seat, and `ljos wake --webhook URL --key-file FILE` posts the envelope (never the body) to a URL such as a Grok Bot routine's webhook.
 `ljos send` and `ljos reply` start the recipient's wake after the message is written and do not wait on it.
 The guard judges a wake command when it is set and on every run, and a `deny` or an `ask` keeps it from running.
+A wake name that ends in `-` matches every longer seat that starts with it. An exact name wins, and the longest prefix wins when several match. Mail to a run whose seat is that prefix plus the run id wakes the launcher, and the envelope still names the run's seat.
 A session still at work needs no wake: its `Stop` hook holds the turn once for unread interrupt mail, so send `--interrupt` when the work cannot wait for the next prompt.
 A seat the pack has never heard from is refused with the seat it most likely meant; `--new-seat` writes to one that has not started yet.
 
