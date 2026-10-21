@@ -745,6 +745,88 @@ fn a_missing_mcp_binary_is_named() {
 }
 
 #[test]
+fn doctor_flags_a_command_from_another_home() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let foreign = "/home/box/.cargo/bin/ljos-mcp";
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        format!("[mcp_servers.ljos]\ncommand = \"{foreign}\"\nargs = []\n"),
+    )
+    .unwrap();
+    fs::write(
+        home.join(".claude.json"),
+        format!("{{\"mcpServers\":{{\"ljos\":{{\"command\":\"{foreign}\"}}}}}}\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".config/opencode")).unwrap();
+    fs::write(
+        home.join(".config/opencode/opencode.json"),
+        format!("{{\"mcp\":{{\"servers\":{{\"ljos\":{{\"command\":[\"{foreign}\"]}}}}}}}}\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".config/goose")).unwrap();
+    fs::write(
+        home.join(".config/goose/config.yaml"),
+        format!("extensions:\n  ljos:\n    cmd: \"{foreign}\"\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".config/zed")).unwrap();
+    fs::write(
+        home.join(".config/zed/settings.json"),
+        "// zed allows comments\n{ \"context_servers\": {} }\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(line.contains(foreign), "{line}");
+    assert!(line.contains(".codex"), "{line}");
+    assert!(line.contains(".claude.json"), "{line}");
+    assert!(line.contains("opencode.json"), "{line}");
+    assert!(line.contains("config.yaml"), "{line}");
+    assert!(line.contains("ljos cloud up"), "{line}");
+    assert!(!line.contains("settings.json"), "{line}");
+    assert!(!line.contains("not JSON"), "{line}");
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(!row.ok, "{line}");
+    assert_eq!(ljos_cli::doctor_word(&row), "no");
+
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n",
+    )
+    .unwrap();
+    for extra in [
+        ".claude.json",
+        ".config/opencode/opencode.json",
+        ".config/goose/config.yaml",
+    ] {
+        fs::remove_file(home.join(extra)).unwrap();
+    }
+    let bare = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(bare.contains("is not on PATH"), "{bare}");
+    assert!(bare.contains("ljos cloud up"), "{bare}");
+
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"$HOME/.local/bin/ljos-mcp\"\nargs = []\n",
+    )
+    .unwrap();
+    assert!(
+        ljos_cli::cloud::missing_mcp_line().is_none(),
+        "a command under $HOME that exists here is runnable"
+    );
+}
+
+#[test]
 fn install_sh_cloud_reuses_binaries_that_already_answer() {
     let root = tempfile::tempdir().unwrap();
     let bins = root.path().join("bin");
