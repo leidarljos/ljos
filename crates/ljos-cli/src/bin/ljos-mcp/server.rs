@@ -301,8 +301,7 @@ const SEAT_PROPERTY: &str =
 /// Every listed tool accepts `seat`. The handlers ignore the field; the
 /// server reads it before the handler runs. It is not required in the
 /// schema: `LJOS_SEAT` in the server's environment supplies it.
-fn offer_seat(tool: &mut Tool) {
-    let mut schema = tool.input_schema.as_ref().clone();
+fn offer_seat(schema: &mut serde_json::Map<String, serde_json::Value>) {
     let properties = schema
         .entry("properties")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -314,7 +313,87 @@ fn offer_seat(tool: &mut Tool) {
             })
         });
     }
+}
+
+/// Formats from the JSON Schema draft. `uint`, `uint64` and `double` are
+/// schemars names; a strict client rejects them and then drops the server.
+fn standard_format(format: &str) -> bool {
+    matches!(
+        format,
+        "date-time"
+            | "date"
+            | "time"
+            | "duration"
+            | "email"
+            | "idn-email"
+            | "hostname"
+            | "idn-hostname"
+            | "ipv4"
+            | "ipv6"
+            | "uri"
+            | "uri-reference"
+            | "iri"
+            | "iri-reference"
+            | "uuid"
+            | "uri-template"
+            | "json-pointer"
+            | "relative-json-pointer"
+            | "regex"
+    )
+}
+
+/// Drop a format a strict client does not know, and any nested draft
+/// identifier. The type stays.
+fn drop_odd_formats(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("$schema");
+            if map
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|format| !standard_format(format))
+            {
+                map.remove("format");
+            }
+            for child in map.values_mut() {
+                drop_odd_formats(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                drop_odd_formats(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A schema a strict client will load: an object, no draft identifier, no
+/// schemars-only format. The draft identifier points at a meta-schema the
+/// client has not loaded, and the client then refuses the whole list.
+fn finish_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    schema.remove("$schema");
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        schema.insert("type".into(), serde_json::Value::String("object".into()));
+    }
+    let mut value = serde_json::Value::Object(std::mem::take(schema));
+    drop_odd_formats(&mut value);
+    if let serde_json::Value::Object(map) = value {
+        *schema = map;
+    }
+}
+
+/// The tool as `tools/list` sends it.
+fn publish_tool(tool: &mut Tool) {
+    let mut schema = tool.input_schema.as_ref().clone();
+    offer_seat(&mut schema);
+    finish_schema(&mut schema);
     tool.input_schema = std::sync::Arc::new(schema);
+    if let Some(output) = tool.output_schema.take() {
+        let mut schema = output.as_ref().clone();
+        finish_schema(&mut schema);
+        tool.output_schema = Some(std::sync::Arc::new(schema));
+    }
 }
 
 #[derive(Clone)]
@@ -3340,7 +3419,7 @@ impl ServerHandler for LjosServer {
             .filter(|t| listed(set.as_deref(), &t.name))
             .collect();
         for tool in &mut tools {
-            offer_seat(tool);
+            publish_tool(tool);
         }
         listing_order(&mut tools);
         Ok(ListToolsResult {
@@ -3359,7 +3438,7 @@ impl ServerHandler for LjosServer {
             .get(name)
             .filter(|_| listed(set.as_deref(), name))
             .cloned()?;
-        offer_seat(&mut tool);
+        publish_tool(&mut tool);
         Some(tool)
     }
 
@@ -3453,6 +3532,37 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
+
+    /// A schema `tools/list` may send: an object, no draft identifier, and
+    /// no format outside the JSON Schema draft.
+    fn assert_listed_schema(name: &str, schema: &serde_json::Map<String, serde_json::Value>) {
+        assert_eq!(
+            schema.get("type").and_then(|value| value.as_str()),
+            Some("object"),
+            "{name}"
+        );
+        assert_plain_schema(name, &serde_json::Value::Object(schema.clone()));
+    }
+
+    fn assert_plain_schema(name: &str, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                assert!(map.get("$schema").is_none(), "{name}");
+                if let Some(format) = map.get("format").and_then(|value| value.as_str()) {
+                    assert!(standard_format(format), "{name} format {format}");
+                }
+                for child in map.values() {
+                    assert_plain_schema(name, child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_plain_schema(name, item);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn a_call_names_its_thread_in_the_meta() {
@@ -3806,7 +3916,11 @@ mod tests {
         assert!(tools.iter().any(|tool| tool.name == "ljos_start"));
         assert!(tools.iter().any(|tool| tool.name == "ljos_guard_check"));
         for tool in &mut tools {
-            offer_seat(tool);
+            publish_tool(tool);
+            assert_listed_schema(&tool.name, &tool.input_schema);
+            if let Some(output) = &tool.output_schema {
+                assert_listed_schema(&tool.name, output);
+            }
             let props = tool
                 .input_schema
                 .get("properties")
