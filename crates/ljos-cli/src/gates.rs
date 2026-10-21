@@ -42,7 +42,9 @@ pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
 /// checkout configures a `test` command and that tip has no passing record.
 /// A force-push still asks. A merge whose head sha has no recorded checks
 /// asks too: the reason names that sha, and a local evidence record when
-/// the checkout has one for it.
+/// the checkout has one for it. A fine-grained token with no Checks
+/// permission reads the REST fallback when the rollup is denied, and the
+/// reason names which source it used.
 #[must_use]
 pub fn guard_verdict(line: &str, cwd: Option<&Path>, rules: &[super::Rule]) -> Option<super::Rule> {
     let fast = super::static_guard_in(line, cwd);
@@ -1700,17 +1702,35 @@ fn review_pr(
     expect: Option<&str>,
     action: &str,
 ) -> Result<(), super::Rule> {
+    let args = pr_view_args(spec, repo, "number,headRefOid,statusCheckRollup,url,state");
+    match gh_read(cwd, &args) {
+        Ok(view) => review_rollup(cwd, &view, expect, action),
+        Err(err) if err.rollup_denied => review_pr_rest(cwd, spec, repo, expect, action),
+        Err(err) => Err(merge_io(action, &err.text)),
+    }
+}
+
+fn pr_view_args(spec: &str, repo: Option<&str>, fields: &str) -> Vec<String> {
     let mut args = vec!["pr".to_string(), "view".to_string()];
     if !spec.is_empty() {
         args.push(spec.to_string());
     }
     args.push("--json".into());
-    args.push("number,headRefOid,statusCheckRollup,url,state".into());
+    args.push(fields.to_string());
     if let Some(repo) = repo {
         args.push("--repo".into());
         args.push(repo.to_string());
     }
-    let view = gh_json(cwd, &args).map_err(|e| merge_io(action, &e))?;
+    args
+}
+
+struct PrHead {
+    number: u64,
+    sha: String,
+    url: String,
+}
+
+fn pr_head(view: &Value, action: &str) -> Result<PrHead, super::Rule> {
     let number = view["number"]
         .as_u64()
         .ok_or_else(|| merge_io(action, "the pull request number was missing"))?;
@@ -1719,42 +1739,289 @@ fn review_pr(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| merge_io(action, "the head sha was missing"))?
         .to_string();
-    if let Some(expect) = expect {
-        if sha != expect {
-            return Err(merge_deny(
-                action,
-                expect,
-                &number.to_string(),
-                &format!("The pull request head is {sha}, but this merge publishes {expect}."),
-            ));
-        }
+    let url = view["url"].as_str().unwrap_or("").to_string();
+    Ok(PrHead { number, sha, url })
+}
+
+fn same_head(
+    action: &str,
+    sha: &str,
+    number: u64,
+    expect: Option<&str>,
+) -> Result<(), super::Rule> {
+    let Some(expect) = expect else {
+        return Ok(());
+    };
+    if sha == expect {
+        return Ok(());
     }
+    Err(merge_deny(
+        action,
+        expect,
+        &number.to_string(),
+        &format!("The pull request head is {sha}, but this merge publishes {expect}."),
+    ))
+}
+
+fn review_rollup(
+    cwd: &Path,
+    view: &Value,
+    expect: Option<&str>,
+    action: &str,
+) -> Result<(), super::Rule> {
+    let head = pr_head(view, action)?;
+    same_head(action, &head.sha, head.number, expect)?;
     let rollup = &view["statusCheckRollup"];
     if let Some(problem) = ci_problem(rollup) {
-        return Err(merge_deny(action, &sha, &number.to_string(), &problem));
+        return Err(merge_deny(
+            action,
+            &head.sha,
+            &head.number.to_string(),
+            &name_source(&problem, "rollup"),
+        ));
     }
-    let absent = ci_absent(rollup);
-    let url = view["url"].as_str().unwrap_or("");
-    let Some((owner, name)) = owner_repo(url) else {
+    let Some((owner, name)) = owner_repo(&head.url) else {
         return Err(merge_io(
             action,
             "the pull request URL did not name an owner and repository",
         ));
     };
-    let threads = bugbot_query(cwd, &owner, &name, number).map_err(|e| merge_io(action, &e))?;
-    if let Some(problem) = bugbot_problem(&threads).map_err(|e| merge_io(action, &e))? {
-        return Err(merge_deny(action, &sha, &number.to_string(), &problem));
+    finish_review(
+        cwd,
+        &Reviewed {
+            action,
+            number: head.number,
+            sha: &head.sha,
+            owner: &owner,
+            name: &name,
+            absent: ci_absent(rollup),
+            source: "rollup",
+        },
+    )
+}
+
+/// The rollup read was denied to this token. Workflow runs and the combined
+/// commit status carry the same CI result. Both empty is the no-CI ask. A
+/// failed read keeps the refusal that gh could not read the pull request.
+fn review_pr_rest(
+    cwd: &Path,
+    spec: &str,
+    repo: Option<&str>,
+    expect: Option<&str>,
+    action: &str,
+) -> Result<(), super::Rule> {
+    let args = pr_view_args(spec, repo, "number,headRefOid,url,state");
+    let view = gh_json(cwd, &args).map_err(|e| merge_io(action, &e))?;
+    let head = pr_head(&view, action)?;
+    same_head(action, &head.sha, head.number, expect)?;
+    let Some((owner, name)) = owner_repo(&head.url) else {
+        return Err(merge_io(
+            action,
+            "the pull request URL did not name an owner and repository",
+        ));
+    };
+    let runs = workflow_runs(cwd, &owner, &name, &head.sha).map_err(|e| merge_io(action, &e))?;
+    let status = commit_status(cwd, &owner, &name, &head.sha).map_err(|e| merge_io(action, &e))?;
+    let problem = rest_problem(&runs, &status).map_err(|e| merge_io(action, &e))?;
+    if let Some(problem) = problem {
+        return Err(merge_deny(
+            action,
+            &head.sha,
+            &head.number.to_string(),
+            &name_source(&problem, "REST fallback"),
+        ));
     }
-    if absent {
-        return Err(merge_ask(cwd, &sha));
+    finish_review(
+        cwd,
+        &Reviewed {
+            action,
+            number: head.number,
+            sha: &head.sha,
+            owner: &owner,
+            name: &name,
+            absent: rest_absent(&runs, &status),
+            source: "REST fallback",
+        },
+    )
+}
+
+struct Reviewed<'a> {
+    action: &'a str,
+    number: u64,
+    sha: &'a str,
+    owner: &'a str,
+    name: &'a str,
+    absent: bool,
+    source: &'a str,
+}
+
+fn finish_review(cwd: &Path, review: &Reviewed<'_>) -> Result<(), super::Rule> {
+    let threads = bugbot_query(cwd, review.owner, review.name, review.number)
+        .map_err(|e| merge_io(review.action, &e))?;
+    if let Some(problem) = bugbot_problem(&threads).map_err(|e| merge_io(review.action, &e))? {
+        return Err(merge_deny(
+            review.action,
+            review.sha,
+            &review.number.to_string(),
+            &name_source(&problem, review.source),
+        ));
+    }
+    if review.absent {
+        return Err(merge_ask(cwd, review.sha, review.source));
     }
     Ok(())
 }
 
+fn name_source(problem: &str, source: &str) -> String {
+    format!("{problem}. Source: {source}.")
+}
+
+const RUN_PAGE: usize = 100;
+
+fn workflow_runs(cwd: &Path, owner: &str, name: &str, sha: &str) -> Result<Vec<Value>, String> {
+    let mut all = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let body = gh_json(
+            cwd,
+            &[
+                "api".into(),
+                format!("repos/{owner}/{name}/actions/runs"),
+                "-f".into(),
+                format!("head_sha={sha}"),
+                "-f".into(),
+                format!("per_page={RUN_PAGE}"),
+                "-f".into(),
+                format!("page={page}"),
+            ],
+        )?;
+        let Some(runs) = body.get("workflow_runs").and_then(Value::as_array) else {
+            return Err("the workflow run list was missing".into());
+        };
+        let total = body.get("total_count").and_then(Value::as_u64);
+        if runs.is_empty() {
+            if total.is_some_and(|t| (all.len() as u64) < t) {
+                return Err("the workflow run list ended early".into());
+            }
+            break;
+        }
+        all.extend(runs.iter().cloned());
+        let more = match total {
+            Some(total) => (all.len() as u64) < total,
+            None => runs.len() >= RUN_PAGE,
+        };
+        if !more {
+            break;
+        }
+        if page == 100 {
+            return Err("the workflow run list did not end".into());
+        }
+        page += 1;
+    }
+    Ok(all)
+}
+
+fn commit_status(cwd: &Path, owner: &str, name: &str, sha: &str) -> Result<Value, String> {
+    gh_json(
+        cwd,
+        &[
+            "api".into(),
+            format!("repos/{owner}/{name}/commits/{sha}/status"),
+        ],
+    )
+}
+
+fn rest_absent(runs: &[Value], status: &Value) -> bool {
+    runs.is_empty()
+        && status
+            .get("statuses")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+}
+
+fn rest_problem(runs: &[Value], status: &Value) -> Result<Option<String>, String> {
+    let mut bad = Vec::new();
+    for run in runs {
+        if let Some(fault) = run_fault(run) {
+            bad.push(fault);
+        }
+    }
+    if let Some(fault) = status_fault(status)? {
+        bad.push(fault);
+    }
+    if bad.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!("{} not green", bad.join(", "))))
+    }
+}
+
+fn run_fault(run: &Value) -> Option<String> {
+    let name = run["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("run");
+    let status = run["status"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let conclusion = run["conclusion"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        status.as_str(),
+        "queued" | "in_progress" | "in-progress" | "waiting" | "requested" | "pending"
+    ) {
+        return Some(format!("{name}={status} (pending)"));
+    }
+    if status == "completed" && matches!(conclusion.as_str(), "success" | "neutral" | "skipped") {
+        return None;
+    }
+    let shown = if !conclusion.is_empty() {
+        conclusion
+    } else if !status.is_empty() {
+        status
+    } else {
+        "unknown".to_string()
+    };
+    Some(format!("{name}={shown}"))
+}
+
+fn status_fault(status: &Value) -> Result<Option<String>, String> {
+    let Some(list) = status.get("statuses").and_then(Value::as_array) else {
+        return Err("the commit status list was missing".into());
+    };
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let state = status["state"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if state == "success" {
+        return Ok(None);
+    }
+    let shown = if state.is_empty() {
+        "unknown".to_string()
+    } else {
+        state
+    };
+    if shown == "pending" {
+        Ok(Some(format!("commit status={shown} (pending)")))
+    } else {
+        Ok(Some(format!("commit status={shown}")))
+    }
+}
+
 /// An ask for a head sha with no CI checks. A passing local record for
-/// that exact sha is named. The merge still asks.
-fn merge_ask(cwd: &Path, sha: &str) -> super::Rule {
-    let mut detail = format!("no CI ran on head sha {sha}.");
+/// that exact sha is named. The merge still asks. `source` is `rollup` or
+/// `REST fallback`.
+fn merge_ask(cwd: &Path, sha: &str, source: &str) -> super::Rule {
+    let mut detail = format!("no CI ran on head sha {sha}. Source: {source}.");
     if evidence_recorded(cwd, sha) {
         detail.push_str(&format!(" A local evidence record exists for {sha}."));
     }
@@ -2067,20 +2334,52 @@ fn gh_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("gh"))
 }
 
+struct GhFail {
+    text: String,
+    /// The rollup field was refused with the fine-grained token phrase.
+    /// Any other failure leaves this false.
+    rollup_denied: bool,
+}
+
 fn gh_json(cwd: &Path, args: &[String]) -> Result<Value, String> {
+    gh_read(cwd, args).map_err(|err| err.text)
+}
+
+fn gh_read(cwd: &Path, args: &[String]) -> Result<Value, GhFail> {
     let mut cmd = Command::new(gh_program());
     cmd.current_dir(cwd).args(args);
-    let out = run_out(&mut cmd, super::guard_timeout())?;
+    let out = run_out(&mut cmd, super::guard_timeout()).map_err(|text| GhFail {
+        text,
+        rollup_denied: false,
+    })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
+        let raw_out = String::from_utf8_lossy(&out.stdout);
+        let rollup_denied = rollup_permission_denied(&err) || rollup_permission_denied(&raw_out);
         let text = brief(&err);
-        return Err(if text.is_empty() {
+        let text = if text.is_empty() {
             format!("gh exited {}", out.status.code().unwrap_or(1))
         } else {
             text
+        };
+        return Err(GhFail {
+            text,
+            rollup_denied,
         });
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("gh did not return JSON ({e})"))
+    serde_json::from_slice(&out.stdout).map_err(|e| GhFail {
+        text: format!("gh did not return JSON ({e})"),
+        rollup_denied: false,
+    })
+}
+
+/// Fine-grained tokens have no Checks permission. `gh pr view` then fails
+/// with this phrase when the json fields include `statusCheckRollup`.
+/// A different failure is not this case.
+fn rollup_permission_denied(err: &str) -> bool {
+    let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.to_ascii_lowercase()
+        .contains("resource not accessible by personal access token")
 }
 
 fn brief(s: &str) -> String {
@@ -2509,16 +2808,93 @@ mod tests {
         if fail {
             std::fs::write(dir.path().join("fail"), "1").unwrap();
         }
+        hold_gh(dir)
+    }
+
+    fn hold_gh(dir: tempfile::TempDir) -> GhHold {
         let script = r#"#!/bin/sh
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 if [ -f "$here/fail" ]; then
   echo "HTTP 401: Bad credentials" >&2
   exit 1
 fi
+has_rollup=0
+for a in "$@"; do
+  case "$a" in
+    *statusCheckRollup*) has_rollup=1 ;;
+  esac
+done
+if [ "$has_rollup" -eq 1 ] && [ -f "$here/rollup-error" ]; then
+  cat "$here/rollup-error" >&2
+  exit 1
+fi
+if [ "$has_rollup" -eq 1 ] && [ -f "$here/rollup-error-out" ]; then
+  cat "$here/rollup-error-out"
+  exit 1
+fi
 case "$*" in
   *graphql*) cat "$here/threads.json" ;;
   *"pr list"*) cat "$here/list.json" ;;
-  *"pr view"*) cat "$here/view.json" ;;
+  *"pr view"*)
+    if [ "$has_rollup" -eq 0 ] && [ -f "$here/meta-error" ]; then
+      cat "$here/meta-error" >&2
+      exit 1
+    fi
+    cat "$here/view.json"
+    ;;
+  *actions/runs*)
+    if [ -f "$here/runs-error" ]; then
+      cat "$here/runs-error" >&2
+      exit 1
+    fi
+    case "$*" in
+      *repos/acme/widgets/actions/runs*) ;;
+      *) echo "workflow runs were not read for the pull request repository" >&2; exit 1 ;;
+    esac
+    if [ -f "$here/want-sha" ]; then
+      want=$(cat "$here/want-sha")
+      found=0
+      for a in "$@"; do
+        case "$a" in
+          "head_sha=$want") found=1 ;;
+        esac
+      done
+      if [ "$found" -eq 0 ]; then
+        echo "workflow runs were not read for the head sha" >&2
+        exit 1
+      fi
+    fi
+    page=1
+    for a in "$@"; do
+      case "$a" in
+        page=*) page=${a#page=} ;;
+      esac
+    done
+    if [ -f "$here/runs-$page.json" ]; then
+      cat "$here/runs-$page.json"
+    else
+      echo "workflow run page $page failed" >&2
+      exit 1
+    fi
+    ;;
+  *commits/*/status*)
+    if [ -f "$here/status-error" ]; then
+      cat "$here/status-error" >&2
+      exit 1
+    fi
+    if [ -f "$here/want-sha" ]; then
+      want=$(cat "$here/want-sha")
+      case "$*" in
+        *"commits/$want/status"*) ;;
+        *) echo "commit status was not read for the head sha" >&2; exit 1 ;;
+      esac
+    fi
+    case "$*" in
+      *repos/acme/widgets/commits/*) ;;
+      *) echo "commit status was not read for the pull request repository" >&2; exit 1 ;;
+    esac
+    cat "$here/status.json"
+    ;;
   *) echo "stub gh: $*" >&2; exit 1 ;;
 esac
 "#;
@@ -2580,6 +2956,191 @@ esac
                 "conclusion": null
             }]),
         )
+    }
+
+    const ROLLUP_DENIED: &str = "GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup)\n";
+
+    struct RestGh {
+        sha: String,
+        threads: String,
+        list: String,
+        pages: Vec<String>,
+        status: String,
+        rollup_error: Option<String>,
+        rollup_stdout: Option<String>,
+        meta_error: Option<String>,
+        runs_error: Option<String>,
+        status_error: Option<String>,
+        view: Option<String>,
+    }
+
+    fn rest_gh(sha: &str, pages: Vec<String>, status: String) -> RestGh {
+        RestGh {
+            sha: sha.to_string(),
+            threads: quiet_threads(),
+            list: "[]".to_string(),
+            pages,
+            status,
+            rollup_error: Some(ROLLUP_DENIED.to_string()),
+            rollup_stdout: None,
+            meta_error: None,
+            runs_error: None,
+            status_error: None,
+            view: None,
+        }
+    }
+
+    fn stub_rest(spec: &RestGh) -> GhHold {
+        let dir = tempfile::tempdir().unwrap();
+        let view = spec.view.clone().unwrap_or_else(|| meta_view(&spec.sha));
+        let root = dir.path();
+        std::fs::write(root.join("view.json"), view).unwrap();
+        std::fs::write(root.join("threads.json"), &spec.threads).unwrap();
+        std::fs::write(root.join("list.json"), &spec.list).unwrap();
+        std::fs::write(root.join("status.json"), &spec.status).unwrap();
+        std::fs::write(root.join("want-sha"), &spec.sha).unwrap();
+        for (i, page) in spec.pages.iter().enumerate() {
+            std::fs::write(root.join(format!("runs-{}.json", i + 1)), page).unwrap();
+        }
+        if let Some(text) = &spec.rollup_error {
+            std::fs::write(root.join("rollup-error"), text).unwrap();
+        }
+        if let Some(text) = &spec.rollup_stdout {
+            std::fs::write(root.join("rollup-error-out"), text).unwrap();
+        }
+        if let Some(text) = &spec.meta_error {
+            std::fs::write(root.join("meta-error"), text).unwrap();
+        }
+        if let Some(text) = &spec.runs_error {
+            std::fs::write(root.join("runs-error"), text).unwrap();
+        }
+        if let Some(text) = &spec.status_error {
+            std::fs::write(root.join("status-error"), text).unwrap();
+        }
+        hold_gh(dir)
+    }
+
+    fn meta_view(sha: &str) -> String {
+        serde_json::json!({
+            "number": 7,
+            "headRefOid": sha,
+            "state": "OPEN",
+            "url": "https://github.com/acme/widgets/pull/7",
+        })
+        .to_string()
+    }
+
+    fn workflow(name: &str, status: &str, conclusion: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+        })
+    }
+
+    fn run_page(runs: serde_json::Value) -> String {
+        let n = runs.as_array().map(|a| a.len()).unwrap_or(0);
+        run_page_total(n as u64, runs)
+    }
+
+    fn run_page_total(total: u64, runs: serde_json::Value) -> String {
+        serde_json::json!({
+            "total_count": total,
+            "workflow_runs": runs,
+        })
+        .to_string()
+    }
+
+    fn no_runs() -> String {
+        run_page(serde_json::json!([]))
+    }
+
+    fn commit_status_body(state: &str, statuses: serde_json::Value) -> String {
+        let n = statuses.as_array().map(|a| a.len()).unwrap_or(0);
+        serde_json::json!({
+            "state": state,
+            "statuses": statuses,
+            "total_count": n,
+        })
+        .to_string()
+    }
+
+    fn no_statuses() -> String {
+        commit_status_body("pending", serde_json::json!([]))
+    }
+
+    fn success_status() -> String {
+        commit_status_body(
+            "success",
+            serde_json::json!([{"context": "ci", "state": "success"}]),
+        )
+    }
+
+    fn status_state(state: &str) -> String {
+        commit_status_body(
+            state,
+            serde_json::json!([{"context": "ci", "state": state}]),
+        )
+    }
+
+    fn green_runs() -> String {
+        run_page(serde_json::json!([
+            workflow("unit", "completed", Some("success")),
+            workflow("docs", "completed", Some("neutral")),
+            workflow("nightly", "completed", Some("skipped")),
+        ]))
+    }
+
+    fn merge_rule(dir: &Path) -> super::super::Rule {
+        guard_verdict("gh pr merge 7", Some(dir), &[]).expect("the merge gate spoke")
+    }
+
+    fn assert_rest_deny(rule: &super::super::Rule, needle: &str) {
+        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+        assert_eq!(rule.pattern, "merge-gate");
+        assert!(rule.reason.contains(needle), "{}", rule.reason);
+        assert!(
+            rule.reason.contains("Source: REST fallback"),
+            "{}",
+            rule.reason
+        );
+        assert!(!rule.reason.contains("no CI"), "{}", rule.reason);
+        assert!(
+            !rule.reason.contains("could not read the pull request"),
+            "{}",
+            rule.reason
+        );
+    }
+
+    fn assert_unreadable(rule: &super::super::Rule) {
+        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+        assert_eq!(rule.pattern, "merge-gate");
+        assert!(
+            rule.reason.contains("could not read the pull request"),
+            "{}",
+            rule.reason
+        );
+        assert!(rule.reason.contains("gh auth login"), "{}", rule.reason);
+        assert!(!rule.reason.contains("no CI"), "{}", rule.reason);
+        assert!(!rule.reason.contains("CI is missing"), "{}", rule.reason);
+        assert!(
+            !rule.reason.contains("Source: REST fallback"),
+            "{}",
+            rule.reason
+        );
+        assert!(!rule.reason.contains("Source: rollup"), "{}", rule.reason);
+    }
+
+    fn assert_rest_ask(rule: &super::super::Rule, sha: &str) {
+        assert_eq!(rule.verdict, "ask", "{}", rule.reason);
+        assert_eq!(rule.pattern, "merge-gate");
+        assert!(rule.reason.contains("no CI ran"), "{}", rule.reason);
+        assert!(rule.reason.contains(sha), "{}", rule.reason);
+        assert!(
+            rule.reason.contains("Source: REST fallback"),
+            "{}",
+            rule.reason
+        );
     }
 
     fn quiet_threads() -> String {
@@ -3185,6 +3746,461 @@ esac
             denied.reason
         );
         assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "gh auth login");
+    }
+
+    #[test]
+    fn a_denied_check_rollup_allows_a_green_rest_fallback() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let allow = |spec: &RestGh| {
+            let _hold = stub_rest(spec);
+            assert!(
+                guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none(),
+                "green REST CI allows the merge"
+            );
+            let api = "curl -X PUT https://api.github.com/repos/acme/widgets/pulls/7/merge";
+            assert!(guard_verdict(api, Some(dir.path()), &[]).is_none(), "{api}");
+        };
+
+        allow(&rest_gh(sha, vec![green_runs()], no_statuses()));
+        allow(&rest_gh(sha, vec![green_runs()], success_status()));
+        allow(&rest_gh(sha, vec![no_runs()], success_status()));
+        allow(&rest_gh(
+            sha,
+            vec![run_page(serde_json::json!([workflow(
+                "nightly",
+                "completed",
+                Some("skipped"),
+            )]))],
+            no_statuses(),
+        ));
+        allow(&rest_gh(
+            sha,
+            vec![
+                run_page_total(
+                    2,
+                    serde_json::json!([workflow("unit", "completed", Some("success"))]),
+                ),
+                run_page_total(
+                    2,
+                    serde_json::json!([workflow("docs", "completed", Some("neutral"))]),
+                ),
+            ],
+            success_status(),
+        ));
+
+        let mut wrapped = rest_gh(sha, vec![green_runs()], no_statuses());
+        wrapped.rollup_error = Some(
+            "GraphQL: Resource not accessible by\npersonal access token (repository.pullRequest.statusCheckRollup)\n"
+                .into(),
+        );
+        allow(&wrapped);
+
+        let mut stdout = rest_gh(sha, vec![green_runs()], no_statuses());
+        stdout.rollup_error = None;
+        stdout.rollup_stdout = Some(ROLLUP_DENIED.into());
+        allow(&stdout);
+
+        let mut bugbot = rest_gh(sha, vec![green_runs()], success_status());
+        bugbot.threads = threads(false, false);
+        let _hold = stub_rest(&bugbot);
+        let open = merge_rule(dir.path());
+        assert_eq!(open.verdict, "deny");
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(
+            open.reason.contains("Source: REST fallback"),
+            "{}",
+            open.reason
+        );
+        assert!(!open.reason.contains("no CI"), "{}", open.reason);
+        drop(_hold);
+
+        let mut human = rest_gh(sha, vec![green_runs()], success_status());
+        human.threads = human_thread();
+        let _hold = stub_rest(&human);
+        assert!(
+            guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none(),
+            "a thread that is not Bugbot does not refuse the merge"
+        );
+    }
+
+    #[test]
+    fn a_denied_check_rollup_refuses_a_bad_workflow_run() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for conclusion in [
+            "failure",
+            "cancelled",
+            "timed_out",
+            "action_required",
+            "stale",
+        ] {
+            let page = run_page(serde_json::json!([workflow(
+                "ci",
+                "completed",
+                Some(conclusion),
+            )]));
+            let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+            let denied = merge_rule(dir.path());
+            assert_rest_deny(&denied, &format!("ci={conclusion}"));
+            assert!(!denied.reason.contains("(pending)"), "{}", denied.reason);
+        }
+
+        let page = run_page(serde_json::json!([workflow("ci", "completed", None)]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "ci=completed");
+        drop(_hold);
+
+        for status in ["queued", "in_progress", "in-progress", "waiting"] {
+            let page = run_page(serde_json::json!([workflow("ci", status, None)]));
+            let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+            let denied = merge_rule(dir.path());
+            assert_rest_deny(&denied, &format!("ci={status} (pending)"));
+        }
+
+        let page = run_page(serde_json::json!([
+            workflow("unit", "completed", Some("failure")),
+            workflow("lint", "queued", None),
+        ]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "unit=failure");
+        assert!(
+            denied.reason.contains("lint=queued (pending)"),
+            "{}",
+            denied.reason
+        );
+        drop(_hold);
+
+        let pages = vec![
+            run_page_total(
+                2,
+                serde_json::json!([workflow("unit", "completed", Some("success"))]),
+            ),
+            run_page_total(
+                2,
+                serde_json::json!([workflow("lint", "completed", Some("failure"))]),
+            ),
+        ];
+        let _hold = stub_rest(&rest_gh(sha, pages, success_status()));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "lint=failure");
+        assert!(!denied.reason.contains("unit="), "{}", denied.reason);
+        drop(_hold);
+
+        let page = run_page(serde_json::json!([workflow(
+            "ci",
+            "completed",
+            Some("failure"),
+        )]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+        assert_denies(
+            &answers("gh pr merge 7", dir.path(), &[]),
+            "Source: REST fallback",
+        );
+        assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "ci=failure");
+    }
+
+    #[test]
+    fn a_denied_check_rollup_refuses_a_bad_commit_status() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for state in ["failure", "error"] {
+            let _hold = stub_rest(&rest_gh(sha, vec![green_runs()], status_state(state)));
+            let denied = merge_rule(dir.path());
+            assert_rest_deny(&denied, &format!("commit status={state}"));
+            assert!(!denied.reason.contains("(pending)"), "{}", denied.reason);
+        }
+        let _hold = stub_rest(&rest_gh(sha, vec![green_runs()], status_state("pending")));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "commit status=pending (pending)");
+        drop(_hold);
+
+        let _hold = stub_rest(&rest_gh(sha, vec![no_runs()], status_state("failure")));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "commit status=failure");
+        drop(_hold);
+
+        let mut missing = rest_gh(sha, vec![green_runs()], success_status());
+        missing.status = serde_json::json!({
+            "statuses": [{"context": "ci", "state": "success"}],
+            "total_count": 1,
+        })
+        .to_string();
+        let _hold = stub_rest(&missing);
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "commit status=unknown");
+        drop(_hold);
+
+        let page = run_page(serde_json::json!([workflow(
+            "unit",
+            "completed",
+            Some("cancelled"),
+        )]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], status_state("error")));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "unit=cancelled");
+        assert!(
+            denied.reason.contains("commit status=error"),
+            "{}",
+            denied.reason
+        );
+    }
+
+    #[test]
+    fn a_denied_check_rollup_with_no_runs_and_no_statuses_asks() {
+        let dir = repo();
+        seed(dir.path());
+        let sha = tip(dir.path());
+        let _hold = stub_rest(&rest_gh(&sha, vec![no_runs()], no_statuses()));
+        let asked = merge_rule(dir.path());
+        assert_rest_ask(&asked, &sha);
+        assert!(!asked.reason.contains("evidence"), "{}", asked.reason);
+        let rows = answers("gh pr merge 7", dir.path(), &[]);
+        let shell = rows
+            .iter()
+            .find(|(name, _)| name == "cursor-shell")
+            .unwrap();
+        assert!(shell.1.contains("\"permission\":\"ask\""), "{}", shell.1);
+        assert!(shell.1.contains("REST fallback"), "{}", shell.1);
+        assert!(shell.1.contains(&sha), "{}", shell.1);
+        drop(_hold);
+
+        let bad = evidence_file(dir.path(), &sha).unwrap();
+        if let Some(parent) = bad.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &bad,
+            serde_json::json!({
+                "command": "true",
+                "exit": 1,
+                "sha": sha,
+                "ts": "2026-10-20T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _hold = stub_rest(&rest_gh(&sha, vec![no_runs()], no_statuses()));
+        let failed = merge_rule(dir.path());
+        assert_rest_ask(&failed, &sha);
+        assert!(!failed.reason.contains("evidence"), "{}", failed.reason);
+        drop(_hold);
+
+        gates(dir.path(), "test = \"true\"\n");
+        record_in(dir.path(), &["true".into()]).unwrap();
+        let _hold = stub_rest(&rest_gh(&sha, vec![no_runs()], no_statuses()));
+        let recorded = merge_rule(dir.path());
+        assert_rest_ask(&recorded, &sha);
+        assert!(
+            recorded.reason.contains("local evidence record"),
+            "{}",
+            recorded.reason
+        );
+        assert!(
+            recorded.reason.contains(&format!("exists for {sha}")),
+            "{}",
+            recorded.reason
+        );
+        drop(_hold);
+
+        let page = run_page(serde_json::json!([workflow(
+            "ci",
+            "completed",
+            Some("failure"),
+        )]));
+        let _hold = stub_rest(&rest_gh(&sha, vec![page], no_statuses()));
+        let red = merge_rule(dir.path());
+        assert_rest_deny(&red, "ci=failure");
+        assert!(!red.reason.contains("evidence"), "{}", red.reason);
+        drop(_hold);
+
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let _hold = stub_rest(&rest_gh(other, vec![no_runs()], no_statuses()));
+        let elsewhere = merge_rule(dir.path());
+        assert_rest_ask(&elsewhere, other);
+        assert!(
+            !elsewhere.reason.contains("evidence"),
+            "{}",
+            elsewhere.reason
+        );
+        drop(_hold);
+
+        let mut spec = rest_gh(&sha, vec![no_runs()], no_statuses());
+        spec.threads = threads(false, false);
+        let _hold = stub_rest(&spec);
+        let open = merge_rule(dir.path());
+        assert_eq!(open.verdict, "deny");
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(
+            open.reason.contains("Source: REST fallback"),
+            "{}",
+            open.reason
+        );
+        assert!(!open.reason.contains("no CI ran"), "{}", open.reason);
+    }
+
+    #[test]
+    fn a_failed_rest_read_does_not_say_ci_is_missing() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let unreadable = |spec: &RestGh| {
+            let _hold = stub_rest(spec);
+            let denied = merge_rule(dir.path());
+            assert_unreadable(&denied);
+            denied.reason
+        };
+
+        let mut runs_fail = rest_gh(sha, vec![green_runs()], success_status());
+        runs_fail.runs_error = Some("HTTP 502\n".into());
+        unreadable(&runs_fail);
+
+        let mut status_fail = rest_gh(sha, vec![green_runs()], success_status());
+        status_fail.status_error = Some("HTTP 502\n".into());
+        unreadable(&status_fail);
+
+        let mut empty_status_fail = rest_gh(sha, vec![no_runs()], no_statuses());
+        empty_status_fail.status_error = Some("HTTP 502\n".into());
+        let reason = unreadable(&empty_status_fail);
+        assert!(!reason.contains("no CI ran"), "{reason}");
+
+        let mut meta_fail = rest_gh(sha, vec![green_runs()], success_status());
+        meta_fail.meta_error = Some("HTTP 401: Bad credentials\n".into());
+        let reason = unreadable(&meta_fail);
+        assert!(reason.contains("Bad credentials"), "{reason}");
+
+        let mut no_url = rest_gh(sha, vec![no_runs()], no_statuses());
+        no_url.view = Some(
+            serde_json::json!({
+                "number": 7,
+                "headRefOid": sha,
+                "state": "OPEN",
+            })
+            .to_string(),
+        );
+        unreadable(&no_url);
+
+        let bad_runs = rest_gh(sha, vec!["{}".into()], no_statuses());
+        let reason = unreadable(&bad_runs);
+        assert!(
+            reason.contains("the workflow run list was missing"),
+            "{reason}"
+        );
+
+        let mut bad_status = rest_gh(sha, vec![green_runs()], success_status());
+        bad_status.status = r#"{"state":"success"}"#.into();
+        let reason = unreadable(&bad_status);
+        assert!(
+            reason.contains("the commit status list was missing"),
+            "{reason}"
+        );
+
+        let short = rest_gh(
+            sha,
+            vec![run_page_total(
+                2,
+                serde_json::json!([workflow("unit", "completed", Some("success"))]),
+            )],
+            success_status(),
+        );
+        let reason = unreadable(&short);
+        assert!(reason.contains("workflow run page 2 failed"), "{reason}");
+
+        for message in [
+            "HTTP 401: Bad credentials\n",
+            "Resource not accessible by integration\n",
+            "HTTP 403: personal access token lacks a scope\n",
+        ] {
+            let mut spec = rest_gh(sha, vec![green_runs()], success_status());
+            spec.rollup_error = Some(message.into());
+            let reason = unreadable(&spec);
+            assert!(reason.contains(message.trim()), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_denied_check_rollup_still_refuses_a_different_head() {
+        let dir = repo();
+        seed(dir.path());
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.path().join("g.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "g.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "note the feature"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(dir.path(), &["merge", "--no-ff", "--no-edit", "feature"]);
+        let head = tip(dir.path());
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut spec = rest_gh(
+            other,
+            vec![run_page(serde_json::json!([workflow(
+                "unit",
+                "completed",
+                Some("success"),
+            )]))],
+            success_status(),
+        );
+        spec.list = format!(r#"[{{"number":7,"headRefOid":"{head}","state":"OPEN"}}]"#);
+        let _hold = stub_rest(&spec);
+        let denied = guard_verdict("git push origin main", Some(dir.path()), &[])
+            .expect("a different head is refused");
+        assert_eq!(denied.verdict, "deny");
+        assert!(
+            denied
+                .reason
+                .contains(&format!("The pull request head is {other}")),
+            "{}",
+            denied.reason
+        );
+        assert!(
+            denied
+                .reason
+                .contains(&format!("this merge publishes {head}")),
+            "{}",
+            denied.reason
+        );
+        assert!(!denied.reason.contains("no CI"), "{}", denied.reason);
+    }
+
+    #[test]
+    fn a_check_rollup_message_names_the_rollup() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _hold = stub_gh(&red_view(sha), &quiet_threads(), "[]");
+        let red = merge_rule(dir.path());
+        assert_eq!(red.verdict, "deny");
+        assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+        assert!(red.reason.contains("Source: rollup"), "{}", red.reason);
+        assert!(!red.reason.contains("REST fallback"), "{}", red.reason);
+        drop(_hold);
+
+        let _hold = stub_gh(&pending_view(sha), &quiet_threads(), "[]");
+        let pending = merge_rule(dir.path());
+        assert!(
+            pending.reason.contains("ci=IN_PROGRESS"),
+            "{}",
+            pending.reason
+        );
+        assert!(
+            pending.reason.contains("Source: rollup"),
+            "{}",
+            pending.reason
+        );
+        drop(_hold);
+
+        for rollup in [serde_json::Value::Null, serde_json::json!([])] {
+            let _hold = stub_gh(&rollup_view(sha, rollup), &quiet_threads(), "[]");
+            let asked = merge_rule(dir.path());
+            assert_eq!(asked.verdict, "ask", "{}", asked.reason);
+            assert!(asked.reason.contains("no CI ran"), "{}", asked.reason);
+            assert!(asked.reason.contains("Source: rollup"), "{}", asked.reason);
+            assert!(!asked.reason.contains("REST fallback"), "{}", asked.reason);
+        }
+
+        let _hold = stub_gh(&green_view(sha), &threads(false, false), "[]");
+        let open = merge_rule(dir.path());
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(open.reason.contains("Source: rollup"), "{}", open.reason);
     }
 
     #[test]
