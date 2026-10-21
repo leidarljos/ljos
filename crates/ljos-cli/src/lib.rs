@@ -3538,7 +3538,7 @@ fn rewrite_absolute_ljos_mcp(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     let mut changed = false;
-    while let Some(start) = rest.find(|c: char| c == '"' || c == '\'') {
+    while let Some(start) = rest.find(['"', '\'']) {
         let quote = rest[start..].chars().next().unwrap_or('"');
         out.push_str(&rest[..start]);
         let after = &rest[start + quote.len_utf8()..];
