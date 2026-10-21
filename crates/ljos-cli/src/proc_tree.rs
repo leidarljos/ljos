@@ -56,12 +56,13 @@ pub fn of(pid: u32) -> Option<Proc> {
     })
 }
 
-/// The processes above `pid`, nearest first, up to but not including init.
+/// The processes above `pid`, nearest first, up to and including pid 1:
+/// in a container that may be the harness itself.
 #[must_use]
 pub fn above(pid: u32) -> Vec<Proc> {
     let mut out = Vec::new();
     let mut next = stat(pid).map(|s| s.ppid);
-    while let Some(p) = next.filter(|&p| p > 1 && out.len() < DEPTH) {
+    while let Some(p) = next.filter(|&p| p > 0 && out.len() < DEPTH) {
         let Some(s) = stat(p) else {
             break;
         };
@@ -174,10 +175,11 @@ pub fn calling_shell(chain: &[Proc]) -> Option<&Proc> {
 }
 
 /// Where a chain stops being the hook's own: the person's session, a
-/// terminal or the init system ([`crate::is_session`]). Every sitting in
-/// that session shares it, and it outlives each of them.
+/// terminal or the init system ([`crate::is_session`]), or pid 1 unless
+/// it is a harness. Every sitting in that session shares it, and it
+/// outlives each of them.
 fn ends_the_walk(p: &Proc) -> bool {
-    crate::is_session(&p.comm)
+    crate::is_session(&p.comm) || (p.pid == 1 && !is_harness(p))
 }
 
 /// The program that ran the process whose ancestors are `chain`, read up
@@ -346,5 +348,26 @@ mod tests {
             fake(4, "claude"),
         ];
         assert_eq!(runner(&chain), Some(&chain[1]));
+    }
+
+    #[test]
+    fn pid_1_is_the_runner_only_as_a_harness() {
+        let chain = [fake(1, "sh"), fake(2, "uv"), named(1, "claude")];
+        assert_eq!(runner(&chain), Some(&chain[2]), "a container's harness");
+        let chain = [fake(1, "sh"), fake(2, "bash"), named(1, "tini")];
+        assert_eq!(runner(&chain), Some(&chain[1]), "an init is no runner");
+        let chain = [fake(1, "sh"), fake(2, "node"), named(1, "dumb-init")];
+        assert_eq!(runner(&chain), Some(&chain[1]));
+        assert_eq!(runner(&[named(1, "tini")]), None);
+    }
+
+    #[test]
+    fn the_walk_reads_up_to_a_process_with_no_parent() {
+        let chain = ancestors();
+        let top = chain.last().expect("the test runner is above this process");
+        assert!(
+            chain.len() == DEPTH || stat(top.pid).is_some_and(|s| s.ppid == 0),
+            "{chain:?}"
+        );
     }
 }
