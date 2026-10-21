@@ -291,9 +291,10 @@ and MemOS's provenance and versions are an atom's writer, deeds and live
 window. ReasoningBank's lessons from failure are =finish --lesson=, and
 the hook hands back what bears on a command when it fails. A claim enters
 the pack when someone says to keep it with =remember= or =prefer=, and
-that write is origin =user-declared=. =finish --lesson= and
-=findings --remember= file origin =agent-derived= as proposals. The
-prompt hook files a correction as a proposal and does not write it.
+that write is origin =user-declared=. =finish --lesson= files origin
+=agent-derived= as a proposal at L0 (=derived=). =findings --remember=
+files origin =tool-echo= as a proposal at L0. The prompt hook files a
+correction as a proposal in the person's words and does not write it.
 A standing choice the person states in a prompt, such as "from now on
 use bun, never yarn", is the person's own sentence, so the hook saves it
 as a standing preference and says so with the =ljos forget= line that
@@ -307,7 +308,7 @@ session's, saves nothing, grants no approval and files no correction,
 and neither does any prompt while =LJOS_UNATTENDED=1= is set. Codex
 sends each hook event twice; the copy prints the first delivery's
 answer and saves nothing.
-=ljos accept= writes a proposal as a standing lesson, and so does the same
+=ljos accept= promotes a proposal from L0 to =explicit= and writes it as a standing lesson, and so does the same
 text typed with =remember= or =prefer=. The person runs =accept=; under an
 agent runner it refuses. An import from =receive= or =sync= is origin
 =peer=. None of these paths reads a runner's own memory, so the seat

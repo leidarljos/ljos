@@ -33,9 +33,10 @@ enum Probe {
     Store,
 }
 
-/// Classify a probe error. Kind is checked before the text, so an empty
-/// message is refused as unknown when the pack cannot keep mail, and as
-/// missing text when it can.
+/// Classify a probe error. Kind is checked before the level, so a pack
+/// that cannot keep mail refuses `message`, and one that can refuses the
+/// unknown level. An empty text is a tool dump on either pack, refused
+/// before the kind, and that 400 does not say which pack answered.
 fn probe_of(text: &str) -> Probe {
     if text.contains("unknown atom kind") {
         Probe::Refused
@@ -699,12 +700,15 @@ fn writer_version(client: &packset_client::PacksetClient) -> Option<String> {
         })
 }
 
-/// Fail when this writer does not keep mail. An empty message is not
-/// stored: the kind is refused, or the text is.
+/// Fail when this writer does not keep mail.
+///
+/// An empty message is a tool dump on every packset, refused before the
+/// kind, so it reads the same from a pack that keeps mail and from one
+/// that does not. The probe names a level the pack does not keep. The
+/// kind is refused, or the level is, and neither answer is stored.
 fn ensure_mail(client: &packset_client::PacksetClient, verb: &str) -> Result<()> {
-    // The writer's version decides when it gives one. packset 0.12.1 checks
-    // the text before the kind, so an empty probe reads the same from a
-    // writer that keeps mail and from one that refuses it.
+    // The writer's version decides when it gives one. Without a version
+    // the probe below is the check.
     if let Some(version) = writer_version(client) {
         match super::cmp_semver(&version, MAIL_PACKSET) {
             Some(std::cmp::Ordering::Less) => {
@@ -717,8 +721,8 @@ fn ensure_mail(client: &packset_client::PacksetClient, verb: &str) -> Result<()>
     let probe = json!({
         "schema": "inside.atom/v1",
         "kind": "message",
-        "level": "explicit",
-        "text": "",
+        "level": "nope",
+        "text": "probe",
         "workspace": workspace_of(Some(&client.workspace())),
     });
     let posted = super::with_writer(|| client.post_atom(&probe).map_err(anyhow::Error::from));
@@ -1493,6 +1497,14 @@ mod tests {
         assert_eq!(probe_of(refused), Probe::Refused);
         let kept = "bad response: http://127.0.0.1:8761/v1/atoms: 400: atom text is required";
         assert_eq!(probe_of(kept), Probe::Kept);
+        let level = "bad response: http://127.0.0.1:8761/v1/atoms: 400: unknown atom level: nope";
+        assert_eq!(probe_of(level), Probe::Kept);
+        // An empty body is this 400 on a pack that keeps mail and on one
+        // that does not. It must not be read as a kind refusal, and it
+        // must not be the probe.
+        let dump =
+            "bad response: http://127.0.0.1:8761/v1/atoms: 400: tool dump is attach, not an atom";
+        assert_eq!(probe_of(dump), Probe::Kept);
         let down = "http://127.0.0.1:8761/v1/atoms: http: connection refused";
         assert_eq!(probe_of(down), Probe::Store);
         let named = unsupported_mail(Some("0.12.1"));

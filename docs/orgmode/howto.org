@@ -133,11 +133,21 @@ writes to the other members. =--interrupt= puts the message ahead of the
 others on the next prompt. =--issue ID= threads it on that vissue issue,
 and a reply keeps the issue. =ljos inbox= lists what this seat has not
 read, and writes no receipt. A pack that does not answer is an error.
+A writer that refuses kind =message= is an error too: the command exits
+non-zero, names packset 0.13.0, and does not print an empty inbox.
 =ljos send= names the packset version that keeps mail. =ljos read ID=
 writes one receipt. =ljos reply ID TEXT= writes back to the sender.
 
-=ljos hook --prompt= shows unread mail at the start of the next prompt
-and writes a receipt for each message it shows. Shown there is read.
+=ljos hook --prompt= shows unread mail at the start of the next prompt,
+at most eight messages and interrupts first, and writes one receipt for
+each message it shows. The rest stay unread. The receipt atom's text is
+four lines, =read ID=, =by SEAT=, =at STAMP= and =msg ID=. The sender's
+next inbox prints that receipt once, as the message id, the reader and
+the stamp, and a second prompt writes nothing. Shown there is read.
+A shell writes the receipt before the hook exits. Cursor holds the note
+on the prompt and writes the receipt when it is delivered: =postToolUse=
+puts the note in =additional_context=, and a turn with no tool puts it
+in =followup_message= on =Stop=.
 A shell seat has no hook, so it polls =ljos inbox= and reads with
 =ljos read=.
 
@@ -647,8 +657,9 @@ ljos findings out/campaign.json --remember --issue demo-319z
 
 The first prints one line per finding. The second files one lesson per
 finding a person or a seat resolved, under the recipe's name, the
-package and the failure class, with origin =agent-derived=. It does not
-write the atom. =ljos accept ID= writes it as a standing lesson, and the command cites the
+package and the failure class, with origin =tool-echo= at L0 (=derived=).
+It does not write the atom. =ljos accept ID= promotes it to =explicit=
+and writes it as a standing lesson, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
 past is skipped; =--all= takes it too. Once someone accepts the
 proposal, the recipe's next bump recalls this lesson from its island.
