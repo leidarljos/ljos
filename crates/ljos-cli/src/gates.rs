@@ -2,7 +2,8 @@
 //!
 //! The checks are mechanical. A line that is not a commit, a push, or a
 //! merge is left to the seat guard and the pack's rules. A denial names
-//! the command that makes the same line pass.
+//! the command that makes the same line pass. A push is never refused for
+//! a missing test record: it runs, and the hook passes the warning on.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -14,6 +15,22 @@ use serde_json::Value;
 
 thread_local! {
     static GH_BIN: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+thread_local! {
+    /// What the last judged push had to say without refusing it: its tip
+    /// has no passing test record, or the gate settings did not parse.
+    static PUSH_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The warning the last judged push left, once. The push ran either way.
+#[must_use]
+pub fn take_push_warning() -> Option<String> {
+    PUSH_WARNING.with(|slot| slot.borrow_mut().take())
+}
+
+fn warn_push(text: String) {
+    PUSH_WARNING.with(|slot| *slot.borrow_mut() = Some(text));
 }
 
 #[cfg(test)]
@@ -31,6 +48,7 @@ thread_local! {
 /// call back into the static guard or policyd.
 #[must_use]
 pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
+    PUSH_WARNING.with(|slot| *slot.borrow_mut() = None);
     let found = std::env::current_dir().ok();
     let base = cwd.or(found.as_deref());
     enforce(line, base, 0).err()
@@ -38,9 +56,14 @@ pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
 
 /// The static guard (seat, user rules, these gates, a dangerous push) and
 /// then the pack's rules, the same composition the hook uses. `None` lets
-/// the line run. A plain push is held for test evidence only when the
-/// checkout configures a `test` command and that tip has no passing record.
-/// A force-push still asks.
+/// the line run. A plain push runs. When the checkout sets `test` and the
+/// tip has no passing record, [`take_push_warning`] says so. A force,
+/// mirror or delete push asks, and so does a push onto a protected branch
+/// of a repository whose owner is not in `owners`. A merge whose head sha
+/// has no recorded checks asks too: the reason names that sha, and a local
+/// evidence record when the checkout has one for it. A fine-grained token
+/// with no Checks permission reads the REST fallback when the rollup is
+/// denied, and the reason names which source it used.
 #[must_use]
 pub fn guard_verdict(line: &str, cwd: Option<&Path>, rules: &[super::Rule]) -> Option<super::Rule> {
     let fast = super::static_guard_in(line, cwd);
@@ -132,16 +155,6 @@ struct Walk {
     branch: Option<String>,
     branch_set: bool,
     fresh: bool,
-    pending: Option<Pending>,
-}
-
-#[derive(Debug, Clone)]
-struct Pending {
-    branch: String,
-    src: String,
-    sha: Option<String>,
-    not_ff: bool,
-    missing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +185,9 @@ struct GateConfig {
     test: Option<String>,
     signoff: bool,
     protected: Vec<String>,
+    /// The accounts and organisations whose repositories are the person's
+    /// own. Empty: every repository is.
+    owners: Vec<String>,
     identity: Option<Person>,
     /// The file that set [`GateConfig::identity`].
     identity_from: Option<PathBuf>,
@@ -197,13 +213,6 @@ struct CommitFields {
     dry: bool,
     help: bool,
     hidden: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PushClass {
-    Plain,
-    Held,
-    Skip,
 }
 
 struct ApiMerge {
@@ -304,7 +313,6 @@ fn enforce(line: &str, cwd: Option<&Path>, depth: usize) -> Result<(), super::Ru
 fn handle_git(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule> {
     match git.sub.as_str() {
         "commit" => on_commit(git, inv, walk),
-        "merge" => on_merge(git, walk),
         "checkout" | "switch" => {
             if git.args.iter().any(|a| a == "-") {
                 walk.branch = None;
@@ -402,172 +410,115 @@ fn on_commit(git: &GitCmd, inv: &Inv, walk: &mut Walk) -> Result<(), super::Rule
     Ok(())
 }
 
-fn on_merge(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
-    let Some(src) = merge_source(&git.args) else {
+fn on_push(git: &GitCmd, walk: &Walk) -> Result<(), super::Rule> {
+    if is_dry(&git.args) || is_delete(&git.args) {
+        return Ok(());
+    }
+    // No checkout has no tip and no gate file. A plain push is allowed. A
+    // force push or a delete still asks in the push gate.
+    let Some(root) = repo_root(&git.cwd) else {
         return Ok(());
     };
-    let target = if walk.branch_set {
-        walk.branch.clone()
-    } else {
-        abbrev(&git.cwd)
+    let cfg = match load_config(&root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn_push(format!(
+                "ljos ran this push without reading the gate settings: {e}"
+            ));
+            return Ok(());
+        }
     };
-    let Some(target) = target else {
-        return Ok(());
-    };
-    let cfg = repo_config(&git.cwd, "git-merge-unready")?;
-    if !is_protected(&target, &cfg.protected) {
-        return Ok(());
-    }
-    if has_subst(&src) {
-        walk.pending = Some(Pending {
-            branch: target,
-            src,
-            sha: None,
-            not_ff: false,
-            missing: true,
-        });
-        return Ok(());
-    }
-    let sha = rev(&git.cwd, &src);
-    let already = sha
-        .as_deref()
-        .is_some_and(|_| is_ancestor(&git.cwd, &src, "HEAD"));
-    if already {
-        return Ok(());
-    }
-    let fast = sha
-        .as_deref()
-        .is_some_and(|_| is_ancestor(&git.cwd, "HEAD", &src));
-    let not_ff = sha.is_some() && (forces_no_ff(&git.args) || !fast);
-    walk.pending = Some(Pending {
-        branch: target,
-        src,
-        sha,
-        not_ff,
-        missing: false,
-    });
-    // A missing source is `sha == None` and `missing` stays false until the
-    // push. `missing` is set here when rev-parse failed.
-    if let Some(p) = walk.pending.as_mut() {
-        p.missing = p.sha.is_none();
-    }
-    Ok(())
-}
-
-fn on_push(git: &GitCmd, walk: &mut Walk) -> Result<(), super::Rule> {
-    let class = push_class(&git.args);
-    if class == PushClass::Skip {
-        return Ok(());
-    }
-    // No checkout has no tip and no gate file, so there is nothing for an
-    // evidence denial to name. A plain push is allowed. A force push, a
-    // tag push, or a delete still asks in the push gate.
-    if repo_root(&git.cwd).is_none() {
-        return Ok(());
-    }
-    let cfg = repo_config(&git.cwd, "git-push-evidence")?;
     let current = if walk.branch_set {
         walk.branch.clone()
     } else {
         abbrev(&git.cwd)
     };
     let dests = push_dests(&git.cwd, &git.args, current.as_deref());
-    if let Some(pending) = walk.pending.clone() {
-        if dests.iter().any(|d| d == &pending.branch) {
-            let action = format!(
-                "git merge {} into {} followed by push",
-                pending.src, pending.branch
-            );
-            if pending.missing {
-                return Err(deny(
-                    "merge-gate",
-                    "git-merge-unready",
-                    &format!(
-                        "Refusing `{action}`. Cannot read `{}`. Pass a branch that exists, wait until CI is green on its tip and every Cursor Bugbot thread is resolved or has a reply, then merge.",
-                        pending.src
-                    ),
-                ));
-            }
-            if pending.not_ff {
-                return Err(not_ff_deny(&pending.src, &pending.branch));
-            }
-            let sha = pending.sha.clone().unwrap_or_default();
-            let spec = pr_branch(&git.cwd, &pending.src);
-            review_pr(&git.cwd, &spec, None, Some(&sha), &action)?;
-            if cfg.test.is_some() {
-                evidence_ok(&git.cwd, &sha, &cfg)?;
-            }
-            return Ok(());
+    if let Some(rule) = foreign_protected(&git.cwd, &git.args, current.as_deref(), &dests, &cfg) {
+        return Err(rule);
+    }
+    // Evidence is a warning. A missing or stale record never holds a push,
+    // and neither does a commit made on the same line.
+    if let Some(test) = cfg.test.as_deref() {
+        if let Some(why) = evidence_gap(&git.cwd, &git.args, current.as_deref(), walk.fresh, test) {
+            warn_push(format!(
+                "This push runs without a passing test record. {why} Run `ljos evidence record -- {test}` to record one."
+            ));
         }
-    }
-    // Evidence is opt-in. A checkout with no `test` command has nothing to
-    // record, and a plain push runs. A force push still asks, later.
-    // A merge is reviewed only when the commit this push publishes is a
-    // merge. The checkout's HEAD being a merge does not make a push of
-    // another branch one.
-    if cfg.test.is_none() {
-        review_pushed_merges(
-            &git.cwd,
-            &git.args,
-            current.as_deref(),
-            &dests,
-            &cfg.protected,
-            walk.fresh,
-        )?;
-        return Ok(());
-    }
-    let specs = refspecs(&git.cwd, &git.args);
-    if specs.is_empty() && walk.fresh {
-        return Err(fresh_deny(cfg.test.as_deref()));
-    }
-    review_pushed_merges(
-        &git.cwd,
-        &git.args,
-        current.as_deref(),
-        &dests,
-        &cfg.protected,
-        walk.fresh,
-    )?;
-    let shas = published_shas(
-        &git.cwd,
-        &git.args,
-        current.as_deref(),
-        walk.fresh,
-        cfg.test.as_deref(),
-    )?;
-    if shas.is_empty() {
-        return Ok(());
-    }
-    for sha in &shas {
-        evidence_ok(&git.cwd, sha, &cfg)?;
     }
     Ok(())
 }
 
-/// Review a protected push whose published commit is a merge. A ref that
-/// cannot be read is left to the evidence check, which names that ref.
-fn review_pushed_merges(
+/// A push onto a protected branch of a repository the person does not
+/// own asks. `owners` in `ljos.toml` or `.ljos/gates.toml` names the
+/// accounts and organisations that are the person's own. With no `owners`
+/// set, or a remote whose owner cannot be read, the push runs.
+fn foreign_protected(
     cwd: &Path,
     args: &[String],
     current: Option<&str>,
     dests: &[String],
-    protected: &[String],
+    cfg: &GateConfig,
+) -> Option<super::Rule> {
+    if cfg.owners.is_empty() {
+        return None;
+    }
+    let branch = dests.iter().find(|d| is_protected(d, &cfg.protected))?;
+    let url = push_url(cwd, args, current)?;
+    let (owner, repo) = super::remote_slug(&url)?;
+    if cfg.owners.iter().any(|o| o.eq_ignore_ascii_case(&owner)) {
+        return None;
+    }
+    Some(super::Rule {
+        pattern: "push-gate".into(),
+        verdict: "ask".into(),
+        reason: format!(
+            "`{branch}` is a protected branch of {owner}/{repo}, and {owner} is not in `owners`; the agent asks you first"
+        ),
+    })
+}
+
+/// The URL a push goes to: a URL named in place of a remote, else the
+/// named remote's push URL, else the current branch's remote, else
+/// `origin`.
+fn push_url(cwd: &Path, args: &[String], current: Option<&str>) -> Option<String> {
+    let pos = positionals(args);
+    let names = remotes(cwd);
+    let remote = match pos.first() {
+        Some(first) if names.iter().any(|r| r == first) => first.clone(),
+        Some(first) if first.contains("://") || (first.contains('@') && first.contains(':')) => {
+            return Some(first.clone());
+        }
+        _ => current
+            .and_then(|c| git_config(cwd, &format!("branch.{c}.remote")))
+            .unwrap_or_else(|| "origin".to_string()),
+    };
+    git_text(cwd, &["remote", "get-url", "--push", &remote]).filter(|u| !u.is_empty())
+}
+
+/// Why the commits a push publishes have no passing record for `test`,
+/// or `None` when each one has.
+fn evidence_gap(
+    cwd: &Path,
+    args: &[String],
+    current: Option<&str>,
     fresh: bool,
-) -> Result<(), super::Rule> {
-    if fresh || !hits_protected(dests, protected) {
-        return Ok(());
+    test: &str,
+) -> Option<String> {
+    let specs = refspecs(cwd, args);
+    let pushes_head = specs.is_empty()
+        || specs
+            .iter()
+            .filter_map(|spec| src_of(spec))
+            .any(|src| pushing_current(&src, current));
+    if fresh && pushes_head {
+        return Some("The same command makes a new commit, so its tip has no record yet.".into());
     }
     let Some(shas) = shas_quietly(cwd, args, current) else {
-        return Ok(());
+        return Some("The commit this push publishes cannot be read.".into());
     };
-    for sha in shas {
-        if git_text(cwd, &["rev-parse", "--verify", &format!("{sha}^2")]).is_none() {
-            continue;
-        }
-        let action = format!("git push of merge commit {sha}");
-        review_sha(cwd, &sha, &action)?;
-    }
-    Ok(())
+    shas.iter()
+        .find_map(|sha| evidence_problem(cwd, sha, test).map(|why| format!("Tip {sha}: {why}")))
 }
 
 /// The commits a push would publish, or `None` when one of them cannot be
@@ -592,145 +543,32 @@ fn shas_quietly(cwd: &Path, args: &[String], current: Option<&str>) -> Option<Ve
     Some(out)
 }
 
-fn published_shas(
-    cwd: &Path,
-    args: &[String],
-    current: Option<&str>,
-    fresh: bool,
-    test: Option<&str>,
-) -> Result<Vec<String>, super::Rule> {
-    let specs = refspecs(cwd, args);
-    if specs.is_empty() {
-        if fresh {
-            return Err(fresh_deny(test));
-        }
-        return head_sha(cwd).map(|s| vec![s]).ok_or_else(|| {
-            deny(
-                "push-gate",
-                "git-push-evidence",
-                "This repository has no commit yet. Commit, run `ljos evidence record -- <test command>`, then push that sha.",
-            )
-        });
-    }
-    let mut out = Vec::new();
-    for spec in specs {
-        let Some(src) = src_of(&spec) else {
-            continue;
-        };
-        if pushing_current(&src, current) {
-            if fresh {
-                return Err(fresh_deny(test));
-            }
-            let sha = head_sha(cwd).ok_or_else(|| {
-                deny(
-                    "push-gate",
-                    "git-push-evidence",
-                    "This repository has no commit yet. Commit, run `ljos evidence record -- <test command>`, then push that sha.",
-                )
-            })?;
-            out.push(sha);
-        } else {
-            let sha = rev(cwd, &src).ok_or_else(|| {
-                deny(
-                    "push-gate",
-                    "git-push-evidence",
-                    &format!(
-                        "Cannot read `{src}`, so the tip this push publishes is unknown. Push a branch that exists, run `ljos evidence record -- <test command>` on its tip, then push that sha."
-                    ),
-                )
-            })?;
-            out.push(sha);
-        }
-    }
-    Ok(out)
-}
-
-fn fresh_deny(test: Option<&str>) -> super::Rule {
-    let run = match test {
-        Some(test) => format!("Commit, run `ljos evidence record -- {test}`,"),
-        None => "Add `test = \"cargo test --workspace\"` (or this repo's suite, such as `meson test --suite eon`) to `.ljos/gates.toml`, commit, run `ljos evidence record -- <that command>`,".to_string(),
-    };
-    deny(
-        "push-gate",
-        "git-push-evidence",
-        &format!(
-            "{run} then push that commit. This command creates a new commit, so the tip it would push has no evidence yet."
-        ),
-    )
-}
-
-fn not_ff_deny(src: &str, branch: &str) -> super::Rule {
-    deny(
-        "merge-gate",
-        "git-merge-unready",
-        &format!(
-            "Refusing `git merge {src}` into `{branch}` followed by a push. This merge is not a fast-forward, so the commit that would be pushed has no CI. Run `git merge --ff-only {src}` once `{src}` contains `{branch}`, wait until `gh pr checks` is green on that sha and every Cursor Bugbot thread is resolved or has a reply, then push. Or merge on the forge with `gh pr merge` once those are true."
-        ),
-    )
-}
-
-fn evidence_ok(cwd: &Path, sha: &str, cfg: &GateConfig) -> Result<(), super::Rule> {
-    let Some(test) = cfg.test.as_deref() else {
-        return Ok(());
-    };
+/// What is wrong with the stored record for `sha`, or `None` when it is a
+/// passing run of `test`.
+fn evidence_problem(cwd: &Path, sha: &str, test: &str) -> Option<&'static str> {
     let Some(path) = evidence_file(cwd, sha) else {
-        return Err(evidence_deny(
-            sha,
-            Some(test),
-            "The tip sha cannot be stored as evidence.",
-        ));
+        return Some("the tip sha cannot be stored as evidence.");
     };
     if !path.is_file() {
-        return Err(evidence_deny(
-            sha,
-            Some(test),
-            "No evidence file for this tip.",
-        ));
+        return Some("no evidence file for this tip.");
     }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => {
-            return Err(evidence_deny(
-                sha,
-                Some(test),
-                "The evidence file cannot be read.",
-            ))
-        }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Some("the evidence file cannot be read.");
     };
-    let rec: Stored = match serde_json::from_str(&text) {
-        Ok(rec) => rec,
-        Err(_) => {
-            return Err(evidence_deny(
-                sha,
-                Some(test),
-                "The evidence file is unreadable.",
-            ))
-        }
+    let Ok(rec) = serde_json::from_str::<Stored>(&text) else {
+        return Some("the evidence file is unreadable.");
     };
-    let why = if rec.sha != sha {
-        "The evidence file is for a different commit."
+    if rec.sha != sha {
+        Some("the evidence file is for a different commit.")
     } else if rec.exit != 0 {
-        "The stored run did not exit 0."
+        Some("the stored run did not exit 0.")
     } else if norm_cmd(&rec.command) != test {
-        "The stored command is not the `test` line in `.ljos/gates.toml`."
+        Some("the stored command is not the `test` line in `.ljos/gates.toml`.")
     } else if rec.ts.trim().is_empty() {
-        "The evidence file has no timestamp."
+        Some("the evidence file has no timestamp.")
     } else {
-        return Ok(());
-    };
-    Err(evidence_deny(sha, Some(test), why))
-}
-
-fn evidence_deny(sha: &str, test: Option<&str>, why: &str) -> super::Rule {
-    let run = match test {
-        Some(test) => format!("Run `ljos evidence record -- {test}`, then push {sha}."),
-        None => "Add `test = \"cargo test --workspace\"` (or this repo's suite, such as `meson test --suite eon`) to `.ljos/gates.toml`, run `ljos evidence record -- <that command>`, then push.".to_string(),
-    };
-    deny(
-        "push-gate",
-        "git-push-evidence",
-        &format!("Tip {sha}. {why} {run}"),
-    )
+        None
+    }
 }
 
 fn write_evidence(cwd: &Path, sha: &str, command: &str, ts: &str) -> Result<()> {
@@ -750,6 +588,19 @@ fn write_evidence(cwd: &Path, sha: &str, command: &str, ts: &str) -> Result<()> 
     std::fs::write(&tmp, serde_json::to_vec_pretty(&body)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// A passing `ljos evidence record` for this exact sha: the file under
+/// `.git/ljos-evidence/<sha>.json`, with that sha and exit 0.
+fn evidence_recorded(cwd: &Path, sha: &str) -> bool {
+    let Some(path) = evidence_file(cwd, sha) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Stored>(&text)
+        .is_ok_and(|rec| rec.sha == sha && rec.exit == 0 && !rec.ts.trim().is_empty())
 }
 
 fn evidence_file(cwd: &Path, sha: &str) -> Option<PathBuf> {
@@ -790,6 +641,7 @@ fn load_config(root: &Path) -> Result<GateConfig, String> {
         test: None,
         signoff: false,
         protected: default_protected(),
+        owners: Vec::new(),
         identity: None,
         identity_from: None,
     };
@@ -882,6 +734,13 @@ fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
         cfg.protected = req_strings(src, "protected_branches", path)?
             .into_iter()
             .map(|name| branch_of(&name))
+            .filter(|name| !name.is_empty())
+            .collect();
+    }
+    if src.contains_key("owners") {
+        cfg.owners = req_strings(src, "owners", path)?
+            .into_iter()
+            .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
             .collect();
     }
@@ -1001,10 +860,6 @@ fn is_protected(name: &str, protected: &[String]) -> bool {
     protected.iter().any(|p| p == &name)
 }
 
-fn hits_protected(dests: &[String], protected: &[String]) -> bool {
-    dests.iter().any(|d| is_protected(d, protected))
-}
-
 /// The branches a `--force-with-lease` push asks before it replaces:
 /// `main`, `master` and `develop`, and every branch `protected_branches`
 /// names in the config layers [`config_layers`] reads (the user and seat
@@ -1017,6 +872,7 @@ pub(crate) fn lease_protected(cwd: Option<&Path>) -> Option<Vec<String>> {
         test: None,
         signoff: false,
         protected: Vec::new(),
+        owners: Vec::new(),
         identity: None,
         identity_from: None,
     };
@@ -1101,18 +957,6 @@ fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
             .trim_end_matches(['\r', '\n'])
             .to_string(),
     )
-}
-
-fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 fn identity_ok(
@@ -1411,20 +1255,6 @@ fn reuse_messages(cwd: &Path, revs: &[String]) -> Option<String> {
     Some(out)
 }
 
-fn push_class(args: &[String]) -> PushClass {
-    if is_dry(args) || is_delete(args) {
-        PushClass::Skip
-    } else if is_force(args) || publishes_tags(args) {
-        PushClass::Held
-    } else {
-        PushClass::Plain
-    }
-}
-
-fn is_force(args: &[String]) -> bool {
-    args.iter().any(|a| super::push_rewrites(a))
-}
-
 fn is_dry(args: &[String]) -> bool {
     args.iter().any(|a| {
         a == "--dry-run"
@@ -1442,16 +1272,6 @@ fn is_delete(args: &[String]) -> bool {
         && pos
             .iter()
             .all(|p| p.strip_prefix('+').unwrap_or(p).starts_with(':'))
-}
-
-fn publishes_tags(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--tags" | "--follow-tags" | "--mirror" | "--all"
-        ) || a.starts_with("refs/tags/")
-            || a.starts_with("+refs/tags/")
-    })
 }
 
 fn positionals(args: &[String]) -> Vec<String> {
@@ -1542,69 +1362,6 @@ fn pushing_current(src: &str, current: Option<&str>) -> bool {
     current.is_some_and(|c| branch_of(c) == branch_of(src))
 }
 
-fn pr_branch(cwd: &Path, src: &str) -> String {
-    let names = remotes(cwd);
-    if let Some((remote, rest)) = src.split_once('/') {
-        if names.iter().any(|r| r == remote) && !rest.is_empty() {
-            return rest.to_string();
-        }
-    }
-    src.to_string()
-}
-
-fn merge_source(args: &[String]) -> Option<String> {
-    if is_help(args) {
-        return None;
-    }
-    if args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--abort" | "--continue" | "--quit"))
-    {
-        return None;
-    }
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if a == "--" {
-            return args.get(i + 1).cloned();
-        }
-        if matches!(
-            a.as_str(),
-            "-m" | "--message"
-                | "-s"
-                | "--strategy"
-                | "-X"
-                | "--strategy-option"
-                | "-F"
-                | "--file"
-                | "--into"
-        ) {
-            i += 2;
-            continue;
-        }
-        if a.starts_with("--message=")
-            || a.starts_with("--strategy=")
-            || a.starts_with("--into=")
-            || a.starts_with("--file=")
-            || a.starts_with("--strategy-option=")
-        {
-            i += 1;
-            continue;
-        }
-        if a.starts_with('-') {
-            i += 1;
-            continue;
-        }
-        return Some(a.clone());
-    }
-    None
-}
-
-fn forces_no_ff(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--no-ff" || a == "--squash" || a.starts_with("--no-ff"))
-}
-
 fn switched_branch(args: &[String]) -> Option<String> {
     if is_help(args) {
         return None;
@@ -1646,38 +1403,6 @@ fn is_help(args: &[String]) -> bool {
     args.iter().any(|a| a == "--help" || a == "-h")
 }
 
-fn review_sha(cwd: &Path, sha: &str, action: &str) -> Result<(), super::Rule> {
-    let list = gh_json(
-        cwd,
-        &[
-            "pr".into(),
-            "list".into(),
-            "--search".into(),
-            sha.into(),
-            "--state".into(),
-            "all".into(),
-            "--json".into(),
-            "number,headRefOid,state".into(),
-            "--limit".into(),
-            "20".into(),
-        ],
-    )
-    .map_err(|e| merge_io(action, &e))?;
-    let rows = list
-        .as_array()
-        .ok_or_else(|| merge_io(action, "the pull request list was missing"))?;
-    let Some(hit) = rows.iter().find(|p| p["headRefOid"].as_str() == Some(sha)) else {
-        return Err(merge_deny(
-            action,
-            sha,
-            "",
-            "No pull request has this head sha.",
-        ));
-    };
-    let number = hit["number"].as_u64().unwrap_or(0).to_string();
-    review_pr(cwd, &number, None, Some(sha), action)
-}
-
 fn review_pr(
     cwd: &Path,
     spec: &str,
@@ -1685,17 +1410,35 @@ fn review_pr(
     expect: Option<&str>,
     action: &str,
 ) -> Result<(), super::Rule> {
+    let args = pr_view_args(spec, repo, "number,headRefOid,statusCheckRollup,url,state");
+    match gh_read(cwd, &args) {
+        Ok(view) => review_rollup(cwd, &view, expect, action),
+        Err(err) if err.rollup_denied => review_pr_rest(cwd, spec, repo, expect, action),
+        Err(err) => Err(merge_io(action, &err.text)),
+    }
+}
+
+fn pr_view_args(spec: &str, repo: Option<&str>, fields: &str) -> Vec<String> {
     let mut args = vec!["pr".to_string(), "view".to_string()];
     if !spec.is_empty() {
         args.push(spec.to_string());
     }
     args.push("--json".into());
-    args.push("number,headRefOid,statusCheckRollup,url,state".into());
+    args.push(fields.to_string());
     if let Some(repo) = repo {
         args.push("--repo".into());
         args.push(repo.to_string());
     }
-    let view = gh_json(cwd, &args).map_err(|e| merge_io(action, &e))?;
+    args
+}
+
+struct PrHead {
+    number: u64,
+    sha: String,
+    url: String,
+}
+
+fn pr_head(view: &Value, action: &str) -> Result<PrHead, super::Rule> {
     let number = view["number"]
         .as_u64()
         .ok_or_else(|| merge_io(action, "the pull request number was missing"))?;
@@ -1704,31 +1447,297 @@ fn review_pr(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| merge_io(action, "the head sha was missing"))?
         .to_string();
-    if let Some(expect) = expect {
-        if sha != expect {
-            return Err(merge_deny(
-                action,
-                expect,
-                &number.to_string(),
-                &format!("The pull request head is {sha}, but this merge publishes {expect}."),
-            ));
-        }
+    let url = view["url"].as_str().unwrap_or("").to_string();
+    Ok(PrHead { number, sha, url })
+}
+
+fn same_head(
+    action: &str,
+    sha: &str,
+    number: u64,
+    expect: Option<&str>,
+) -> Result<(), super::Rule> {
+    let Some(expect) = expect else {
+        return Ok(());
+    };
+    if sha == expect {
+        return Ok(());
     }
-    if let Some(problem) = ci_problem(&view["statusCheckRollup"]) {
-        return Err(merge_deny(action, &sha, &number.to_string(), &problem));
+    Err(merge_deny(
+        action,
+        expect,
+        &number.to_string(),
+        &format!("The pull request head is {sha}, but this merge publishes {expect}."),
+    ))
+}
+
+fn review_rollup(
+    cwd: &Path,
+    view: &Value,
+    expect: Option<&str>,
+    action: &str,
+) -> Result<(), super::Rule> {
+    let head = pr_head(view, action)?;
+    same_head(action, &head.sha, head.number, expect)?;
+    let rollup = &view["statusCheckRollup"];
+    if let Some(problem) = ci_problem(rollup) {
+        return Err(merge_deny(
+            action,
+            &head.sha,
+            &head.number.to_string(),
+            &name_source(&problem, "rollup"),
+        ));
     }
-    let url = view["url"].as_str().unwrap_or("");
-    let Some((owner, name)) = owner_repo(url) else {
+    let Some((owner, name)) = owner_repo(&head.url) else {
         return Err(merge_io(
             action,
             "the pull request URL did not name an owner and repository",
         ));
     };
-    let threads = bugbot_query(cwd, &owner, &name, number).map_err(|e| merge_io(action, &e))?;
-    if let Some(problem) = bugbot_problem(&threads).map_err(|e| merge_io(action, &e))? {
-        return Err(merge_deny(action, &sha, &number.to_string(), &problem));
+    finish_review(
+        cwd,
+        &Reviewed {
+            action,
+            number: head.number,
+            sha: &head.sha,
+            owner: &owner,
+            name: &name,
+            absent: ci_absent(rollup),
+            source: "rollup",
+        },
+    )
+}
+
+/// The rollup read was denied to this token. Workflow runs and the combined
+/// commit status carry the same CI result. Both empty is the no-CI ask. A
+/// failed read keeps the refusal that gh could not read the pull request.
+fn review_pr_rest(
+    cwd: &Path,
+    spec: &str,
+    repo: Option<&str>,
+    expect: Option<&str>,
+    action: &str,
+) -> Result<(), super::Rule> {
+    let args = pr_view_args(spec, repo, "number,headRefOid,url,state");
+    let view = gh_json(cwd, &args).map_err(|e| merge_io(action, &e))?;
+    let head = pr_head(&view, action)?;
+    same_head(action, &head.sha, head.number, expect)?;
+    let Some((owner, name)) = owner_repo(&head.url) else {
+        return Err(merge_io(
+            action,
+            "the pull request URL did not name an owner and repository",
+        ));
+    };
+    let runs = workflow_runs(cwd, &owner, &name, &head.sha).map_err(|e| merge_io(action, &e))?;
+    let status = commit_status(cwd, &owner, &name, &head.sha).map_err(|e| merge_io(action, &e))?;
+    let problem = rest_problem(&runs, &status).map_err(|e| merge_io(action, &e))?;
+    if let Some(problem) = problem {
+        return Err(merge_deny(
+            action,
+            &head.sha,
+            &head.number.to_string(),
+            &name_source(&problem, "REST fallback"),
+        ));
+    }
+    finish_review(
+        cwd,
+        &Reviewed {
+            action,
+            number: head.number,
+            sha: &head.sha,
+            owner: &owner,
+            name: &name,
+            absent: rest_absent(&runs, &status),
+            source: "REST fallback",
+        },
+    )
+}
+
+struct Reviewed<'a> {
+    action: &'a str,
+    number: u64,
+    sha: &'a str,
+    owner: &'a str,
+    name: &'a str,
+    absent: bool,
+    source: &'a str,
+}
+
+fn finish_review(cwd: &Path, review: &Reviewed<'_>) -> Result<(), super::Rule> {
+    let threads = bugbot_query(cwd, review.owner, review.name, review.number)
+        .map_err(|e| merge_io(review.action, &e))?;
+    if let Some(problem) = bugbot_problem(&threads).map_err(|e| merge_io(review.action, &e))? {
+        return Err(merge_deny(
+            review.action,
+            review.sha,
+            &review.number.to_string(),
+            &name_source(&problem, review.source),
+        ));
+    }
+    if review.absent {
+        return Err(merge_ask(cwd, review.sha, review.source));
     }
     Ok(())
+}
+
+fn name_source(problem: &str, source: &str) -> String {
+    format!("{problem}. Source: {source}.")
+}
+
+const RUN_PAGE: usize = 100;
+
+fn workflow_runs(cwd: &Path, owner: &str, name: &str, sha: &str) -> Result<Vec<Value>, String> {
+    let mut all = Vec::new();
+    let mut page = 1u32;
+    loop {
+        let body = gh_json(
+            cwd,
+            &[
+                "api".into(),
+                format!("repos/{owner}/{name}/actions/runs"),
+                "-f".into(),
+                format!("head_sha={sha}"),
+                "-f".into(),
+                format!("per_page={RUN_PAGE}"),
+                "-f".into(),
+                format!("page={page}"),
+            ],
+        )?;
+        let Some(runs) = body.get("workflow_runs").and_then(Value::as_array) else {
+            return Err("the workflow run list was missing".into());
+        };
+        let total = body.get("total_count").and_then(Value::as_u64);
+        if runs.is_empty() {
+            if total.is_some_and(|t| (all.len() as u64) < t) {
+                return Err("the workflow run list ended early".into());
+            }
+            break;
+        }
+        all.extend(runs.iter().cloned());
+        let more = match total {
+            Some(total) => (all.len() as u64) < total,
+            None => runs.len() >= RUN_PAGE,
+        };
+        if !more {
+            break;
+        }
+        if page == 100 {
+            return Err("the workflow run list did not end".into());
+        }
+        page += 1;
+    }
+    Ok(all)
+}
+
+fn commit_status(cwd: &Path, owner: &str, name: &str, sha: &str) -> Result<Value, String> {
+    gh_json(
+        cwd,
+        &[
+            "api".into(),
+            format!("repos/{owner}/{name}/commits/{sha}/status"),
+        ],
+    )
+}
+
+fn rest_absent(runs: &[Value], status: &Value) -> bool {
+    runs.is_empty()
+        && status
+            .get("statuses")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+}
+
+fn rest_problem(runs: &[Value], status: &Value) -> Result<Option<String>, String> {
+    let mut bad = Vec::new();
+    for run in runs {
+        if let Some(fault) = run_fault(run) {
+            bad.push(fault);
+        }
+    }
+    if let Some(fault) = status_fault(status)? {
+        bad.push(fault);
+    }
+    if bad.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!("{} not green", bad.join(", "))))
+    }
+}
+
+fn run_fault(run: &Value) -> Option<String> {
+    let name = run["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("run");
+    let status = run["status"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let conclusion = run["conclusion"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        status.as_str(),
+        "queued" | "in_progress" | "in-progress" | "waiting" | "requested" | "pending"
+    ) {
+        return Some(format!("{name}={status} (pending)"));
+    }
+    if status == "completed" && matches!(conclusion.as_str(), "success" | "neutral" | "skipped") {
+        return None;
+    }
+    let shown = if !conclusion.is_empty() {
+        conclusion
+    } else if !status.is_empty() {
+        status
+    } else {
+        "unknown".to_string()
+    };
+    Some(format!("{name}={shown}"))
+}
+
+fn status_fault(status: &Value) -> Result<Option<String>, String> {
+    let Some(list) = status.get("statuses").and_then(Value::as_array) else {
+        return Err("the commit status list was missing".into());
+    };
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let state = status["state"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if state == "success" {
+        return Ok(None);
+    }
+    let shown = if state.is_empty() {
+        "unknown".to_string()
+    } else {
+        state
+    };
+    if shown == "pending" {
+        Ok(Some(format!("commit status={shown} (pending)")))
+    } else {
+        Ok(Some(format!("commit status={shown}")))
+    }
+}
+
+/// An ask for a head sha with no CI checks. A passing local record for
+/// that exact sha is named. The merge still asks. `source` is `rollup` or
+/// `REST fallback`.
+fn merge_ask(cwd: &Path, sha: &str, source: &str) -> super::Rule {
+    let mut detail = format!("no CI ran on head sha {sha}. Source: {source}.");
+    if evidence_recorded(cwd, sha) {
+        detail.push_str(&format!(" A local evidence record exists for {sha}."));
+    }
+    super::Rule {
+        pattern: "merge-gate".into(),
+        verdict: "ask".into(),
+        reason: format!("git-merge-unready: {detail}"),
+    }
 }
 
 fn merge_deny(action: &str, sha: &str, pr: &str, problem: &str) -> super::Rule {
@@ -1756,14 +1765,19 @@ fn merge_io(action: &str, err: &str) -> super::Rule {
     )
 }
 
+/// No checks on the head sha: a null rollup or an empty list. That is an
+/// ask in [`review_pr`], not a denial.
+fn ci_absent(rollup: &Value) -> bool {
+    rollup.is_null() || rollup.as_array().is_some_and(Vec::is_empty)
+}
+
 fn ci_problem(rollup: &Value) -> Option<String> {
-    if rollup.is_null() {
-        return Some("no CI checks are recorded".into());
+    // No checks at all is an ask, decided in [`review_pr`]. A red or
+    // pending check is a denial.
+    if ci_absent(rollup) {
+        return None;
     }
     let arr = rollup.as_array()?;
-    if arr.is_empty() {
-        return Some("no CI checks are recorded".into());
-    }
     let mut bad = Vec::new();
     for check in arr {
         let name = check["name"]
@@ -2028,20 +2042,52 @@ fn gh_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("gh"))
 }
 
+struct GhFail {
+    text: String,
+    /// The rollup field was refused with the fine-grained token phrase.
+    /// Any other failure leaves this false.
+    rollup_denied: bool,
+}
+
 fn gh_json(cwd: &Path, args: &[String]) -> Result<Value, String> {
+    gh_read(cwd, args).map_err(|err| err.text)
+}
+
+fn gh_read(cwd: &Path, args: &[String]) -> Result<Value, GhFail> {
     let mut cmd = Command::new(gh_program());
     cmd.current_dir(cwd).args(args);
-    let out = run_out(&mut cmd, super::guard_timeout())?;
+    let out = run_out(&mut cmd, super::guard_timeout()).map_err(|text| GhFail {
+        text,
+        rollup_denied: false,
+    })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
+        let raw_out = String::from_utf8_lossy(&out.stdout);
+        let rollup_denied = rollup_permission_denied(&err) || rollup_permission_denied(&raw_out);
         let text = brief(&err);
-        return Err(if text.is_empty() {
+        let text = if text.is_empty() {
             format!("gh exited {}", out.status.code().unwrap_or(1))
         } else {
             text
+        };
+        return Err(GhFail {
+            text,
+            rollup_denied,
         });
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("gh did not return JSON ({e})"))
+    serde_json::from_slice(&out.stdout).map_err(|e| GhFail {
+        text: format!("gh did not return JSON ({e})"),
+        rollup_denied: false,
+    })
+}
+
+/// Fine-grained tokens have no Checks permission. `gh pr view` then fails
+/// with this phrase when the json fields include `statusCheckRollup`.
+/// A different failure is not this case.
+fn rollup_permission_denied(err: &str) -> bool {
+    let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.to_ascii_lowercase()
+        .contains("resource not accessible by personal access token")
 }
 
 fn brief(s: &str) -> String {
@@ -2129,7 +2175,7 @@ fn remote_hidden_at(line: &str, depth: usize) -> Option<super::Rule> {
                 return Some(deny(
                     "remote-gate",
                     "git-remote-hidden",
-                    "Run the git command in this checkout, then record evidence or merge here.",
+                    "Run the commit or the merge in this checkout, where the gate can read it.",
                 ));
             }
         }
@@ -2143,7 +2189,10 @@ fn gate_command(line: &str) -> bool {
             if git.shell.as_deref().is_some_and(gate_command) {
                 return true;
             }
-            if matches!(git.sub.as_str(), "commit" | "push" | "merge") {
+            // A push and a local merge are not held, so running them
+            // elsewhere hides nothing. A commit's message and a forge
+            // merge are.
+            if git.sub == "commit" {
                 return true;
             }
         }
@@ -2455,16 +2504,108 @@ mod tests {
     }
 
     fn stub_gh(view: &str, threads: &str, list: &str) -> GhHold {
+        stub_gh_at(view, threads, list, false)
+    }
+
+    fn stub_gh_unreadable() -> GhHold {
+        stub_gh_at("", "", "", true)
+    }
+
+    fn stub_gh_at(view: &str, threads: &str, list: &str, fail: bool) -> GhHold {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("view.json"), view).unwrap();
         std::fs::write(dir.path().join("threads.json"), threads).unwrap();
         std::fs::write(dir.path().join("list.json"), list).unwrap();
+        if fail {
+            std::fs::write(dir.path().join("fail"), "1").unwrap();
+        }
+        hold_gh(dir)
+    }
+
+    fn hold_gh(dir: tempfile::TempDir) -> GhHold {
         let script = r#"#!/bin/sh
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+if [ -f "$here/fail" ]; then
+  echo "HTTP 401: Bad credentials" >&2
+  exit 1
+fi
+has_rollup=0
+for a in "$@"; do
+  case "$a" in
+    *statusCheckRollup*) has_rollup=1 ;;
+  esac
+done
+if [ "$has_rollup" -eq 1 ] && [ -f "$here/rollup-error" ]; then
+  cat "$here/rollup-error" >&2
+  exit 1
+fi
+if [ "$has_rollup" -eq 1 ] && [ -f "$here/rollup-error-out" ]; then
+  cat "$here/rollup-error-out"
+  exit 1
+fi
 case "$*" in
   *graphql*) cat "$here/threads.json" ;;
   *"pr list"*) cat "$here/list.json" ;;
-  *"pr view"*) cat "$here/view.json" ;;
+  *"pr view"*)
+    if [ "$has_rollup" -eq 0 ] && [ -f "$here/meta-error" ]; then
+      cat "$here/meta-error" >&2
+      exit 1
+    fi
+    cat "$here/view.json"
+    ;;
+  *actions/runs*)
+    if [ -f "$here/runs-error" ]; then
+      cat "$here/runs-error" >&2
+      exit 1
+    fi
+    case "$*" in
+      *repos/acme/widgets/actions/runs*) ;;
+      *) echo "workflow runs were not read for the pull request repository" >&2; exit 1 ;;
+    esac
+    if [ -f "$here/want-sha" ]; then
+      want=$(cat "$here/want-sha")
+      found=0
+      for a in "$@"; do
+        case "$a" in
+          "head_sha=$want") found=1 ;;
+        esac
+      done
+      if [ "$found" -eq 0 ]; then
+        echo "workflow runs were not read for the head sha" >&2
+        exit 1
+      fi
+    fi
+    page=1
+    for a in "$@"; do
+      case "$a" in
+        page=*) page=${a#page=} ;;
+      esac
+    done
+    if [ -f "$here/runs-$page.json" ]; then
+      cat "$here/runs-$page.json"
+    else
+      echo "workflow run page $page failed" >&2
+      exit 1
+    fi
+    ;;
+  *commits/*/status*)
+    if [ -f "$here/status-error" ]; then
+      cat "$here/status-error" >&2
+      exit 1
+    fi
+    if [ -f "$here/want-sha" ]; then
+      want=$(cat "$here/want-sha")
+      case "$*" in
+        *"commits/$want/status"*) ;;
+        *) echo "commit status was not read for the head sha" >&2; exit 1 ;;
+      esac
+    fi
+    case "$*" in
+      *repos/acme/widgets/commits/*) ;;
+      *) echo "commit status was not read for the pull request repository" >&2; exit 1 ;;
+    esac
+    cat "$here/status.json"
+    ;;
   *) echo "stub gh: $*" >&2; exit 1 ;;
 esac
 "#;
@@ -2502,6 +2643,251 @@ esac
                 "status": "COMPLETED",
                 "conclusion": "FAILURE"
             }]
+        })
+        .to_string()
+    }
+
+    fn rollup_view(sha: &str, rollup: serde_json::Value) -> String {
+        serde_json::json!({
+            "number": 7,
+            "headRefOid": sha,
+            "state": "OPEN",
+            "url": "https://github.com/acme/widgets/pull/7",
+            "statusCheckRollup": rollup,
+        })
+        .to_string()
+    }
+
+    fn pending_view(sha: &str) -> String {
+        rollup_view(
+            sha,
+            serde_json::json!([{
+                "name": "ci",
+                "status": "IN_PROGRESS",
+                "conclusion": null
+            }]),
+        )
+    }
+
+    const ROLLUP_DENIED: &str = "GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup)\n";
+
+    struct RestGh {
+        sha: String,
+        threads: String,
+        list: String,
+        pages: Vec<String>,
+        status: String,
+        rollup_error: Option<String>,
+        rollup_stdout: Option<String>,
+        meta_error: Option<String>,
+        runs_error: Option<String>,
+        status_error: Option<String>,
+        view: Option<String>,
+    }
+
+    fn rest_gh(sha: &str, pages: Vec<String>, status: String) -> RestGh {
+        RestGh {
+            sha: sha.to_string(),
+            threads: quiet_threads(),
+            list: "[]".to_string(),
+            pages,
+            status,
+            rollup_error: Some(ROLLUP_DENIED.to_string()),
+            rollup_stdout: None,
+            meta_error: None,
+            runs_error: None,
+            status_error: None,
+            view: None,
+        }
+    }
+
+    fn stub_rest(spec: &RestGh) -> GhHold {
+        let dir = tempfile::tempdir().unwrap();
+        let view = spec.view.clone().unwrap_or_else(|| meta_view(&spec.sha));
+        let root = dir.path();
+        std::fs::write(root.join("view.json"), view).unwrap();
+        std::fs::write(root.join("threads.json"), &spec.threads).unwrap();
+        std::fs::write(root.join("list.json"), &spec.list).unwrap();
+        std::fs::write(root.join("status.json"), &spec.status).unwrap();
+        std::fs::write(root.join("want-sha"), &spec.sha).unwrap();
+        for (i, page) in spec.pages.iter().enumerate() {
+            std::fs::write(root.join(format!("runs-{}.json", i + 1)), page).unwrap();
+        }
+        if let Some(text) = &spec.rollup_error {
+            std::fs::write(root.join("rollup-error"), text).unwrap();
+        }
+        if let Some(text) = &spec.rollup_stdout {
+            std::fs::write(root.join("rollup-error-out"), text).unwrap();
+        }
+        if let Some(text) = &spec.meta_error {
+            std::fs::write(root.join("meta-error"), text).unwrap();
+        }
+        if let Some(text) = &spec.runs_error {
+            std::fs::write(root.join("runs-error"), text).unwrap();
+        }
+        if let Some(text) = &spec.status_error {
+            std::fs::write(root.join("status-error"), text).unwrap();
+        }
+        hold_gh(dir)
+    }
+
+    fn meta_view(sha: &str) -> String {
+        serde_json::json!({
+            "number": 7,
+            "headRefOid": sha,
+            "state": "OPEN",
+            "url": "https://github.com/acme/widgets/pull/7",
+        })
+        .to_string()
+    }
+
+    fn workflow(name: &str, status: &str, conclusion: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+        })
+    }
+
+    fn run_page(runs: serde_json::Value) -> String {
+        let n = runs.as_array().map(|a| a.len()).unwrap_or(0);
+        run_page_total(n as u64, runs)
+    }
+
+    fn run_page_total(total: u64, runs: serde_json::Value) -> String {
+        serde_json::json!({
+            "total_count": total,
+            "workflow_runs": runs,
+        })
+        .to_string()
+    }
+
+    fn no_runs() -> String {
+        run_page(serde_json::json!([]))
+    }
+
+    fn commit_status_body(state: &str, statuses: serde_json::Value) -> String {
+        let n = statuses.as_array().map(|a| a.len()).unwrap_or(0);
+        serde_json::json!({
+            "state": state,
+            "statuses": statuses,
+            "total_count": n,
+        })
+        .to_string()
+    }
+
+    fn no_statuses() -> String {
+        commit_status_body("pending", serde_json::json!([]))
+    }
+
+    fn success_status() -> String {
+        commit_status_body(
+            "success",
+            serde_json::json!([{"context": "ci", "state": "success"}]),
+        )
+    }
+
+    fn status_state(state: &str) -> String {
+        commit_status_body(
+            state,
+            serde_json::json!([{"context": "ci", "state": state}]),
+        )
+    }
+
+    fn green_runs() -> String {
+        run_page(serde_json::json!([
+            workflow("unit", "completed", Some("success")),
+            workflow("docs", "completed", Some("neutral")),
+            workflow("nightly", "completed", Some("skipped")),
+        ]))
+    }
+
+    fn merge_rule(dir: &Path) -> super::super::Rule {
+        guard_verdict("gh pr merge 7", Some(dir), &[]).expect("the merge gate spoke")
+    }
+
+    fn assert_rest_deny(rule: &super::super::Rule, needle: &str) {
+        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+        assert_eq!(rule.pattern, "merge-gate");
+        assert!(rule.reason.contains(needle), "{}", rule.reason);
+        assert!(
+            rule.reason.contains("Source: REST fallback"),
+            "{}",
+            rule.reason
+        );
+        assert!(!rule.reason.contains("no CI"), "{}", rule.reason);
+        assert!(
+            !rule.reason.contains("could not read the pull request"),
+            "{}",
+            rule.reason
+        );
+    }
+
+    fn assert_unreadable(rule: &super::super::Rule) {
+        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+        assert_eq!(rule.pattern, "merge-gate");
+        assert!(
+            rule.reason.contains("could not read the pull request"),
+            "{}",
+            rule.reason
+        );
+        assert!(rule.reason.contains("gh auth login"), "{}", rule.reason);
+        assert!(!rule.reason.contains("no CI"), "{}", rule.reason);
+        assert!(!rule.reason.contains("CI is missing"), "{}", rule.reason);
+        assert!(
+            !rule.reason.contains("Source: REST fallback"),
+            "{}",
+            rule.reason
+        );
+        assert!(!rule.reason.contains("Source: rollup"), "{}", rule.reason);
+    }
+
+    fn assert_rest_ask(rule: &super::super::Rule, sha: &str) {
+        assert_eq!(rule.verdict, "ask", "{}", rule.reason);
+        assert_eq!(rule.pattern, "merge-gate");
+        assert!(rule.reason.contains("no CI ran"), "{}", rule.reason);
+        assert!(rule.reason.contains(sha), "{}", rule.reason);
+        assert!(
+            rule.reason.contains("Source: REST fallback"),
+            "{}",
+            rule.reason
+        );
+    }
+
+    fn quiet_threads() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": []
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn human_thread() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": [{
+                                "isResolved": false,
+                                "comments": {"nodes": [{
+                                    "author": {"login": "octocat"},
+                                    "body": "please rename this"
+                                }]}
+                            }]
+                        }
+                    }
+                }
+            }
         })
         .to_string()
     }
@@ -2847,7 +3233,7 @@ esac
     }
 
     #[test]
-    fn a_plain_push_with_evidence_is_allowed_and_without_it_is_refused() {
+    fn a_plain_push_without_evidence_runs_and_says_so() {
         let dir = repo();
         seed(dir.path());
         gates(dir.path(), "test = \"true\"\n");
@@ -2856,12 +3242,19 @@ esac
             verdict: "ask".into(),
             reason: "A push needs consent.".into(),
         }];
-        let refused = answers("git push origin main", dir.path(), &rules);
-        assert_denies(&refused, "ljos evidence record -- true");
+        let _ = take_push_warning();
+        let unrecorded = answers("git push origin main", dir.path(), &rules);
+        assert_allows(&unrecorded);
+        let warned = take_push_warning().expect("a missing record is a warning");
+        assert!(warned.contains("ljos evidence record -- true"), "{warned}");
         record_in(dir.path(), &["true".into()]).unwrap();
         let allowed = answers("git push origin main", dir.path(), &rules);
         assert_allows(&allowed);
         assert!(guard_verdict("git push origin main", Some(dir.path()), &rules).is_none());
+        assert!(
+            take_push_warning().is_none(),
+            "a recorded tip has nothing to say"
+        );
         let forced = guard_verdict("git push --force origin main", Some(dir.path()), &rules)
             .expect("force still asks");
         assert_eq!(forced.verdict, "ask");
@@ -2874,20 +3267,40 @@ esac
             "git commit -m \"note the seat\" && git push origin main",
             Some(dir.path()),
             &[],
+        );
+        assert!(
+            fresh.is_none(),
+            "commit and push on one line runs: {fresh:?}"
+        );
+        let said = take_push_warning().expect("the new commit has no record");
+        assert!(said.contains("new commit"), "{said}");
+        let remote = guard_verdict("ssh host 'git push origin main'", Some(dir.path()), &[]);
+        assert!(
+            remote.is_none(),
+            "a push run elsewhere is a push: {remote:?}"
+        );
+        let commit = guard_verdict(
+            "ssh host 'git commit -m \"Co-authored-by: Cursor <c@c>\"'",
+            Some(dir.path()),
+            &[],
         )
-        .unwrap();
+        .expect("a commit run elsewhere hides its message");
         assert!(
-            fresh.reason.contains("ljos evidence record -- true"),
+            commit.reason.contains("git-remote-hidden"),
             "{}",
-            fresh.reason
+            commit.reason
         );
-        let remote =
-            guard_verdict("ssh host 'git push origin main'", Some(dir.path()), &[]).unwrap();
-        assert!(
-            remote.reason.contains("git-remote-hidden"),
-            "{}",
-            remote.reason
-        );
+    }
+
+    #[test]
+    fn a_broken_gate_file_warns_and_the_push_runs() {
+        let dir = repo();
+        seed(dir.path());
+        gates(dir.path(), "test = [\n");
+        let _ = take_push_warning();
+        assert!(guard_verdict("git push origin main", Some(dir.path()), &[]).is_none());
+        let said = take_push_warning().expect("the parse failure is a warning");
+        assert!(said.contains("gates.toml"), "{said}");
     }
 
     #[test]
@@ -2907,6 +3320,7 @@ esac
 
         let _hold = stub_gh(&green_view(sha), &threads(false, false), "[]");
         let open = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(open.verdict, "deny");
         assert!(open.reason.contains("Bugbot"), "{}", open.reason);
         drop(_hold);
 
@@ -2916,42 +3330,654 @@ esac
         assert!(guard_verdict(api, Some(dir.path()), &[]).is_none(), "{api}");
     }
 
+    /// A stub `gh` that fails every call: a push that reached for the
+    /// forge would be refused with its error.
+    fn silent_gh() -> GhHold {
+        stub_gh("not json", "not json", "not json")
+    }
+
     #[test]
-    fn a_local_merge_pushed_to_a_protected_branch_checks_the_published_sha() {
+    fn a_pending_check_on_a_merge_is_refused() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _hold = stub_gh(&pending_view(sha), &quiet_threads(), "[]");
+        let pending = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(pending.verdict, "deny");
+        assert!(
+            pending.reason.contains("ci=IN_PROGRESS"),
+            "{}",
+            pending.reason
+        );
+        assert!(
+            pending.reason.contains("git-merge-unready"),
+            "{}",
+            pending.reason
+        );
+        assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "ci=IN_PROGRESS");
+        drop(_hold);
+
+        let state = rollup_view(
+            sha,
+            serde_json::json!([{
+                "context": "build",
+                "state": "PENDING"
+            }]),
+        );
+        let _hold = stub_gh(&state, &quiet_threads(), "[]");
+        let held = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(held.verdict, "deny");
+        assert!(held.reason.contains("build=PENDING"), "{}", held.reason);
+    }
+
+    #[test]
+    fn a_head_sha_with_no_ci_asks_and_names_local_evidence() {
+        let dir = repo();
+        seed(dir.path());
+        let sha = tip(dir.path());
+        for rollup in [serde_json::Value::Null, serde_json::json!([])] {
+            let _hold = stub_gh(&rollup_view(&sha, rollup), &quiet_threads(), "[]");
+            let asked =
+                guard_verdict("gh pr merge 7", Some(dir.path()), &[]).expect("no checks asks");
+            assert_eq!(asked.verdict, "ask", "{}", asked.reason);
+            assert_eq!(asked.pattern, "merge-gate");
+            assert!(asked.reason.contains("no CI ran"), "{}", asked.reason);
+            assert!(asked.reason.contains(&sha), "{}", asked.reason);
+            assert!(!asked.reason.contains("evidence"), "{}", asked.reason);
+            let rows = answers("gh pr merge 7", dir.path(), &[]);
+            let shell = rows
+                .iter()
+                .find(|(name, _)| name == "cursor-shell")
+                .unwrap();
+            assert!(shell.1.contains("\"permission\":\"ask\""), "{}", shell.1);
+            assert!(shell.1.contains("no CI ran"), "{}", shell.1);
+            assert!(shell.1.contains(&sha), "{}", shell.1);
+        }
+
+        let bad = evidence_file(dir.path(), &sha).unwrap();
+        if let Some(parent) = bad.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &bad,
+            serde_json::json!({
+                "command": "true",
+                "exit": 1,
+                "sha": sha,
+                "ts": "2026-10-20T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _hold = stub_gh(
+            &rollup_view(&sha, serde_json::Value::Null),
+            &quiet_threads(),
+            "[]",
+        );
+        let failed = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(failed.verdict, "ask");
+        assert!(!failed.reason.contains("evidence"), "{}", failed.reason);
+        drop(_hold);
+
+        gates(dir.path(), "test = \"true\"\n");
+        record_in(dir.path(), &["true".into()]).unwrap();
+        let _hold = stub_gh(
+            &rollup_view(&sha, serde_json::json!([])),
+            &quiet_threads(),
+            "[]",
+        );
+        let recorded = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(recorded.verdict, "ask", "{}", recorded.reason);
+        assert!(recorded.reason.contains("no CI ran"), "{}", recorded.reason);
+        assert!(recorded.reason.contains(&sha), "{}", recorded.reason);
+        assert!(
+            recorded.reason.contains("local evidence record"),
+            "{}",
+            recorded.reason
+        );
+        assert!(
+            recorded.reason.contains(&format!("exists for {sha}")),
+            "{}",
+            recorded.reason
+        );
+        drop(_hold);
+
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let _hold = stub_gh(
+            &rollup_view(other, serde_json::Value::Null),
+            &quiet_threads(),
+            "[]",
+        );
+        let elsewhere = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(elsewhere.verdict, "ask");
+        assert!(elsewhere.reason.contains(other), "{}", elsewhere.reason);
+        assert!(
+            !elsewhere.reason.contains("evidence"),
+            "{}",
+            elsewhere.reason
+        );
+        drop(_hold);
+
+        let _hold = stub_gh(&red_view(&sha), &quiet_threads(), "[]");
+        let red = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(red.verdict, "deny");
+        assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+        drop(_hold);
+
+        let _hold = stub_gh(
+            &rollup_view(&sha, serde_json::Value::Null),
+            &threads(false, false),
+            "[]",
+        );
+        let open = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(open.verdict, "deny");
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(!open.reason.contains("no CI ran"), "{}", open.reason);
+    }
+
+    #[test]
+    fn an_unreadable_pull_request_is_refused_without_saying_ci_is_missing() {
+        let dir = repo();
+        let _hold = stub_gh_unreadable();
+        let denied =
+            guard_verdict("gh pr merge 7", Some(dir.path()), &[]).expect("unreadable pull request");
+        assert_eq!(denied.verdict, "deny");
+        assert_eq!(denied.pattern, "merge-gate");
+        assert!(denied.reason.contains("gh auth login"), "{}", denied.reason);
+        assert!(!denied.reason.contains("no CI"), "{}", denied.reason);
+        assert!(
+            !denied.reason.contains("CI is missing"),
+            "{}",
+            denied.reason
+        );
+        assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "gh auth login");
+    }
+
+    #[test]
+    fn a_denied_check_rollup_allows_a_green_rest_fallback() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let allow = |spec: &RestGh| {
+            let _hold = stub_rest(spec);
+            assert!(
+                guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none(),
+                "green REST CI allows the merge"
+            );
+            let api = "curl -X PUT https://api.github.com/repos/acme/widgets/pulls/7/merge";
+            assert!(guard_verdict(api, Some(dir.path()), &[]).is_none(), "{api}");
+        };
+
+        allow(&rest_gh(sha, vec![green_runs()], no_statuses()));
+        allow(&rest_gh(sha, vec![green_runs()], success_status()));
+        allow(&rest_gh(sha, vec![no_runs()], success_status()));
+        allow(&rest_gh(
+            sha,
+            vec![run_page(serde_json::json!([workflow(
+                "nightly",
+                "completed",
+                Some("skipped"),
+            )]))],
+            no_statuses(),
+        ));
+        allow(&rest_gh(
+            sha,
+            vec![
+                run_page_total(
+                    2,
+                    serde_json::json!([workflow("unit", "completed", Some("success"))]),
+                ),
+                run_page_total(
+                    2,
+                    serde_json::json!([workflow("docs", "completed", Some("neutral"))]),
+                ),
+            ],
+            success_status(),
+        ));
+
+        let mut wrapped = rest_gh(sha, vec![green_runs()], no_statuses());
+        wrapped.rollup_error = Some(
+            "GraphQL: Resource not accessible by\npersonal access token (repository.pullRequest.statusCheckRollup)\n"
+                .into(),
+        );
+        allow(&wrapped);
+
+        let mut stdout = rest_gh(sha, vec![green_runs()], no_statuses());
+        stdout.rollup_error = None;
+        stdout.rollup_stdout = Some(ROLLUP_DENIED.into());
+        allow(&stdout);
+
+        let mut bugbot = rest_gh(sha, vec![green_runs()], success_status());
+        bugbot.threads = threads(false, false);
+        let _hold = stub_rest(&bugbot);
+        let open = merge_rule(dir.path());
+        assert_eq!(open.verdict, "deny");
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(
+            open.reason.contains("Source: REST fallback"),
+            "{}",
+            open.reason
+        );
+        assert!(!open.reason.contains("no CI"), "{}", open.reason);
+        drop(_hold);
+
+        let mut human = rest_gh(sha, vec![green_runs()], success_status());
+        human.threads = human_thread();
+        let _hold = stub_rest(&human);
+        assert!(
+            guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none(),
+            "a thread that is not Bugbot does not refuse the merge"
+        );
+    }
+
+    #[test]
+    fn a_denied_check_rollup_refuses_a_bad_workflow_run() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for conclusion in [
+            "failure",
+            "cancelled",
+            "timed_out",
+            "action_required",
+            "stale",
+        ] {
+            let page = run_page(serde_json::json!([workflow(
+                "ci",
+                "completed",
+                Some(conclusion),
+            )]));
+            let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+            let denied = merge_rule(dir.path());
+            assert_rest_deny(&denied, &format!("ci={conclusion}"));
+            assert!(!denied.reason.contains("(pending)"), "{}", denied.reason);
+        }
+
+        let page = run_page(serde_json::json!([workflow("ci", "completed", None)]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "ci=completed");
+        drop(_hold);
+
+        for status in ["queued", "in_progress", "in-progress", "waiting"] {
+            let page = run_page(serde_json::json!([workflow("ci", status, None)]));
+            let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+            let denied = merge_rule(dir.path());
+            assert_rest_deny(&denied, &format!("ci={status} (pending)"));
+        }
+
+        let page = run_page(serde_json::json!([
+            workflow("unit", "completed", Some("failure")),
+            workflow("lint", "queued", None),
+        ]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "unit=failure");
+        assert!(
+            denied.reason.contains("lint=queued (pending)"),
+            "{}",
+            denied.reason
+        );
+        drop(_hold);
+
+        let pages = vec![
+            run_page_total(
+                2,
+                serde_json::json!([workflow("unit", "completed", Some("success"))]),
+            ),
+            run_page_total(
+                2,
+                serde_json::json!([workflow("lint", "completed", Some("failure"))]),
+            ),
+        ];
+        let _hold = stub_rest(&rest_gh(sha, pages, success_status()));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "lint=failure");
+        assert!(!denied.reason.contains("unit="), "{}", denied.reason);
+        drop(_hold);
+
+        let page = run_page(serde_json::json!([workflow(
+            "ci",
+            "completed",
+            Some("failure"),
+        )]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], success_status()));
+        assert_denies(
+            &answers("gh pr merge 7", dir.path(), &[]),
+            "Source: REST fallback",
+        );
+        assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "ci=failure");
+    }
+
+    #[test]
+    fn a_denied_check_rollup_refuses_a_bad_commit_status() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for state in ["failure", "error"] {
+            let _hold = stub_rest(&rest_gh(sha, vec![green_runs()], status_state(state)));
+            let denied = merge_rule(dir.path());
+            assert_rest_deny(&denied, &format!("commit status={state}"));
+            assert!(!denied.reason.contains("(pending)"), "{}", denied.reason);
+        }
+        let _hold = stub_rest(&rest_gh(sha, vec![green_runs()], status_state("pending")));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "commit status=pending (pending)");
+        drop(_hold);
+
+        let _hold = stub_rest(&rest_gh(sha, vec![no_runs()], status_state("failure")));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "commit status=failure");
+        drop(_hold);
+
+        let mut missing = rest_gh(sha, vec![green_runs()], success_status());
+        missing.status = serde_json::json!({
+            "statuses": [{"context": "ci", "state": "success"}],
+            "total_count": 1,
+        })
+        .to_string();
+        let _hold = stub_rest(&missing);
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "commit status=unknown");
+        drop(_hold);
+
+        let page = run_page(serde_json::json!([workflow(
+            "unit",
+            "completed",
+            Some("cancelled"),
+        )]));
+        let _hold = stub_rest(&rest_gh(sha, vec![page], status_state("error")));
+        let denied = merge_rule(dir.path());
+        assert_rest_deny(&denied, "unit=cancelled");
+        assert!(
+            denied.reason.contains("commit status=error"),
+            "{}",
+            denied.reason
+        );
+    }
+
+    #[test]
+    fn a_denied_check_rollup_with_no_runs_and_no_statuses_asks() {
+        let dir = repo();
+        seed(dir.path());
+        let sha = tip(dir.path());
+        let _hold = stub_rest(&rest_gh(&sha, vec![no_runs()], no_statuses()));
+        let asked = merge_rule(dir.path());
+        assert_rest_ask(&asked, &sha);
+        assert!(!asked.reason.contains("evidence"), "{}", asked.reason);
+        let rows = answers("gh pr merge 7", dir.path(), &[]);
+        let shell = rows
+            .iter()
+            .find(|(name, _)| name == "cursor-shell")
+            .unwrap();
+        assert!(shell.1.contains("\"permission\":\"ask\""), "{}", shell.1);
+        assert!(shell.1.contains("REST fallback"), "{}", shell.1);
+        assert!(shell.1.contains(&sha), "{}", shell.1);
+        drop(_hold);
+
+        let bad = evidence_file(dir.path(), &sha).unwrap();
+        if let Some(parent) = bad.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &bad,
+            serde_json::json!({
+                "command": "true",
+                "exit": 1,
+                "sha": sha,
+                "ts": "2026-10-20T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _hold = stub_rest(&rest_gh(&sha, vec![no_runs()], no_statuses()));
+        let failed = merge_rule(dir.path());
+        assert_rest_ask(&failed, &sha);
+        assert!(!failed.reason.contains("evidence"), "{}", failed.reason);
+        drop(_hold);
+
+        gates(dir.path(), "test = \"true\"\n");
+        record_in(dir.path(), &["true".into()]).unwrap();
+        let _hold = stub_rest(&rest_gh(&sha, vec![no_runs()], no_statuses()));
+        let recorded = merge_rule(dir.path());
+        assert_rest_ask(&recorded, &sha);
+        assert!(
+            recorded.reason.contains("local evidence record"),
+            "{}",
+            recorded.reason
+        );
+        assert!(
+            recorded.reason.contains(&format!("exists for {sha}")),
+            "{}",
+            recorded.reason
+        );
+        drop(_hold);
+
+        let page = run_page(serde_json::json!([workflow(
+            "ci",
+            "completed",
+            Some("failure"),
+        )]));
+        let _hold = stub_rest(&rest_gh(&sha, vec![page], no_statuses()));
+        let red = merge_rule(dir.path());
+        assert_rest_deny(&red, "ci=failure");
+        assert!(!red.reason.contains("evidence"), "{}", red.reason);
+        drop(_hold);
+
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let _hold = stub_rest(&rest_gh(other, vec![no_runs()], no_statuses()));
+        let elsewhere = merge_rule(dir.path());
+        assert_rest_ask(&elsewhere, other);
+        assert!(
+            !elsewhere.reason.contains("evidence"),
+            "{}",
+            elsewhere.reason
+        );
+        drop(_hold);
+
+        let mut spec = rest_gh(&sha, vec![no_runs()], no_statuses());
+        spec.threads = threads(false, false);
+        let _hold = stub_rest(&spec);
+        let open = merge_rule(dir.path());
+        assert_eq!(open.verdict, "deny");
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(
+            open.reason.contains("Source: REST fallback"),
+            "{}",
+            open.reason
+        );
+        assert!(!open.reason.contains("no CI ran"), "{}", open.reason);
+    }
+
+    #[test]
+    fn a_failed_rest_read_does_not_say_ci_is_missing() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let unreadable = |spec: &RestGh| {
+            let _hold = stub_rest(spec);
+            let denied = merge_rule(dir.path());
+            assert_unreadable(&denied);
+            denied.reason
+        };
+
+        let mut runs_fail = rest_gh(sha, vec![green_runs()], success_status());
+        runs_fail.runs_error = Some("HTTP 502\n".into());
+        unreadable(&runs_fail);
+
+        let mut status_fail = rest_gh(sha, vec![green_runs()], success_status());
+        status_fail.status_error = Some("HTTP 502\n".into());
+        unreadable(&status_fail);
+
+        let mut empty_status_fail = rest_gh(sha, vec![no_runs()], no_statuses());
+        empty_status_fail.status_error = Some("HTTP 502\n".into());
+        let reason = unreadable(&empty_status_fail);
+        assert!(!reason.contains("no CI ran"), "{reason}");
+
+        let mut meta_fail = rest_gh(sha, vec![green_runs()], success_status());
+        meta_fail.meta_error = Some("HTTP 401: Bad credentials\n".into());
+        let reason = unreadable(&meta_fail);
+        assert!(reason.contains("Bad credentials"), "{reason}");
+
+        let mut no_url = rest_gh(sha, vec![no_runs()], no_statuses());
+        no_url.view = Some(
+            serde_json::json!({
+                "number": 7,
+                "headRefOid": sha,
+                "state": "OPEN",
+            })
+            .to_string(),
+        );
+        unreadable(&no_url);
+
+        let bad_runs = rest_gh(sha, vec!["{}".into()], no_statuses());
+        let reason = unreadable(&bad_runs);
+        assert!(
+            reason.contains("the workflow run list was missing"),
+            "{reason}"
+        );
+
+        let mut bad_status = rest_gh(sha, vec![green_runs()], success_status());
+        bad_status.status = r#"{"state":"success"}"#.into();
+        let reason = unreadable(&bad_status);
+        assert!(
+            reason.contains("the commit status list was missing"),
+            "{reason}"
+        );
+
+        let short = rest_gh(
+            sha,
+            vec![run_page_total(
+                2,
+                serde_json::json!([workflow("unit", "completed", Some("success"))]),
+            )],
+            success_status(),
+        );
+        let reason = unreadable(&short);
+        assert!(reason.contains("workflow run page 2 failed"), "{reason}");
+
+        for message in [
+            "HTTP 401: Bad credentials\n",
+            "Resource not accessible by integration\n",
+            "HTTP 403: personal access token lacks a scope\n",
+        ] {
+            let mut spec = rest_gh(sha, vec![green_runs()], success_status());
+            spec.rollup_error = Some(message.into());
+            let reason = unreadable(&spec);
+            assert!(reason.contains(message.trim()), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_push_of_a_merge_ignores_a_different_pull_request_head() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.path().join("g.txt"), "two\n").unwrap();
         git(dir.path(), &["add", "g.txt"]);
         git(dir.path(), &["commit", "-q", "-m", "note the feature"]);
-        let feature = tip(dir.path());
-        gates(dir.path(), "test = \"true\"\n");
-        record_in(dir.path(), &["true".into()]).unwrap();
         git(dir.path(), &["checkout", "-q", "main"]);
-        let _hold = stub_gh(&green_view(&feature), &threads(true, false), "[]");
-        let line = "git merge feature && git push origin main";
-        let rows = answers(line, dir.path(), &[]);
-        assert_allows(&rows);
-        drop(_hold);
-
-        std::fs::write(dir.path().join("h.txt"), "three\n").unwrap();
-        git(dir.path(), &["add", "h.txt"]);
-        git(dir.path(), &["commit", "-q", "-m", "note main"]);
-        let diverged = guard_verdict(line, Some(dir.path()), &[]).unwrap();
-        assert!(
-            diverged.reason.contains("not a fast-forward"),
-            "{}",
-            diverged.reason
+        git(dir.path(), &["merge", "--no-ff", "--no-edit", "feature"]);
+        let head = tip(dir.path());
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut spec = rest_gh(
+            other,
+            vec![run_page(serde_json::json!([workflow(
+                "unit",
+                "completed",
+                Some("success"),
+            )]))],
+            success_status(),
         );
+        spec.list = format!(r#"[{{"number":7,"headRefOid":"{head}","state":"OPEN"}}]"#);
+        let _hold = stub_rest(&spec);
+        // The forge head is `other` and this merge publishes `head`. A push
+        // does not read the pull request, so the difference does not refuse it.
         assert!(
-            diverged.reason.contains("git merge --ff-only feature"),
-            "{}",
-            diverged.reason
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a push does not read the pull request"
         );
     }
 
     #[test]
-    fn pushing_a_merge_commit_uses_the_head_sha() {
+    fn a_check_rollup_message_names_the_rollup() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _hold = stub_gh(&red_view(sha), &quiet_threads(), "[]");
+        let red = merge_rule(dir.path());
+        assert_eq!(red.verdict, "deny");
+        assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+        assert!(red.reason.contains("Source: rollup"), "{}", red.reason);
+        assert!(!red.reason.contains("REST fallback"), "{}", red.reason);
+        drop(_hold);
+
+        let _hold = stub_gh(&pending_view(sha), &quiet_threads(), "[]");
+        let pending = merge_rule(dir.path());
+        assert!(
+            pending.reason.contains("ci=IN_PROGRESS"),
+            "{}",
+            pending.reason
+        );
+        assert!(
+            pending.reason.contains("Source: rollup"),
+            "{}",
+            pending.reason
+        );
+        drop(_hold);
+
+        for rollup in [serde_json::Value::Null, serde_json::json!([])] {
+            let _hold = stub_gh(&rollup_view(sha, rollup), &quiet_threads(), "[]");
+            let asked = merge_rule(dir.path());
+            assert_eq!(asked.verdict, "ask", "{}", asked.reason);
+            assert!(asked.reason.contains("no CI ran"), "{}", asked.reason);
+            assert!(asked.reason.contains("Source: rollup"), "{}", asked.reason);
+            assert!(!asked.reason.contains("REST fallback"), "{}", asked.reason);
+        }
+
+        let _hold = stub_gh(&green_view(sha), &threads(false, false), "[]");
+        let open = merge_rule(dir.path());
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(open.reason.contains("Source: rollup"), "{}", open.reason);
+    }
+
+    #[test]
+    fn no_bugbot_threads_lets_a_green_merge_through() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _hold = stub_gh(&green_view(sha), &quiet_threads(), "[]");
+        assert!(guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none());
+        assert_allows(&answers("gh pr merge 7", dir.path(), &[]));
+        drop(_hold);
+
+        let _hold = stub_gh(&green_view(sha), &human_thread(), "[]");
+        assert!(
+            guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none(),
+            "a thread that is not Bugbot does not refuse the merge"
+        );
+    }
+
+    #[test]
+    fn a_local_merge_pushed_to_the_persons_own_main_runs() {
+        let dir = repo();
+        seed(dir.path());
+        git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.path().join("g.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "g.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "note the feature"]);
+        gates(dir.path(), "test = \"true\"\n");
+        record_in(dir.path(), &["true".into()]).unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]);
+        let _hold = silent_gh();
+        let line = "git merge feature && git push origin main";
+        assert_allows(&answers(line, dir.path(), &[]));
+
+        std::fs::write(dir.path().join("h.txt"), "three\n").unwrap();
+        git(dir.path(), &["add", "h.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "note main"]);
+        let diverged = guard_verdict(line, Some(dir.path()), &[]);
+        assert!(
+            diverged.is_none(),
+            "a merge commit onto the person's main runs: {diverged:?}"
+        );
+    }
+
+    #[test]
+    fn pushing_a_merge_commit_does_not_wait_on_the_forge() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2962,21 +3988,41 @@ esac
         git(dir.path(), &["merge", "--no-ff", "--no-edit", "feature"]);
         let head = tip(dir.path());
         assert!(second_parent(dir.path()).is_some(), "{head}");
-        gates(dir.path(), "test = \"true\"\n");
-        record_in(dir.path(), &["true".into()]).unwrap();
         let list = format!(r#"[{{"number":7,"headRefOid":"{head}","state":"OPEN"}}]"#);
-        let _hold = stub_gh(&green_view(&head), &threads(true, false), &list);
+        let _hold = stub_gh(&red_view(&head), &threads(false, false), &list);
         assert_allows(&answers("git push origin main", dir.path(), &[]));
-        drop(_hold);
-
-        let _hold = stub_gh(&red_view(&head), &threads(true, false), &list);
-        let red = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
-        assert!(red.reason.contains("git-merge-unready"), "{}", red.reason);
-        assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+        assert!(guard_verdict("git push origin main", Some(dir.path()), &[]).is_none());
     }
 
     #[test]
-    fn a_push_of_another_branch_does_not_review_the_checkout_merge() {
+    fn a_protected_branch_of_someone_elses_repository_asks() {
+        let dir = repo();
+        seed(dir.path());
+        let _hold = silent_gh();
+        gates(dir.path(), "owners = [\"rgoswami\", \"leidarljos\"]\n");
+        let asked = guard_verdict("git push origin main", Some(dir.path()), &[])
+            .expect("acme is not one of the owners");
+        assert_eq!(asked.verdict, "ask");
+        assert_eq!(asked.pattern, "push-gate");
+        assert!(asked.reason.contains("acme/widgets"), "{}", asked.reason);
+        assert!(
+            guard_verdict("git push origin HEAD:feature", Some(dir.path()), &[]).is_none(),
+            "a feature branch of someone else's repository is an ordinary push"
+        );
+        gates(dir.path(), "owners = [\"ACME\"]\n");
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "owners match without case"
+        );
+        gates(dir.path(), "signoff = false\n");
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "no owners set: every repository is the person's"
+        );
+    }
+
+    #[test]
+    fn a_force_push_with_a_test_command_asks_and_is_not_an_evidence_refusal() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -2990,17 +4036,17 @@ esac
         git(dir.path(), &["checkout", "-q", "merged"]);
         assert!(second_parent(dir.path()).is_some());
         gates(dir.path(), "test = \"true\"\n");
-        let refused = guard_verdict("git push --force origin main", Some(dir.path()), &[]).unwrap();
-        assert_eq!(refused.pattern, "push-gate");
+        let asked = guard_verdict("git push --force origin main", Some(dir.path()), &[]).unwrap();
+        assert_eq!(asked.verdict, "ask", "{}", asked.reason);
         assert!(
-            refused.reason.contains("git-push-evidence"),
+            !asked.reason.contains("git-push-evidence"),
             "{}",
-            refused.reason
+            asked.reason
         );
         assert!(
-            !refused.reason.contains("git-merge-unready"),
+            !asked.reason.contains("git-merge-unready"),
             "{}",
-            refused.reason
+            asked.reason
         );
     }
 
@@ -3090,12 +4136,28 @@ esac
             "a gates file with no test command does not ask for evidence"
         );
         gates(dir.path(), "test = \"true\"\n");
-        let refused = guard_verdict("git push origin main", Some(dir.path()), &[]).unwrap();
+        let _ = take_push_warning();
         assert!(
-            refused.reason.contains("ljos evidence record -- true"),
-            "{}",
-            refused.reason
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a test command with no record warns and the push runs"
         );
+        let said = take_push_warning().expect("a warning");
+        assert!(said.contains("ljos evidence record -- true"), "{said}");
+        let sha = tip(dir.path());
+        let path = evidence_file(dir.path(), &sha).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"command":"true","exit":1,"sha":"{sha}","ts":"2020-01-01T00:00:00Z"}}"#),
+        )
+        .unwrap();
+        let _ = take_push_warning();
+        assert!(
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a stale record warns and the push runs"
+        );
+        let stale = take_push_warning().expect("a failing record is a warning");
+        assert!(stale.contains("did not exit 0"), "{stale}");
     }
 
     #[test]

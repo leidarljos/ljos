@@ -13,8 +13,14 @@
 //! and `ljos accept` posts the atom. A writer that does not answer keeps
 //! the proposal local for this call.
 //!
-//! `origin` on a live atom is `user-declared`, `agent-derived` or `peer`.
-//! A 400 that names `origin` as unknown is retried once without the field.
+//! `origin` on a live atom is `user-declared` (a person), `agent-derived`
+//! (this seat's own agent), `tool-echo` (tool output), `external` or `peer`
+//! (another seat). A 400 that names `origin` as unknown is retried once
+//! without the field.
+//!
+//! Packset's memory levels are `explicit` and `derived`. `derived` is L0.
+//! An agent's own lesson starts there. Tool output and another seat cannot
+//! be stored above it until [`accept`] promotes the proposal to `explicit`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,7 +33,25 @@ use serde_json::Value;
 
 pub const ORIGIN_USER: &str = "user-declared";
 pub const ORIGIN_AGENT: &str = "agent-derived";
+pub const ORIGIN_TOOL: &str = "tool-echo";
 pub const ORIGIN_PEER: &str = "peer";
+
+/// Packset's lower memory level (`packset_core::record::LEVELS`). L0.
+pub const LEVEL_L0: &str = "derived";
+/// Packset's level for a claim a person stood behind.
+pub const LEVEL_EXPLICIT: &str = "explicit";
+
+/// The level an origin may be filed at.
+///
+/// A person's words are `explicit`. An agent's own lesson starts at L0.
+/// Tool output and another seat are capped there until [`accept`].
+#[must_use]
+pub fn admission_level(origin: &str) -> &'static str {
+    match origin {
+        ORIGIN_USER => LEVEL_EXPLICIT,
+        _ => LEVEL_L0,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filed {
@@ -44,6 +68,9 @@ struct Record {
     remote_id: Option<String>,
     text: String,
     kind: String,
+    /// `user-declared`, `agent-derived`, `tool-echo` or `peer`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    origin: String,
     atom: Value,
 }
 
@@ -238,16 +265,82 @@ fn post_direct(client: &PacksetClient, atom: &Value) -> Result<Option<String>> {
 /// It carries origin `agent-derived`. A writer from before agent writes
 /// were live answers `held as proposal ID`; that proposal is accepted on
 /// the spot, so the memory is live there too. Nothing waits for a person.
+/// A lesson past the two-sentence cap or the character cap is posted as the
+/// shorter copies [`crate::pack_copy::pack_copies`] cuts. A lesson that
+/// fails only the word limit, the grade or the adverb ratio is posted
+/// whole, as `prefer` stores it, and the pack keeps the text with a
+/// warning. A preference is posted as written.
 ///
 /// # Errors
 ///
 /// An empty text, or the pack refusing the claim for a reason other than
-/// holding it (a secret, the size cap).
-pub fn write_agent(client: &PacksetClient, mut atom: Value) -> Result<Value> {
-    if atom["text"].as_str().unwrap_or("").trim().is_empty() {
+/// holding it (a secret, the size cap, a third sentence).
+pub fn write_agent(client: &PacksetClient, atom: Value) -> Result<Value> {
+    let text = atom["text"].as_str().unwrap_or("").trim().to_string();
+    if text.is_empty() {
         bail!("remember: empty text is not a claim");
     }
-    stamp_origin(&mut atom, ORIGIN_AGENT);
+    if atom["kind"].as_str() == Some("lesson") && past_hard_cap(&text) {
+        let copies = crate::pack_copy::pack_copies(&text);
+        let unchanged = copies.is_empty() || (copies.len() == 1 && copies[0] == text);
+        if !unchanged {
+            let mut last = None;
+            let mut first_err = None;
+            for copy in &copies {
+                let mut one = atom.clone();
+                one["text"] = Value::String(copy.clone());
+                match write_agent_one(client, one) {
+                    Ok(posted) => last = Some(posted),
+                    Err(e) if crate::note_can_wait(&e) => return Err(e),
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+            if let Some(posted) = last {
+                return Ok(posted);
+            }
+            return Err(
+                first_err.unwrap_or_else(|| anyhow::anyhow!("remember: empty text is not a claim"))
+            );
+        }
+    }
+    write_agent_one(client, atom)
+}
+
+/// The two-sentence cap and the character cap. Word count, grade and
+/// adverb ratio are the checks `prefer` stores with a warning.
+fn past_hard_cap(text: &str) -> bool {
+    packset_core::prose::sentences(text).len() > packset_core::prose::MAX_ATOM_SENTENCES
+        || text.chars().count() > packset_core::record::TEXT_SOFT_CAP
+}
+
+/// A prose refusal other than the sentence cap. The sentence error is
+/// reported first, so a third sentence is not stored as a warning.
+fn prose_is_soft(text: &str) -> bool {
+    match packset_core::prose_refuse(text, packset_core::ProseRole::Atom) {
+        Ok(_) => false,
+        Err(why) => !why.to_string().contains("sentences; one claim is at most"),
+    }
+}
+
+/// One agent atom, with no further split.
+pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result<Value> {
+    let text = atom["text"].as_str().unwrap_or("").trim();
+    if text.is_empty() {
+        bail!("remember: empty text is not a claim");
+    }
+    // The pack refuses an agent-derived atom for length, grade and adverbs,
+    // and keeps a person's atom with a warning. A lesson that fails only
+    // those checks is stored the way `prefer` stores it.
+    let origin = if prose_is_soft(text) {
+        ORIGIN_USER
+    } else {
+        ORIGIN_AGENT
+    };
+    stamp_origin(&mut atom, origin);
     match post_kept(client, &atom) {
         Ok(posted) => Ok(posted),
         Err(e) => {
@@ -273,15 +366,55 @@ pub fn write_agent(client: &PacksetClient, mut atom: Value) -> Result<Value> {
 ///
 /// A held answer is the proposal. The id is stable for one kind and one
 /// text, so the same lesson is one open proposal. An open, accepted or
-/// satisfied row is returned as it stands.
-pub fn propose_atom(client: &PacksetClient, mut atom: Value) -> Result<Filed> {
+/// satisfied row is returned as it stands. Origin is `agent-derived`.
+pub fn propose_atom(client: &PacksetClient, atom: Value) -> Result<Filed> {
+    file_proposal(client, atom, true)
+}
+
+/// File `atom` as a proposal and do not post it.
+///
+/// `ljos finish --lesson`, `ljos findings --remember` and the correction
+/// hook use this. The claim stays out of the pack until [`accept`] promotes
+/// it. A known origin on the atom is kept. The level is [`admission_level`]:
+/// L0 (`derived`) for an agent, a tool echo and another seat, `explicit`
+/// for the person's own words.
+pub fn propose_admission(client: &PacksetClient, atom: Value) -> Result<Filed> {
+    file_proposal(client, atom, false)
+}
+
+fn file_proposal(client: &PacksetClient, mut atom: Value, post: bool) -> Result<Filed> {
     let _g = gate();
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     let kind = atom["kind"].as_str().unwrap_or("lesson").to_string();
     if text.is_empty() {
         bail!("propose: empty text is not a proposal");
     }
-    stamp_origin(&mut atom, ORIGIN_AGENT);
+    if atom
+        .get("workspace")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty()
+    {
+        if let Some(map) = atom.as_object_mut() {
+            map.insert("workspace".into(), Value::String(client.workspace()));
+        }
+    }
+    if post {
+        stamp_origin(&mut atom, ORIGIN_AGENT);
+    } else {
+        let named = atom["origin"].as_str().unwrap_or("");
+        if !packset_core::atom::known_origin(named) {
+            stamp_origin(&mut atom, ORIGIN_AGENT);
+        }
+        let origin = atom["origin"].as_str().unwrap_or(ORIGIN_AGENT).to_string();
+        if let Some(map) = atom.as_object_mut() {
+            map.insert(
+                "level".into(),
+                Value::String(admission_level(&origin).to_string()),
+            );
+        }
+    }
+    let origin = atom["origin"].as_str().unwrap_or(ORIGIN_AGENT).to_string();
     let id = crate::work_id(&format!("{kind}\n{text}"));
     if let Some(existing) = read_latest().get(&id) {
         if matches!(existing.status.as_str(), "open" | "accepted" | "satisfied") {
@@ -291,7 +424,11 @@ pub fn propose_atom(client: &PacksetClient, mut atom: Value) -> Result<Filed> {
             });
         }
     }
-    let remote_id = post_direct(client, &atom)?;
+    let remote_id = if post {
+        post_direct(client, &atom)?
+    } else {
+        None
+    };
     let rec = Record {
         id: id.clone(),
         status: "open".into(),
@@ -299,11 +436,19 @@ pub fn propose_atom(client: &PacksetClient, mut atom: Value) -> Result<Filed> {
         remote_id,
         text,
         kind,
+        origin,
         atom,
     };
     let remote = rec.remote;
     append(&rec)?;
     Ok(Filed { id, remote })
+}
+
+/// Raise a proposal's memory level from L0 to `explicit`.
+fn promote_level(atom: &mut Value) {
+    if let Some(map) = atom.as_object_mut() {
+        map.insert("level".into(), Value::String(LEVEL_EXPLICIT.to_string()));
+    }
 }
 
 /// The person's own text wrote the claim. An open proposal of those words
@@ -482,6 +627,10 @@ pub fn accept(id: &str) -> Result<String> {
         append(&rec)?;
         return Ok(accepted_line(&rec.id, &rec.kind, &posted));
     }
+    // A person accepting the proposal is the promotion off L0. Tool output
+    // and another seat stay at `derived` until this line. The origin stays,
+    // so a reader can still see where the claim came from.
+    promote_level(&mut rec.atom);
     match post_kept(&client, &rec.atom) {
         Ok(posted) => {
             rec.status = "accepted".into();

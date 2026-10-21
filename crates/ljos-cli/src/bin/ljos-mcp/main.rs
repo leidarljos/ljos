@@ -17,6 +17,9 @@ use rmcp::{transport::stdio, ServiceExt};
 async fn main() -> anyhow::Result<()> {
     ljos_cli::normalize_tracker_env();
     ljos_cli::load_seat_env();
+    if let Some(line) = ljos_cli::cloud::missing_mcp_line() {
+        eprintln!("{line}");
+    }
     // One process is one connection. A later seat argument cannot mint a
     // second session for a ballot.
     ljos_cli::ballot_sig::pin_connection_session(None);
@@ -24,6 +27,10 @@ async fn main() -> anyhow::Result<()> {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // Starting the server is a run of this version: refresh skills and
+    // runner env files ljos wrote.
+    ljos_cli::runner_skills::refresh_on_new_version();
+    ljos_cli::runner_env::refresh_on_new_version();
     ljos_cli::bookkeep::spawn_idle_finish();
     // Dropped when the process returns, including after the client closes.
     // A name, not `let _`, so the finish runs at the end of main.

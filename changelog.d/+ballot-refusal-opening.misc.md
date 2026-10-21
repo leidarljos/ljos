@@ -1,0 +1,1 @@
+A cast refused because the session already voted opens with `already cast a ballot on ISSUE (SESSION)` whether or not it names the same voter, so a reader or script matching that refusal still finds it.

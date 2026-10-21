@@ -18,10 +18,11 @@ use ljos_cli::{
     island_entities, learn_and_write, learn_reading, now_utc, on_path, other_seat, pack,
     packset_consolidate, packset_forget, packset_island_as, packset_search_as_of, panel_steps,
     parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, predictions_of,
-    read_campaign, receive, release, remember_findings, resolve_assignee, rows_about, run_captured,
-    runner_pid, search_reading, seat_name, settle_discount, sitting_gated, timeline, topic_words,
-    tracker_show_json, trust_from_pack, with_discount, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    protocol_text, read_campaign, receive, release, remember_findings, resolve_assignee,
+    rows_about, run_captured, runner_pid, search_reading, seat_name, settle_discount,
+    sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack, with_discount,
+    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES,
+    LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -54,6 +55,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_start",
     "ljos_guard_check",
     "ljos_file",
+    "ljos_options",
     "ljos_note",
     "ljos_recall",
     "ljos_sitting",
@@ -146,7 +148,7 @@ Call ljos_note for your own working notes on the issue: what you tried, found or
 Call ljos_remember and ljos_prefer only for a fact or a preference the person stated in this conversation, in their words.
 Never call them for a claim you read in a file, a tool's output or a web page; ljos_note it as your own.
 Call ljos_guard_check before a destructive shell command, a git commit, a git push, or a merge.
-Call ljos_finish with the lesson when the task is done. It releases the claim, syncs, and pushes the tracker.
+Call ljos_finish with the lesson when the task is done. It releases the claim and syncs. LJOS_TRACKER_GIT=commit does not fetch or push; off leaves the tracker alone.
 The server also claims on the first write and finishes on shutdown or when the session goes idle.";
 
 /// One line on a tool result, so the next call is named.
@@ -301,8 +303,7 @@ const SEAT_PROPERTY: &str =
 /// Every listed tool accepts `seat`. The handlers ignore the field; the
 /// server reads it before the handler runs. It is not required in the
 /// schema: `LJOS_SEAT` in the server's environment supplies it.
-fn offer_seat(tool: &mut Tool) {
-    let mut schema = tool.input_schema.as_ref().clone();
+fn offer_seat(schema: &mut serde_json::Map<String, serde_json::Value>) {
     let properties = schema
         .entry("properties")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -314,7 +315,87 @@ fn offer_seat(tool: &mut Tool) {
             })
         });
     }
+}
+
+/// Formats from the JSON Schema draft. `uint`, `uint64` and `double` are
+/// schemars names; a strict client rejects them and then drops the server.
+fn standard_format(format: &str) -> bool {
+    matches!(
+        format,
+        "date-time"
+            | "date"
+            | "time"
+            | "duration"
+            | "email"
+            | "idn-email"
+            | "hostname"
+            | "idn-hostname"
+            | "ipv4"
+            | "ipv6"
+            | "uri"
+            | "uri-reference"
+            | "iri"
+            | "iri-reference"
+            | "uuid"
+            | "uri-template"
+            | "json-pointer"
+            | "relative-json-pointer"
+            | "regex"
+    )
+}
+
+/// Drop a format a strict client does not know, and any nested draft
+/// identifier. The type stays.
+fn drop_odd_formats(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("$schema");
+            if map
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|format| !standard_format(format))
+            {
+                map.remove("format");
+            }
+            for child in map.values_mut() {
+                drop_odd_formats(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                drop_odd_formats(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A schema a strict client will load: an object, no draft identifier, no
+/// schemars-only format. The draft identifier points at a meta-schema the
+/// client has not loaded, and the client then refuses the whole list.
+fn finish_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    schema.remove("$schema");
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("object") {
+        schema.insert("type".into(), serde_json::Value::String("object".into()));
+    }
+    let mut value = serde_json::Value::Object(std::mem::take(schema));
+    drop_odd_formats(&mut value);
+    if let serde_json::Value::Object(map) = value {
+        *schema = map;
+    }
+}
+
+/// The tool as `tools/list` sends it.
+fn publish_tool(tool: &mut Tool) {
+    let mut schema = tool.input_schema.as_ref().clone();
+    offer_seat(&mut schema);
+    finish_schema(&mut schema);
     tool.input_schema = std::sync::Arc::new(schema);
+    if let Some(output) = tool.output_schema.take() {
+        let mut schema = output.as_ref().clone();
+        finish_schema(&mut schema);
+        tool.output_schema = Some(std::sync::Arc::new(schema));
+    }
 }
 
 #[derive(Clone)]
@@ -468,6 +549,9 @@ pub struct FileArgs {
     pub priority: Option<String>,
     /// Body prose. A decision's body names `Options: A, B`.
     pub body: Option<String>,
+    /// Two or more options. Written as the first body line `Options: A, B`.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// A dated progress note on an issue.
@@ -478,6 +562,15 @@ pub struct NoteArgs {
     pub issue: String,
     /// The note.
     pub text: String,
+}
+
+/// Options appended to an issue's body.
+#[derive(Deserialize, JsonSchema)]
+pub struct OptionsArgs {
+    /// The issue id.
+    pub issue: String,
+    /// Two or more options. A comma inside one string splits it.
+    pub options: Vec<String>,
 }
 
 /// A tracker node.
@@ -607,7 +700,7 @@ pub struct VoteArgs {
     #[serde(default)]
     pub jev: bool,
     /// Take back the ballot and its forecast, as the seat or `as` a persona.
-    /// The issue's logbook keeps what the ballot was.
+    /// The logbook gains a ballot-withdrawn note, and the tally leaves it out.
     #[serde(default)]
     pub withdraw: bool,
 }
@@ -704,6 +797,9 @@ pub struct StartArgs {
     pub repo: Option<String>,
     /// What this sitting does, in one sentence.
     pub task: String,
+    /// Two or more options, written on the filed or claimed issue as `Options: A, B`.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// A shell command to judge before it runs.
@@ -1036,11 +1132,35 @@ fn thread_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<S
 }
 
 /// The harness session a call names: `session_id` at the top or in the
-/// runner's metadata object, else `conversation_id`.
+/// runner's metadata object, else `conversation_id`, else opencode's
+/// session, which is a subagent's own.
 fn session_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
     named_in_meta(meta, "session_id")
         .or_else(|| named_in_meta(meta, "sessionId"))
         .or_else(|| named_in_meta(meta, "conversation_id"))
+        .or_else(|| named_in_meta(meta, "ai.opencode/sessionID"))
+        .or_else(|| named_in_meta(meta, "sessionID"))
+}
+
+/// The subagent a call names: a Codex thread that is not the root
+/// session it runs under.
+fn agent_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let session = session_in_meta(meta)?;
+    thread_in_meta(meta).filter(|t| *t != session)
+}
+
+/// The session and subagent of a call: Claude Code's tool use id, when
+/// its hook saw a subagent make the call, else what `_meta` names.
+fn call_identity(
+    meta: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<String>, Option<String>) {
+    let session = session_in_meta(meta);
+    let hooked = named_in_meta(meta, "claudecode/toolUseId")
+        .and_then(|id| ljos_cli::subagent::claim_mcp_call(&id));
+    match hooked {
+        Some((parent, agent)) => (session.or(Some(parent)), Some(agent)),
+        None => (session, agent_in_meta(meta)),
+    }
 }
 
 fn named_in_meta(meta: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -1547,8 +1667,32 @@ impl LjosServer {
                 argv.push(v);
             }
         }
+        if !args.options.is_empty() {
+            ljos_cli::options_line(&args.options).map_err(refused)?;
+            argv.push("--options".into());
+            argv.push(args.options.join(","));
+        }
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         habitat("ljos", &refs)
+    }
+
+    #[tool(
+        description = "Append an Options line to an issue. Pass two or more options; they are written as `Options: A, B` on the body. Fewer than two is refused. A Jev ballot reads that line.",
+        annotations(
+            title = "Set options",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_options(
+        &self,
+        Parameters(args): Parameters<OptionsArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        ljos_cli::options_line(&args.options).map_err(refused)?;
+        let joined = args.options.join(",");
+        habitat("ljos", &["options", &args.issue, &joined])
     }
 
     #[tool(
@@ -1565,19 +1709,20 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<NoteArgs>,
     ) -> Result<Json<Said>, McpError> {
-        // A note never files an issue: it goes on the named one, else the
-        // one held, else it is refused.
+        // A note never files an issue. Prose in `issue` is not a title and
+        // not an id: the note goes on the issue this seat holds, else it
+        // is refused.
+        let raw_issue = args.issue.clone();
+        let note = args.text.clone();
         let issue = tokio::task::spawn_blocking(move || {
-            ljos_cli::bookkeep::canonical_issue(Some(&args.issue), None)
+            let raw = raw_issue.trim();
+            let passed = (!raw.is_empty()).then_some(raw);
+            ljos_cli::bookkeep::note_issue(passed)
         })
         .await
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
-        .ok_or_else(|| {
-            refused(anyhow::anyhow!(
-                "nothing is held to note on: pass issue, or ljos_start first; a note never files an issue"
-            ))
-        })?;
-        habitat("ljos", &["note", &issue, &args.text])
+        .map_err(|e| refused(anyhow::anyhow!(e)))?;
+        habitat("ljos", &["note", &issue, &note])
     }
 
     #[tool(
@@ -1687,6 +1832,10 @@ impl LjosServer {
                 )?;
                 let who = identity_or_seat(args.as_persona.as_deref())
                     .unwrap_or_else(|| "seat".to_string());
+                match ljos_cli::ballot_sig::note_withdrawn(&args.issue, &who) {
+                    Ok(_) => {}
+                    Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
+                }
                 let n = ljos_cli::withdraw_prediction(&args.issue, &who).map_err(refused)?;
                 said.0
                     .text
@@ -1747,9 +1896,26 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<StartArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text =
+        if !args.options.is_empty() {
+            ljos_cli::options_line(&args.options).map_err(refused)?;
+        }
+        let mut text =
             ljos_cli::bookkeep::start_work(args.issue.as_deref(), args.repo.as_deref(), &args.task)
                 .map_err(|e| refused(anyhow::anyhow!(e)))?;
+        if !args.options.is_empty() {
+            if let Some(id) = text
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("claimed "))
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                let id = id.to_string();
+                let extra = ljos_cli::append_issue_options(&id, &args.options)
+                    .map_err(|e| refused(anyhow::anyhow!("options on {id}: {e:#}")))?;
+                text.push_str(&extra);
+            }
+        }
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -1793,7 +1959,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the five before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the blockers, the playbook copied before recall, the working set, reclaim, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the closed set before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -1818,7 +1984,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the task is done. Pass the lesson. It completes the session node, files the lesson, releases the claim, syncs, and pushes the tracker. Pass the issue ljos_start claimed; absent, that issue is the one this sitting holds. Pass close only when the work is accepted and a blocker on the ticket may drop.",
+        description = "Call this when the task is done. Pass the lesson. It completes the session node, files the lesson, releases the claim, syncs, and pushes the tracker unless LJOS_TRACKER_GIT is commit or off. Pass the issue ljos_start claimed; absent, that issue is the one this sitting holds. Pass close only when the work is accepted and a blocker on the ticket may drop.",
         annotations(
             title = "Close a sitting",
             read_only_hint = false,
@@ -2742,6 +2908,9 @@ impl LjosServer {
                 copies the full body before recall; a panel is refused until one is bound.\n\
              6. `ljos_recall` on the node. What it stands on and what it cited.\n\
              7. `ljos_timeline` the last twelve dated events across the stores.\n\
+                The sitting then prints `== reclaim`, before `== claim`: claims\n\
+                quiet longer than the lease go back to ready when their\n\
+                conversation is gone.\n\
              8. `ljos_claim` a session node for it. A harness seat occupies per\n\
                 issue; a named worker occupies one slot.\n\
              \n\
@@ -2987,13 +3156,41 @@ fn call_order(name: &str) -> Order {
     }
 }
 
-/// Initialization notifications and tool requests can run concurrently.
-/// Admission uses the peer's identity only after its connection is recorded.
-fn announce_client_once(client: &str) {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        announce_seat(client, runner_pid());
-    });
+/// The client name already recorded for this connection. Empty until the
+/// client has identified itself. `runner` is not stored: a tool call that
+/// arrives before initialize has no peer info, and recording that stand-in
+/// would leave the seat pinned.
+static CONNECTED_CLIENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record the seat for this connection from the peer's client name.
+/// `None` is a tool call before the client has identified itself. The
+/// stand-in `runner` is the same absence. A later real name is recorded;
+/// a real name is not replaced.
+fn note_connected_client(client: Option<&str>) {
+    let Some(client) = client.map(str::trim).filter(|name| !name.is_empty()) else {
+        return;
+    };
+    if ljos_cli::seat_slug(client) == "runner" {
+        return;
+    }
+    let mut seen = CONNECTED_CLIENT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if seen.as_deref() == Some(client) {
+        return;
+    }
+    if seen.is_some() {
+        return;
+    }
+    announce_seat(client, runner_pid());
+    *seen = Some(client.to_string());
+}
+
+#[cfg(test)]
+fn reset_connected_client() {
+    *CONNECTED_CLIENT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = None;
 }
 
 fn call_queue() -> std::sync::MutexGuard<'static, std::collections::VecDeque<QueuedCall>> {
@@ -3256,10 +3453,9 @@ impl ServerHandler for LjosServer {
         let client = context
             .peer
             .peer_info()
-            .map(|info| info.client_info.name.clone())
-            .unwrap_or_else(|| "runner".to_string());
+            .map(|info| info.client_info.name.clone());
         let resolved = tokio::task::spawn_blocking(move || {
-            announce_client_once(&client);
+            note_connected_client(client.as_deref());
             ljos_cli::resolve_call_seat(seat_text.as_deref())
         })
         .await
@@ -3301,7 +3497,7 @@ impl ServerHandler for LjosServer {
         // their operation arguments and still reject undeclared fields.
         let mut request = request;
         let thread = thread_in_meta(&context.meta.0);
-        let session = session_in_meta(&context.meta.0);
+        let (session, agent) = call_identity(&context.meta.0);
         if let Some(arguments) = request.arguments.as_mut() {
             supply_issue(arguments, session.as_deref());
             arguments.remove("seat");
@@ -3317,10 +3513,13 @@ impl ServerHandler for LjosServer {
                 None => call.await,
             }
         };
-        let response =
-            ljos_cli::ballot_sig::scope_session(session, ljos_cli::as_thread(thread, seated_call))
-                .await
-                .or_else(as_tool_error)?;
+        let response = ljos_cli::ballot_sig::scope_session(
+            session,
+            agent,
+            ljos_cli::as_thread(thread, seated_call),
+        )
+        .await
+        .or_else(as_tool_error)?;
         Ok(attach_next(&name, response))
     }
 
@@ -3340,7 +3539,7 @@ impl ServerHandler for LjosServer {
             .filter(|t| listed(set.as_deref(), &t.name))
             .collect();
         for tool in &mut tools {
-            offer_seat(tool);
+            publish_tool(tool);
         }
         listing_order(&mut tools);
         Ok(ListToolsResult {
@@ -3359,19 +3558,19 @@ impl ServerHandler for LjosServer {
             .get(name)
             .filter(|_| listed(set.as_deref(), name))
             .cloned()?;
-        offer_seat(&mut tool);
+        publish_tool(&mut tool);
         Some(tool)
     }
 
     /// The client has said who it is: name the seat after it and leave the
-    /// record a shell below the same runner reads.
+    /// record a shell below the same runner reads. A missing name is not
+    /// recorded; the next call that carries one does.
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         let client = context
             .peer
             .peer_info()
-            .map(|info| info.client_info.name.clone())
-            .unwrap_or_else(|| "runner".to_string());
-        announce_client_once(&client);
+            .map(|info| info.client_info.name.clone());
+        note_connected_client(client.as_deref());
     }
 
     /// The two cards and the protocol, and nothing else.
@@ -3415,7 +3614,7 @@ impl ServerHandler for LjosServer {
         let uri = request.uri.clone();
         if uri == PROTOCOL_URI {
             return Ok(
-                ReadResourceResult::new(vec![ResourceContents::text(PROTOCOL, uri)])
+                ReadResourceResult::new(vec![ResourceContents::text(protocol_text(), uri)])
                     .with_ttl_ms(RESOURCE_TTL_MS)
                     .with_cache_scope(CacheScope::Private)
                     .into(),
@@ -3454,6 +3653,37 @@ mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
 
+    /// A schema `tools/list` may send: an object, no draft identifier, and
+    /// no format outside the JSON Schema draft.
+    fn assert_listed_schema(name: &str, schema: &serde_json::Map<String, serde_json::Value>) {
+        assert_eq!(
+            schema.get("type").and_then(|value| value.as_str()),
+            Some("object"),
+            "{name}"
+        );
+        assert_plain_schema(name, &serde_json::Value::Object(schema.clone()));
+    }
+
+    fn assert_plain_schema(name: &str, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                assert!(map.get("$schema").is_none(), "{name}");
+                if let Some(format) = map.get("format").and_then(|value| value.as_str()) {
+                    assert!(standard_format(format), "{name} format {format}");
+                }
+                for child in map.values() {
+                    assert_plain_schema(name, child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_plain_schema(name, item);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[test]
     fn a_call_names_its_thread_in_the_meta() {
         let meta = |v: serde_json::Value| v.as_object().unwrap().clone();
@@ -3478,6 +3708,117 @@ mod tests {
             }))),
             Some("sess-mcp-0001".to_string())
         );
+    }
+
+    /// A Codex subagent's call names its thread under the root session;
+    /// the root's own call names the root twice. An opencode subagent has
+    /// a session of its own.
+    #[test]
+    fn a_call_names_its_subagent_in_the_meta() {
+        let meta = |v: serde_json::Value| v.as_object().unwrap().clone();
+        let codex = |thread: &str| {
+            meta(serde_json::json!({
+                "x-runner-turn-metadata": {"session_id": "019a-root-0001", "thread_id": thread}
+            }))
+        };
+        assert_eq!(
+            agent_in_meta(&codex("019a-thread-a")),
+            Some("019a-thread-a".to_string())
+        );
+        assert_eq!(agent_in_meta(&codex("019a-root-0001")), None);
+        assert_eq!(
+            agent_in_meta(&meta(serde_json::json!({"thread_id": "top-level-thread"}))),
+            None
+        );
+        let opencode = meta(serde_json::json!({"ai.opencode/sessionID": "ses_child-0001"}));
+        assert_eq!(
+            session_in_meta(&opencode),
+            Some("ses_child-0001".to_string())
+        );
+        assert_eq!(agent_in_meta(&opencode), None);
+    }
+
+    /// A tool call can be read before initialize. Recording `runner` then
+    /// would pin the seat; the name arrives with the client, and that is
+    /// what the shell below this runner reads.
+    #[test]
+    fn a_tool_call_before_initialized_does_not_pin_runner() {
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _reset = ConnectedReset;
+        reset_connected_client();
+        let dir = tempfile::tempdir().unwrap();
+        let _saved = RestoreEnv::new(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+        ]);
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::remove_var("LJOS_HOLD");
+        }
+        let seat_file = dir
+            .path()
+            .join("run/ljos")
+            .join(format!("seat-{}", ljos_cli::runner_pid()));
+        note_connected_client(None);
+        assert!(
+            !seat_file.exists(),
+            "a tool call before initialize recorded a seat"
+        );
+        note_connected_client(Some("runner"));
+        assert!(
+            !seat_file.exists(),
+            "the stand-in runner was recorded: {}",
+            std::fs::read_to_string(&seat_file).unwrap_or_default()
+        );
+        note_connected_client(Some("Codex"));
+        let text = std::fs::read_to_string(&seat_file).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(text.lines().next(), Some("codex"), "{text}");
+    }
+
+    struct ConnectedReset;
+
+    impl Drop for ConnectedReset {
+        fn drop(&mut self) {
+            reset_connected_client();
+        }
+    }
+
+    struct RestoreEnv {
+        pairs: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    impl RestoreEnv {
+        fn new(keys: &[&str]) -> Self {
+            Self {
+                pairs: keys
+                    .iter()
+                    .map(|key| ((*key).to_string(), std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.pairs {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
     }
 
     /// The default lists the core set, every name in it is a tool, and the
@@ -3506,6 +3847,55 @@ mod tests {
         assert!(more.contains(&"ljos_remember".to_string()));
         assert!(listed(None, "ljos_bump_plan"));
         assert!(!listed(Some(&core), "ljos_bump_plan"));
+    }
+
+    /// Recall is in the core set, and `ljos onboard --harness opencode`
+    /// writes a server entry that puts `ljos_ljos_recall` on opencode's
+    /// native tool list. opencode names a tool `server_tool` and leaves MCP
+    /// tools in Code Mode until the server sets `codemode` false. That flag
+    /// is read under `mcp.servers`.
+    #[test]
+    fn the_core_set_contains_recall_and_opencode_exposes_it() {
+        let core = tool_set(None).expect("core set");
+        assert!(
+            core.iter().any(|name| name == "ljos_recall"),
+            "recall is in the core set: {core:?}"
+        );
+        assert!(
+            core.iter().any(|name| name == "ljos_note"),
+            "note is in the core set: {core:?}"
+        );
+        let all: ljos_cli::Harnesses =
+            toml::from_str(ljos_cli::HARNESSES_EXAMPLE).expect("harnesses example");
+        for name in ["opencode", "opencode-v2"] {
+            let harness = all
+                .harness
+                .iter()
+                .find(|harness| harness.name == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(
+                harness.json_pointer.as_deref(),
+                Some("/mcp/servers/ljos"),
+                "{name}"
+            );
+            let entry: serde_json::Value = serde_json::from_str(
+                harness
+                    .json_entry
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{name} entry")),
+            )
+            .unwrap_or_else(|err| panic!("{name} entry: {err}"));
+            assert_eq!(
+                entry.get("codemode").and_then(serde_json::Value::as_bool),
+                Some(false),
+                "{name} exposes its tools: {entry}"
+            );
+            assert_eq!(
+                entry.get("type").and_then(serde_json::Value::as_str),
+                Some("local"),
+                "{name}"
+            );
+        }
     }
 
     /// The guard and memory tools lead the list, and the persona tools close
@@ -3728,7 +4118,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            49,
+            50,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -3776,6 +4166,7 @@ mod tests {
                 "ljos_island",
                 "ljos_learn",
                 "ljos_note",
+                "ljos_options",
                 "ljos_persona",
                 "ljos_playbook",
                 "ljos_predict",
@@ -3806,7 +4197,11 @@ mod tests {
         assert!(tools.iter().any(|tool| tool.name == "ljos_start"));
         assert!(tools.iter().any(|tool| tool.name == "ljos_guard_check"));
         for tool in &mut tools {
-            offer_seat(tool);
+            publish_tool(tool);
+            assert_listed_schema(&tool.name, &tool.input_schema);
+            if let Some(output) = &tool.output_schema {
+                assert_listed_schema(&tool.name, output);
+            }
             let props = tool
                 .input_schema
                 .get("properties")
@@ -3977,6 +4372,13 @@ mod tests {
     /// error, the same way every other refusal is.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_refuses_a_bad_commit() {
+        // A parallel test points HOME at a temporary directory, which
+        // suspends the guard. This check is about the command, so keep it on.
+        let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+        }
         let server = LjosServer::at(std::env::temp_dir());
         let allow = server
             .ljos_guard_check(Parameters(GuardArgs {
@@ -4006,6 +4408,7 @@ mod tests {
     #[test]
     fn the_protocol_is_served_and_orders_the_sitting() {
         assert_eq!(card_named(PROTOCOL_URI), None, "the protocol is not a card");
+        let protocol = protocol_text();
         for verb in [
             "ljos doctor",
             "ljos cards",
@@ -4015,7 +4418,7 @@ mod tests {
             "ljos recall",
             "ljos claim",
         ] {
-            assert!(PROTOCOL.contains(verb), "{verb} missing from the protocol");
+            assert!(protocol.contains(verb), "{verb} missing from the protocol");
         }
         let order: Vec<usize> = [
             "## Before the work",
@@ -4023,16 +4426,19 @@ mod tests {
             "## After the work",
         ]
         .iter()
-        .map(|h| PROTOCOL.find(h).unwrap_or_else(|| panic!("{h} missing")))
+        .map(|h| protocol.find(h).unwrap_or_else(|| panic!("{h} missing")))
         .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]));
+        let reclaim = protocol.find("`== reclaim`").expect("reclaim");
+        let claim = protocol.find("`== claim`").expect("claim");
+        assert!(reclaim < claim, "reclaim is printed before claim");
         // Every tool the server declares is named in the protocol, so a reader
         // of the protocol has heard of everything the server can do.
         for tool in LjosServer::tool_router().list_all() {
             let verb = tool.name.trim_start_matches("ljos_").to_string();
             assert!(
-                PROTOCOL.contains(&format!("`{verb}`"))
-                    || PROTOCOL.contains(&format!("ljos {verb}")),
+                protocol.contains(&format!("`{verb}`"))
+                    || protocol.contains(&format!("ljos {verb}")),
                 "tool {verb} is not in the protocol"
             );
         }

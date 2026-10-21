@@ -7,13 +7,13 @@ Command line
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Verb                                                                                                                            | Habitat                   | Does                                                                                                                                                                                                                                           |
 +=================================================================================================================================+===========================+================================================================================================================================================================================================================================================+
-| ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway]``                                                  | all                       | open a sitting: doctor, cards, due, island, playbook, recall, timeline, reclaim, claim; reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs;     |
-|                                                                                                                                 |                           | stops at the first store down; the name defaults to this conversation's holder (``ljos seat``); ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``; the name is a tracker ``playbook:`` note until finish or       |
-|                                                                                                                                 |                           | release                                                                                                                                                                                                                                        |
+| ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway]``                                                  | all                       | open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim; reclaim hands back claims   |
+|                                                                                                                                 |                           | quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs; stops at the first store down; the name defaults to this conversation's holder ( ``ljos seat`` ); ``--playbook``      |
+|                                                                                                                                 |                           | copies a recipe before recall; absent, title-match else ``sit`` ; the name is a tracker ``playbook:`` note until finish or release                                                                                                             |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``               | all                       | close a sitting: file ``--lesson`` as a proposal with origin ``agent-derived``, or write it at once as the person's when no agent runner is above the process and a terminal is on its input, fire the island, complete, learn;                |
-|                                                                                                                                 |                           | ``ljos accept ID`` writes the lesson; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent, this conversation's holder); ``--close`` closes the ticket only when the |
-|                                                                                                                                 |                           | work is accepted, else the ticket stays                                                                                                                                                                                                        |
+| ``finish ISSUE [--status S] [--lesson TEXT] [--outcome OPTION] [--beta B] [--gen G] [--assignee NAME] [--close]``               | all                       | close a sitting: complete the session node, file ``--lesson`` as a proposal at L0 (``derived``) with origin ``agent-derived`` or write it at once as the person's when no agent runner is above the process and a terminal is on its input,    |
+|                                                                                                                                 |                           | fire the island, then learn; ``ljos accept ID`` promotes that proposal to ``explicit`` and writes the lesson; ``--gen`` names the claim's generation (absent, the live one; a stale one is refused); ``--assignee`` names the holder (absent,  |
+|                                                                                                                                 |                           | this conversation's holder); ``--close`` closes the ticket only when the work is accepted, else the ticket stays open and nobody holds it                                                                                                      |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``calibrate -p PROJECT [--rounds N]``                                                                                           | consensus, pack           | trust rows from the project's voting history (Dawid-Skene accuracy)                                                                                                                                                                            |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -26,7 +26,8 @@ Command line
 | ``prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]``                                                          | pack, user config         | one standing preference, origin ``user-declared``; each ``--deny`` or ``--ask`` also writes that rule with the preference as its reason, so the hook enforces it. ``--user`` writes a user rule instead, shared by every seat on this machine, |
 |                                                                                                                                 |                           | never reviewed, and not also stored as a seat preference; ``--why`` is required with it. See User rules                                                                                                                                        |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``accept ID``                                                                                                                   | pack                      | write one open proposal into the pack as a standing lesson; under an agent runner, only a proposal another conversation filed; a proposal the same text already wrote with ``remember`` or ``prefer`` is not written again                     |
+| ``accept ID``                                                                                                                   | pack                      | promote one open proposal from L0 (``derived``) to ``explicit`` and write it into the pack; the origin stays; under an agent runner, only a proposal another conversation filed; a proposal the same text already wrote with ``remember`` or   |
+|                                                                                                                                 |                           | ``prefer`` is not written again                                                                                                                                                                                                                |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``forget ID [--why DEED]``                                                                                                      | pack                      | tombstone a claim, naming the deed that withdrew it                                                                                                                                                                                            |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -103,8 +104,8 @@ Command line
 | ``send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]``                                                                 | pack                      | write to one seat, or with ``--group`` to the other members of that group; ``--interrupt`` leads the next prompt; ``--issue`` threads the message on that vissue issue and the atom takes the issue's scope, so ``ljos sync`` carries it in    |
 |                                                                                                                                 |                           | that repository's sealed log                                                                                                                                                                                                                   |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``inbox [--all]``                                                                                                               | pack                      | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; ``ljos hook --prompt`` writes a receipt for each message it shows; a pack that does not answer is an error; ``--all``        |
-|                                                                                                                                 |                           | includes mail already read                                                                                                                                                                                                                     |
+| ``inbox [--all]``                                                                                                               | pack                      | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; ``ljos hook --prompt`` writes a receipt for each message it shows; a pack that does not answer is an error, and so is a      |
+|                                                                                                                                 |                           | writer that refuses kind ``message``; ``--all`` includes mail already read                                                                                                                                                                     |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``read ID``                                                                                                                     | pack                      | write a read receipt for one message; a second read writes nothing                                                                                                                                                                             |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -164,7 +165,8 @@ Command line
 |                                                                                                                                 |                           | what is missing; ``--dry-run`` prints the rows                                                                                                                                                                                                 |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``findings STATE [--remember] [--all] [--issue I]``                                                                             | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; ``--remember`` files one lesson per finding a person or a seat resolved (recipe, step, error line, fix), |
-|                                                                                                                                 |                           | origin ``agent-derived``, under the recipe's name, its package and the class; ``ljos accept ID`` writes it; ``--all`` takes the ones a later attempt superseded too; ``--issue`` cites the state file as a deed on the issue                   |
+|                                                                                                                                 |                           | origin ``tool-echo`` at L0 (``derived``), under the recipe's name, its package and the class; ``ljos accept ID`` promotes it to ``explicit`` and writes it; ``--all`` takes the ones a later attempt superseded too; ``--issue`` cites the     |
+|                                                                                                                                 |                           | state file as a deed on the issue                                                                                                                                                                                                              |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``sync [--key] [--import] [--export]``                                                                                          | tracker, pack             | share the seat's memory across machines through the tracker repository: pull and take other machines' sealed logs, then write and push this machine's; ``--key`` prints this machine's age public key (made on first use) and stops;           |
 |                                                                                                                                 |                           | ``--import`` only pulls; ``--export`` only writes and pushes                                                                                                                                                                                   |
@@ -186,6 +188,12 @@ Command line
 |                                                                                                                                 |                           | a shell runner (``shell = true``, ``grokbot``, or ``shell``) writes the skill and an env file and registers no server and no hook                                                                                                              |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
+``ljos file "TITLE" --options A,B`` writes ``Options: A, B`` as the first body line.
+``ljos options ISSUE A,B`` appends that line and refuses fewer than two.
+Withdrawing a ballot writes ``ballot-withdrawn: VOTER HARNESS NONCE``.
+The tally leaves that ballot out, and so does the push gate.
+A later cast from that session says the ballot was withdrawn.
+
 ``send SEAT TEXT`` writes to one seat. A seat the pack has never heard
 from is refused, with the seats it knows, since mail waits under the name
 it was sent to; ``--new-seat`` writes to one that has not started yet.
@@ -193,11 +201,23 @@ it was sent to; ``--new-seat`` writes to one that has not started yet.
 ``--issue ID`` threads the message on that vissue issue, and the atom takes
 the issue's scope so ``ljos sync`` carries it in that repository's sealed
 log. ``inbox`` lists unread mail and writes no receipt. A pack that does
-not answer is an error. ``read ID`` writes one receipt. ``reply ID TEXT``
+not answer is an error. A writer that refuses kind ``message`` is an error
+too: the command exits non-zero, names packset 0.13.0, and does not print
+an empty inbox. When the writer reports a version, the error names that
+version. ``read ID`` writes one receipt. ``reply ID TEXT``
 answers the sender and keeps the issue. ``group NAME --add SEAT`` records
-a member. ``ljos hook --prompt`` writes a receipt for each message it
-shows. When the pack does not answer, the hook prints ``mail could not be checked``
-and still exits 0. A shell seat polls ``ljos inbox``.
+a member. ``ljos hook --prompt`` shows at most eight unread messages,
+interrupts first, and writes one receipt for each message it shows.
+The rest stay unread, and the note says how many remain.
+The receipt is an atom whose text is four lines: ``read ID``, ``by SEAT``,
+``at STAMP`` and ``msg ID``. The sender's inbox prints that receipt once,
+as the message id, the reader and the stamp. A second prompt writes
+nothing. A shell writes the receipt before the hook exits. Cursor holds
+the note: the prompt prints nothing and writes no receipt, and the
+receipt is written when the note is delivered, on ``postToolUse`` as
+``additional_context``, or on ``Stop`` when the turn ran no tool, as
+``followup_message``. When the pack does not answer, the hook prints
+``mail could not be checked`` and still exits 0. A shell seat polls ``ljos inbox``.
 
 ``send`` and ``reply`` start the recipient's wake, when it has one, after the message is written.
 ``ljos wake --command CMD`` runs ``CMD`` under ``sh -c`` with ``LJOS_SEAT`` set to the seat, so ``ljos inbox`` in it reads that seat's mail.
@@ -210,14 +230,22 @@ A seat the pack has never heard from is refused with the known seat it most like
 ``ljos deed --remove ACCESSION --ticket ID`` drops that citation. The removal is appended to the ticket. The heading is not rewritten.
 
 ``remember`` and ``prefer`` write origin ``user-declared``. ``finish --lesson``
-and ``findings --remember`` file origin ``agent-derived`` and do not write
-the atom. ``ljos accept ID`` writes the held atom as a standing lesson,
-and under an agent runner accepts only a proposal another
-conversation filed, such as a worker's. The writer records the
-acceptance. The same text typed with ``remember`` or ``prefer`` writes it
-as ``user-declared`` and satisfies the proposal, and the held proposal is
-closed. An atom taken by ``receive --import`` or by ``sync`` has origin
-``peer``, whatever origin the sender wrote.
+files a proposal at L0, packset's ``derived`` level, with origin
+``agent-derived``, and writes the lesson at once as ``user-declared`` when
+the person types it in a terminal of their own with no agent runner
+above the process. ``findings --remember`` files a proposal at L0 with
+origin ``tool-echo``, because a campaign file is tool output. The prompt
+hook files a correction as a proposal in the person's words, origin
+``user-declared``, and does not write it. A proposal from tool output or
+another seat (``peer``) stays at L0 until ``ljos accept ID`` promotes it to
+``explicit`` and writes it. An agent's own lesson starts at L0, and the
+same accept writes it. Accept keeps the origin. Under an agent runner
+accept takes only a proposal another conversation filed, such as a
+worker's. The writer records the acceptance. The same text typed with
+``remember`` or ``prefer`` writes it as ``user-declared`` and satisfies the
+proposal, and the held proposal is closed. An atom taken by
+``receive --import`` or by ``sync`` has origin ``peer``, whatever origin the
+sender wrote.
 
 The claim graph records the held ticket too: a tracker id maps to one node
 (FNV-1a 128 of the id) and a name to one actor; a 32-hex id passes through.
@@ -261,20 +289,31 @@ Each stub chains to the repository's ``.git/hooks/<name>`` when that file is exe
 Booking never fails the hook. A line it prints goes to stderr, and a habitat that did not answer is a line in the book log.
 ``LJOS_OFF`` set to ``1``, ``true``, ``yes`` or ``on``, in either case, skips the booking, and the stub still chains.
 
-``ljos hook --git-commit`` books the commit git just created and reads no stdin.
+``ljos hook --git-commit`` books the commit git just created.
+``post-commit`` reads no stdin.
+``post-rewrite`` reads the old and new shas and moves the citation onto the new commit. A dropped commit, an all-zero new sha, loses its citation.
 ``--git-hook`` is ``post-commit`` or ``post-rewrite``.
-The commit is booked once, so an amend and a rebase do not book it again.
+An amend or a rebase moves the deed onto the new sha and does not leave the replaced sha cited.
 A ``post-commit`` in the middle of a rebase or a merge does not book. ``post-rewrite`` does.
 A commit already cited on an open sitting in that checkout is not opened as a second book.
 
 The hook books as a seat. The process tree is not one.
+The holder is ``SEAT@TAG``, the same name ``ljos claim`` uses for that conversation. ``LJOS_SESSION_ID`` alone is kept as written.
 ``LJOS_SEAT`` wins when it is set and is not ``seat``, ``you``, ``agent``, or a name that slugs to ``runner``.
 Otherwise ``seats.toml`` is read through ``CURSOR_CONVERSATION_ID``.
 The file is ``$LJOS_SEATS`` when that is set, otherwise ``$XDG_CONFIG_HOME/ljos/seats.toml``, otherwise ``~/.config/ljos/seats.toml``.
 Each key is a conversation id and each value is the seat name.
 An id with no row is ``grokbot-`` plus the first eight characters of the id.
+With none of these, an ``ANTIGRAVITY_CONVERSATION_ID`` books as ``antigravity`` and an ``OPENCODE_SESSION_ID`` books as ``opencode``.
 With none of these the commit stays unbooked.
-A Claude Code, Codex, or opencode session, named by ``CLAUDECODE``, ``CODEX_THREAD_ID``, ``CODEX_SESSION_ID`` or ``OPENCODE_SESSION_ID``, is not booked.
+A Claude Code or Codex session, named by ``CLAUDECODE``, ``CODEX_THREAD_ID`` or ``CODEX_SESSION_ID``, is not booked.
+An opencode session is booked by this hook, including a commit from its shell or a subprocess.
+An agy session is booked the same way when no seat was named.
+Without these hooks, ``Stop`` and ``SessionEnd`` cite each commit HEAD's reflog says the checkout wrote since the sitting began, so a commit from a script, or one chained before a step that failed, still has a deed.
+A pull, a merge or a checkout adds none.
+
+The env file ``ljos onboard`` writes sets ``LJOS_GIT_HOOKS`` to ``${LJOS_GIT_HOOKS:-${XDG_DATA_HOME:-$HOME/.local/share}/ljos/git-hooks}``, the same directory the hooks install into.
+``ljos doctor`` reports an env file that sets a different directory.
 
 Commits under ``[git_hooks] skip`` in ``ljos.toml`` are not booked, and neither are ``/tmp``, ``/var/tmp``, ``/dev/shm``, the tracker (``VISSUE_ROOT`` or ``ISSUE_ROOT``), ``CLAIMDAG_DIR``, and the deedar store.
 The table is read from ``$LJOS_CONFIG``, from ``./ljos.toml``, from ``~/.config/ljos/ljos.toml``, and from ``~/.config/ljos/seats/$LJOS_SEAT/ljos.toml``.
@@ -297,7 +336,7 @@ when to call it.
 
 By default the server lists the core set, in this order: ``ljos_rule``,
 ``ljos_request_approval``, ``ljos_prefer``, ``ljos_remember``, ``ljos_search``,
-``ljos_start``, ``ljos_guard_check``, ``ljos_file``, ``ljos_note``, ``ljos_recall``,
+``ljos_start``, ``ljos_guard_check``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_recall``,
 ``ljos_sitting``, ``ljos_finish``, ``ljos_claim``, ``ljos_release``, ``ljos_send``,
 ``ljos_inbox``, ``ljos_reply``, ``ljos_vote``, ``ljos_consensus`` and ``ljos_doctor``.
 ``LJOS_MCP_TOOLS=all`` lists every tool above: the core set first, then the rest
@@ -342,7 +381,7 @@ Variable                                                    Read by
 A temporary HOME or working directory
 -------------------------------------
 
-ljos treats a ``HOME`` under ``/tmp``, ``/var/tmp``, ``/private/tmp``, ``/dev/shm`` or ``$TMPDIR`` as a test sandbox, and does the same for a working directory under one of those, so a test suite that deletes branches in a scratch repository is not stopped. There the command guard is off, and with a temporary ``HOME`` the memory writer does not start on its own either. A memory command then says so and names ``packset ensure``, which starts the writer by hand. ``ljos doctor`` shows a ``guard`` row marked ``warn`` whenever the guard is off, from ``LJOS_OFF`` or from a temporary ``HOME`` or working directory, and ``install.sh`` says so at the end of an install into a temporary ``HOME``. To try ljos with the guard on, use a ``HOME`` outside those directories.
+ljos treats a ``HOME`` under ``/tmp``, ``/var/tmp``, ``/private/tmp``, ``/dev/shm`` or ``$TMPDIR`` as a test sandbox. There the command guard is off, and the memory writer does not start on its own either. A memory command then says so and names ``packset ensure``, which starts the writer by hand. A working directory under one of those, with a ``HOME`` outside them, is not a sandbox: ``cd /tmp && rm -rf ~/proj`` is judged. ``LJOS_GUARD=on`` keeps the guard on under a temporary ``HOME``, which is how a test suite exercises it; ``LJOS_OFF`` still switches it off. ``ljos doctor`` shows a ``guard`` row marked ``warn`` whenever the guard is off, from ``LJOS_OFF`` or from a temporary ``HOME``, the session start line says ``command guard off`` with the reason, and ``install.sh`` says so at the end of an install into a temporary ``HOME``.
 
 A runner's table may also name ``start`` and ``resume``, the argv that open
 a session in a persona's home and resume the latest one there; a
@@ -413,7 +452,8 @@ file of the shape
 ``{"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type": "command", "command": "..."}]}]}}``.
 ``onboard`` merges ``ljos hook`` into it on the prompt and session-end events
 (matcher ``*``) by default, or on the events the table's ``hook_events`` lists
-(``PreToolUse`` takes the matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit``),
+(``PreToolUse`` takes the matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch``,
+and a second group ``^mcp__.+__ljos_.+$`` for the seat's MCP tools),
 once each, and drops it from events no longer listed. On the events
 ``hook_fail_closed`` lists, the hook carries ``"onFailure": "block"``, so the
 runner stops the action when the hook fails, times out or cannot start;
@@ -436,7 +476,7 @@ Event                  The hook does
 ``PostToolUseFailure`` searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions
 ``PreCompact``         fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery
 ``SessionStart``       after a compaction (``source`` ``compact``), on a runner that takes its context, answers with that note; a fresh session hears one line: that ljos is on, the memory and due counts, the command guard, and up to three preferences
-``PreToolUse``         applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit``); a deny blocks
+``PreToolUse``         applies the TCB and pack rules to the command (matcher ``Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch``); a deny blocks. It keeps the call's ``agent_id`` for each ``ljos`` line, and on a seat MCP tool (``^mcp__.+__ljos_.+$``) only notes a subagent's call, so the ballot binds the session plus that agent
 ``Stop``               speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (``decision: block``, or ``followup_message`` in Cursor) and receipts it
 ``SubagentStop``       names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once
 ====================== ===============================================================================================================================================================================================================================================================================================================================================================================

@@ -17,6 +17,7 @@ pub mod ask_pack;
 pub mod ballot_sig;
 pub mod bookkeep;
 pub mod capture;
+pub mod cloud;
 pub mod command_prefs;
 pub mod converge;
 pub mod extract;
@@ -27,11 +28,16 @@ pub mod jev;
 pub mod mail;
 pub mod memories;
 pub mod note_queue;
+pub mod pack_copy;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
+pub mod proc_tree;
 pub mod reap;
+pub mod runner_env;
 pub mod runner_hooks;
+pub mod runner_skills;
+pub mod subagent;
 pub mod sync;
 pub mod tools;
 mod tracker_push;
@@ -57,8 +63,20 @@ pub fn skill_text() -> String {
 consensus through ljos. On a runner that hides MCP tools, the pack is use_tool \
 ljos__ljos_search, ljos__ljos_remember, and ljos__ljos_prefer. Search the pack \
 before answering from memory. Load before any work that touches an issue, a memory, \
-a deed, a claim or a vote.\n---\n\n{PROTOCOL}"
+a deed, a claim or a vote.\n---\n\n{}",
+        protocol_text()
     )
+}
+
+/// The protocol with the sitting's section list filled in from
+/// [`SITTING_SECTIONS`], the same order `ljos sitting` prints.
+#[must_use]
+pub fn protocol_text() -> String {
+    const MARK: &str = "@@SITTING_SECTIONS@@\n";
+    match PROTOCOL.split_once(MARK) {
+        Some((head, tail)) => format!("{head}{}{tail}", render_sitting_steps()),
+        None => PROTOCOL.to_string(),
+    }
 }
 
 /// One step an onboarding took, or would take.
@@ -278,6 +296,11 @@ pub fn session_start_for(session: Option<&str>) -> String {
     }
     let mut line =
         session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"));
+    // A guard that switched itself off says so where the session starts,
+    // not only in `ljos doctor`.
+    if let Some(off) = bookkeep::guard_off_reason() {
+        line = line.replace("command guard on", &format!("command guard {off}"));
+    }
     if let Some(issue) = bookkeep::session_issue(session) {
         if !line.contains(&issue) {
             line.push_str(&format!(" This session's issue is {issue}."));
@@ -662,8 +685,11 @@ skills = "~/.config/runner/skills"
 [[harness]]
 name = "opencode"
 config_json = "~/.config/opencode/opencode.json"
-json_pointer = "/mcp/ljos"
-json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "timeout": 30000}'
+# opencode names a tool server_tool. codemode false puts that name on the
+# model's tool list, so ljos_recall is ljos_ljos_recall. The flag is read
+# under mcp.servers. 1.19.3 flattens this entry and lists the tool.
+json_pointer = "/mcp/servers/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "codemode": false, "timeout": 30000}'
 skills = "~/.config/opencode/skills"
 # opencode's hooks are a plugin: the memory hook on each prompt, argv law
 # on each bash call, the session id in every shell it opens.
@@ -674,9 +700,10 @@ plugin_template = "opencode"
 name = "opencode-v2"
 # opencode V2 runs only plugins that default-export Plugin.define; a V1
 # plugin loads and does nothing. Onboard this shape on a V2 opencode.
+# The MCP entry matches opencode: codemode false under mcp.servers.
 config_json = "~/.config/opencode/opencode.json"
-json_pointer = "/mcp/ljos"
-json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "timeout": 30000}'
+json_pointer = "/mcp/servers/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "codemode": false, "timeout": 30000}'
 skills = "~/.config/opencode/skills"
 plugin = "~/.config/opencode/plugins/ljos.ts"
 plugin_template = "opencode-v2"
@@ -1025,7 +1052,7 @@ fn home() -> Result<PathBuf> {
 }
 
 /// `~` at the start of a configured path is the home directory.
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => home().map_or_else(|_| PathBuf::from(path), |h| h.join(rest)),
         None => PathBuf::from(path),
@@ -1205,36 +1232,7 @@ pub fn server_entry() -> Result<Value> {
 }
 
 fn write_skill(dir: &Path, dry: bool) -> Step {
-    let path = dir.join("ljos").join("SKILL.md");
-    let text = skill_text();
-    if std::fs::read_to_string(&path).is_ok_and(|have| have == text) {
-        return Step {
-            what: "skill".into(),
-            detail: format!("{} is current", path.display()),
-            ok: true,
-        };
-    }
-    if dry {
-        return Step {
-            what: "skill".into(),
-            detail: format!("would write {}", path.display()),
-            ok: true,
-        };
-    }
-    let written = std::fs::create_dir_all(path.parent().unwrap_or(dir))
-        .and_then(|()| std::fs::write(&path, text));
-    match written {
-        Ok(()) => Step {
-            what: "skill".into(),
-            detail: format!("wrote {}", path.display()),
-            ok: true,
-        },
-        Err(e) => Step {
-            what: "skill".into(),
-            detail: format!("{}: {e}", path.display()),
-            ok: false,
-        },
-    }
+    runner_skills::install_skill(&dir.join("ljos").join("SKILL.md"), dry)
 }
 
 /// `{server}` is the path to `ljos-mcp`, `{name}` the runner's name from
@@ -1321,9 +1319,11 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
 
 /// The conversation id a runner stamped into the environment, when there
 /// is one. Used to bind a ballot when no MCP call and no hook named a
-/// session of its own.
+/// session of its own. The holder an env file shares is not one.
 pub(crate) fn runner_session_id() -> Option<String> {
-    session_actor().map(|(id, _)| id)
+    session_actor()
+        .filter(|(id, keys)| !(keys == "LJOS_SESSION_ID" && is_shared_holder_id(id)))
+        .map(|(id, _)| id)
 }
 
 /// The holder for the conversation this process belongs to, named after
@@ -1419,7 +1419,7 @@ pub fn conversation_tag(pid: u32) -> String {
 
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
-fn runtime_dir() -> PathBuf {
+pub(crate) fn runtime_dir() -> PathBuf {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
@@ -1774,6 +1774,7 @@ pub async fn with_call_seat<F: std::future::Future>(seat: Seat, f: F) -> F::Outp
 pub fn seat_for_thread(thread: &str) -> Seat {
     let thread = thread.trim();
     let seat = named_var("LJOS_SEAT")
+        .and_then(|raw| seated_name(&raw))
         .or_else(|| ANNOUNCED.get().map(|s| s.seat.clone()))
         .unwrap_or_else(login_user);
     let path = session_record_path(thread);
@@ -1820,11 +1821,11 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
     load_seat_env();
     // The hooks sit `LJOS_SEAT` (the process, else `~/.config/ljos/env`).
     // The client's harness name is the seat only when nobody named one.
+    // A subagent name is kept, so it is not replaced by that harness.
     let harness = seat_for_client(client);
     let name = named_var("LJOS_SEAT")
         .or_else(|| named_var("VISSUE_AGENT"))
-        .map(|raw| seat_slug(&raw))
-        .filter(|slug| slug != "runner" && !omitted_actor_name(slug))
+        .and_then(|raw| seated_name(&raw))
         .unwrap_or(harness);
     if let Some(parent) = inherited_record(&name) {
         let seat = Seat::tagged(
@@ -2280,9 +2281,12 @@ pub fn whoami() -> Seat {
     }
     // Both variables are a person naming the seat: the seat's own, and the
     // tracker's name for the same thing. Either beats what the tree says.
+    // A legacy holder is the seat it names (`inky-n9o` is `inky`). A
+    // subagent name is left as written so a claim under it is refused
+    // rather than given the client's harness.
     let named = named_var("LJOS_SEAT")
-        .map(|n| (n, "LJOS_SEAT"))
-        .or_else(|| named_var("VISSUE_AGENT").map(|n| (n, "VISSUE_AGENT")));
+        .map(|n| (seat_for_env(&n), "LJOS_SEAT"))
+        .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")));
     // The record filed under a conversation id this shell carries, unless
     // the nearest runner above left one for another seat: a runner started
     // from another runner's shell inherits the other's ids, and its own
@@ -2305,11 +2309,13 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
-    // A holder a person named wins outright.
+    // A holder a person named wins outright. A legacy holder is stored as
+    // the seat it names, so the claim is not taken under the raw name.
     if let Some(hold) = named_var("LJOS_HOLD") {
+        let holder = claim_holder(&hold).unwrap_or(hold);
         return Seat {
             seat: seat_name,
-            holder: hold,
+            holder,
             source: "LJOS_HOLD".into(),
         };
     }
@@ -2369,7 +2375,7 @@ pub fn whoami() -> Seat {
         (None, Some(p)) => p.clone(),
         (None, None) => {
             if let Some(name) = agent {
-                Seat::whole(&name, "VISSUE_AGENT")
+                Seat::whole(&seat_for_env(&name), "VISSUE_AGENT")
             } else {
                 Seat::whole(&login_user(), "the login user")
             }
@@ -2459,12 +2465,14 @@ fn insert_claimed_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str
 }
 
 fn insert_known_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) {
-    let name = raw.split('@').next().unwrap_or(raw).trim();
-    if name.is_empty() || omitted_actor_name(name) {
+    // The roster authorises a seat to hold a claim. A raw holder
+    // (`inky-n9o`, `ljos-bot`) is that seat, not a second one, and a
+    // subagent name is not a seat. The tracker file is left as it was.
+    if is_raw_subagent_name(raw) {
         return;
     }
-    let slug = seat_slug(name);
-    if slug == "runner" || omitted_actor_name(&slug) {
+    let slug = canonical_seat_name(raw);
+    if slug.is_empty() || slug == "runner" || omitted_actor_name(&slug) {
         return;
     }
     seats.insert(slug);
@@ -2559,24 +2567,29 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     load_seat_env();
     let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
     let named = named_var("LJOS_SEAT").or_else(|| named_var("VISSUE_AGENT"));
-    let (raw, from_env) = match (from_call, named) {
+    let (raw, from_env) = match (from_call, named.as_deref()) {
         (Some(name), Some(seat))
-            if is_harness_name(name) || seat_slug(name) == seat_slug(&seat) =>
+            if is_harness_name(name)
+                || seat_slug(name) == seat_slug(seat)
+                || canonical_seat_name(name) == canonical_seat_name(seat) =>
         {
-            (seat, true)
+            (seat.to_string(), true)
         }
         (Some(name), _) => (name.to_string(), false),
-        (None, Some(seat)) => (seat, true),
+        (None, Some(seat)) => (seat.to_string(), true),
         (None, None) => {
             bail!("pass seat, your own bot name, on every call: this server has no LJOS_SEAT")
         }
     };
+    if is_raw_subagent_name(&raw) {
+        bail!(SUBAGENT_NO_SEAT);
+    }
     let slug_source = raw.split('@').next().unwrap_or(raw.as_str()).trim();
     if slug_source.is_empty() || omitted_actor_name(slug_source) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
-    let named_slug = seat_slug(slug_source);
-    if named_slug == "runner" || omitted_actor_name(&named_slug) {
+    let named_slug = canonical_seat_name(&raw);
+    if named_slug.is_empty() || named_slug == "runner" || omitted_actor_name(&named_slug) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
     let known = seat_roster(&named_slug);
@@ -2762,7 +2775,9 @@ pub fn holder_name() -> String {
 #[must_use]
 pub fn resolve_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) if !omitted_actor_name(n) && !own_seat(n) => n.to_string(),
+        Some(n) if !omitted_actor_name(n) && !own_seat(n) => {
+            claim_holder(n).unwrap_or_else(|_| n.to_string())
+        }
         _ => holder_name(),
     }
 }
@@ -2776,7 +2791,7 @@ pub fn resolve_assignee(passed: Option<&str>) -> String {
 #[must_use]
 pub fn cli_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) if !omitted_actor_name(n) => n.to_string(),
+        Some(n) if !omitted_actor_name(n) => claim_holder(n).unwrap_or_else(|_| n.to_string()),
         _ => holder_name(),
     }
 }
@@ -2847,7 +2862,13 @@ fn conversation_seat() -> Option<Seat> {
     if slug == "runner" || omitted_actor_name(&slug) {
         return None;
     }
-    Some(Seat::whole(&name, source))
+    // `ljos claim` holds as `SEAT@TAG` once the seat is named. The hook
+    // used to hold as the bare mapped name, so one conversation had two.
+    Some(Seat {
+        holder: holder_for_session(&name, id),
+        seat: name,
+        source: source.to_string(),
+    })
 }
 
 /// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
@@ -2873,7 +2894,7 @@ pub(crate) struct HookActor {
 
 impl HookActor {
     pub(crate) fn enter(seat: &str) -> Self {
-        let holder = hook_holder_for(seat, &resolve_seat());
+        let holder = booking_holder(seat);
         let previous = HOOK_ACTOR.with(|slot| slot.replace(Some((seat.to_string(), holder))));
         Self { previous }
     }
@@ -2907,11 +2928,53 @@ pub fn hook_holder_for(seat: &str, resolved: &Seat) -> String {
     let tagged = holder
         .split_once('@')
         .is_some_and(|(name, tag)| name == seat && !tag.is_empty());
-    if resolved.seat.trim() == seat && (holder == seat || tagged) {
+    // `LJOS_SESSION_ID` is kept as written by `ljos claim`. The hook keeps
+    // it when it names this seat. A process-tree holder is still dropped.
+    let chosen = resolved.seat.trim() == seat
+        && resolved.source.contains("LJOS_SESSION_ID")
+        && !holder.is_empty();
+    if resolved.seat.trim() == seat && (holder == seat || tagged || chosen) {
         holder.to_string()
     } else {
         seat.to_string()
     }
+}
+
+/// The holder a git hook books under. [`hook_holder_for`] when that is
+/// already `SEAT@TAG` or a chosen `LJOS_SESSION_ID`. A bare seat is tagged
+/// with the harness conversation id, the form `ljos claim` uses.
+fn booking_holder(seat: &str) -> String {
+    let holder = hook_holder_for(seat, &resolve_seat());
+    if holder.contains('@') || holder != seat.trim() {
+        return holder;
+    }
+    if let Some(id) = stamped_id("OPENCODE_SESSION_ID")
+        .or_else(|| stamped_id("ANTIGRAVITY_CONVERSATION_ID"))
+        .or_else(|| stamped_id("CURSOR_CONVERSATION_ID"))
+    {
+        return holder_for_session(seat, &id);
+    }
+    holder
+}
+
+/// A runner conversation id long enough to be one. Shorter values are
+/// ignored, the same rule as [`runner_session_var`].
+fn stamped_id(key: &str) -> Option<String> {
+    let id = std::env::var(key).ok()?;
+    let id = id.trim();
+    if id.len() >= 8 {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+/// The opencode or agy conversation this process belongs to, when the
+/// runner stamped one. The git hook books into that session so a later
+/// plugin observe sees the deed and does not cite it again.
+#[must_use]
+pub fn harness_book_session() -> Option<String> {
+    stamped_id("OPENCODE_SESSION_ID").or_else(|| stamped_id("ANTIGRAVITY_CONVERSATION_ID"))
 }
 
 /// Whether two holder names are one holder: the same name, or a seat's
@@ -2981,53 +3044,196 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 
 /// A holder as its seat and its conversation tag. `SEAT@TAG` is the form
 /// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
-/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`); a last part of three
-/// or four lowercase letters and digits with at least one digit is read
-/// as that tag, so `eessi-bot` and `disk-saver` stay whole seats. An old
-/// tag comes back as `None`: the server that wrote it is gone and no
-/// conversation holds under it again, so the seat is its holder now and
-/// any conversation of that seat may finish or release the claim.
+/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
+/// `free-opencode-1vmow`); a last part of one to six lowercase letters and
+/// digits with at least one digit is read as that tag, so `eessi-bot` and
+/// `disk-saver` stay whole seats. The same suffix on the seat side of
+/// `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old tag comes back
+/// as `None`: the server that wrote it is gone and no conversation holds
+/// under it again, so the seat is its holder now and any conversation of
+/// that seat may finish or release the claim.
 #[must_use]
 pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     let holder = holder.trim();
     let (seat, tag) = match holder.split_once('@') {
-        Some((seat, tag)) if !tag.is_empty() => (seat, Some(tag)),
-        _ => match holder.rsplit_once('-') {
-            Some((seat, tag)) if !seat.is_empty() && legacy_tag(tag) => (seat, None),
-            _ => (holder, None),
-        },
+        Some((seat, tag)) if !tag.is_empty() => (without_legacy_tag(seat), Some(tag.to_string())),
+        _ => (without_legacy_tag(holder), None),
     };
     let seat = LEGACY_SEATS
         .iter()
-        .find(|(old, _)| *old == seat)
-        .map_or(seat, |(_, now)| *now);
-    (seat.to_string(), tag.map(str::to_string))
+        .find(|(old, _)| *old == seat.to_ascii_lowercase())
+        .map_or(seat, |(_, now)| (*now).to_string());
+    (seat, tag)
 }
 
 fn legacy_tag(tag: &str) -> bool {
-    (3..=4).contains(&tag.len())
+    (1..=6).contains(&tag.len())
         && tag
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && tag.bytes().any(|b| b.is_ascii_digit())
 }
 
+/// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
+/// none is returned unchanged, so `Disk Saver` keeps its case.
+fn without_legacy_tag(seat: &str) -> String {
+    let mut lower = seat.to_ascii_lowercase();
+    let mut stripped = false;
+    while let Some((head, tag)) = lower.rsplit_once('-') {
+        if head.is_empty() || !legacy_tag(tag) {
+            break;
+        }
+        lower = head.to_string();
+        stripped = true;
+    }
+    if stripped {
+        lower
+    } else {
+        seat.to_string()
+    }
+}
+
+/// `name` without a `:issue` scope. `saddle:proj-aaaa` is the holder
+/// `saddle` scoped to that issue; a colon inside the scope stays there.
+fn split_claim_scope(raw: &str) -> (&str, Option<&str>) {
+    match raw.split_once(':') {
+        Some((body, scope)) if !body.is_empty() && !scope.is_empty() => (body, Some(scope)),
+        _ => (raw, None),
+    }
+}
+
+/// The seat `name` holds for, slugged. An empty name stays empty: slugging
+/// it would call it `runner`. A legacy holder is its seat (`inky-n9o` is
+/// `inky`, `ljos-bot` is `ljosbot`).
+#[must_use]
+pub(crate) fn canonical_seat_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    let (body, _) = split_claim_scope(name);
+    let (seat, _) = holder_parts(body);
+    if seat.is_empty() {
+        return String::new();
+    }
+    seat_slug(&seat)
+}
+
+/// Whether `name` is a subagent standing in as a seat. Every subagent id
+/// starts `sand-sub`, and the old fallback of that prefix is the one name
+/// `grokbot-sand-sub`.
+#[must_use]
+pub(crate) fn is_raw_subagent_name(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let (body, _) = split_claim_scope(name);
+    let head = body.split('@').next().unwrap_or(body).trim();
+    head.starts_with("sand-sub") || canonical_seat_name(name) == "grokbot-sand-sub"
+}
+
+/// The seat to put in the environment for `name`. A display name whose
+/// slug is already the seat (`Disk Saver`, `INKY`) is kept. A legacy
+/// holder becomes the seat. A subagent name is kept, so the refusal can
+/// see it.
+#[must_use]
+pub(crate) fn seat_for_env(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || is_raw_subagent_name(name) {
+        return name.to_string();
+    }
+    let mapped = canonical_seat_name(name);
+    let head = name.split(['@', ':']).next().unwrap_or(name);
+    if mapped == seat_slug(head) {
+        name.to_string()
+    } else {
+        mapped
+    }
+}
+
+/// A name a person set, as the seat that holds. A subagent name is refused.
+/// A legacy holder is the seat. A name whose slug is already that seat is
+/// returned as written, scope and conversation tag included.
+///
+/// # Errors
+///
+/// `name` is a subagent, empty, or a pronoun.
+pub(crate) fn claim_holder(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        bail!("pass a seat name");
+    }
+    if is_raw_subagent_name(raw) {
+        bail!(SUBAGENT_NO_SEAT);
+    }
+    let (body, scope) = split_claim_scope(raw);
+    let (seat, tag) = holder_parts(body);
+    if seat.is_empty() || omitted_actor_name(&seat) {
+        bail!("pass a seat name, not {raw:?}");
+    }
+    let mapped = seat_slug(&seat);
+    if omitted_actor_name(&mapped) {
+        bail!("pass a seat name, not {raw:?}");
+    }
+    let head = body.split('@').next().unwrap_or(body);
+    if seat_slug(head) == mapped {
+        return Ok(raw.to_string());
+    }
+    let mut out = match tag {
+        Some(tag) => format!("{mapped}@{tag}"),
+        None => mapped,
+    };
+    if let Some(scope) = scope {
+        out = format!("{out}:{scope}");
+    }
+    Ok(out)
+}
+
+/// The slug [`announce_seat`] and [`seat_for_thread`] sit as. A subagent
+/// name is kept so the harness does not take its place.
+fn seated_name(raw: &str) -> Option<String> {
+    let slug = if is_raw_subagent_name(raw) {
+        seat_slug(raw)
+    } else {
+        seat_slug(&seat_for_env(raw))
+    };
+    (slug != "runner" && !omitted_actor_name(&slug)).then_some(slug)
+}
+
 /// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
 /// `CURSOR_CONVERSATION_ID`, then `grokbot-` plus the first eight characters
-/// of that id. Nothing here reads the process tree. `None` means the hook
-/// does not book.
+/// of that id, then `antigravity` when `ANTIGRAVITY_CONVERSATION_ID` is
+/// set, then `opencode` when `OPENCODE_SESSION_ID` is set. Nothing here
+/// reads the process tree. `None` means the hook does not book.
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
-        let slug = seat_slug(&name);
+        if is_raw_subagent_name(&name) {
+            return None;
+        }
+        let seat = seat_for_env(&name);
+        let slug = seat_slug(&seat);
         if slug != "runner" && !omitted_actor_name(&slug) {
-            return Some(name);
+            return Some(seat);
         }
     }
-    grokbot_seat_name().filter(|name| {
+    if let Some(name) = grokbot_seat_name().filter(|name| {
+        if is_raw_subagent_name(name) {
+            return false;
+        }
         let slug = seat_slug(name);
         slug != "runner" && !omitted_actor_name(&slug)
-    })
+    }) {
+        return Some(name);
+    }
+    if stamped_id("ANTIGRAVITY_CONVERSATION_ID").is_some() {
+        return Some("antigravity".to_string());
+    }
+    if stamped_id("OPENCODE_SESSION_ID").is_some() {
+        return Some("opencode".to_string());
+    }
+    None
 }
 
 /// The seat `CURSOR_CONVERSATION_ID` maps to: `seats.toml`, else `grokbot-`
@@ -3048,11 +3254,16 @@ pub fn grokbot_seat_name() -> Option<String> {
 /// say so instead of booking under `grokbot-sand-sub`.
 #[must_use]
 pub fn unseated_subagent() -> bool {
-    if named_var("LJOS_SEAT").is_some()
-        || named_var("VISSUE_AGENT").is_some()
-        || named_var("LJOS_HOLD").is_some()
-    {
-        return false;
+    let named = [
+        named_var("LJOS_SEAT"),
+        named_var("VISSUE_AGENT"),
+        named_var("LJOS_HOLD"),
+    ];
+    let set: Vec<String> = named.into_iter().flatten().collect();
+    if !set.is_empty() {
+        // A real seat keeps the conversation, including one whose id is a
+        // subagent. The name `grokbot-sand-sub` is not a seat.
+        return set.iter().any(|name| is_raw_subagent_name(name));
     }
     std::env::var("CURSOR_CONVERSATION_ID")
         .ok()
@@ -3669,7 +3880,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
 
 /// The env file a shell runner sources, beside the runners file unless
 /// the table names `env_file`.
-fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
+pub(crate) fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
     match &h.env_file {
         Some(path) => expand(path),
         None => file
@@ -3708,7 +3919,7 @@ fn keep_seat_assignment(name: &str) -> String {
 /// `LJOS_SESSION_ID=NAME-shell`: without it each shell hashed its own
 /// process into a new holder, and `ljos finish` in a second shell was
 /// refused as not the assignee.
-fn seat_env_text(name: &str) -> String {
+pub(crate) fn seat_env_text(name: &str) -> String {
     format!(
         "# Source this in the shell that runs the agent's commands.\n\
          # This runner has no MCP client, so the process tree is not its seat.\n\
@@ -3721,10 +3932,12 @@ fn seat_env_text(name: &str) -> String {
          # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
          {}\n\
          {}\n\
+         {}\n\
          {}\n",
         shared_holder_id(name),
         seat_lines(name),
         session_assignment(name),
+        git_hooks::HOOKS_ENV_LINE,
         GUARD_PATH_LINES
     )
 }
@@ -3804,9 +4017,12 @@ for d in $PATH; do
 done
 IFS=$old_ifs
 if [ -z "$real" ]; then echo "ljos guard: no $me found on PATH" >&2; exit 127; fi
-# LJOS_OFF and a temp sandbox are not seats. Bookkeeping is a hook, not this shim.
+# LJOS_OFF, and a HOME that is a temporary directory, are not seats. A
+# temporary working directory is: `cd /tmp && rm -rf ~/proj` is judged.
+# LJOS_GUARD=on keeps the guard on under a temporary HOME. Bookkeeping is
+# a hook, not this shim.
 case ",1,true,TRUE,yes,YES,on,ON," in
-  *,"${LJOS_OFF}",*) exec "$real" "$@" ;;
+  *,"${LJOS_OFF:-}",*) exec "$real" "$@" ;;
 esac
 under_temp() {
   p=$1
@@ -3821,9 +4037,97 @@ under_temp() {
   done
   return 1
 }
-if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)" || under_temp "$(pwd -P)"; then
-  exec "$real" "$@"
-fi
+case ",1,true,TRUE,yes,YES,on,ON," in
+  *,"${LJOS_GUARD:-}",*) ;;
+  *) if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)"; then exec "$real" "$@"; fi ;;
+esac
+# The branches a --force-with-lease push may not replace without asking:
+# main, master, develop, and `protected_branches` in the checkout's
+# `.ljos/gates.toml` or `ljos.toml`. A list the shim cannot read on one
+# line is `?`, which matches no branch name, so the push asks.
+guarded_branches() {
+  printf 'main master develop'
+  top=$("$real" -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  for f in "$top/.ljos/gates.toml" "$top/ljos.toml"; do
+    [ -f "$f" ] || continue
+    grep -q 'protected_branches' "$f" 2>/dev/null || continue
+    names=$(sed -n 's/^[[:space:]]*protected_branches[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$f" | tr -d "\"'," | tr '\n' ' ')
+    if [ -n "$names" ]; then printf ' %s' "$names"; else printf ' ?'; fi
+  done
+}
+# Whether this git call is a --force-with-lease push the hook would let
+# run: no plain force, no +refspec, no delete or mirror, and every branch
+# it replaces outside guarded_branches. The current branch is
+# `git rev-parse --abbrev-ref HEAD`. A bare push also replaces
+# branch.<name>.merge, the upstream the hook reads.
+lease_free() {
+  [ "$me" = git ] || return 1
+  set -f
+  dir=.; sub=; lease=; remote=; names=; skip=; open=; specs=
+  for a in "$@"; do
+    if [ -n "$skip" ]; then
+      [ "$skip" = C ] && case $a in /*) dir=$a ;; *) dir=$dir/$a ;; esac
+      skip=; continue
+    fi
+    if [ -z "$sub" ]; then
+      case $a in
+        -C) skip=C ;;
+        -c|--git-dir|--work-tree|--namespace) skip=1 ;;
+        -*) ;;
+        *) sub=$a ;;
+      esac
+      continue
+    fi
+    case $a in
+      --force-with-lease) lease=1 ;;
+      --force-with-lease=*)
+        lease=1
+        n=${a#--force-with-lease=}; n=${n%%:*}; n=${n#refs/heads/}
+        case $n in "") ;; HEAD) names="$names HEAD" ;; *) names="$names $n" ;; esac ;;
+      --force|--mirror|--delete|--all|--branches) set +f; return 1 ;;
+      -o|--push-option|--receive-pack|--exec|--repo) skip=1 ;;
+      --*) ;;
+      -*f*) set +f; return 1 ;;
+      -d) set +f; return 1 ;;
+      -*) ;;
+      +*|:*) set +f; return 1 ;;
+      *)
+        if [ -z "$remote" ]; then remote=$a; continue; fi
+        specs=1
+        case $a in *:*) n=${a#*:} ;; *) n=$a ;; esac
+        n=${n#refs/heads/}
+        case $n in ""|*[\*\?\[\$\`]*) open=1 ;; *) names="$names $n" ;; esac
+        ;;
+    esac
+  done
+  set +f
+  [ "$sub" = push ] && [ -n "$lease" ] && [ -z "$open" ] || return 1
+  cur=$("$real" -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  [ -n "$cur" ] && [ "$cur" != HEAD ] || return 1
+  # No refspec: the hook reads branch.<name>.merge and the current
+  # branch. A remote-tracking ref is missing until the first fetch.
+  if [ -z "$specs" ]; then
+    up=$("$real" -C "$dir" config --get "branch.${cur}.merge" 2>/dev/null) || return 1
+    up=${up#refs/heads/}
+    [ -n "$up" ] || return 1
+    names="$names $up $cur"
+  fi
+  case " $names " in
+    *" HEAD "*) names="$names $cur" ;;
+  esac
+  guarded=$(guarded_branches "$dir")
+  (
+    set -f
+    for b in $names; do
+      [ "$b" = HEAD ] && continue
+      for g in $guarded; do
+        [ "$g" = '?' ] && exit 1
+        [ "$b" = "$g" ] && exit 1
+      done
+    done
+    exit 0
+  )
+}
 # The first git of a conversation is the session start this runner never
 # hooks. The brief is held claims, recall and unread mail, on stderr, once.
 # Bound the wait: a slow seat must not hold the command. A failure allows it.
@@ -3857,6 +4161,16 @@ if command -v ljos-policyd >/dev/null 2>&1; then
           esac
           printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No ljos rule would refuse it. Run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
+      esac
+      # A force push asks, as the hook does: a lease push onto a branch
+      # outside main, master, develop and the protected ones runs, and
+      # any other force push goes to the person. This shim cannot ask.
+      case "$rule" in
+        git-force-push|git-force-push:*)
+          if lease_free "$@"; then exec "$real" "$@"; fi
+          echo "ljos guard: asks ($rule): $me $*" >&2
+          echo "ljos guard: this rewrites history on the remote, so it is the person's to approve. Tell them the exact command; they can run it, or approve it in a runner whose hook can ask." >&2
+          exit 126 ;;
       esac
       case "$rule" in
         rm-rf-*|find-delete-*) hint="Leave it, or move it to the trash (trash-put or gio trash). Moving it under /tmp to delete it there is the same delete." ;;
@@ -3982,6 +4296,16 @@ fn shared_holder_id(name: &str) -> String {
 /// The end of the holder a runner with no conversation id shares.
 const SHARED_HOLDER_SUFFIX: &str = "-shell";
 
+/// Whether `id` is a [`shared_holder_id`]: every conversation of a runner
+/// that stamps no id holds under it, so it names no run.
+pub(crate) fn is_shared_holder_id(id: &str) -> bool {
+    let mut id = id.trim();
+    while let Some(rest) = id.strip_suffix("-seat") {
+        id = rest;
+    }
+    id.ends_with(SHARED_HOLDER_SUFFIX)
+}
+
 /// The env file's session line: set `LJOS_SESSION_ID` to the shared
 /// holder only when neither it nor a runner's conversation id is set.
 /// The variables tested are the ones [`runner_session_var`] reads.
@@ -4016,41 +4340,6 @@ pub fn shared_holder_note(node: &str, holder: &str, hold: &Hold) -> String {
     )
 }
 
-fn env_step(path: &Path, name: &str, dry: bool) -> Step {
-    let text = seat_env_text(name);
-    let source = format!("source {}", path.display());
-    if std::fs::read_to_string(path).is_ok_and(|have| have == text) {
-        return Step {
-            what: "env".into(),
-            detail: format!("{} is current; {source}", path.display()),
-            ok: true,
-        };
-    }
-    if dry {
-        return Step {
-            what: "env".into(),
-            detail: format!("would write {}; {source}", path.display()),
-            ok: true,
-        };
-    }
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, text));
-    match written {
-        Ok(()) => Step {
-            what: "env".into(),
-            detail: format!("wrote {}; {source}", path.display()),
-            ok: true,
-        },
-        Err(e) => Step {
-            what: "env".into(),
-            detail: format!("{}: {e}", path.display()),
-            ok: false,
-        },
-    }
-}
-
 fn shell_steps(
     file: &Path,
     h: &Harness,
@@ -4066,7 +4355,7 @@ fn shell_steps(
     };
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
-    steps.push(env_step(&env_path_for(file, h), &h.name, dry));
+    steps.push(runner_env::install(&env_path_for(file, h), &h.name, dry));
     steps.push(guard_step(dry, place.map(|place| place.guard_dir)));
     if h.name == "grokbot" {
         steps.push(git_hooks_step(dry, place));
@@ -4491,6 +4780,22 @@ fn hook_matcher(event: &str) -> &'static str {
         .map_or("*", |(_, m)| m)
 }
 
+/// The seat's MCP tools as Claude Code names them. The hook reads which
+/// subagent calls one, so the server can bind that ballot to it. A
+/// matcher with a `^` is a regular expression, unanchored unless written
+/// so; joined to the tool list, it would make `Write` match `TodoWrite`.
+/// So it is a `PreToolUse` group of its own.
+pub const SEAT_MCP_MATCHER: &str = "^mcp__.+__ljos_.+$";
+
+/// The matchers of the seat's further groups on `event`.
+fn extra_hook_matchers(event: &str) -> &'static [&'static str] {
+    if event == "PreToolUse" {
+        &[SEAT_MCP_MATCHER]
+    } else {
+        &[]
+    }
+}
+
 /// The events a runner's table asks for, or the default.
 fn hook_events_of(h: &Harness) -> Vec<String> {
     if h.name == "grok" {
@@ -4548,7 +4853,7 @@ pub fn hook_trusted(trust: &Path, hooks: &Path) -> bool {
 /// What onboard and doctor say about a hook the runner has not trusted.
 fn untrusted_hook_note(runner: &str) -> String {
     format!(
-        "{runner} skips the ljos hooks until you trust them: open `/hooks` in {runner} and trust each ljos hook. A rewritten hook needs trusting again"
+        "{runner} skips the ljos hooks until you trust them. Before the guard runs, open `/hooks` in {runner} and trust each ljos hook, and trust it again after an upgrade rewrites one. Until then only the rm, git and find shims guard its commands"
     )
 }
 
@@ -4603,7 +4908,9 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
         };
         let block = fail_closed.contains(event);
         let want = hook_matcher(event);
+        let extra = extra_hook_matchers(event);
         let mut present = false;
+        let mut found = Vec::new();
         let mut shut = false;
         let mut grew = false;
         for group in groups.iter_mut() {
@@ -4613,20 +4920,26 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
             if !seat {
                 continue;
             }
+            let further = extra
+                .iter()
+                .find(|m| group["matcher"].as_str() == Some(**m));
             // A group that also carries someone else's hook keeps its matcher.
             // Widening it would fire that other hook on apply_patch.
             let only_seat = group["hooks"]
                 .as_array()
                 .is_some_and(|hs| !hs.is_empty() && hs.iter().all(is_seat_hook));
-            if only_seat && group["matcher"].as_str() != Some(want) {
+            if further.is_none() && only_seat && group["matcher"].as_str() != Some(want) {
                 group["matcher"] = want.into();
                 grew = true;
+            }
+            match further {
+                Some(m) => found.push(*m),
+                None => present = true,
             }
             let Some(hooks) = group["hooks"].as_array_mut() else {
                 continue;
             };
             for hook in hooks.iter_mut().filter(|h| is_seat_hook(h)) {
-                present = true;
                 if block && hook["onFailure"] != "block" {
                     hook["onFailure"] = "block".into();
                     shut = true;
@@ -4639,17 +4952,24 @@ fn hook_step(file: &Path, events: &[String], fail_closed: &[String], dry: bool) 
         if grew {
             widened.push(event.clone());
         }
-        if present {
+        let missing: Vec<&str> = (!present)
+            .then_some(want)
+            .into_iter()
+            .chain(extra.iter().copied().filter(|m| !found.contains(m)))
+            .collect();
+        if missing.is_empty() {
             continue;
         }
         let mut hook = serde_json::json!({"type": "command", "command": command, "timeout": 20});
         if block {
             hook["onFailure"] = "block".into();
         }
-        groups.push(serde_json::json!({
-            "matcher": hook_matcher(event),
-            "hooks": [hook]
-        }));
+        for matcher in missing {
+            groups.push(serde_json::json!({
+                "matcher": matcher,
+                "hooks": [hook.clone()]
+            }));
+        }
         added.push(event.clone());
     }
     for (event, groups) in hooks.iter_mut() {
@@ -5423,15 +5743,20 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
     let event = event
         .map(|name| normalize_hook_event(name).to_string())
         .unwrap_or_else(|| {
-            // PreToolUse and PostToolUse both carry `toolCall`. PostToolUse is
-            // the one with `error` (empty when the command exited 0). Without
-            // that, a commit the gate allowed is never cited.
-            if v.get("toolCall").is_some() {
+            // A `toolCall` object is a call. PostToolUse is the one with
+            // `error` (empty when the command exited 0). A null or missing
+            // `toolCall` with `stepIdx` or `error` is the after-hook: agy
+            // often sends no command there. The before-hook's command is
+            // reused. A `toolCall` object with no `error` stays PreToolUse.
+            let tool_is_call = v.get("toolCall").is_some_and(Value::is_object);
+            if tool_is_call {
                 if v.get("error").is_some() {
                     "PostToolUse"
                 } else {
                     "PreToolUse"
                 }
+            } else if v.get("stepIdx").is_some() || v.get("error").is_some() {
+                "PostToolUse"
             } else if v.get("executionNum").is_some() {
                 "Stop"
             } else if v.get("invocationNum").is_some() {
@@ -5458,7 +5783,7 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         event == "PreInvocation" && v["invocationNum"].as_u64().is_some_and(|n| n <= 1),
         std::sync::atomic::Ordering::Relaxed,
     );
-    let (event, cue) = match event.as_str() {
+    let (event, mut cue) = match event.as_str() {
         "PreToolUse" => {
             let args = &v["toolCall"]["args"];
             let cue = args["CommandLine"]
@@ -5525,12 +5850,46 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         "UserPromptSubmit" => ("UserPromptSubmit", prompt_of(v)),
         _ => ("TurnEnd", String::new()),
     };
+    // The after payload often names no command. The before payload did.
+    if event == "PreToolUse" {
+        if let Some(id) = session.as_deref().filter(|id| !id.is_empty()) {
+            remember_agy_command(id, &cue);
+        }
+    } else if matches!(event, "PostToolUse" | "PostToolUseFailure") && cue.trim().is_empty() {
+        if let Some(id) = session.as_deref().filter(|id| !id.is_empty()) {
+            let restored = recall_agy_command(id);
+            if !restored.is_empty() {
+                cue = restored;
+            }
+        }
+    }
     HookCall {
         event: event.to_string(),
         cue,
         session,
         shape: HookShape::Steps,
     }
+}
+
+/// Where the command from agy's before-hook is kept until the after-hook.
+fn agy_cmd_path(session: &str) -> PathBuf {
+    runtime_dir().join(format!("agy-cmd-{}", session_tag(session)))
+}
+
+fn remember_agy_command(session: &str, command: &str) {
+    let command = command.trim();
+    if command.is_empty() {
+        return;
+    }
+    let path = agy_cmd_path(session);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, command);
+}
+
+fn recall_agy_command(session: &str) -> String {
+    std::fs::read_to_string(agy_cmd_path(session)).unwrap_or_default()
 }
 
 /// Whether `prompt` is a user turn conversation `session` has not raised
@@ -5559,7 +5918,12 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
             shape: HookShape::Asks,
         };
     };
-    if v.get("conversationId").is_some() || v.get("toolCall").is_some() {
+    if v.get("conversationId").is_some()
+        || v.get("toolCall").is_some()
+        || v.get("stepIdx").is_some()
+        || v.get("invocationNum").is_some()
+        || v.get("executionNum").is_some()
+    {
         return steps_call(&v, event);
     }
     let raw_event = v["hook_event_name"].as_str().unwrap_or("");
@@ -6288,17 +6652,112 @@ fn names_the_cue(text: &str, cue: &str) -> bool {
         .any(|w| have.binary_search(w).is_ok())
 }
 
+/// A word that does not start or end an abbreviation: too short to be a
+/// name, or a stop word. `of` is short, so `conflict of interest` keeps
+/// the `o`.
+fn glue_word(word: &str) -> bool {
+    word.len() < 3 || CUE_STOP.contains(&word) || CUE_STOP_SHORT.contains(&word)
+}
+
+/// Initials of a phrase that has a small word in the middle.
+/// `conflict of interest` is `coi`. A run of names with nothing between
+/// them is left alone, so `add lodash dependency` does not become a token.
+fn phrase_acronyms(text: &str) -> Vec<String> {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let mut out = Vec::new();
+    for start in 0..words.len() {
+        if glue_word(&words[start]) {
+            continue;
+        }
+        for len in 3..=6 {
+            let end = start + len;
+            if end > words.len() {
+                break;
+            }
+            if glue_word(&words[end - 1]) {
+                continue;
+            }
+            let window = &words[start..end];
+            if !window[1..len - 1].iter().any(|word| glue_word(word)) {
+                continue;
+            }
+            let acronym: String = window
+                .iter()
+                .filter_map(|word| word.chars().next())
+                .collect();
+            if !(3..=6).contains(&acronym.len())
+                || !acronym.chars().all(|c| c.is_ascii_alphabetic())
+                || CUE_STOP.contains(&acronym.as_str())
+                || CUE_STOP_SHORT.contains(&acronym.as_str())
+                || RULE_WORDS.contains(&acronym.as_str())
+            {
+                continue;
+            }
+            out.push(acronym);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Words plus the abbreviations of its phrases. A claim that says `COI`
+/// and a prompt that says `conflict of interest` share `coi`.
+fn match_tokens(text: &str) -> Vec<String> {
+    let mut words = prompt_words(text);
+    words.extend(phrase_acronyms(text));
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
+/// The cue's phrase abbreviates a word of the claim, or the claim's
+/// phrase abbreviates a word of the cue.
+fn abbreviation_match(text: &str, cue: &str) -> bool {
+    let have = prompt_words(text);
+    let want = prompt_words(cue);
+    phrase_acronyms(cue)
+        .iter()
+        .any(|token| have.binary_search(token).is_ok())
+        || phrase_acronyms(text)
+            .iter()
+            .any(|token| want.binary_search(token).is_ok())
+}
+
+/// The query the pack is asked, with each phrase's abbreviation appended
+/// so a claim that only says the short form can still match.
+fn recall_query(cue: &str) -> String {
+    let have = prompt_words(cue);
+    let extra: Vec<String> = phrase_acronyms(cue)
+        .into_iter()
+        .filter(|token| have.binary_search(token).is_err())
+        .collect();
+    if extra.is_empty() {
+        cue.to_string()
+    } else {
+        format!("{cue} {}", extra.join(" "))
+    }
+}
+
 /// Whether a claim names the cue's subject, which is the word test the
 /// prompt hook uses.
 ///
-/// An alias is the name of one tool or one thing. Two content words are a
-/// subject. One content word is the subject only when the cue has two
-/// content words or fewer, so the overlap is at least half of what the cue
-/// is about. A longer cue that shares one ordinary word (`test`, `commit`,
-/// `build`) is a coincidence: the cosines on such a cue sit within a few
-/// hundredths of each other, and the best of them stays under the encoder's
-/// confidence line.
+/// An alias is the name of one tool or one thing. An abbreviation is too:
+/// `COI` names `conflict of interest`, and the phrase names the short
+/// form. Two content words are a subject. One content word is the subject
+/// only when the cue has two content words or fewer, so the overlap is at
+/// least half of what the cue is about. A longer cue that shares one
+/// ordinary word (`test`, `commit`, `build`) is a coincidence: the cosines
+/// on such a cue sit within a few hundredths of each other, and the best
+/// of them stays under the encoder's confidence line.
 fn names_the_subject(text: &str, cue: &str) -> bool {
+    if abbreviation_match(text, cue) {
+        return true;
+    }
     if !names_the_cue(text, cue) {
         return false;
     }
@@ -6568,19 +7027,8 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     if rows.is_empty() {
         return None;
     }
-    let docs: Vec<Vec<String>> = rows.iter().map(|(_, body)| prompt_words(body)).collect();
-    let df = document_frequency(&docs);
-    let mut scored: Vec<(usize, f64)> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (_, body))| {
-            let mut score = bm25_distinctive(&docs, &df, i, cue);
-            if names_the_subject(body, cue) {
-                score = score.max(1.0);
-            }
-            (score > 0.0).then_some((i, score))
-        })
-        .collect();
+    let bodies: Vec<&str> = rows.iter().map(|(_, body)| body.as_str()).collect();
+    let mut scored = lexical_scores(&bodies, cue);
     if scored.is_empty() {
         return None;
     }
@@ -6601,9 +7049,9 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     Some((format!("{RECALL_HEADER}\n{}", lines.join("\n")), ids))
 }
 
-/// The text a cold prompt is matched on: the claim, plus the title, rule
-/// and command kept in `source`. The prose gate shortens the claim; the
-/// words a later prompt uses can survive only in `source`.
+/// The text a cold prompt is matched on: the claim, plus the title, rule,
+/// command and citation kept in `source`. The prose gate shortens the
+/// claim; the words a later prompt uses can survive only in `source`.
 fn recall_body(atom: &Value) -> String {
     let mut text = atom
         .get("text")
@@ -6613,7 +7061,7 @@ fn recall_body(atom: &Value) -> String {
     let Some(source) = atom.get("source").and_then(Value::as_object) else {
         return text;
     };
-    for key in ["title", "rule", "command"] {
+    for key in ["title", "rule", "command", "citation"] {
         if let Some(value) = source
             .get(key)
             .and_then(Value::as_str)
@@ -6640,7 +7088,8 @@ fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String,
     df
 }
 
-/// BM25 over the words of `cue` that are rare in `docs`.
+/// BM25 over the words of `cue` that are rare in `docs`, including an
+/// abbreviation standing in for a phrase.
 ///
 /// A word in one atom always counts, including when the pack holds only
 /// that atom. A word in half the atoms or more does not: `test` then
@@ -6652,7 +7101,7 @@ fn bm25_distinctive(
     index: usize,
     cue: &str,
 ) -> f64 {
-    let query = prompt_words(cue);
+    let query = match_tokens(cue);
     if query.is_empty() || docs.is_empty() {
         return 0.0;
     }
@@ -6678,6 +7127,26 @@ fn bm25_distinctive(
         score += idf * norm;
     }
     score
+}
+
+/// Rank of each body against `cue`, highest first. A shared abbreviation
+/// counts as naming the subject.
+fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
+    let docs: Vec<Vec<String>> = bodies.iter().map(|body| match_tokens(body)).collect();
+    let df = document_frequency(&docs);
+    let mut scored: Vec<(usize, f64)> = bodies
+        .iter()
+        .enumerate()
+        .filter_map(|(i, body)| {
+            let mut score = bm25_distinctive(&docs, &df, i, cue);
+            if names_the_subject(body, cue) {
+                score = score.max(1.0);
+            }
+            (score > 0.0).then_some((i, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored
 }
 
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
@@ -7173,9 +7642,10 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
+        let asked = recall_query(cue);
         let body: Value = packset_client::authorize(ureq::get(&url))
             .query("workspace", &client.workspace())
-            .query("q", cue)
+            .query("q", &asked)
             .query("limit", &limit.to_string())
             .timeout(std::time::Duration::from_millis(ms))
             .call()
@@ -8893,8 +9363,9 @@ pub fn correction_cue(text: &str) -> Option<&'static str> {
     CORRECTION_CUES.iter().find(|c| lower.contains(*c)).copied()
 }
 
-/// Write a correction as an agent-derived preference, reviewed later.
-/// Once per session per cue. A pack that does not answer is left for the note.
+/// File a correction as a proposal in the person's words. The hook does not
+/// write the preference. Once per session per cue. A pack that does not
+/// answer is left for the note.
 pub fn store_correction(call: &HookCall) {
     let Some(hit) = correction_cue(&call.cue) else {
         return;
@@ -8929,7 +9400,13 @@ fn file_correction(call: &HookCall, key: &str) {
         let workspace = client.workspace();
         let mut atom = atom_body("preference", &text, &workspace);
         stamp_horizon(&mut atom, "preference", &text, Some(false));
-        admit::write_agent(&client, atom).is_ok()
+        // The words are the person's. The hook files them; it does not store
+        // them. Accept is what writes the preference.
+        admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+        if let Some(map) = atom.as_object_mut() {
+            map.insert("hook".into(), Value::Bool(true));
+        }
+        admit::propose_admission(&client, atom).is_ok()
     });
     if wrote {
         mark_seen(call.session.as_deref(), &[key]);
@@ -9518,20 +9995,6 @@ pub fn format_steps(steps: &[Step]) -> String {
         .collect()
 }
 
-/// The doctor's `runner env` row. A file an older ljos wrote is stale,
-/// not missing: the text this ljos writes changed, and `ljos onboard`
-/// rewrites it.
-fn runner_env_state(name: &str, env_path: &Path, ready: bool, exists: bool) -> String {
-    match (ready, exists) {
-        (true, _) => format!("{name}: source {}", env_path.display()),
-        (false, true) => format!(
-            "{name}: {} is stale, an older ljos wrote it; ljos onboard --harness {name}",
-            env_path.display()
-        ),
-        (false, false) => format!("{name}: no ljos env file; ljos onboard --harness {name}"),
-    }
-}
-
 /// The runner rows for `doctor`, one pair per runner the file names.
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
@@ -9575,17 +10038,13 @@ fn harness_rows() -> Vec<Habitat> {
             .skills
             .as_deref()
             .map(|d| expand(d).join("ljos").join("SKILL.md"));
-        let current = skill
-            .as_ref()
-            .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t == skill_text()));
         if h.shell {
             let env_path = env_path_for(&path, h);
-            let written = std::fs::read_to_string(&env_path).ok();
-            let ready = written.as_deref() == Some(seat_env_text(&h.name).as_str());
+            let (env_ok, env_state) = runner_env::doctor_env(&h.name, &env_path);
             rows.push(Habitat {
                 name: "runner env",
-                state: runner_env_state(&h.name, &env_path, ready, written.is_some()),
-                ok: ready,
+                state: env_state,
+                ok: env_ok,
             });
         } else {
             let registered = is_registered(h, &server) == Some(true);
@@ -9685,24 +10144,11 @@ fn harness_rows() -> Vec<Habitat> {
                 });
             }
         }
+        let (skill_ok, skill_state) = runner_skills::doctor_skill(&h.name, skill.as_deref());
         rows.push(Habitat {
             name: "runner skill",
-            state: match (&skill, current) {
-                (Some(p), true) => format!("{}: {}", h.name, p.display()),
-                (Some(p), false) if p.is_file() => {
-                    format!(
-                        "{}: {} is stale; ljos onboard --harness {}",
-                        h.name,
-                        p.display(),
-                        h.name
-                    )
-                }
-                (Some(_), false) => {
-                    format!("{}: absent; ljos onboard --harness {}", h.name, h.name)
-                }
-                (None, _) => format!("{}: no skills directory named", h.name),
-            },
-            ok: current,
+            state: skill_state,
+            ok: skill_ok,
         });
     }
     rows
@@ -9803,7 +10249,7 @@ fn pack_step(dry: bool) -> Step {
 }
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`.
-fn data_base() -> Option<PathBuf> {
+pub(crate) fn data_base() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -9868,16 +10314,30 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 pub(crate) fn isolated_config_home() -> &'static Path {
     use std::sync::OnceLock;
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    // A static is never dropped, so a `TempDir` held here stayed behind
+    // after every run. The directory is removed when the test process
+    // exits instead.
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    extern "C" fn remove_isolated_config_home() {
+        if let Some(dir) = DIR.get() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
     DIR.get_or_init(|| {
         let dir = tempfile::Builder::new()
             .prefix("ljos-isolated-config-")
             .tempdir()
-            .expect("isolated config directory");
-        std::fs::create_dir_all(dir.path().join("ljos")).expect("isolated config dir");
+            .expect("isolated config directory")
+            .keep();
+        std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
+        // SAFETY: `atexit` takes a plain function with no arguments, which
+        // only reads the static set just before it is registered.
+        unsafe {
+            libc::atexit(remove_isolated_config_home);
+        }
         dir
     })
-    .path()
+    .as_path()
 }
 
 fn named_env(key: &str) -> Option<String> {
@@ -10718,11 +11178,17 @@ pub fn atom_kind(label: &str) -> Result<&'static str> {
 /// one pack, and a reader can then see whose lesson it is reading.
 pub const SEAT_ENTITY: &str = "seat:";
 
-/// Explicit claim body. The text is stored as given; never harvested. The
+/// Explicit claim body. The text is stored as given; never harvested. A
+/// trailing citation is the atom's source, not another sentence. The
 /// entities open with the seat that wrote it.
 pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
+    let (text, citation) = peel_citations(text);
     let mut entities = vec![format!("{SEAT_ENTITY}{}", seat_name())];
     entities.extend(take_validity());
+    let mut source = atom_source();
+    if let Some(citation) = citation {
+        source["citation"] = Value::String(citation);
+    }
     serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
@@ -10730,8 +11196,79 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
         "text": text,
         "workspace": workspace,
         "entities": entities,
-        "source": atom_source(),
+        "source": source,
     })
+}
+
+/// Take citation tails off `text`. The claim is unchanged when nothing
+/// trailing is a citation, and when peeling would leave it empty.
+fn peel_citations(text: &str) -> (String, Option<String>) {
+    let parts = packset_core::prose::sentences(text);
+    if parts.len() < 2 {
+        return (text.to_string(), None);
+    }
+    let mut end = parts.len();
+    while end > 0 && citation_sentence(&parts[end - 1]) {
+        end -= 1;
+    }
+    if end == 0 || end == parts.len() {
+        return (text.to_string(), None);
+    }
+    (parts[..end].join(" "), Some(parts[end..].join("\n")))
+}
+
+/// A sentence that only cites a source: a `Source:` / `Citation:` /
+/// `Ref:` label with a URL or a DOI, a `See`/`Via` whose remainder is
+/// that URL, or a sentence that is the URL.
+fn citation_sentence(sentence: &str) -> bool {
+    let inner = citation_inner(sentence);
+    if inner.is_empty() {
+        return false;
+    }
+    let lower = inner.to_ascii_lowercase();
+    const LABELS: &[&str] = &[
+        "source:",
+        "sources:",
+        "citation:",
+        "citations:",
+        "reference:",
+        "references:",
+        "ref:",
+        "refs:",
+    ];
+    for label in LABELS {
+        if let Some(rest) = lower.strip_prefix(label) {
+            return has_url_or_doi(rest);
+        }
+    }
+    for label in ["see:", "see ", "via:", "via "] {
+        if let Some(rest) = lower.strip_prefix(label) {
+            return url_at_start(rest);
+        }
+    }
+    inner.split_whitespace().count() <= 3 && url_at_start(&lower)
+}
+
+fn citation_inner(sentence: &str) -> &str {
+    let sentence = sentence.trim();
+    let sentence = sentence.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | '"' | '\''));
+    sentence.trim().trim_end_matches(['.', '!', '?']).trim()
+}
+
+fn has_url_or_doi(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("https://")
+        || lower.contains("http://")
+        || lower.contains("doi.org/")
+        || lower.contains("doi:")
+}
+
+fn url_at_start(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("doi:")
+        || lower.starts_with("doi.org/")
 }
 
 /// The entity prefixes of a claim's validity window: the world time it
@@ -10866,6 +11403,65 @@ pub fn add_entities(atom: &mut Value, more: impl IntoIterator<Item = String>) {
     atom["entities"] = Value::Array(list);
 }
 
+/// The line a log prints for a failed `POST /v1/atoms`. The pack's status
+/// and reason are that line, with what to change when the reason is a
+/// prose refusal. The original error stays the source, so a refusal can
+/// still be told from a pack that did not answer.
+pub(crate) fn with_post_failure(prefix: &str, err: anyhow::Error) -> anyhow::Error {
+    let why = format!("{err:#}");
+    if why.contains(prefix) {
+        return err;
+    }
+    let Some(reason) = server_reason(&why) else {
+        return err.context(format!("{prefix}: {why}"));
+    };
+    let line = match fix_hint(&reason) {
+        Some(hint) => format!("{prefix}: {reason}. {hint}"),
+        None => format!("{prefix}: {reason}"),
+    };
+    err.context(line)
+}
+
+/// `400: atom has 3 sentences; one claim is at most 2` from a
+/// `bad response: URL: CODE: reason` chain. Parts split on colon
+/// followed by a space, so a colon in the URL stays with the URL.
+fn server_reason(chain: &str) -> Option<String> {
+    let parts: Vec<&str> = chain.split(": ").collect();
+    for (i, part) in parts.iter().enumerate() {
+        let code = part.trim();
+        let Ok(status) = code.parse::<u16>() else {
+            continue;
+        };
+        if !(400..=599).contains(&status) {
+            continue;
+        }
+        let rest = parts[i + 1..].join(": ");
+        if rest.is_empty() {
+            return Some(code.to_string());
+        }
+        return Some(format!("{code}: {rest}"));
+    }
+    None
+}
+
+/// What to change, when the pack's reason names the limit and not the edit.
+fn fix_hint(reason: &str) -> Option<&'static str> {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("one claim is at most") || reason.contains("sentences; one claim") {
+        Some("Split it into two remembers.")
+    } else if (reason.contains("very hard") || reason.contains("words, the limit"))
+        && !reason.contains("split it")
+    {
+        Some("Split that sentence at a conjunction or drop a clause.")
+    } else if reason.contains("readability grade") && !reason.contains("shorter") {
+        Some("Use shorter sentences and shorter words.")
+    } else if reason.contains("adverb") && !reason.contains("cut the") {
+        Some("Cut the -ly words or replace them with a number.")
+    } else {
+        None
+    }
+}
+
 /// POST one explicit claim. Callers pass Remember/Prefer only.
 pub fn post_claim(
     client: &PacksetClient,
@@ -10892,7 +11488,8 @@ fn post_claim_horizon(
     stamp_horizon(&mut atom, kind, trimmed, transient);
     admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
     let posted = with_writer(|| {
-        admit::post_kept(client, &atom).with_context(|| format!("{label}: POST /v1/atoms failed"))
+        admit::post_kept(client, &atom)
+            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
     })?;
     admit::satisfy_text(trimmed);
     Ok(posted)
@@ -10901,7 +11498,9 @@ fn post_claim_horizon(
 /// Write a claim an agent made, at once. No person approves it first: it
 /// carries origin `agent-derived` and its provenance in `source`, and
 /// `ljos memories review` keeps, edits, merges or drops it afterwards.
-/// The pack's own checks (secrets, size, the two-sentence cap) still apply.
+/// The pack still refuses a secret, the size cap and a third sentence.
+/// A sentence over 29 words, a grade over 14 or too many adverbs is stored
+/// as written, with the pack's warning, the same way `prefer` stores it.
 ///
 /// # Errors
 ///
@@ -10912,23 +11511,21 @@ pub fn packset_write_agent(
     persona: Option<&str>,
     transient: Option<bool>,
 ) -> Result<Value> {
-    let client = pack()?;
-    let workspace = client.workspace();
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = client_or_queue(&prefix, kind, trimmed, "")?;
+    let workspace = client.workspace();
     let mut atom = atom_body(kind, trimmed, &workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
     }
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    store_agent_atom(&client, atom, &prefix)
 }
 
 /// The entity a claim in the person's own words carries. The prompt hook
@@ -11028,22 +11625,25 @@ pub fn packset_write_mcp(
     persona: Option<&str>,
     transient: Option<bool>,
 ) -> Result<Value> {
-    let client = pack()?;
     let basis = Basis::of(text);
+    let kind = atom_kind(label)?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = if basis == Basis::Agent {
+        client_or_queue(&prefix, kind, text.trim(), "")?
+    } else {
+        pack()?
+    };
     let atom = mcp_claim_atom(label, text, &client.workspace(), persona, transient, basis)?;
     match basis {
         Basis::Person => {
             let posted = with_writer(|| {
                 admit::post_kept(&client, &atom)
-                    .with_context(|| format!("{label}: POST /v1/atoms failed"))
+                    .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
             })?;
             admit::satisfy_text(text.trim());
             Ok(posted)
         }
-        Basis::Agent => with_writer(|| {
-            admit::write_agent(&client, atom.clone())
-                .with_context(|| format!("{label}: POST /v1/atoms failed"))
-        }),
+        Basis::Agent => store_agent_atom(&client, atom, &prefix),
     }
 }
 
@@ -11066,7 +11666,8 @@ pub(crate) fn packset_write_agent_sourced(
     command: &str,
     issue: &str,
 ) -> Result<Value> {
-    let client = pack()?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = client_or_queue(&prefix, "lesson", text, issue)?;
     let atom = agent_sourced_atom(
         label,
         text,
@@ -11077,10 +11678,7 @@ pub(crate) fn packset_write_agent_sourced(
         command,
         issue,
     )?;
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    store_agent_atom(&client, atom, &prefix)
 }
 
 /// The atom [`packset_write_agent_sourced`] posts. Split out so a test can
@@ -11118,50 +11716,258 @@ fn agent_sourced_atom(
     Ok(atom)
 }
 
+/// What `ljos note` did with the memory copy. The logbook note is a
+/// separate write and is already on the ticket when this comes back.
+pub struct NoteMemory {
+    /// The last copy the pack stored.
+    pub body: Option<Value>,
+    /// `Some(true)` when a copy was newly queued, `Some(false)` when those
+    /// copies were already waiting, `None` when nothing was queued.
+    pub queued: Option<bool>,
+    /// Why a copy was not stored, when the pack refused or did not answer.
+    pub error: Option<anyhow::Error>,
+}
+
+/// Post `atom`. A lesson the pack did not answer for is queued in fitted
+/// copies. A refusal is not queued.
+fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result<Value> {
+    match with_writer(|| admit::write_agent(client, atom.clone())) {
+        Ok(posted) => Ok(posted),
+        Err(e) if note_can_wait(&e) && atom["kind"].as_str() == Some("lesson") => {
+            let text = atom["text"].as_str().unwrap_or("");
+            let copies = pack_copy::pack_copies(text);
+            if !copies.is_empty() {
+                let issue = atom["issue"].as_str().unwrap_or("");
+                let workspace = atom["workspace"].as_str().unwrap_or("");
+                let _ = queue_copies(issue, &copies, workspace, "lesson");
+            }
+            Err(with_post_failure(prefix, e))
+        }
+        Err(e) => Err(with_post_failure(prefix, e)),
+    }
+}
+
+/// The pack client, or a queued lesson when the pack is off.
+fn client_or_queue(prefix: &str, kind: &str, text: &str, issue: &str) -> Result<PacksetClient> {
+    match pack() {
+        Ok(client) => Ok(client),
+        Err(e) if kind == "lesson" && note_can_wait(&e) => {
+            let copies = pack_copy::pack_copies(text);
+            if !copies.is_empty() {
+                let _ = queue_copies(issue, &copies, "", "lesson");
+            }
+            Err(with_post_failure(prefix, e))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// A progress note, as an agent memory the default list shows. The tracker
-/// logbook is a separate write. The atom is packset's `note` kind (0.15.2),
-/// which keeps logbook text the one-claim gate would refuse and needs the
-/// issue it copies. A pack older than 0.15.2 answers "unknown atom kind",
-/// and the note goes again as a `summary`, the kind it was before. A pack
-/// that refuses is the error; the caller keeps the logbook note.
+/// logbook is a separate write. The memory copy is cut to copies the pack's
+/// atom gate accepts, so a long sentence or a third sentence is stored, and
+/// a pack that does not know kind `note` takes the same text as a `summary`.
+/// The same words on another ticket are another memory. A pack that answers
+/// with the record it already holds for a different ticket is given the note
+/// again under this ticket's set. A pack that is down or answers 401 keeps
+/// those copies queued. A refusal is not queued. The caller keeps the
+/// logbook note either way.
 ///
 /// # Errors
 ///
-/// An empty text, or the pack refusing the note.
-pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
-    let client = pack()?;
-    write_note_with(&client, issue, text)
+/// An empty text, or the queue file cannot be written.
+pub fn packset_write_note(issue: &str, text: &str) -> Result<NoteMemory> {
+    match pack() {
+        Ok(client) => write_note_with(&client, issue, text, true),
+        Err(e) if note_can_wait(&e) => {
+            let copies = pack_copy::pack_copies(text);
+            let queued = queue_copies(issue, &copies, "", "note")?;
+            Ok(NoteMemory {
+                body: None,
+                queued,
+                error: Some(with_post_failure("note: POST /v1/atoms failed", e)),
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// [`packset_write_note`] through a client already opened, so a queued
-/// note goes to the workspace it was meant for.
-fn write_note_with(client: &PacksetClient, issue: &str, text: &str) -> Result<Value> {
-    let atom = progress_note_atom(issue, text, &client.workspace())?;
-    let first = with_writer(|| {
-        admit::write_agent(client, atom.clone()).context("note: POST /v1/atoms failed")
-    });
+/// note goes to the workspace it was meant for. `queue_on_wait` is false
+/// while flushing: the queue already holds the copy.
+fn write_note_with(
+    client: &PacksetClient,
+    issue: &str,
+    text: &str,
+    queue_on_wait: bool,
+) -> Result<NoteMemory> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("note: empty text is not a memory");
+    }
+    let copies = pack_copy::pack_copies(trimmed);
+    let posting = if copies.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        copies
+    };
+    let mut last = None;
+    let mut first_err = None;
+    for (at, copy) in posting.iter().enumerate() {
+        match post_note_one(client, issue, copy) {
+            Ok(body) => last = Some(body),
+            Err(e) if note_can_wait(&e) => {
+                let queued = if queue_on_wait {
+                    Some(queue_copies(
+                        issue,
+                        &posting[at..],
+                        &client.workspace(),
+                        "note",
+                    )?)
+                } else {
+                    None
+                };
+                let queued = queued.flatten();
+                let error = with_post_failure("note: POST /v1/atoms failed", e);
+                if last.is_some() {
+                    return Ok(NoteMemory {
+                        body: last,
+                        queued,
+                        error: None,
+                    });
+                }
+                return Ok(NoteMemory {
+                    body: None,
+                    queued,
+                    error: Some(error),
+                });
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(with_post_failure("note: POST /v1/atoms failed", e));
+                }
+            }
+        }
+    }
+    if last.is_some() {
+        return Ok(NoteMemory {
+            body: last,
+            queued: None,
+            error: None,
+        });
+    }
+    Ok(NoteMemory {
+        body: None,
+        queued: None,
+        error: first_err,
+    })
+}
+
+fn post_note_one(client: &PacksetClient, issue: &str, text: &str) -> Result<Value> {
+    let posted = post_note_kind(
+        client,
+        progress_note_atom(issue, text, &client.workspace())?,
+    )?;
+    if kept_for_issue(&posted, issue) {
+        return Ok(posted);
+    }
+    // The same text, kind and set are one memory on a pack that does not
+    // read `issue`. The set is part of that key, so this ticket's note is
+    // stored again where the first ticket's record does not match.
+    let mut again = progress_note_atom(issue, text, &client.workspace())?;
+    again["set"] = Value::String(note_set(issue));
+    let posted = post_note_kind(client, again)?;
+    if kept_for_issue(&posted, issue) {
+        return Ok(posted);
+    }
+    bail!("note: the pack returned another ticket's memory");
+}
+
+fn post_note_kind(client: &PacksetClient, atom: Value) -> Result<Value> {
+    let first = with_writer(|| admit::write_agent_one(client, atom.clone()));
     match first {
         Err(e) if note_kind_unknown(&e) => {
             let mut atom = atom;
             atom["kind"] = Value::String("summary".into());
-            with_writer(|| {
-                admit::write_agent(client, atom.clone()).context("note: POST /v1/atoms failed")
-            })
+            with_writer(|| admit::write_agent_one(client, atom.clone()))
         }
         other => other,
     }
 }
 
-/// Whether a note the pack did not take should wait for it: the pack is
+/// Whether the pack's answer is this ticket's memory.
+///
+/// A body that names no issue is the record just stored: the id is this
+/// post's. A body that names another ticket is the memory that ticket
+/// already holds, returned because the text matched.
+fn kept_for_issue(body: &Value, issue: &str) -> bool {
+    let issue = issue.trim();
+    if let Some(got) = body
+        .get("issue")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|got| !got.is_empty())
+    {
+        return got == issue;
+    }
+    let Some(tags) = body.get("entities").and_then(Value::as_array) else {
+        return true;
+    };
+    let want = format!("issue:{issue}");
+    let tagged = tags.iter().any(|tag| tag.as_str() == Some(want.as_str()));
+    let other = tags.iter().any(|tag| {
+        tag.as_str()
+            .is_some_and(|tag| tag.starts_with("issue:") && tag != want)
+    });
+    tagged || !other
+}
+
+/// A set name the pack accepts for `issue`.
+///
+/// The ticket id when that is a legal set name. Otherwise a short hash, so
+/// a writer that keeps claims apart by set still stores one note per ticket.
+fn note_set(issue: &str) -> String {
+    let raw = issue.trim().to_ascii_lowercase();
+    if let Ok(name) = packset_core::set_name::check(&raw) {
+        return name;
+    }
+    let hashed = format!("n{}", &work_id(issue)[..31]);
+    packset_core::set_name::check(&hashed).unwrap_or(hashed)
+}
+
+/// Whether a memory the pack did not take should wait for it: the pack is
 /// off, missing, not answering, or does not know this seat's token. A
-/// refusal (an HTTP 4xx other than 401, 408 or 429) is final, so the note does not wait, and an empty text is no
-/// note at all.
+/// refusal (an HTTP 4xx other than 401, 408 or 429, or the pack's prose
+/// and size rules) is final, so the copy does not wait. An empty text is
+/// no memory at all. The words `POST /v1/atoms failed` alone are not a
+/// refusal: the status and the pack's reason decide.
 #[must_use]
 pub fn note_can_wait(err: &anyhow::Error) -> bool {
-    if format!("{err:#}").contains("empty text is not a memory") {
+    let text = format!("{err:#}");
+    if text.contains("empty text is not a memory")
+        || text.contains("empty text is not a claim")
+        || text.contains("another ticket's memory")
+    {
         return false;
     }
-    !err.chain().any(
+    const FINAL: &[&str] = &[
+        "atom sentence",
+        "one claim is at most",
+        "soft cap",
+        "readability grade",
+        "adverb ratio",
+        "credential-shaped",
+        "invisible unicode",
+        "instructs the model",
+        "unknown atom kind",
+        "unknown atom origin",
+        "unknown atom level",
+        "note atom needs issue",
+        "atom text is required",
+    ];
+    if FINAL.iter().any(|phrase| text.contains(phrase)) {
+        return false;
+    }
+    let typed = err.chain().any(
         |cause| match cause.downcast_ref::<packset_client::Error>() {
             Some(packset_client::Error::Bad(why)) => refusal_status(why),
             Some(packset_client::Error::Http(inner)) => {
@@ -11169,7 +11975,11 @@ pub fn note_can_wait(err: &anyhow::Error) -> bool {
             }
             _ => false,
         },
-    )
+    );
+    if typed || refusal_status(&text) {
+        return false;
+    }
+    true
 }
 
 fn refused_code(code: u16) -> bool {
@@ -11190,17 +12000,44 @@ fn refusal_status(why: &str) -> bool {
         .any(refused_code)
 }
 
-/// Queue the memory copy of a note the pack did not take, for the next
-/// note, finish or doctor to send. `false` when it was already queued.
-///
-/// # Errors
-///
-/// The queue file cannot be written.
-pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
-    let workspace = std::env::var("PACKSET_WORKSPACE")
+fn memory_workspace(workspace: &str) -> String {
+    let workspace = workspace.trim();
+    if !workspace.is_empty() {
+        return workspace.to_string();
+    }
+    std::env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
+        .unwrap_or_else(|| SEAT_WORKSPACE.to_string())
+}
+
+/// Queue fitted copies. `Some(true)` when one was new, `Some(false)` when
+/// every copy was already waiting, `None` when none of them can be stored.
+fn queue_copies(
+    issue: &str,
+    texts: &[String],
+    workspace: &str,
+    kind: &str,
+) -> Result<Option<bool>> {
+    let mut seen = false;
+    let mut newly = false;
+    for text in texts {
+        if !pack_copy::pack_copy_ok(text) {
+            continue;
+        }
+        seen = true;
+        if queue_memory(issue, text, workspace, kind)? {
+            newly = true;
+        }
+    }
+    Ok(seen.then_some(newly))
+}
+
+pub(crate) fn queue_memory(issue: &str, text: &str, workspace: &str, kind: &str) -> Result<bool> {
+    let text = text.trim();
+    if !pack_copy::pack_copy_ok(text) {
+        bail!("queue: the pack would refuse this copy");
+    }
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -11208,15 +12045,32 @@ pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
         &note_queue::state_dir(),
         note_queue::Queued {
             issue: issue.trim().to_string(),
-            text: text.trim().to_string(),
-            workspace,
+            text: text.to_string(),
+            workspace: memory_workspace(workspace),
             at,
+            kind: kind.to_string(),
         },
     )
 }
 
-/// Send the notes queued while the pack was off or not answering. A pack
-/// that still cannot be reached leaves them all queued.
+/// Queue the memory copy of a note the pack did not take, for the next
+/// note, finish, doctor or session start to send. `false` when it was
+/// already queued, or when the pack would refuse the text.
+///
+/// # Errors
+///
+/// The queue file cannot be written.
+pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
+    let copies = pack_copy::pack_copies(text);
+    match queue_copies(issue, &copies, "", "note")? {
+        Some(newly) => Ok(newly),
+        None => Ok(false),
+    }
+}
+
+/// Send the memories queued while the pack was off or not answering. A
+/// copy the pack would refuse is dropped. A pack that still cannot be
+/// reached leaves the fitted copies queued.
 ///
 /// # Errors
 ///
@@ -11225,7 +12079,37 @@ pub fn flush_note_queue() -> Result<note_queue::Drained> {
     flush_note_queue_in(&note_queue::state_dir())
 }
 
+fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
+    let mut out = Vec::new();
+    for note in notes {
+        for text in pack_copy::pack_copies(&note.text) {
+            let item = note_queue::Queued {
+                text,
+                ..note.clone()
+            };
+            if out.iter().any(|seen: &note_queue::Queued| {
+                seen.issue.trim() == item.issue.trim()
+                    && seen.text.trim() == item.text.trim()
+                    && seen.workspace == item.workspace
+                    && seen.kind == item.kind
+            }) {
+                continue;
+            }
+            out.push(item);
+        }
+    }
+    out
+}
+
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
+    let pending = note_queue::pending_in(dir);
+    if pending.is_empty() {
+        return Ok(note_queue::Drained::default());
+    }
+    let fitted = fit_queued(pending.clone());
+    if fitted != pending {
+        note_queue::replace_in(dir, fitted)?;
+    }
     if note_queue::pending_in(dir).is_empty() {
         return Ok(note_queue::Drained::default());
     }
@@ -11235,12 +12119,36 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Ok(client) => client.clone().with_workspace(note.workspace.clone()),
             Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
         };
-        match write_note_with(&client, &note.issue, &note.text) {
-            Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
+        let sent = if note.kind == "lesson" {
+            post_queued_lesson(&client, note)
+                .map(|body| note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()))
+        } else {
+            match write_note_with(&client, &note.issue, &note.text, false) {
+                Ok(mem) => match mem.body {
+                    Some(body) => Ok(note_queue::Sent::Kept(
+                        body["id"].as_str().unwrap_or("?").to_string(),
+                    )),
+                    None => Err(mem
+                        .error
+                        .unwrap_or_else(|| anyhow::anyhow!("note: empty text is not a memory"))),
+                },
+                Err(e) => Err(e),
+            }
+        };
+        match sent {
+            Ok(done) => done,
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
         }
     })
+}
+
+fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
+    let text = note.text.trim();
+    let mut atom = atom_body("lesson", text, &client.workspace());
+    stamp_issue(&mut atom, &note.issue);
+    stamp_horizon(&mut atom, "lesson", text, Some(false));
+    with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
 /// The doctor row for the note queue. It sends what waits first, so a
@@ -11311,20 +12219,18 @@ fn progress_note_atom(issue: &str, text: &str, workspace: &str) -> Result<Value>
 ///
 /// As [`packset_write_agent`].
 pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> Result<Value> {
-    let client = pack()?;
-    let workspace = client.workspace();
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = client_or_queue(&prefix, kind, trimmed, "")?;
+    let workspace = client.workspace();
     let mut atom = atom_body(kind, trimmed, &workspace);
     stamp_horizon(&mut atom, kind, trimmed, Some(true));
     add_entities(&mut atom, tags.iter().cloned());
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    store_agent_atom(&client, atom, &prefix)
 }
 
 /// The issue this memory belongs to. The pack reads `issue` as identity:
@@ -11417,9 +12323,12 @@ pub fn packset_write_scoped(
     stamp_issue(&mut atom, issue);
     stamp_horizon(&mut atom, kind, trimmed, None);
     with_writer(|| {
-        client
-            .post_atom(&atom)
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+        client.post_atom(&atom).map_err(|e| {
+            with_post_failure(
+                &format!("{label}: POST /v1/atoms failed"),
+                anyhow::Error::from(e),
+            )
+        })
     })
 }
 
@@ -11474,7 +12383,8 @@ pub fn packset_write_as(
     // themselves, not against the seat's or another persona's.
     atom["set"] = Value::String(persona_set(name));
     let posted = with_writer(|| {
-        admit::post_kept(&client, &atom).with_context(|| format!("{label}: POST /v1/atoms failed"))
+        admit::post_kept(&client, &atom)
+            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
     })?;
     admit::satisfy_text(trimmed);
     Ok(posted)
@@ -12064,7 +12974,7 @@ pub const RUBRIC: &str = "\
 const SIT_BODY: &str = "\
 A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
 
-1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, this recipe, recall, timeline, reclaim, claim.
+1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, blockers, this recipe, recall, timeline, reclaim, claim.
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Lessons are `ljos remember` in two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
@@ -13833,6 +14743,54 @@ pub fn issue_options(body: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// The `Options: A, B` line for `raw`. Commas split each string.
+///
+/// # Errors
+///
+/// Fewer than two options.
+pub fn options_line(raw: &[String]) -> Result<String> {
+    let options: Vec<String> = raw
+        .iter()
+        .flat_map(|item| item.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect();
+    if options.len() < 2 {
+        bail!("options: name two or more, separated by commas");
+    }
+    Ok(format!("Options: {}", options.join(", ")))
+}
+
+/// `body` with an options line in front. An empty `raw` leaves `body` as it is.
+///
+/// # Errors
+///
+/// Fewer than two options when `raw` is not empty.
+pub fn body_with_options(body: Option<String>, raw: &[String]) -> Result<Option<String>> {
+    if raw.is_empty() {
+        return Ok(body);
+    }
+    let line = options_line(raw)?;
+    match body {
+        Some(rest) if !rest.trim().is_empty() => Ok(Some(format!("{line}\n{}", rest.trim()))),
+        _ => Ok(Some(line)),
+    }
+}
+
+/// Append an `Options:` line to `issue` and commit the tracker.
+///
+/// # Errors
+///
+/// Fewer than two options, or the tracker did not append.
+pub fn append_issue_options(issue: &str, raw: &[String]) -> Result<String> {
+    let line = options_line(raw)?;
+    let said = run_captured("vissue", &["append", issue, &line])
+        .with_context(|| format!("options: {issue} was not updated"))?;
+    let persisted = persist_tracker(issue, "noted options");
+    Ok(format!("{}{persisted}", said.stdout))
+}
+
 /// Jev's answer for a persona on an issue, not yet cast: its brief, less
 /// the closing instructions a subagent needs, is the state, and the
 /// issue's options are the choices.
@@ -13842,7 +14800,7 @@ pub fn issue_options(body: &str) -> Vec<String> {
 /// No such persona, an issue without two options, or Jev off or not
 /// answering.
 pub fn jev_ballot(name: &str, issue: &str) -> Result<jev::Ballot> {
-    let v = tracker_show_json(issue)?;
+    let v = issue_record(issue)?;
     let options = issue_options(v["body"].as_str().unwrap_or(""));
     if options.len() < 2 {
         bail!("vote --jev: {issue} has no `Options: A, B` line with two options or more");
@@ -14761,6 +15719,40 @@ fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
                 if !out.contains(&norm) {
                     out.push(norm);
                 }
+            }
+        }
+    }
+    out
+}
+
+/// The words after the name of each `ljos` the shell runs for `line`, as
+/// the process gets them: quotes resolved, assignments, wrappers and
+/// redirections off. Two runs of one line are two entries.
+pub(crate) fn ljos_invocations(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for sub in nested_lines(line, 0) {
+        for raw in raw_segments(&sub) {
+            let words = shell_words(&strip_prefixes(&raw).join(" "));
+            let Some((name, rest)) = words.split_first() else {
+                continue;
+            };
+            if name.rsplit('/').next() != Some("ljos") {
+                continue;
+            }
+            let mut argv = Vec::new();
+            let mut skip = false;
+            for word in rest {
+                if std::mem::take(&mut skip) {
+                    continue;
+                }
+                if word == ">" || (!word.is_empty() && word.chars().all(|c| c == '<')) {
+                    skip = true;
+                } else if !word.starts_with('<') {
+                    argv.push(word.clone());
+                }
+            }
+            if !argv.is_empty() {
+                out.push(argv);
             }
         }
     }
@@ -17269,6 +18261,11 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// same line is left as it is when the push itself is ordinary.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
+    // A temporary HOME and LJOS_OFF switch the whole guard off, the push
+    // gate included, the same way the shim steps aside.
+    if bookkeep::guard_suspended() {
+        return None;
+    }
     let Some(call) = push_call(line) else {
         return rule.cloned();
     };
@@ -18873,8 +19870,8 @@ pub fn doctor() -> Vec<Habitat> {
 }
 
 /// A row only while the guard is off in this process (`LJOS_OFF`, or a
-/// temporary `HOME` or working directory), so a person who tries ljos in
-/// `/tmp` reads why a command it would stop runs.
+/// temporary `HOME` with no `LJOS_GUARD=on`), so a person who tries ljos
+/// with a scratch home reads why a command it would stop runs.
 fn guard_off_row() -> Option<Habitat> {
     bookkeep::guard_off_reason().map(|state| Habitat {
         name: "guard",
@@ -19217,6 +20214,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    out.push(cloud::mcp_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
     wake_writer();
@@ -19377,6 +20375,19 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 state: said.stdout.lines().next().unwrap_or("").to_string(),
                 ok: true,
             },
+            Err(e) if name == "tracker" => {
+                let mut state = e.to_string().lines().next().unwrap_or("").to_string();
+                if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
+                    if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
+                        state = format!("{state}; {extra}");
+                    }
+                }
+                Habitat {
+                    name,
+                    state,
+                    ok: false,
+                }
+            }
             Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
                 let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
                 Habitat {
@@ -19907,7 +20918,11 @@ pub fn pack_token_row(
 pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
         .filter(|h| {
-            !h.ok && (REQUIRED.contains(&h.name) || h.name == "pack" || h.name == "pack token")
+            !h.ok
+                && (REQUIRED.contains(&h.name)
+                    || h.name == "pack"
+                    || h.name == "pack token"
+                    || h.name == "mcp")
         })
         .map(|h| h.name)
         .collect()
@@ -19964,10 +20979,15 @@ fn optional_bin(name: &str) -> bool {
 }
 
 /// `ok` when the row answers, `warn` when the policy row names an
-/// `ljos-policyd` without phronesis, `info` when the row is optional and
-/// absent, `no` when a required row failed.
+/// `ljos-policyd` without phronesis or a runner skill or runner env ljos
+/// wrote is stale or edited by hand, `info` when the row is optional and
+/// absent, `no` when a required row failed. A stale skill or env ljos
+/// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
+    if row.name == "tracker" && names_unpushed(&row.state) {
+        return "warn";
+    }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
         "warn"
     } else if row.ok {
@@ -19977,11 +20997,26 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))
     {
         "info"
-    } else if WARN_ROWS.contains(&row.name) || row.name == "guard" {
+    } else if (row.name == "runner skill" && runner_skills::is_skill_warning(&row.state))
+        || (row.name == "runner env" && runner_env::is_env_warning(&row.state))
+        || WARN_ROWS.contains(&row.name)
+        || row.name == "guard"
+    {
         "warn"
     } else {
         "no"
     }
+}
+
+/// `1 unpushed` and `12 unpushed` count. `0 unpushed` does not.
+fn names_unpushed(state: &str) -> bool {
+    state.split(';').any(|part| {
+        let mut words = part.split_whitespace();
+        let Some(n) = words.next() else {
+            return false;
+        };
+        words.next() == Some("unpushed") && n != "0"
+    })
 }
 
 pub fn format_doctor(rows: &[Habitat]) -> String {
@@ -20317,23 +21352,72 @@ pub fn handover(
             .trim_end()
             .to_string(),
     );
-    // The key deedar signs with is the one doctor reports: the variable, or
-    // the seat's own at ~/.config/deedar/host.key. `off` signs nothing.
-    if host_key_path().is_some() {
-        let manifest = out.join("manifest-sha256.txt");
-        let said = run_captured(
-            "deedar",
-            &["vouch", "sign", &manifest.display().to_string()],
-        )?;
-        lines.push(said.stdout.trim_end().to_string());
-    } else {
-        lines.push(
-            "unsigned: no host key at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
-             `ljos onboard` writes one"
-                .into(),
-        );
-    }
+    let manifest = out.join("manifest-sha256.txt");
+    lines.push(sign_handover_manifest(&manifest)?);
     Ok(lines)
+}
+
+/// Sign a handover manifest with this seat's key. A manifest that already
+/// has a signature is left as it is: the machine key does not sign it again.
+///
+/// # Errors
+///
+/// `deedar vouch sign` fails.
+pub fn sign_handover_manifest(manifest: &Path) -> Result<String> {
+    let sig = manifest.with_extension("txt.sig");
+    if sig.is_file() {
+        return Ok("already signed; left unchanged".into());
+    }
+    if let Some(key) = seat_handover_key() {
+        let said = vouch_sign(manifest, Some(&key))?;
+        return Ok(said.stdout.trim_end().to_string());
+    }
+    if host_key_path().is_some() {
+        let said = vouch_sign(manifest, None)?;
+        return Ok(said.stdout.trim_end().to_string());
+    }
+    Ok(
+        "unsigned: no host key at ~/.config/deedar/host.key and DEEDAR_HOST_SIGNING_KEY unset; \
+         `ljos onboard` writes one"
+            .into(),
+    )
+}
+
+fn seat_handover_key() -> Option<PathBuf> {
+    let seat = std::env::var("LJOS_SEAT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let path = ballot_sig::seat_key_path(&seat)?;
+    (path.is_file() && !ballot_sig::is_box_host_key(&path)).then_some(path)
+}
+
+fn vouch_sign(manifest: &Path, key: Option<&Path>) -> Result<Said> {
+    use std::process::{Command, Stdio};
+    let bin = which::which("deedar").context("deedar not on PATH")?;
+    let mut cmd = Command::new(bin);
+    if let Some(key) = key {
+        cmd.env("DEEDAR_HOST_SIGNING_KEY", key);
+    }
+    cmd.args(["vouch", "sign", &manifest.display().to_string()]);
+    git_hooks::hook_child_env(&mut cmd);
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("deedar: could not start")?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        let why = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        bail!("deedar exited {}: {why}", out.status);
+    }
+    Ok(Said { stdout, stderr })
 }
 
 /// Put the bridge from a log of `size` entries to this store's head into
@@ -21541,7 +22625,13 @@ pub fn packset_search_as_of(
         let client = pack()?;
         let workspace = client.workspace();
         client
-            .search_opts(&workspace, q, limit, stamp.as_deref(), rerank)
+            .search_opts(
+                &workspace,
+                &recall_query(q),
+                limit,
+                stamp.as_deref(),
+                rerank,
+            )
             .context("search: GET /v1/search failed")
     })?;
     // The cross-encoder replaces the head. When the fused leader is also
@@ -21758,6 +22848,8 @@ fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
 ///
 /// The refusal, explained, or any other failure of the claim graph.
 pub fn claim(node: &str, assignee: &str) -> Result<String> {
+    let assignee = claim_holder(assignee)?;
+    let assignee = assignee.as_str();
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
@@ -21899,6 +22991,8 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
 /// Nothing is ready, every ready node was taken first, or the claim graph
 /// refused for some other reason.
 pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
+    let assignee = claim_holder(assignee)?;
+    let assignee = assignee.as_str();
     let asker = work_id(assignee);
     let slack = slack.map(|s| s.to_string());
     let mut args = vec![
@@ -22100,9 +23194,11 @@ fn state_before_claim(h: &vissue_core::IssueHeading) -> Option<String> {
 /// see [`unstamp_tracker`].
 fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) -> String {
     let mut out = said;
-    if id == node.trim() {
-        return out;
-    }
+    // `node_for` returns `node` unchanged when the issue id is already 32
+    // hex. Skipping the tracker then left the issue STARTED with nobody
+    // on it: the claim graph had released, and the heading still said
+    // STARTED. A node the tracker does not know is a no-op here.
+    let _ = id;
     let line = match unstamp_tracker(node, holder, reopen) {
         Ok(Some(line)) => line,
         Ok(None) => return out,
@@ -22185,28 +23281,31 @@ fn hold_record_path(actor: &str) -> PathBuf {
     runtime_dir().join(format!("hold-{actor}"))
 }
 
-/// The process that owns this conversation: the first ancestor that is
+/// The process that owns this conversation: the nearest ancestor that is
 /// not a shell or a wrapper. For the MCP server that is the runner; for
 /// the command line it is the runner above the shell, else the shell the
-/// person types into.
+/// person types into. A short-lived program that ran this command is that
+/// owner, so its claim is not kept by the daemon above it after it exits.
 fn conversation_process() -> (u32, String) {
-    let chain = ancestry();
-    // A command whose runner the tree lost (a detached pty, a reparented
-    // shell) reaches the multiplexer first; the pane's own shell below it is
-    // the conversation, since the multiplexer is every pane's parent.
-    let mut below = chain.get(1);
-    for entry in chain.iter().skip(1) {
-        if is_session(&entry.1) {
+    owner_of(&ancestry()).unwrap_or_else(|| (std::process::id(), String::new()))
+}
+
+/// [`conversation_process`] for one ancestry, nearest first.
+fn owner_of(chain: &[(u32, String)]) -> Option<(u32, String)> {
+    let mut shell = None;
+    for (pid, comm) in chain {
+        if is_session(comm) {
             break;
         }
-        if !WRAPPERS.contains(&entry.1.as_str()) {
-            return entry.clone();
+        if WRAPPERS.contains(&comm.as_str()) {
+            if shell.is_none() {
+                shell = Some((*pid, comm.clone()));
+            }
+            continue;
         }
-        below = Some(entry);
+        return Some((*pid, comm.clone()));
     }
-    below
-        .cloned()
-        .unwrap_or((std::process::id(), String::new()))
+    shell
 }
 
 fn write_hold(actor: &str, assignee: &str, node: &str) {
@@ -22845,10 +23944,229 @@ fn civil_of_days(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Open a sitting on an issue, in the protocol's order, and stop at the
-/// first habitat that does not answer: doctor, cards, the review clock,
-/// the island the issue's title activates, the working set, the timeline,
-/// the claim.
+/// One section `ljos sitting` prints. [`sitting_gated`] emits these names in
+/// this order, and [`protocol_text`] numbers the same list.
+struct SittingSection {
+    /// The name after `== `. `island` prints as `== island: TITLE`.
+    name: &'static str,
+    /// Left out when it has nothing to say. The others are always printed.
+    optional: bool,
+    /// The protocol step, continuation lines indented three spaces.
+    step: &'static str,
+}
+
+/// The sections a sitting prints, in print order. Optional sections are
+/// omitted when empty; the ones that print stay in this order.
+const SITTING_SECTIONS: &[SittingSection] = &[
+    SittingSection {
+        name: "doctor",
+        optional: false,
+        step: "`== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;\n   \
+`packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.\n   \
+A `warn` on `host` means the kernel killed a process within a day. The\n   \
+sitting opens; run one build or test suite at a time.",
+    },
+    SittingSection {
+        name: "sync",
+        optional: true,
+        step: "`== sync`, left out when the repository names no scope. The sitting pulls\n   \
+the other machines' logs for this scope and takes them before the island\n   \
+is walked. `ljos sync` runs the same pull and push by hand.",
+    },
+    SittingSection {
+        name: "cards",
+        optional: false,
+        step: "`== cards`. `ljos cards`. What the human froze. Read, never write.",
+    },
+    SittingSection {
+        name: "due",
+        optional: false,
+        step: "`== due`. `ljos due`. What is due for review: the soonest eight and the total.\n   \
+The verb prints a page; it does not grade. Grade it after the sitting:\n   \
+check a shown claim against the work, then run `ljos graded ID`\n   \
+(`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the\n   \
+last hour, so a saved list cannot be graded unread; `ljos due --all`\n   \
+lists everything to read and puts none of it up. The review clock\n   \
+moves only when you grade, and a backlog is left due, not drained.",
+    },
+    SittingSection {
+        name: "island",
+        optional: false,
+        step: "`== island`. `ljos island` on the issue's title. The sitting takes the strongest\n   \
+eight. The number on a row is the activation spread along links.\n   \
+`--as NAME` walks that persona's weights. `--fire` after the island\n   \
+was used rewrites those weights, and the next walk follows them. A\n   \
+weak island does not fire. `ljos search TOPIC` and a full\n   \
+`ljos island TASK` are during the work, not this opening.",
+    },
+    SittingSection {
+        name: "blockers",
+        optional: false,
+        step: "`== blockers`. The issue's blockers, read from the tracker. An issue whose\n   \
+blockers are still open is refused before anything is claimed, because the\n   \
+graph says it is not workable; `--anyway` sits on it regardless and says so.",
+    },
+    SittingSection {
+        name: "playbook",
+        optional: false,
+        step: "`== playbook`. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The\n   \
+six built-in recipes are `sit`, `arena`, `land`, `company-panel`,\n   \
+`overnight`, `feature`. Kind `playbook`, weighed not recalled. Pack\n   \
+latest per name is the copy; built-in bodies seed only when the pack\n   \
+has no live atom of that name. Write, list, bind, and copy refuse any\n   \
+other name. `ljos playbooks` lists the six. Absent a name, the sitting\n   \
+matches the title (any name but `feature`) or binds `sit`. Mid-sitting\n   \
+turns re-read the same note; a new task is a new sitting. Finish and\n   \
+release write `playbook:` so the next sitting does not reprint the\n   \
+previous recipe. Sitting always binds one of the closed set before\n   \
+claim. A panel is refused until one is bound. The name lives on the\n   \
+tracker as a `playbook:` note until `finish` or `release`. Feature work runs on a parent issue:\n   \
+`ljos workflow PARENT --start feature` files its design child, and\n   \
+`ljos workflow PARENT` prints the stage and the next step. A sitting\n   \
+on the parent or a child prints the same in `== workflow`, and\n   \
+`ljos finish PARENT --close` is refused until the panel passed.\n   \
+`ljos workflow PARENT --round` files the next panel. Once the substance\n   \
+has settled, a nit, a wording note or a style note stays on the issue.\n   \
+A blocking finding with a reason is one `fix:` child. The same objection\n   \
+is not filed again. At the round limit the parent closes as\n   \
+settled-with-notes and does not wait.",
+    },
+    SittingSection {
+        name: "workflow",
+        optional: true,
+        step: "`== workflow`, left out when neither the issue nor its parent carries a\n   \
+workflow. The stage and the next step, the same reading as `ljos workflow`.",
+    },
+    SittingSection {
+        name: "panel",
+        optional: true,
+        step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
+the issue speaks to. Each brief goes to its own subagent or run, which\n   \
+casts `ljos vote --as NAME` itself.",
+    },
+    SittingSection {
+        name: "recall",
+        optional: false,
+        step: "`== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has\n   \
+cited so far.",
+    },
+    SittingSection {
+        name: "timeline",
+        optional: false,
+        step: "`== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three\n   \
+stores; `ljos timeline` without a sitting prints them all.",
+    },
+    SittingSection {
+        name: "reclaim",
+        optional: false,
+        step: "`== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900\n   \
+seconds when unset; 0 turns the step off) go back to ready when their\n   \
+conversation is gone, or when no hold record on this host names them. A\n   \
+claim whose runner is still alive is kept. Printed before `== claim`.",
+    },
+    SittingSection {
+        name: "claim",
+        optional: false,
+        step: "`== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:\n   \
+two conversations hold two tickets. The same issue is still one\n   \
+holder. `busy` on a named worker means that name still has another\n   \
+node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so\n   \
+`vissue claims` answers who has it; a tracker that refuses the name\n   \
+refuses the sitting, and `ljos release` frees the claim graph.\n   \
+A background worker you start sits under its own conversation's\n   \
+name and the same seat. The conversation that started it can\n   \
+complete, finish or release the worker's claim, and the worker can\n   \
+finish a claim its parent took.\n   \
+Another seat's claim is still refused, and the refusal names who\n   \
+has it.",
+    },
+];
+
+/// The numbered sitting steps `ljos protocol` prints, from [`SITTING_SECTIONS`].
+fn render_sitting_steps() -> String {
+    let mut out = String::from(
+        "It prints these sections, in this order. Each one is a step the sitting\n\
+runs, and each answers something the next one needs. A section that is left\n\
+out when it has nothing to say says so; the others are printed on every\n\
+sitting that gets that far.\n\n",
+    );
+    for (index, section) in SITTING_SECTIONS.iter().enumerate() {
+        let mut lines = section.step.lines();
+        let first = lines.next().unwrap_or("");
+        out.push_str(&format!("{}. {first}\n", index + 1));
+        for line in lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Walks [`SITTING_SECTIONS`] as `ljos sitting` prints headings, so a heading
+/// that is not the next name in that list does not compile into a quiet drift.
+struct SectionCursor {
+    next: usize,
+}
+
+impl SectionCursor {
+    fn new() -> Self {
+        Self { next: 0 }
+    }
+
+    fn advance(&mut self, name: &str) {
+        while self.next < SITTING_SECTIONS.len() && SITTING_SECTIONS[self.next].name != name {
+            assert!(
+                SITTING_SECTIONS[self.next].optional,
+                "sitting skipped required section {}",
+                SITTING_SECTIONS[self.next].name
+            );
+            self.next += 1;
+        }
+        assert!(
+            self.next < SITTING_SECTIONS.len(),
+            "sitting has no section {name}"
+        );
+        self.next += 1;
+    }
+
+    fn heading(&mut self, out: &mut String, name: &str) {
+        self.advance(name);
+        out.push_str("== ");
+        out.push_str(name);
+        out.push('\n');
+    }
+
+    fn heading_titled(&mut self, out: &mut String, name: &str, title: &str) {
+        self.advance(name);
+        out.push_str(&format!("== {name}: {title}\n"));
+    }
+
+    /// The block already carries its `== name` line. An empty block leaves
+    /// the optional section out.
+    fn block(&mut self, name: &str, block: &str) {
+        if !block.is_empty() {
+            assert!(
+                block.starts_with(&format!("== {name}\n"))
+                    || block.starts_with(&format!("== {name}:")),
+                "sitting block {name} does not open with its heading"
+            );
+            self.advance(name);
+        }
+    }
+
+    fn finish(&self) {
+        for section in &SITTING_SECTIONS[self.next..] {
+            assert!(
+                section.optional,
+                "sitting omitted required section {}",
+                section.name
+            );
+        }
+    }
+}
+
+/// Open a sitting on an issue, in [`SITTING_SECTIONS`] order, and stop at the
+/// first habitat that does not answer.
 /// One verb, so the loop that makes the seat a memory runs every time and
 /// not only when somebody remembers to run it.
 ///
@@ -22902,8 +24220,9 @@ pub fn sitting_gated(
     playbook: Option<&str>,
 ) -> Result<String> {
     let mut out = String::new();
+    let mut sections = SectionCursor::new();
     let rows = doctor_seat();
-    out.push_str("== doctor\n");
+    sections.heading(&mut out, "doctor");
     out.push_str(&format_doctor(&rows));
     let down = failing_for_sitting(&rows);
     if !down.is_empty() {
@@ -22929,16 +24248,16 @@ pub fn sitting_gated(
     let synced =
         sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
     if !synced.is_empty() {
-        out.push_str("== sync\n");
+        sections.heading(&mut out, "sync");
         out.push_str(&synced);
     }
-    out.push_str("== cards\n");
+    sections.heading(&mut out, "cards");
     out.push_str(&cards(cards_dir)?);
     let title = issue_title(issue)?;
     let island = packset_island(&title, false)?;
-    out.push_str("== due\n");
+    sections.heading(&mut out, "due");
     out.push_str(&sitting_due_report(&island)?);
-    out.push_str(&format!("== island: {title}\n"));
+    sections.heading_titled(&mut out, "island", &title);
     // The strongest eight: a sitting wants orientation, not the whole
     // cluster; `ljos island` prints it all.
     let mut top = island.clone();
@@ -22946,7 +24265,7 @@ pub fn sitting_gated(
         rows.truncate(8);
     }
     out.push_str(&format_island(&top));
-    out.push_str("== blockers\n");
+    sections.heading(&mut out, "blockers");
     let blockers = open_blockers(issue);
     if blockers.is_empty() {
         out.push_str("none open; the issue is workable\n");
@@ -22975,11 +24294,15 @@ pub fn sitting_gated(
         },
         _ => resolve_sitting_playbook(issue, &title, playbook)?,
     };
-    out.push_str("== playbook\n");
+    sections.heading(&mut out, "playbook");
     out.push_str(&copy_playbook(issue, &name)?);
-    out.push_str(&workflow_sitting_block(issue));
+    let workflow = workflow_sitting_block(issue);
+    if !workflow.is_empty() {
+        sections.block("workflow", &workflow);
+        out.push_str(&workflow);
+    }
     if decision {
-        out.push_str("== panel\n");
+        sections.heading(&mut out, "panel");
         let dir = runtime_dir().join(format!("panel-{issue}"));
         match panel(issue, &dir) {
             Ok(said) => out.push_str(&format!(
@@ -22988,19 +24311,20 @@ pub fn sitting_gated(
             Err(e) => out.push_str(&format!("{issue} is a decision, and the panel could not be written: {e:#}\n")),
         }
     }
-    out.push_str("== recall\n");
+    sections.heading(&mut out, "recall");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     // The last twelve dated events across the three stores; `ljos
     // timeline` prints them all.
-    out.push_str("== timeline\n");
+    sections.heading(&mut out, "timeline");
     out.push_str(&timeline(issue, SITTING_TIMELINE)?);
     // A lease runs out only when somebody hands it back, and nothing else
     // in the seat does, so the sitting does it before it takes work.
-    out.push_str("== reclaim\n");
+    sections.heading(&mut out, "reclaim");
     out.push_str(&reclaim_expired(lease_secs()));
-    out.push_str("== claim\n");
+    sections.heading(&mut out, "claim");
     out.push_str(&claim(issue, assignee)?);
     out.push_str(&persist_tracker(issue, "claimed"));
+    sections.finish();
     Ok(out)
 }
 
@@ -23065,9 +24389,13 @@ fn reclaim_expired(lease: u64) -> String {
     if lease == 0 {
         return "off (LJOS_LEASE_SECS=0)\n".to_string();
     }
+    let mut out = cloud::reap_gone_owners(lease);
     let listed = match run_captured("claimdag", &["list", "--json"]) {
         Ok(said) => said.stdout,
-        Err(e) => return format!("skipped: the claim graph did not list: {e:#}\n"),
+        Err(e) => {
+            out.push_str(&format!("skipped: the claim graph did not list: {e:#}\n"));
+            return out;
+        }
     };
     let rows: Vec<Value> = serde_json::from_str(listed.trim()).unwrap_or_default();
     let now = std::time::SystemTime::now()
@@ -23075,9 +24403,9 @@ fn reclaim_expired(lease: u64) -> String {
         .map_or(0, |d| d.as_secs());
     let expired = expired_claims(&rows, now, lease);
     if expired.is_empty() {
-        return format!("no claim quiet longer than {lease}s\n");
+        out.push_str(&format!("no claim quiet longer than {lease}s\n"));
+        return out;
     }
-    let mut out = String::new();
     for e in expired {
         let name = if e.summary.is_empty() {
             &e.id
@@ -23251,25 +24579,22 @@ pub fn adopts_holder<'a>(
     assignee: &str,
     named: impl IntoIterator<Item = &'a str>,
 ) -> bool {
-    let mine = bare_seat(assignee, node);
-    // A shell holder is `SEAT-TAG`, TAG the base-36 pid
-    // `conversation_tag` makes: short, and with a digit, so a hyphenated
-    // seat name such as `disk-saver` never reads as `disk` plus a tag.
-    let tagged = |n: &str| {
-        n.strip_prefix(mine.as_str())
-            .and_then(|r| r.strip_prefix('-'))
-            .is_some_and(|t| {
-                (1..=4).contains(&t.len())
-                    && t.bytes()
-                        .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
-                    && t.bytes().any(|b| b.is_ascii_digit())
-            })
-    };
-    !mine.is_empty()
-        && named.into_iter().any(|n| {
-            let n = bare_seat(n, node);
-            n == mine || tagged(&n)
-        })
+    let mine = seat_key(assignee, node);
+    !mine.is_empty() && named.into_iter().any(|n| seat_key(n, node) == mine)
+}
+
+/// The seat a holder stands for, for [`adopts_holder`]. An empty name stays
+/// empty. A legacy holder and a `SEAT-TAG` pid are the seat.
+fn seat_key(name: &str, node: &str) -> String {
+    let bare = bare_seat(name, node);
+    if bare.is_empty() {
+        return String::new();
+    }
+    let (seat, _) = holder_parts(&bare);
+    if seat.is_empty() {
+        return String::new();
+    }
+    seat_slug(&seat)
 }
 
 /// Refusal when this shell's holder is not the name that holds the node:
@@ -23321,7 +24646,8 @@ pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
 /// File the lesson of a finished sitting. A lesson learned on an issue
 /// belongs to the scope of the repository that holds the issue, wherever
 /// it was written. One the person typed in a terminal of their own is
-/// `user-declared`; any other is written at once as `agent-derived`. Called after the node completed, so
+/// `user-declared`; any other is a proposal at L0 (`derived`) with origin
+/// `agent-derived`. Called after the node completed, so
 /// a refusal is a line that names the pack's reason and the command that
 /// keeps the lesson, never an error.
 /// A lesson cut into claims the pack takes: at most two sentences each.
@@ -23379,6 +24705,8 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
         let scope = sync::scope_for_issue(issue);
+        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
         let workspace = client.workspace();
         let mut atom = atom_body("lesson", text, &workspace);
@@ -23388,15 +24716,15 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         }
         add_entities(&mut atom, tags);
         stamp_issue(&mut atom, issue);
-        // Standing at once; the review comes afterwards.
+        // Standing once accepted. Until then the proposal holds it and no
+        // search returns it. An agent's lesson starts at L0.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
-        if lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal()) {
+        if persons {
             // Typed by the person in a terminal of their own: no
             // runner above it, so it needs no second review.
             admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
             let posted = with_writer(|| {
-                admit::post_kept(&client, &atom)
-                    .context("finish: POST /v1/atoms failed for the lesson")
+                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
             })?;
             admit::satisfy_text(text);
             let id: String = posted["id"]
@@ -23409,18 +24737,11 @@ fn finish_lesson(issue: &str, text: &str) -> String {
                 "remembered your lesson (id {id}); the hook shows it from the next prompt\n"
             ));
         }
-        let posted = with_writer(|| {
-            admit::write_agent(&client, atom.clone())
-                .context("finish: POST /v1/atoms failed for the lesson")
-        })?;
-        let id: String = posted["id"]
-            .as_str()
-            .unwrap_or("?")
-            .chars()
-            .take(8)
-            .collect();
+        admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+        let filed = admit::propose_admission(&client, atom)?;
         Ok(format!(
-            "remembered the lesson (id {id}) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it\n"
+            "proposed {} as agent-derived; `ljos accept {}` writes it\n",
+            filed.id, filed.id
         ))
     })();
     match filed {
@@ -23608,6 +24929,34 @@ impl CommitLock {
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
         Self(ok.then_some(file))
     }
+
+    /// [`CommitLock::acquire`], given up at `deadline`: `None` when another
+    /// holder still has it then.
+    #[must_use]
+    pub fn acquire_by(path: &std::path::Path, deadline: std::time::Instant) -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return Some(Self(None));
+        };
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Some(Self(Some(file)));
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Some(Self(None)),
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for CommitLock {
@@ -23618,6 +24967,74 @@ impl Drop for CommitLock {
             // in a way that matters, since close releases it too.
             unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
         }
+    }
+}
+
+/// The file ljos locks around every write to a tracker checkout's index.
+pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
+
+/// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
+/// `git status` by the repository's `info/exclude`. Not in `.git`, where a
+/// hand clearing `*.lock` after a crash would unlink it under a live holder
+/// and the next seat would lock a new file beside it. `None` outside a git
+/// checkout.
+fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
+    if let Some(common) = lines.next().filter(|l| !l.is_empty()) {
+        exclude_tracker_lock(&dir.join(common));
+    }
+    Some(top.join(TRACKER_LOCK))
+}
+
+fn exclude_tracker_lock(common: &Path) {
+    use std::io::Write as _;
+    let exclude = common.join("info").join("exclude");
+    let line = format!("/{TRACKER_LOCK}");
+    let text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == line) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(common.join("info"));
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)
+    else {
+        return;
+    };
+    let gap = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = writeln!(file, "{gap}{line}");
+}
+
+/// Hold the tracker checkout that holds `dir` for one write to its index:
+/// a status read, a file write, an add and a commit, or a rebase. Every
+/// ljos writer on the host takes it, so seats queue instead of meeting on
+/// `index.lock`. Taking it twice in one thread waits forever.
+pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
+    tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
+}
+
+/// [`tracker_commit_lock`] for a caller with a time budget: `None` when
+/// another writer still holds the checkout at `deadline`.
+pub fn tracker_commit_lock_by(dir: &Path, deadline: std::time::Instant) -> Option<CommitLock> {
+    match tracker_lock_path(dir) {
+        Some(path) => CommitLock::acquire_by(&path, deadline),
+        None => Some(CommitLock(None)),
     }
 }
 
@@ -23747,20 +25164,27 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// Put `- {Verb} by {seat} [timestamp]` at the top of the issue's logbook.
 /// The line is the seat, with no `:Seat:` property. A file that does not
 /// hold the issue is left alone.
+///
+/// vissue's own writers hold the file's issues lock and replace the file
+/// whole, and so does this. Rewritten in place, the stamp could drop a
+/// ballot another seat wrote between the read and the write, and a `git
+/// add` hashing the file meanwhile dies on unstable object data.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
     let entry = format!(
         "- {} by {} {}",
         verb_heading(verb),
         seat.trim(),
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
-    let Some(next) = insert_logbook_line(&text, issue, &entry) else {
-        return false;
-    };
-    std::fs::write(path, next).is_ok()
+    vissue_core::store::with_issues_lock(path, || {
+        let text = std::fs::read_to_string(path)?;
+        let Some(next) = insert_logbook_line(&text, issue, &entry) else {
+            return Ok(false);
+        };
+        vissue_core::store::replace_file_atomically(path, &next)?;
+        Ok(true)
+    })
+    .unwrap_or(false)
 }
 
 /// `git log` subjects on the tracker that name a seat, optionally one seat.
@@ -23863,6 +25287,201 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
     out
 }
 
+/// Commit `.ljos-seat-keys` when a ballot pin is still unpushed. The issue
+/// commit names one file; the pin is the seat's public key and has to travel
+/// with it. The caller holds [`tracker_commit_lock`].
+fn commit_seat_pin(start: &Path, seat: &str) {
+    let root = tracker_push::repo_root(start);
+    let name = ballot_sig::PIN_FILE;
+    if !root.join(name).is_file() {
+        return;
+    }
+    let ignored = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["check-ignore", "-q", "--", name])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ignored {
+        return;
+    }
+    let _ = commit_paths(&root, &[name], &format!("chore(issues): pin {seat} key"));
+}
+
+/// How a commit of named paths ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathCommit {
+    Made,
+    /// HEAD already holds the paths as they stand: another seat's commit
+    /// carried them, or they did not change.
+    AlreadyIn,
+    /// What git said, never empty.
+    Refused(String),
+}
+
+/// Stage `paths` and commit them alone (`--only`) in the checkout at
+/// `dir`, so another seat's staged work is left out. The caller holds
+/// [`tracker_commit_lock`]. A git process outside ljos that holds the
+/// index is waited out with backoff.
+///
+/// The add runs first and its failure stands on its own: a commit named
+/// for a file git never took in reports a pathspec error that hides why
+/// the add failed. An untracked file is added here, that file only.
+pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
+    let git = |head: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(dir)
+            .args(head)
+            .arg("--")
+            .args(paths)
+            .stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        cmd.output()
+    };
+    // `Err` is a busy index, with what git said.
+    let attempt = || -> Result<PathCommit, String> {
+        let added = match git(&["add"]) {
+            Ok(out) => out,
+            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        };
+        if !added.status.success() {
+            return refused_or_busy(&added);
+        }
+        if git(&["diff", "--cached", "--quiet"]).is_ok_and(|o| o.status.success()) {
+            return Ok(PathCommit::AlreadyIn);
+        }
+        let made = match git(&["commit", "-q", "--only", "-m", message]) {
+            Ok(out) => out,
+            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        };
+        if made.status.success() {
+            return Ok(PathCommit::Made);
+        }
+        // git says "nothing to commit" on stdout under a branch line, and
+        // exits 1, when a commit made since the add carried the paths.
+        if !index_busy(&made)
+            && git(&["status", "--porcelain"])
+                .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
+        {
+            return Ok(PathCommit::AlreadyIn);
+        }
+        refused_or_busy(&made)
+    };
+    let mut result = attempt();
+    if result.is_err() {
+        if let Some(orphan) = orphaned_index_lock(dir) {
+            return PathCommit::Refused(orphan);
+        }
+    }
+    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        result = attempt();
+    }
+    result.unwrap_or_else(PathCommit::Refused)
+}
+
+/// How old an `index.lock` with no git in its checkout must be before ljos
+/// calls it left behind.
+const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The line for an `index.lock` no git holds: older than a minute, with no
+/// git process working in the checkout. A git killed outright leaves one,
+/// and every later commit fails on it until a person removes it.
+pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    let lock = Path::new(lines.next()?).join("index.lock");
+    let top = PathBuf::from(lines.next()?);
+    let age = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())?;
+    if age < ORPHAN_AFTER || git_runs_in(&top) {
+        return None;
+    }
+    Some(format!(
+        "{} is {}s old and no git process runs in {}: a git killed while it held the index left it, and every commit here fails until it is removed (`rm {}`)",
+        lock.display(),
+        age.as_secs(),
+        top.display(),
+        lock.display()
+    ))
+}
+
+/// Whether a git process on this machine works in `top`, by its working
+/// directory. One whose directory cannot be read may be the holder, and
+/// counts.
+fn git_runs_in(top: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        let comm = comm.trim();
+        if comm != "git" && !comm.starts_with("git-") {
+            continue;
+        }
+        match std::fs::read_link(entry.path().join("cwd")) {
+            Ok(cwd) if cwd.starts_with(top) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn index_busy(out: &std::process::Output) -> bool {
+    let said = String::from_utf8_lossy(&out.stderr);
+    said.contains("index.lock") || said.contains(".lock': File exists")
+}
+
+fn refused_or_busy(out: &std::process::Output) -> Result<PathCommit, String> {
+    if index_busy(out) {
+        Err(git_refusal(out))
+    } else {
+        Ok(PathCommit::Refused(git_refusal(out)))
+    }
+}
+
+/// What git said when it refused: the first line of stderr, else of
+/// stdout, else how it exited. A git killed by a signal says nothing.
+fn git_refusal(out: &std::process::Output) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    for stream in [&out.stderr, &out.stdout] {
+        let said = first_line(stream);
+        if !said.is_empty() {
+            return said;
+        }
+    }
+    match (out.status.code(), out.status.signal()) {
+        (_, Some(signal)) => format!("git was killed by signal {signal} before it said why"),
+        (Some(code), _) => format!("git exited {code} and said nothing"),
+        _ => "git said nothing".into(),
+    }
+}
+
 /// Commit the tracker file that holds `issue` and push it, when the tracker
 /// is a git checkout. A write that stays in one working tree is lost to
 /// every other host and to a rebuilt one; closures made on one laptop and
@@ -23871,7 +25490,9 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
 /// an error: the verb already happened, and the line says what did not.
 /// An ignored file is named with its ignore rule. It is not a clean tree
 /// and it is not force-added. `LJOS_TRACKER_GIT=off` skips it; `=commit`
-/// commits without pushing. The subject names the seat, and the logbook
+/// commits without pushing; `=push` commits, rebases with the per-issue
+/// field merge, and pushes. A push that fails stays committed and is tried
+/// again on the next write. The subject names the seat, and the logbook
 /// gains `- {Verb} by {seat} [timestamp]`.
 pub fn persist_tracker(issue: &str, verb: &str) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -23949,6 +25570,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
     }
+    // Every seat on the host commits this one checkout. From the status
+    // read to the seat pin, one lock outside .git is held, so ljos writers
+    // queue instead of meeting on index.lock, and no seat reads a status
+    // that another seat's commit is about to make stale. A git process
+    // outside ljos that holds the index is waited out a few times before
+    // the line says so.
+    let held = tracker_commit_lock(dir);
     match git(&["status", "--porcelain", "--", &file]) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
@@ -23972,50 +25600,15 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let seat = tracker_seat();
     stamp_seat_logbook(path, issue, verb, &seat);
     let message = format!("chore(issues): {issue} {verb} by {seat}");
-    // Every seat on the host commits this one checkout. The add and the
-    // commit run under one lock in the git directory, so ljos writers queue
-    // instead of meeting on index.lock; a git process outside ljos that
-    // holds the index is waited out a few times before the line says so.
-    let common = git(&["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| dir.join(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_else(|| dir.join(".git"));
-    let _held = CommitLock::acquire(&common.join("ljos-commit.lock"));
-    // The add runs first and its failure stands on its own: a commit named
-    // for a file git never took in reports a pathspec error that hides why
-    // the add failed. An untracked ticket is added here, that file only.
-    let stage_and_commit = || {
-        let added = git(&["add", "--", &file])?;
-        if !added.status.success() {
-            return Ok(added);
-        }
-        git(&["commit", "-q", "--only", "-m", &message, "--", &file])
-    };
-    let mut committed = stage_and_commit();
-    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
-        let busy = matches!(&committed, Ok(o) if !o.status.success()
-            && String::from_utf8_lossy(&o.stderr).contains("index.lock"));
-        if !busy {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-        committed = stage_and_commit();
+    let committed = commit_paths(dir, &[file.as_str()], &message);
+    if !matches!(committed, PathCommit::Refused(_)) {
+        commit_seat_pin(dir, &seat);
     }
-    drop(_held);
+    drop(held);
     match committed {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            return format!(
-                "tracker git: commit refused: {}\n",
-                first_line(if o.stderr.is_empty() {
-                    &o.stdout
-                } else {
-                    &o.stderr
-                })
-            );
-        }
-        Err(e) => return format!("tracker git: {e}\n"),
+        PathCommit::Made => {}
+        PathCommit::AlreadyIn => return "tracker git: nothing to commit\n".into(),
+        PathCommit::Refused(why) => return format!("tracker git: commit refused: {why}\n"),
     }
     if mode == "commit" {
         return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
@@ -24024,6 +25617,18 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let remotes = git(&["remote"]).ok().filter(|o| o.status.success());
     if remotes.is_some_and(|o| o.stdout.iter().all(u8::is_ascii_whitespace)) {
         return format!("tracker git: committed {message}; no remote, kept local\n");
+    }
+    if mode == "push" {
+        return match tracker_push::publish(dir) {
+            Ok(()) => {
+                clear_push_refusal();
+                format!("tracker git: committed and pushed {message}\n")
+            }
+            Err(e) => {
+                record_push_refusal(&e);
+                format!("tracker git: committed {message}; push queued: {e}\n")
+            }
+        };
     }
     // A push can run a repository's pre-push hook that publishes data first
     // and takes minutes. The sitting waits a bounded time; a push still going
@@ -24040,7 +25645,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let mirrors = tracker_upstream(dir)
         .and_then(|up| tracker_mirrors(dir, &up))
         .unwrap_or_default();
-    // Another bot's push is fetched and rebased, not merged and not forced.
+    // Another seat's push is fetched and rebased, not merged and not forced.
     // The first attempt is this script. A non-fast-forward comes back here
     // and [`tracker_push::push_checkout`] unions the org headings, then
     // retries. A branch with no upstream is pushed with `-u origin <branch>`.
@@ -24094,6 +25699,91 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             }
             Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
         }
+    }
+}
+
+/// Push commits `LJOS_TRACKER_GIT=push` left behind. Empty when push mode
+/// is off, the tracker root is unset, or nothing is waiting.
+///
+/// The root is `VISSUE_ROOT` or `ISSUE_ROOT`. A guessed working directory
+/// is left alone: this process may be standing in some other checkout.
+#[must_use]
+pub fn drain_tracker_pushes() -> String {
+    load_seat_env();
+    if std::env::var("LJOS_TRACKER_GIT").ok().as_deref() != Some("push") {
+        return String::new();
+    }
+    let Some(root) = std::env::var_os("VISSUE_ROOT")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("ISSUE_ROOT").filter(|v| !v.is_empty()))
+        .map(PathBuf::from)
+    else {
+        return String::new();
+    };
+    let Some(up) = tracker_upstream(&root) else {
+        return String::new();
+    };
+    let range = format!("{up}..HEAD");
+    let Some(count) = git_ok_stdout(&root, &["rev-list", "--count", &range]) else {
+        return String::new();
+    };
+    let count = count.trim();
+    if count.is_empty() || count == "0" {
+        return String::new();
+    }
+    match tracker_push::publish(&root) {
+        Ok(()) => {
+            clear_push_refusal();
+            format!("tracker git: pushed {count} queued\n")
+        }
+        Err(e) => {
+            record_push_refusal(&e);
+            format!("tracker git: push queued: {e}\n")
+        }
+    }
+}
+
+/// A pid that is not this process and is not running, for a queued-push log.
+/// The log name is a pid. A live pid reads as a push still in flight.
+fn refusal_pid() -> u32 {
+    let mut pid = 3_000_017_u32;
+    for _ in 0..64 {
+        if pid != std::process::id() && !pid_alive(pid) {
+            return pid;
+        }
+        pid = pid.saturating_add(2);
+    }
+    3_000_017
+}
+
+fn record_push_refusal(why: &str) {
+    let dir = runtime_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let log = dir.join(format!("tracker-push-{}.log", refusal_pid()));
+    let _ = std::fs::write(log, format!("{why}\n"));
+}
+
+fn clear_push_refusal() {
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return;
+    };
+    for ent in entries.flatten() {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name
+            .strip_prefix("tracker-push-")
+            .and_then(|s| s.strip_suffix(".log"))
+        else {
+            continue;
+        };
+        let Ok(pid) = rest.parse::<u32>() else {
+            continue;
+        };
+        if push_still_running(&ent.path(), pid) {
+            continue;
+        }
+        let _ = std::fs::remove_file(push_child_record(&ent.path()));
+        let _ = std::fs::remove_file(ent.path());
     }
 }
 
@@ -24379,17 +26069,23 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let context = hook_context(&call, 5);
     // The rules are the law's memory: a deny or an ask fires before the
     // context, so a reader sees the verdict first. A line the fast check
-    // already judged does not wait on policyd, which can hang.
-    let fast = static_guard(&line);
+    // already judged does not wait on policyd, which can hang. A guard that
+    // is switched off judges nothing, policyd included.
+    let off = bookkeep::guard_suspended();
+    let fast = if off { None } else { static_guard(&line) };
     let judged = fast.is_some();
-    let rules = rules_for_gate();
+    let rules = if off { Vec::new() } else { rules_for_gate() };
     let cwd = std::env::current_dir()
         .ok()
         .map(|d| d.display().to_string());
-    let gated = redirect_seat_verb(
-        gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
-        &line,
-    );
+    let gated = if off {
+        None
+    } else {
+        redirect_seat_verb(
+            gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
+            &line,
+        )
+    };
     let deny = gated.as_ref().is_some_and(|rule| rule.verdict == "deny");
     let gated = match fast {
         Some(rule) if !deny => Some(rule),
@@ -24399,7 +26095,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // A TCB `allow` is not the verdict once this seat asks or denies. The
     // line the person reads is the ask, including a force push on a box
     // with no seat rule.
-    let tcb = if judged {
+    let tcb = if judged || off {
         None
     } else {
         match tcb_check(argv) {
@@ -24515,6 +26211,9 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
     if let Some(rule) = static_guard(line) {
+        // The push ran into an ask or a deny. Drop the evidence warning so
+        // the next allowed command does not inherit it.
+        let _ = gates::take_push_warning();
         let text = format!(
             "{line}\n{}: {} (rule: {})\n",
             rule.verdict, rule.reason, rule.pattern
@@ -24531,10 +26230,15 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     if argv.is_empty() {
         bail!("guard: pass the command to check");
     }
-    let text = policy_with_memory(&argv)?;
+    let warning = gates::take_push_warning();
+    let mut text = policy_with_memory(&argv)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
+    }
+    // A push the gate let run with no passing test record says so.
+    if let Some(warning) = warning {
+        text.push_str(&format!("warning: {warning}\n"));
     }
     Ok(GuardReport {
         text,
@@ -24785,7 +26489,8 @@ pub fn unhealthy_note(why: &str) -> String {
 /// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
 /// or a commit, push, or merge the gates refuse, judged in this process.
 /// `None` means the slow check may run: a timeout there allows the line.
-/// A temp home is not a seat, and this returns `None` there too.
+/// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
+/// `None` there too. A temp working directory is still judged.
 ///
 /// `cwd` is the directory the command would run in. Absent, the process
 /// directory. The gates read that checkout's `.ljos/gates.toml` and tip.
@@ -25063,9 +26768,8 @@ pub fn policyd_reason(token: &str) -> String {
              `--signoff`, then commit again"
         }
         "git-push-evidence" => {
-            "no passing test evidence for this exact tip. Run `ljos evidence record -- <test \
-             command>` (the `test` line in `.ljos/gates.toml`), then push that same commit. A \
-             plain push with that record needs no approval"
+            "the push gate could not read this command. A plain push runs, and a tip with no \
+             passing `ljos evidence record -- <test command>` run is a warning, not a refusal"
         }
         "git-merge-unready" => {
             "a merge waits until CI is green on the head sha and every Cursor Bugbot thread is \
@@ -25772,13 +27476,13 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 }
 
 /// Give a child this process's connection. A nested `ljos vote` then signs
-/// with the same session instead of minting a nonce of its own. The seat
-/// argument is not copied onto the session.
+/// with the same session, a subagent's included. The seat argument is not
+/// copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
-    let harness = ballot_sig::harness_session();
-    if !harness.is_empty() && harness != "-" {
-        cmd.env("LJOS_HARNESS_SESSION", harness);
+    let id = ballot_sig::identity();
+    if id.harness != "-" && !id.seat_only() {
+        cmd.env("LJOS_HARNESS_SESSION", id.harness);
     }
 }
 
@@ -26228,18 +27932,12 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         if let Some(id) = issue_id {
             stamp_issue(&mut atom, id);
         }
-        // Standing at once, like a finish lesson; reviewed afterwards.
+        // A campaign file is tool output. It stays a proposal at L0 until
+        // a person accepts it.
         stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
-        let result = match admit::write_agent(&client, atom) {
-            Ok(posted) => format!(
-                "remembered {}",
-                posted["id"]
-                    .as_str()
-                    .unwrap_or("?")
-                    .chars()
-                    .take(8)
-                    .collect::<String>()
-            ),
+        admit::stamp_origin(&mut atom, admit::ORIGIN_TOOL);
+        let result = match admit::propose_admission(&client, atom) {
+            Ok(filed) => format!("proposed {}", filed.id),
             Err(e) => format!("refused: {e}"),
         };
         out.push(Remembered {
@@ -26838,12 +28536,12 @@ mod tests {
         }
     }
 
-    /// A temp home, a temp working directory, or LJOS_OFF runs the real
-    /// binary. The policyd denial that blocked `git branch -D` in a scratch
-    /// repository does not apply there.
+    /// A temp home or LJOS_OFF runs the real binary. A temp working
+    /// directory under a real home is judged, and so is a temp home with
+    /// `LJOS_GUARD=on`.
     #[cfg(unix)]
     #[test]
-    fn a_guard_shim_steps_aside_for_a_temp_sandbox_and_ljos_off() {
+    fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
@@ -26864,7 +28562,7 @@ mod tests {
             ),
         );
         exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
-        let run = |home: &std::path::Path, off: bool, cwd: &std::path::Path| {
+        let run = |home: &std::path::Path, env: &[(&str, &str)], cwd: &std::path::Path| {
             let _ = std::fs::remove_file(&marker);
             let mut cmd = std::process::Command::new("git");
             cmd.arg("branch")
@@ -26876,11 +28574,11 @@ mod tests {
                     "PATH",
                     format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
                 )
-                .env_remove("TMPDIR");
-            if off {
-                cmd.env("LJOS_OFF", "1");
-            } else {
-                cmd.env_remove("LJOS_OFF");
+                .env_remove("TMPDIR")
+                .env_remove("LJOS_OFF")
+                .env_remove("LJOS_GUARD");
+            for (k, v) in env {
+                cmd.env(k, v);
             }
             cmd.output().unwrap()
         };
@@ -26888,14 +28586,21 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let sandbox = dir.path().join("sandbox");
         std::fs::create_dir_all(&sandbox).unwrap();
-        let skipped = run(&home, false, &sandbox);
+        let skipped = run(&home, &[], &sandbox);
         assert!(
             skipped.status.success(),
             "{}",
             String::from_utf8_lossy(&skipped.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&skipped.stdout).trim(), "ran");
-        assert!(!marker.exists(), "policyd was asked in a temp directory");
+        assert!(!marker.exists(), "policyd was asked under a temp HOME");
+        let forced = run(&home, &[("LJOS_GUARD", "on")], &sandbox);
+        assert_eq!(
+            forced.status.code(),
+            Some(126),
+            "LJOS_GUARD=on keeps the guard on"
+        );
+        assert!(marker.exists());
         let outside = SeatDir::new("guard-shim");
         let outside_home = outside.path().join("home");
         let outside_cwd = outside.path().join("work");
@@ -26903,18 +28608,168 @@ mod tests {
         std::fs::create_dir_all(&outside_cwd).unwrap();
         std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&outside_cwd, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let off = run(&outside_home, true, &outside_cwd);
+        let in_tmp = run(&outside_home, &[], &sandbox);
+        assert_eq!(
+            in_tmp.status.code(),
+            Some(126),
+            "a temp working directory under a real home is judged"
+        );
+        assert!(marker.exists());
+        let off = run(&outside_home, &[("LJOS_OFF", "1")], &outside_cwd);
         assert!(
             off.status.success(),
             "{}",
             String::from_utf8_lossy(&off.stderr)
         );
         assert!(!marker.exists(), "LJOS_OFF still asked policyd");
-        let denied = run(&outside_home, false, &outside_cwd);
+        let denied = run(&outside_home, &[], &outside_cwd);
         assert_eq!(denied.status.code(), Some(126));
         assert!(marker.exists());
         let err = String::from_utf8_lossy(&denied.stderr);
         assert!(err.contains("denied"), "{err}");
+        exe(&guard.join("rm"), super::GUARD_SHIM);
+        let _ = std::fs::remove_file(&marker);
+        let removed = std::process::Command::new(guard.join("rm"))
+            .args(["-rf", "/home/ubuntu/proj"])
+            .current_dir(&sandbox)
+            .env("HOME", &outside_home)
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
+            )
+            .env_remove("TMPDIR")
+            .env_remove("LJOS_OFF")
+            .env_remove("LJOS_GUARD")
+            .output()
+            .unwrap();
+        assert_eq!(
+            removed.status.code(),
+            Some(126),
+            "rm -rf under a temp working directory is judged: {}",
+            String::from_utf8_lossy(&removed.stderr)
+        );
+        assert!(marker.exists(), "policyd was not asked");
+    }
+
+    /// The shim asks about a force push, as the hook does: a lease push
+    /// onto a feature branch runs, read with `git rev-parse`, and a lease
+    /// push onto main or a plain force push goes to the person.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
+        use std::os::unix::fs::PermissionsExt;
+        // A temp home with the explicit guard-on setting, not a directory
+        // moved out of /tmp.
+        let root = tempfile::tempdir().unwrap();
+        let guard = root.path().join("guard-bin");
+        let fake = root.path().join("fake");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        for d in [&guard, &fake, &home, &repo] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let exe = |p: &std::path::Path, text: &str| {
+            std::fs::write(p, text).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exe(&guard.join("git"), super::GUARD_SHIM);
+        exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
+        );
+        let real_git = which::which("git").expect("git on PATH");
+        let plain = |args: &[&str]| {
+            let out = std::process::Command::new(&real_git)
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Rohit Goswami")
+                .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
+                .env("GIT_COMMITTER_NAME", "Rohit Goswami")
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        plain(&["init", "-q", "-b", "main"]);
+        plain(&["config", "commit.gpgsign", "false"]);
+        plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        plain(&["checkout", "-q", "-b", "feature"]);
+        let shim = |args: &[&str]| {
+            std::process::Command::new(guard.join("git"))
+                .args(args)
+                .current_dir(&repo)
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}:{}",
+                        guard.display(),
+                        fake.display(),
+                        real_git.parent().unwrap().display()
+                    ),
+                )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on")
+                .output()
+                .unwrap()
+        };
+        // There is no remote, so git itself fails once the shim lets the
+        // push through; the shim's own refusal is exit 126.
+        let feature = shim(&["push", "--force-with-lease", "nowhere", "feature"]);
+        assert_ne!(
+            feature.status.code(),
+            Some(126),
+            "{}",
+            String::from_utf8_lossy(&feature.stderr)
+        );
+        let head = shim(&["push", "--force-with-lease", "nowhere", "HEAD"]);
+        assert_ne!(
+            head.status.code(),
+            Some(126),
+            "{}",
+            String::from_utf8_lossy(&head.stderr)
+        );
+        let main = shim(&["push", "--force-with-lease", "nowhere", "HEAD:main"]);
+        assert_eq!(main.status.code(), Some(126));
+        let said = String::from_utf8_lossy(&main.stderr);
+        assert!(said.contains("asks (git-force-push)"), "{said}");
+        let forced = shim(&["push", "--force", "nowhere", "feature"]);
+        assert_eq!(forced.status.code(), Some(126));
+        let said = String::from_utf8_lossy(&forced.stderr);
+        assert!(said.contains("asks (git-force-push)"), "{said}");
+        plain(&["config", "branch.feature.remote", "origin"]);
+        plain(&["config", "branch.feature.merge", "refs/heads/feature"]);
+        let bare = shim(&["push", "--force-with-lease"]);
+        assert_ne!(
+            bare.status.code(),
+            Some(126),
+            "a bare lease push whose upstream is the feature branch runs: {}",
+            String::from_utf8_lossy(&bare.stderr)
+        );
+        plain(&["config", "branch.feature.merge", "refs/heads/main"]);
+        let upstream_main = shim(&["push", "--force-with-lease"]);
+        assert_eq!(
+            upstream_main.status.code(),
+            Some(126),
+            "a bare lease push whose upstream is main asks"
+        );
+        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+        std::fs::write(
+            repo.join(".ljos/gates.toml"),
+            "protected_branches = [\"feature\"]\n",
+        )
+        .unwrap();
+        let protected = shim(&["push", "--force-with-lease", "nowhere", "feature"]);
+        assert_eq!(
+            protected.status.code(),
+            Some(126),
+            "a protected branch asks"
+        );
     }
 
     /// The in-process guard matches the shim: a temp home and LJOS_OFF do
@@ -26949,6 +28804,7 @@ mod tests {
         let keys = [
             "HOME",
             "LJOS_OFF",
+            "LJOS_GUARD",
             "POLICYD_BIN",
             "PACKSET_URL",
             "PACKSET_PORT",
@@ -26962,8 +28818,19 @@ mod tests {
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("PACKSET_PORT");
             std::env::remove_var("LJOS_OFF");
+            std::env::remove_var("LJOS_GUARD");
             std::env::set_var("HOME", "/home/ubuntu");
         }
+        let judged = super::static_guard_in("rm -rf ~/proj", Some(std::path::Path::new("/tmp")))
+            .expect("a temp working directory does not switch the guard off");
+        assert_eq!(judged.verdict, "deny");
+        assert_eq!(judged.pattern, "rm-rf-outside-tmp");
+        let chained = super::static_guard_in(
+            "cd /tmp && rm -rf ~/proj",
+            Some(std::path::Path::new("/tmp")),
+        )
+        .expect("cd /tmp && rm -rf ~/proj");
+        assert_eq!(chained.pattern, "rm-rf-outside-tmp");
         assert!(
             super::tcb_verdict("git branch -D gone").is_some(),
             "outside a sandbox the branch delete is denied"
@@ -26972,6 +28839,10 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         unsafe { std::env::set_var("LJOS_OFF", "1") };
         assert!(super::tcb_verdict("git branch -D gone").is_none());
+        assert!(
+            super::gate_push(None, "git push --force origin main", None).is_none(),
+            "LJOS_OFF skips a force push"
+        );
         assert!(
             super::seat_guard("sed -i s/a/b/ ~/.codex/hooks.json").is_none(),
             "LJOS_OFF skips the seat guard"
@@ -26983,6 +28854,14 @@ mod tests {
             std::env::set_var("HOME", dir.path());
         }
         assert!(super::tcb_verdict("git branch -D gone").is_none());
+        assert!(
+            super::static_guard("rm -rf /home/ubuntu/proj").is_none(),
+            "a temp HOME does not judge rm -rf"
+        );
+        assert!(
+            super::gate_push(None, "git push --force origin main", None).is_none(),
+            "a temp HOME does not ask about a force push"
+        );
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
         assert!(
             refused.to_string().contains("temporary HOME")
@@ -26992,6 +28871,14 @@ mod tests {
         assert!(!marker.exists(), "a temp HOME started the pack daemon");
         let off = crate::bookkeep::guard_off_reason().expect("the guard is off");
         assert!(off.contains("temporary directory"), "{off}");
+        assert!(off.contains("LJOS_GUARD=on"), "{off}");
+        unsafe { std::env::set_var("LJOS_GUARD", "on") };
+        assert!(
+            super::tcb_verdict("git branch -D gone").is_some(),
+            "LJOS_GUARD=on judges a temp HOME"
+        );
+        assert!(crate::bookkeep::guard_off_reason().is_none());
+        unsafe { std::env::remove_var("LJOS_GUARD") };
         unsafe {
             for (k, v) in &saved {
                 match v {
@@ -27003,7 +28890,8 @@ mod tests {
     }
 
     /// An onboard that already wrote the seat's PreToolUse hook picks up
-    /// apply_patch on the next run, and a second run still says the hook is there.
+    /// apply_patch and a group for the seat's MCP tools on the next run, and
+    /// a second run still says the hook is there.
     #[test]
     fn an_old_pre_tool_matcher_grows_apply_patch() {
         let dir = tempfile::tempdir().unwrap();
@@ -27021,6 +28909,8 @@ mod tests {
             v["hooks"]["PreToolUse"][0]["matcher"],
             "Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch"
         );
+        assert_eq!(v["hooks"]["PreToolUse"][1]["matcher"], SEAT_MCP_MATCHER);
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
         let again = hook_step(&file, &events, &[], false);
         assert!(
             again.detail.contains("carries the memory hook"),
@@ -27476,6 +29366,196 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
         ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A seat's tracker commit waits for the checkout's lock before it
+    /// reads the status or stamps the file, and the lock file lives at the
+    /// top of the worktree, out of `git status`.
+    #[test]
+    fn a_tracker_commit_waits_for_the_checkout_lock_before_it_reads_or_stamps() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+
+        let held = CommitLock::acquire(&root.join(TRACKER_LOCK));
+        assert!(held.0.is_some(), "the checkout lock opens");
+        let path = issues.clone();
+        let writer =
+            std::thread::spawn(move || persist_tracker_file(&path, "probe-a1b2", "claimed"));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            !std::fs::read_to_string(&issues)
+                .unwrap()
+                .contains("by saddle"),
+            "the stamp waits for the seat that holds the checkout"
+        );
+        assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
+        drop(held);
+        let said = writer.join().unwrap();
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 claimed by saddle"),
+            "{said}"
+        );
+        let status = run(&["status", "--porcelain", "--ignored=no"]);
+        assert!(!status.contains(TRACKER_LOCK), "{status}");
+        assert!(root.join(TRACKER_LOCK).is_file());
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    fn seeded_tracker(root: &Path) -> PathBuf {
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        std::fs::write(
+            &issues,
+            "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        issues
+    }
+
+    /// Paths HEAD already holds, as another seat's commit leaves them, are
+    /// not a refusal: git's "nothing to commit" came back as `On branch
+    /// master`.
+    #[test]
+    fn paths_head_already_holds_are_committed_already() {
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let probe = dir.path().join("Software/probe");
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "again"),
+            PathCommit::AlreadyIn
+        );
+        std::fs::write(probe.join("issues.org"), "* DONE [#C] Probe\n").unwrap();
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "done"),
+            PathCommit::Made
+        );
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "done"),
+            PathCommit::AlreadyIn
+        );
+    }
+
+    /// An empty index.lock two minutes old, with no git working in the
+    /// checkout, is named with its path and age at once, instead of six
+    /// seconds of retries ending in git's `File exists`. A fresh one may
+    /// still be a live git's.
+    #[test]
+    fn an_orphaned_index_lock_is_named_plainly() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let lock = dir.path().join(".git/index.lock");
+        let file = std::fs::File::create(&lock).unwrap();
+        assert!(orphaned_index_lock(dir.path()).is_none(), "a fresh lock");
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        drop(file);
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let started = std::time::Instant::now();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("index.lock is 1")
+                && said.contains("s old and no git process runs in")
+                && said.contains("`rm "),
+            "{said}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A git killed before it printed anything is named, not an empty
+    /// `commit refused: `.
+    #[test]
+    fn a_commit_killed_by_a_signal_says_so() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["config", "core.hooksPath"])
+            .arg(&hooks)
+            .status()
+            .unwrap();
+        assert!(set.success());
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("commit refused: git was killed by signal 9"),
+            "{said}"
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
     }
@@ -29605,6 +31685,36 @@ mod tests {
     }
 
     #[test]
+    fn a_logbook_stamp_waits_for_the_issue_lock_and_replaces_the_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, "* TODO ship it\n:PROPERTIES:\n:ID: demo-a\n:END:\n").unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let held = CommitLock::acquire(Path::new(&lock));
+        assert!(held.0.is_some(), "the issues lock opens");
+        let target = path.clone();
+        let stamper =
+            std::thread::spawn(move || stamp_seat_logbook(&target, "demo-a", "voted", "alice"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("by alice"),
+            "the stamp waits for the writer that holds the issue"
+        );
+        drop(held);
+        assert!(stamper.join().unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(":LOGBOOK:\n- Voted by alice ["), "{text}");
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            before,
+            "a git add hashing the old file keeps reading the old file"
+        );
+    }
+
+    #[test]
     fn a_second_commit_lock_waits_for_the_first() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ljos-commit.lock");
@@ -29914,6 +32024,80 @@ mod tests {
         ] {
             assert!(!names_the_subject(pnpm, cue), "{cue}");
             assert!(!names_the_subject(pg, cue), "{cue}");
+        }
+    }
+
+    /// `conflict of interest` and `COI` name one another. The phrase's
+    /// other words are common in the pack, so without the abbreviation the
+    /// claim shares nothing with the query and is not ranked.
+    #[test]
+    fn a_phrase_ranks_its_abbreviation_and_the_abbreviation_ranks_the_phrase() {
+        let cue = "JOSS conflict of interest rule";
+        let target = "Editors must declare COI before a review.";
+        assert!(
+            prompt_words(cue)
+                .iter()
+                .all(|word| prompt_words(target).binary_search(word).is_err()),
+            "the claim already shares a word with the query"
+        );
+        let docs = [
+            target,
+            "The build cache stays warm between test runs on this machine.",
+            "Pin the toolchain in the repository manifest before a release.",
+            "State the rule in the review notes for the next reader.",
+            "The rule for a review is written down before the meeting.",
+            "Every review follows that rule from the first comment.",
+            "A review without that rule waits for the editor.",
+            "Write the rule once and point the review at it.",
+        ];
+        let rank = lexical_scores(&docs, cue)
+            .iter()
+            .position(|(index, _)| docs[*index] == target);
+        assert_eq!(rank, Some(0), "abbreviation rank {rank:?}");
+
+        let expansion = "Editors follow the conflict of interest policy before a review.";
+        let reverse = "Apply the COI rule here";
+        assert!(
+            prompt_words(reverse)
+                .iter()
+                .all(|word| prompt_words(expansion).binary_search(word).is_err()),
+            "the expansion already shares a word with the short query"
+        );
+        let expanded = [
+            expansion,
+            "The rule for a review is written down before the meeting.",
+            "Every review follows that rule from the first comment.",
+            "A review without that rule waits for the editor.",
+            "Write the rule once and point the review at it.",
+            "Keep the build cache warm between test runs.",
+            "Pin the toolchain in the repository manifest.",
+            "The deploy script restarts the service.",
+        ];
+        let rank = lexical_scores(&expanded, reverse)
+            .iter()
+            .position(|(index, _)| expanded[*index] == expansion);
+        assert_eq!(rank, Some(0), "expansion rank {rank:?}");
+
+        let pnpm = "Use pnpm instead of npm for every JavaScript package install in this repo";
+        let pg = "Our staging Postgres is version 15; do not use features from Postgres 16";
+        assert!(!abbreviation_match(
+            pnpm,
+            "add the lodash dependency to the web app"
+        ));
+        assert!(!abbreviation_match(pnpm, "bring lodash into the web app"));
+        assert!(!abbreviation_match(
+            pg,
+            "can I use MERGE ... RETURNING in this query"
+        ));
+        for unrelated in [
+            "Run the tests and tell me what fails",
+            "Summarize the last three commits",
+            "Why is the build slow on my laptop",
+            "Add a docstring to every public function",
+        ] {
+            assert!(!abbreviation_match(pnpm, unrelated), "{unrelated}");
+            assert!(!abbreviation_match(pg, unrelated), "{unrelated}");
+            assert!(!abbreviation_match(target, unrelated), "{unrelated}");
         }
     }
 
@@ -30519,6 +32703,49 @@ mod tests {
         assert_eq!(SITTING_TIMELINE, 12);
     }
 
+    /// `ljos protocol` numbers the sections `ljos sitting` prints, in that
+    /// order, reclaim before claim. The marker the file keeps is filled in
+    /// before anything is printed.
+    #[test]
+    fn the_protocol_names_sitting_sections_in_print_order() {
+        let protocol = protocol_text();
+        assert!(!protocol.contains("@@SITTING_SECTIONS@@"));
+        assert!(!protocol.contains("nine sections"));
+        let names = sitting_sections_in(&protocol);
+        let printed: Vec<&str> = SITTING_SECTIONS
+            .iter()
+            .map(|section| section.name)
+            .collect();
+        assert_eq!(names, printed);
+        let reclaim = names.iter().position(|n| *n == "reclaim").unwrap();
+        let claim = names.iter().position(|n| *n == "claim").unwrap();
+        assert_eq!(reclaim + 1, claim);
+    }
+
+    /// Numbered steps between the sitting heading and the next heading.
+    /// A continuation that mentions another `== name` is not its own step.
+    fn sitting_sections_in(protocol: &str) -> Vec<&str> {
+        let start = protocol
+            .find("## Before the work")
+            .expect("the sitting heading");
+        let rest = &protocol[start..];
+        let end = rest.find("\n## ").expect("the next heading");
+        let mut names = Vec::new();
+        for line in rest[..end].lines() {
+            let line = line.trim();
+            let Some((left, right)) = line.split_once(". `== ") else {
+                continue;
+            };
+            if left.is_empty() || !left.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let name = right.split(['`', ',', ' ', '.']).next().unwrap_or("");
+            assert!(!name.is_empty(), "{line}");
+            names.push(name);
+        }
+        names
+    }
+
     #[test]
     fn policyd_required_is_the_operator_switch() {
         let _g = env_guard();
@@ -30634,6 +32861,59 @@ mod tests {
             holder_parts("inky@14ao"),
             ("inky".to_string(), Some("14ao".to_string()))
         );
+        assert_eq!(
+            holder_parts("free-opencode-1vmow"),
+            ("free-opencode".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("free-claude-8h"),
+            ("free-claude".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("inky-n9o@deadbeef"),
+            ("inky".to_string(), Some("deadbeef".to_string()))
+        );
+        assert_eq!(
+            holder_parts("ljos-bot@q4s23e2cxd"),
+            ("ljosbot".to_string(), Some("q4s23e2cxd".to_string()))
+        );
+        assert_eq!(holder_parts("eessi-bot"), ("eessi-bot".to_string(), None));
+        assert_eq!(
+            holder_parts("grokbot-sand-sub"),
+            ("grokbot-sand-sub".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("grokbot-ea713788"),
+            ("grokbot-ea713788".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("saddle-review"),
+            ("saddle-review".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn a_claim_under_a_legacy_holder_is_held_as_the_seat() {
+        assert_eq!(claim_holder("inky-n9o").unwrap(), "inky");
+        assert_eq!(claim_holder("disk-saver-t4t").unwrap(), "disk-saver");
+        assert_eq!(claim_holder("ljos-bot").unwrap(), "ljosbot");
+        assert_eq!(claim_holder("saddle").unwrap(), "saddle");
+        assert_eq!(claim_holder("Disk Saver").unwrap(), "Disk Saver");
+        assert_eq!(claim_holder("inky@deadbeef").unwrap(), "inky@deadbeef");
+        assert_eq!(claim_holder("inky-n9o@deadbeef").unwrap(), "inky@deadbeef");
+        assert_eq!(
+            claim_holder("saddle:proj-aaaa").unwrap(),
+            "saddle:proj-aaaa"
+        );
+        assert_eq!(
+            claim_holder("disk-saver-t4t:proj-aaaa").unwrap(),
+            "disk-saver:proj-aaaa"
+        );
+        assert_eq!(claim_holder("runner").unwrap(), "runner");
+        let err = claim_holder("grokbot-sand-sub").unwrap_err().to_string();
+        assert!(err.contains("no seat of its own"), "{err}");
+        let err = claim_holder("sand-subagent-001").unwrap_err().to_string();
+        assert!(err.contains("no seat of its own"), "{err}");
     }
 
     #[test]
@@ -30829,8 +33109,8 @@ mod tests {
         assert_eq!(v["theme"], "dark", "the rest of the file is kept");
         assert_eq!(
             v["hooks"]["PreToolUse"].as_array().unwrap().len(),
-            2,
-            "the other hook stays"
+            3,
+            "the other hook stays beside the tool group and the MCP group"
         );
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         // Narrowing to the default drops the seat's tool-call group and
@@ -30887,7 +33167,11 @@ mod tests {
             v["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"],
             "block"
         );
-        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            v["hooks"]["PreToolUse"][2]["hooks"][0]["onFailure"],
+            "block"
+        );
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -32405,15 +34689,166 @@ mod tests {
             session: Some("plain".into()),
             shape: HookShape::Asks,
         });
+        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        let rec: Value = serde_json::from_str(proposals.lines().next().unwrap()).unwrap();
+        assert_eq!(rec["status"], "open", "{rec}");
+        assert_eq!(rec["origin"], "user-declared", "{rec}");
+        assert_eq!(rec["atom"]["level"], "explicit", "{rec}");
+        assert_eq!(rec["atom"]["hook"], true, "{rec}");
         assert!(
-            !state.path().join("ljos/proposals.jsonl").exists(),
-            "a plain correction is written, not proposed"
+            rec["text"]
+                .as_str()
+                .unwrap()
+                .contains("you should have used the cluster"),
+            "{rec}"
         );
         assert_eq!(
             posts.load(Ordering::SeqCst),
-            1,
-            "the correction was written once"
+            0,
+            "a correction is a proposal, not a write"
         );
+    }
+
+    /// `finish --lesson` under an agent files one proposal. The origin is
+    /// this seat's own agent and the level is packset's L0. Nothing is posted.
+    #[test]
+    fn finish_lesson_files_the_agents_proposal_at_l0() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&posts);
+        let (url, _) = serve_http(move |req| {
+            if req.contains("POST /v1/") {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            (500, r#"{"error":"down"}"#.into())
+        });
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("CLAUDECODE", "1"),
+        ]);
+        let _url = PackUrl::set(&url);
+        let line = finish_lesson("Software-3z37", "Build the lesson on the cluster fuse.");
+        assert!(line.contains("proposed "), "{line}");
+        assert!(line.contains(" as agent-derived;"), "{line}");
+        assert!(line.contains("ljos accept "), "{line}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "the lesson was not written"
+        );
+        let rec = proposal_on(&state);
+        assert_eq!(rec["status"], "open", "{rec}");
+        assert_eq!(rec["origin"], admit::ORIGIN_AGENT, "{rec}");
+        assert_eq!(rec["atom"]["origin"], admit::ORIGIN_AGENT, "{rec}");
+        assert_eq!(rec["atom"]["level"], admit::LEVEL_L0, "{rec}");
+        assert_eq!(rec["atom"]["kind"], "lesson", "{rec}");
+        assert!(
+            rec["atom"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("cluster fuse"),
+            "{rec}"
+        );
+    }
+
+    /// A resolved campaign finding is tool output. The proposal carries
+    /// `tool-echo` and cannot start above L0.
+    #[test]
+    fn findings_remember_files_a_tool_proposal_at_l0() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&posts);
+        let (url, _) = serve_http(move |req| {
+            if req.contains("POST /v1/") {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            (500, r#"{"error":"down"}"#.into())
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let path = state.path().join("campaign.json");
+        std::fs::write(
+            &path,
+            r#"{"package":"gcc","version":"15.2.0","target":"terra","status":"done","attempts":1,
+            "findings":[{"id":"f1","status":"resolved","class":"compile","disposition":"fixed",
+            "stage":"build","recipe":"GCCcore-15.2.0.eb","summary":"header missing",
+            "evidence":"fatal error: linux/scc.h","resolution":{"action":"applied the headers patch","changes":[]}}]}"#,
+        )
+        .unwrap();
+        let rows = remember_findings(&path, None, false).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].result.starts_with("proposed "), "{rows:?}");
+        assert!(!rows[0].lesson.is_empty(), "{rows:?}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "the finding was not written"
+        );
+        let rec = proposal_on(&state);
+        assert_eq!(rec["status"], "open", "{rec}");
+        assert_eq!(rec["origin"], admit::ORIGIN_TOOL, "{rec}");
+        assert_eq!(rec["atom"]["origin"], admit::ORIGIN_TOOL, "{rec}");
+        assert_eq!(rec["atom"]["level"], admit::LEVEL_L0, "{rec}");
+        assert_eq!(rec["kind"], "lesson", "{rec}");
+    }
+
+    /// Accept is the promotion. A tool proposal filed at L0 is stored at
+    /// packset's `explicit` level, and the origin stays `tool-echo`.
+    #[test]
+    fn accept_promotes_a_tool_proposal_above_l0() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.contains("POST /v1/atoms") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                atom["id"] = Value::String("atom-promoted".into());
+                slot.lock().unwrap().push(atom.clone());
+                return (200, atom.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let path = state.path().join("campaign.json");
+        std::fs::write(
+            &path,
+            r#"{"package":"gcc","version":"15.2.0","target":"terra","status":"done","attempts":1,
+            "findings":[{"id":"f1","status":"resolved","class":"compile","disposition":"fixed",
+            "stage":"build","recipe":"GCCcore-15.2.0.eb","summary":"header missing",
+            "evidence":"fatal error: linux/scc.h","resolution":{"action":"applied the headers patch","changes":[]}}]}"#,
+        )
+        .unwrap();
+        let rows = remember_findings(&path, None, false).unwrap();
+        let id = rows[0].result.trim_start_matches("proposed ").trim();
+        let before = proposal_on(&state);
+        assert_eq!(before["atom"]["level"], admit::LEVEL_L0, "{before}");
+        assert!(
+            stored.lock().unwrap().is_empty(),
+            "not stored before accept"
+        );
+        let said = admit::accept(id).unwrap();
+        assert!(
+            said.contains("explicit") || said.contains("tool-echo"),
+            "{said}"
+        );
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["level"], admit::LEVEL_EXPLICIT, "{live:?}");
+        assert_eq!(live[0]["origin"], admit::ORIGIN_TOOL, "{live:?}");
+        assert_eq!(live[0]["kind"], "lesson");
+        let after = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        assert!(after.contains("\"status\":\"accepted\""), "{after}");
+    }
+
+    fn proposal_on(state: &tempfile::TempDir) -> Value {
+        let text = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        serde_json::from_str(text.lines().next().unwrap()).unwrap()
     }
 
     #[test]
@@ -32813,6 +35248,22 @@ mod tests {
             "one option is no vote"
         );
         assert!(issue_options("no options").is_empty());
+        assert_eq!(
+            options_line(&["age, gpg".into()]).unwrap(),
+            "Options: age, gpg"
+        );
+        assert!(options_line(&["only".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("two or more"));
+        assert_eq!(
+            body_with_options(Some("Why.".into()), &["age".into(), "gpg".into()]).unwrap(),
+            Some("Options: age, gpg\nWhy.".into())
+        );
+        assert_eq!(
+            body_with_options(Some("Why.".into()), &[]).unwrap(),
+            Some("Why.".into())
+        );
     }
 
     #[test]
@@ -32898,6 +35349,18 @@ mod tests {
             "stderr on a clean commit is not a failed commit"
         );
         assert!(!text.contains("lets the work go on"));
+        assert!(
+            text.contains("process.env"),
+            "the hook inherits the seat environment"
+        );
+        assert!(
+            text.contains("OPENCODE_SESSION_ID"),
+            "the session id reaches ljos hook"
+        );
+        assert!(
+            text.contains("sessionId"),
+            "idle events name the session in either case"
+        );
     }
 
     #[test]
@@ -32944,6 +35407,18 @@ mod tests {
         assert!(
             text.contains("A zero exit still cites it"),
             "stderr on a clean commit is not a failed commit"
+        );
+        assert!(
+            text.contains("process.env"),
+            "the hook inherits the seat environment"
+        );
+        assert!(
+            text.contains("OPENCODE_SESSION_ID"),
+            "the session id reaches ljos hook"
+        );
+        assert!(
+            text.contains("sessionId"),
+            "idle events name the session in either case"
         );
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
@@ -33395,6 +35870,9 @@ mod tests {
             "grokbot-shell"
         );
         assert_eq!(super::shared_holder_id("a"), "a-shell-seat");
+        assert!(super::is_shared_holder_id(&super::shared_holder_id("a")));
+        assert!(super::is_shared_holder_id("grokbot-shell"));
+        assert!(!super::is_shared_holder_id("runner-own-id"));
         // Other runners' ids in this test's own environment would join the
         // holder, so they are set aside while it reads.
         let others: Vec<(String, String)> = std::env::vars()
@@ -33601,6 +36079,7 @@ mod tests {
             .iter()
             .all(|s| s.what != "hook" && !s.what.contains("mcp")));
         assert!(!skills.exists(), "a dry run wrote the skill");
+        assert!(!dir.join("grokbot.env").exists(), "a dry run wrote the env");
 
         let steps =
             super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
@@ -33618,6 +36097,10 @@ mod tests {
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
+            "{env}"
+        );
+        assert!(
+            env.contains("${XDG_DATA_HOME:-$HOME/.local/share}/ljos/git-hooks"),
             "{env}"
         );
         let saved = std::fs::read_to_string(&file).unwrap();
@@ -34242,12 +36725,12 @@ mod tests {
             ("HOME", home.path().to_str().unwrap()),
         ]);
         assert!(tcb_verdict("git status").is_none());
-        let missing = tcb_verdict("git push --force origin main").expect("no evidence");
-        assert_eq!(missing.verdict, "deny");
+        let unrecorded = tcb_verdict("git push --force origin main").expect("a force push asks");
+        assert_eq!(unrecorded.verdict, "ask");
         assert!(
-            missing.reason.contains("git-push-evidence"),
+            !unrecorded.reason.contains("git-push-evidence"),
             "{}",
-            missing.reason
+            unrecorded.reason
         );
         let repo = evidenced_push_repo();
         let rule =
@@ -34341,10 +36824,11 @@ mod tests {
         assert!(bare_cursor.contains("cannot ask here"), "{bare_cursor}");
     }
 
-    /// `ljos_guard_check` refuses a force push that has no test evidence.
-    /// The refusal is an error. `git status` stays allowed.
+    /// `ljos_guard_check` asks about a force push, with or without test
+    /// evidence. `guard_command` reports the ask as an error. `git status`
+    /// stays allowed.
     #[test]
-    fn a_force_push_without_evidence_is_a_guard_error() {
+    fn a_force_push_asks_whether_or_not_it_has_evidence() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
@@ -34360,14 +36844,17 @@ mod tests {
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
         ]);
-        let err = guard_report("git push --force origin main")
-            .expect_err("missing evidence is a denial")
-            .to_string();
-        assert!(err.contains("git-push-evidence"), "{err}");
+        let report = guard_report("git push --force origin main").expect("an ask is a report");
+        assert_eq!(report.verdict, "ask", "{}", report.text);
+        assert!(
+            !report.text.contains("git-push-evidence"),
+            "{}",
+            report.text
+        );
         let err = guard_command("git push --force origin main")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("git-push-evidence"), "{err}");
+        assert!(err.contains("git-force-push"), "{err}");
         let allowed = guard_report("git status").expect("status is allowed");
         assert_eq!(allowed.verdict, "allow");
         let repo = evidenced_push_repo();
@@ -34753,6 +37240,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         assert_eq!(super::hook_holder_for("ljosbot", &tree), "ljosbot");
         assert_eq!(super::hook_holder_for("inky", &session), "inky");
+        let chosen = super::Seat {
+            seat: "saddle".into(),
+            holder: "saddle-review".into(),
+            source: "LJOS_SEAT; session LJOS_SESSION_ID".into(),
+        };
+        assert_eq!(super::hook_holder_for("saddle", &chosen), "saddle-review");
     }
 
     #[test]
@@ -34817,6 +37310,61 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let empty = super::progress_note_atom("probe-0001", " ", "ws").unwrap_err();
         assert!(!super::note_can_wait(&empty));
+        let folded = anyhow::anyhow!("note: the pack returned another ticket's memory");
+        assert!(
+            !super::note_can_wait(&folded),
+            "another ticket's memory is not queued"
+        );
+        let prose = anyhow::anyhow!(
+            "note: POST /v1/atoms failed: 400: atom has 3 sentences; one claim is at most 2"
+        );
+        assert!(
+            !super::note_can_wait(&prose),
+            "a prose refusal is not queued"
+        );
+        let grade = anyhow::anyhow!("readability grade 19.4 exceeds 14");
+        assert!(!super::note_can_wait(&grade));
+        let cap = anyhow::anyhow!("atom text exceeds soft cap 500");
+        assert!(!super::note_can_wait(&cap));
+        let down = anyhow::anyhow!(
+            "the pack writer at PACKSET_URL is not answering. This seat is not pointed at the default writer, so it was not started"
+        );
+        assert!(super::note_can_wait(&down));
+        let unnamed = anyhow::anyhow!("Remember: POST /v1/atoms failed");
+        assert!(
+            super::note_can_wait(&unnamed),
+            "the words alone are not a refusal"
+        );
+    }
+
+    /// A pack that echoes another ticket's record is not this note. A body
+    /// that names no issue is the record this post stored.
+    #[test]
+    fn a_memory_named_for_another_ticket_is_not_this_note() {
+        let ours = serde_json::json!({"id": "1", "issue": "ljos-t1aa"});
+        let theirs = serde_json::json!({"id": "1", "issue": "ljos-t2bb"});
+        let unnamed = serde_json::json!({"id": "1", "kind": "note"});
+        let tagged = serde_json::json!({"entities": ["seat:saddle", "issue:ljos-t1aa"]});
+        let other_tag = serde_json::json!({"entities": ["issue:ljos-t2bb"]});
+        assert!(super::kept_for_issue(&ours, "ljos-t1aa"));
+        assert!(!super::kept_for_issue(&theirs, "ljos-t1aa"));
+        assert!(super::kept_for_issue(&unnamed, "ljos-t1aa"));
+        assert!(super::kept_for_issue(&tagged, "ljos-t1aa"));
+        assert!(!super::kept_for_issue(&other_tag, "ljos-t1aa"));
+    }
+
+    /// The set a second post uses is a name the pack accepts, including
+    /// for a ticket id that is not itself a set name.
+    #[test]
+    fn a_note_set_is_a_name_the_pack_accepts() {
+        assert_eq!(super::note_set("ljos-l9qq"), "ljos-l9qq");
+        assert_eq!(super::note_set(" LJOS-L9QQ "), "ljos-l9qq");
+        let hashed = super::note_set("9aaa-bbbb");
+        assert!(packset_core::set_name::check(&hashed).is_ok(), "{hashed}");
+        assert_ne!(hashed, super::note_set("9aaa-bbbc"));
+        let long = format!("ljos-{}", "a".repeat(40));
+        let name = super::note_set(&long);
+        assert!(packset_core::set_name::check(&name).is_ok(), "{name}");
     }
 
     /// With the pack off, a flush sends nothing and keeps every note.
@@ -34831,6 +37379,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 text: "the pack was off".into(),
                 workspace: "ws".into(),
                 at: 1,
+                kind: "note".into(),
             },
         )
         .unwrap();
@@ -34843,6 +37392,104 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
     }
 
+    fn queued_note(dir: &std::path::Path, text: &str) {
+        crate::note_queue::push_in(
+            dir,
+            crate::note_queue::Queued {
+                issue: "probe-0001".into(),
+                text: text.into(),
+                workspace: "ws".into(),
+                at: 1,
+                kind: "note".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A long copy left in the queue is cut to what the pack takes before
+    /// it waits again. The raw sentence does not stay.
+    #[test]
+    fn a_long_queued_note_is_cut_before_it_waits_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = format!("{}end", "word ".repeat(40));
+        queued_note(tmp.path(), &long);
+        let _env = crate::test_env_lock();
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert!(done.left >= 1, "{done:?}");
+        let pending = crate::note_queue::pending_in(tmp.path());
+        assert!(
+            pending
+                .iter()
+                .all(|note| pack_copy::pack_copy_ok(&note.text)),
+            "{pending:?}"
+        );
+        assert!(
+            pending.iter().all(|note| note.text != long.trim()),
+            "{pending:?}"
+        );
+    }
+
+    /// A copy the pack refuses leaves the queue. It is not kept to be sent again.
+    #[test]
+    fn a_refused_queued_copy_leaves_the_queue() {
+        let _g = env_guard();
+        let (url, _) = serve_http(|_| {
+            (
+                400,
+                r#"{"error":"atom sentence 1 is very hard to read: 38 words, the limit is 29"}"#
+                    .into(),
+            )
+        });
+        let _url = PackUrl::set(&url);
+        let tmp = tempfile::tempdir().unwrap();
+        queued_note(tmp.path(), &format!("{}end", "word ".repeat(40)));
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert_eq!(done.left, 0, "{done:?}");
+        assert!(!done.refused.is_empty(), "{done:?}");
+        assert!(crate::note_queue::pending_in(tmp.path()).is_empty());
+    }
+
+    /// An agent lesson of three sentences is stored as copies the atom gate accepts.
+    #[test]
+    fn a_three_sentence_lesson_is_stored_as_copies_the_gate_accepts() {
+        let _g = env_guard();
+        let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (url, _) = serve_http({
+            let texts = std::sync::Arc::clone(&texts);
+            move |req| {
+                let line = req.lines().next().unwrap_or("");
+                if !line.starts_with("POST /v1/atoms ") && !line.starts_with("POST /v1/atoms\r") {
+                    return (200, "{}".into());
+                }
+                let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let text = atom["text"].as_str().unwrap_or("").to_string();
+                if !pack_copy::pack_copy_ok(&text) {
+                    return (
+                        400,
+                        r#"{"error":"atom has 3 sentences; one claim is at most 2"}"#.into(),
+                    );
+                }
+                texts.lock().unwrap().push(text);
+                (
+                    200,
+                    r#"{"id":"atom-1","kind":"lesson","origin":"agent-derived"}"#.into(),
+                )
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let three = "The parser kept the hyphen. The test pins it. The release ships it.";
+        packset_write_agent("Remember", three, None, Some(false)).unwrap();
+        let stored = texts.lock().unwrap().clone();
+        assert!(stored.len() > 1, "{stored:?}");
+        assert!(stored
+            .iter()
+            .all(|text| text != three && pack_copy::pack_copy_ok(text)));
+    }
+
     #[test]
     fn only_an_unknown_kind_sends_the_note_again() {
         let old =
@@ -34853,14 +37500,56 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_stale_runner_env_is_not_called_missing() {
-        let path = std::path::Path::new("/h/.config/ljos/grokbot.env");
-        assert!(super::runner_env_state("grokbot", path, true, true).contains("source /h/"));
-        let stale = super::runner_env_state("grokbot", path, false, true);
-        assert!(stale.contains("is stale"), "{stale}");
-        assert!(stale.contains("ljos onboard --harness grokbot"), "{stale}");
-        let none = super::runner_env_state("grokbot", path, false, false);
-        assert!(none.contains("no ljos env file"), "{none}");
+    fn a_stale_runner_skill_is_a_warning_not_a_failure() {
+        let stale = super::Habitat {
+            name: "runner skill",
+            state: "cursor: /skills/ljos/SKILL.md is stale; ljos doctor --fix".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&stale), "warn");
+        assert!(super::healthy(std::slice::from_ref(&stale)));
+        let edited = super::Habitat {
+            name: "runner skill",
+            state: "cursor: /skills/ljos/SKILL.md was edited by hand; ljos left it".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&edited), "warn");
+        let absent = super::Habitat {
+            name: "runner skill",
+            state: "cursor: absent; ljos onboard --harness cursor".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&absent), "no");
+    }
+
+    #[test]
+    fn a_stale_runner_env_is_a_warning_not_a_failure() {
+        let stale = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env is stale; ljos doctor --fix".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&stale), "warn");
+        assert!(super::healthy(std::slice::from_ref(&stale)));
+        let edited = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env was edited by hand; ljos left it".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&edited), "warn");
+        let foreign = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env was not written by ljos; ljos left it"
+                .into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&foreign), "no");
+        let none = super::Habitat {
+            name: "runner env",
+            state: "grokbot: no ljos env file; ljos onboard --harness grokbot".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&none), "no");
     }
 
     #[test]
@@ -37332,7 +40021,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("LJOS_OFF", "0"),
         ]);
         let started = std::time::Instant::now();
-        let push = static_guard("git push --force origin main").expect("deny");
+        let push = static_guard("git push --force origin main").expect("ask");
         let rm = static_guard("rm -rf /home/u/proj").expect("deny");
         let both = static_guard("rm -rf /tmp/a /etc").expect("deny");
         let find = static_guard("find /home/u/proj -name x -delete").expect("deny");
@@ -37340,7 +40029,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(static_guard("rm -rf /tmp/a /tmp/b").is_none());
         assert!(static_guard("git status").is_none());
         assert!(static_guard("find /tmp/scratch -name x -delete").is_none());
-        let asked = tcb_verdict("git push --force origin main").expect("deny");
+        let asked = tcb_verdict("git push --force origin main").expect("ask");
         let denied = tcb_verdict("rm -rf /home/u/proj").expect("deny");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
@@ -37348,11 +40037,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             started.elapsed()
         );
         assert!(!marker.exists(), "the slow policyd ran");
-        assert_eq!(push.verdict, "deny");
-        assert_eq!(push.pattern, "push-gate");
-        assert!(push.reason.contains("git-push-evidence"), "{}", push.reason);
-        assert_eq!(asked.verdict, "deny");
-        assert_eq!(asked.pattern, "push-gate");
+        assert_eq!(push.verdict, "ask", "{}", push.reason);
+        assert_eq!(push.pattern, "git-force-push");
+        assert!(
+            !push.reason.contains("git-push-evidence"),
+            "{}",
+            push.reason
+        );
+        assert_eq!(asked.verdict, "ask", "{}", asked.reason);
+        assert_eq!(asked.pattern, "git-force-push");
         let repo = evidenced_push_repo();
         let forced =
             static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
@@ -38155,7 +40848,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .find(|h| h.name == "codex")
             .unwrap();
         assert_eq!(codex.hooks_trust.as_deref(), Some("~/.codex/config.toml"));
-        assert!(untrusted_hook_note("codex").contains("/hooks"));
+        let note = untrusted_hook_note("codex");
+        assert!(note.contains("/hooks"), "{note}");
+        assert!(note.contains("Before the guard"), "{note}");
+        assert!(note.contains("upgrade"), "{note}");
     }
 
     #[test]
@@ -38619,6 +41315,33 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(command_segments("env -i A=1 -- make"), ["make"]);
         assert_eq!(command_segments("command -v git"), ["command -v git"]);
         assert_eq!(command_segments("stdbuf -oL tail -f log"), ["tail -f log"]);
+    }
+
+    /// A hook reads each `ljos` a shell line runs as its process will get
+    /// the words, so the process can find the call the hook saw.
+    #[test]
+    fn each_ljos_a_line_runs_is_read_as_its_argv() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            ljos_invocations(
+                r#"cd /x && FOO=1 ~/.cargo/bin/ljos vote demo-a --for ship --used none --as "reviewer a" 2>&1 | tee log"#
+            ),
+            [argv(&[
+                "vote",
+                "demo-a",
+                "--for",
+                "ship",
+                "--used",
+                "none",
+                "--as",
+                "reviewer a"
+            ])]
+        );
+        assert_eq!(
+            ljos_invocations("sh -c 'ljos recall demo-a < /dev/null'; ljos recall demo-a"),
+            [argv(&["recall", "demo-a"]), argv(&["recall", "demo-a"])]
+        );
+        assert!(ljos_invocations("echo ljos vote demo-a; ljos-mcp; ljos").is_empty());
     }
 
     #[test]
@@ -39462,8 +42185,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
     }
 
-    /// Answers one scratch pack: `down` fails the listing, `refuse` rejects
-    /// kind `message`, `keep` accepts the kind and refuses the empty probe.
+    /// Answers one scratch pack.
+    ///
+    /// `down` fails the listing. `refuse` and `attach` report packset
+    /// 0.12.1. `reject` reports no version: an empty message is the tool
+    /// dump every packset returns before it looks at the kind, and any
+    /// other message is `unknown atom kind`. `keep` and `unversioned`
+    /// accept the kind and refuse the level probe.
     fn serve_pack(kind: &'static str) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -39477,7 +42205,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 let (code, body): (u16, &str) = if line.starts_with("GET /v1/status") {
                     match kind {
                         "refuse" | "attach" => (200, r#"{"version":"0.12.1"}"#),
-                        "unversioned" => (200, r#"{}"#),
+                        "unversioned" | "reject" => (200, r#"{}"#),
                         _ => (200, r#"{"version":"0.13.0"}"#),
                     }
                 } else if line.starts_with("GET /v1/atoms") {
@@ -39493,11 +42221,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     }
                 } else if line.starts_with("POST /v1/atoms") {
                     count.fetch_add(1, Ordering::SeqCst);
-                    if kind == "attach" && req.contains("\"text\":\"\"") {
+                    if kind == "reject" && req.contains("\"text\":\"\"") {
+                        // What every packset answers an empty message, before the kind.
+                        (400, r#"{"error":"tool dump is attach, not an atom"}"#)
+                    } else if kind == "reject" {
+                        (400, r#"{"error":"unknown atom kind: message"}"#)
+                    } else if kind == "attach" && req.contains("\"text\":\"\"") {
                         // What packset 0.12.1 answers an empty message.
                         (400, r#"{"error":"tool dump is attach, not an atom"}"#)
                     } else if kind == "refuse" || kind == "attach" {
                         (400, r#"{"error":"unknown atom kind: message"}"#)
+                    } else if req.contains("\"level\":\"nope\"") {
+                        (400, r#"{"error":"unknown atom level: nope"}"#)
                     } else if req.contains("\"text\":\"\"") {
                         (400, r#"{"error":"atom text is required"}"#)
                     } else {
@@ -39618,6 +42353,25 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "inbox: nothing unread\n"
         );
         assert_eq!(posts.load(Ordering::SeqCst), 1, "one probe");
+    }
+
+    /// No version, and the empty probe is the tool dump every packset
+    /// returns before the kind. A message that is not empty is refused
+    /// as an unknown kind. The inbox names that refusal and posts nothing
+    /// that would be kept.
+    #[test]
+    fn an_unversioned_writer_that_rejects_the_kind_is_not_an_empty_inbox() {
+        let _g = env_guard();
+        let (url, posts) = serve_pack("reject");
+        let _held = PackUrl::set(&url);
+        let err = super::mail::inbox(false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("inbox:"), "{text}");
+        assert!(text.contains("does not keep mail"), "{text}");
+        assert!(text.contains("kind message"), "{text}");
+        assert!(text.contains(super::mail::MAIL_PACKSET), "{text}");
+        assert!(!text.contains("nothing unread"), "{text}");
+        assert_eq!(posts.load(Ordering::SeqCst), 1, "the kind was probed");
     }
 
     #[test]
@@ -40197,6 +42951,203 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(req.contains("horizon:transient"), "{req}");
         assert!(req.contains("\"origin\":\"user-declared\""), "{req}");
         assert!(!req.contains("extract"), "{req}");
+    }
+
+    /// The error a person reads names the pack's status and reason, and
+    /// says how to split a claim the sentence cap refused. The pack error
+    /// stays the cause, so a refusal is not queued.
+    #[test]
+    fn a_refused_remember_puts_the_pack_reason_on_the_error() {
+        let (url, _) = serve_http(|req| {
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if body.contains("grade") {
+                (
+                    400,
+                    r#"{"error":"readability grade 19.4 exceeds 14; use shorter sentences and shorter words"}"#
+                        .into(),
+                )
+            } else {
+                (
+                    400,
+                    r#"{"error":"atom has 3 sentences; one claim is at most 2"}"#.into(),
+                )
+            }
+        });
+        let client = PacksetClient::new(&url);
+        let err = post_claim(&client, "Remember", "One. Two. Three.", "ws").unwrap_err();
+        let top = err.to_string();
+        assert!(
+            top.starts_with(
+                "Remember: POST /v1/atoms failed: 400: atom has 3 sentences; one claim is at most 2"
+            ),
+            "{top}"
+        );
+        assert!(top.contains("Split it into two remembers."), "{top}");
+        assert!(err
+            .chain()
+            .any(|cause| cause.downcast_ref::<packset_client::Error>().is_some()));
+        assert!(!note_can_wait(&err), "{err:#}");
+
+        let grade = post_claim(
+            &client,
+            "Remember",
+            "the grade stays on the error line",
+            "ws",
+        )
+        .unwrap_err();
+        let top = grade.to_string();
+        assert!(
+            top.starts_with(
+                "Remember: POST /v1/atoms failed: 400: readability grade 19.4 exceeds 14"
+            ),
+            "{top}"
+        );
+        assert!(!note_can_wait(&grade), "{grade:#}");
+    }
+
+    /// A trailing citation is the atom's source. The claim that remains
+    /// is two sentences, and the pack accepts it.
+    #[test]
+    fn a_citation_tail_is_the_atoms_source() {
+        for tail in [
+            "Source: https://example.com/doc",
+            "(Source: https://example.com/doc)",
+            "Sources: https://a.example/one https://b.example/two",
+            "Citation: Smith 2024, https://doi.org/10.1000/abc",
+            "Ref: https://example.com/doc",
+            "See https://example.com/doc.",
+            "https://example.com/doc",
+        ] {
+            let cited = format!("The parser kept the hyphen. The test pins it. {tail}");
+            let body = atom_body("lesson", &cited, "ws");
+            let text = body["text"].as_str().unwrap();
+            assert_eq!(
+                packset_core::prose::sentences(text).len(),
+                2,
+                "{tail} -> {text}"
+            );
+            assert!(
+                packset_core::prose_refuse(text, packset_core::ProseRole::Atom).is_ok(),
+                "{text}"
+            );
+            assert!(!text.to_ascii_lowercase().contains("source:"), "{text}");
+            assert!(!text.contains("https://"), "{text}");
+            let citation = body["source"]["citation"].as_str().unwrap_or("");
+            assert!(
+                citation.contains("https://") || citation.contains("doi.org"),
+                "{tail} -> {citation}"
+            );
+            let mut value = body.clone();
+            admit::stamp_origin(&mut value, admit::ORIGIN_AGENT);
+            let mut map = value.as_object().cloned().unwrap();
+            packset_core::record::validate(&mut map).unwrap_or_else(|why| {
+                panic!("cited claim refused ({tail}): {why}");
+            });
+        }
+        let logged = atom_body(
+            "lesson",
+            "The parser kept the hyphen. Source: the log.",
+            "ws",
+        );
+        assert!(
+            logged["text"].as_str().unwrap().contains("Source:"),
+            "{logged}"
+        );
+        assert!(logged["source"].get("citation").is_none(), "{logged}");
+        let raw = atom_body("lesson", "Remember: pin the review set", "ws");
+        assert_eq!(raw["text"], "Remember: pin the review set");
+        assert!(raw["source"].get("citation").is_none(), "{raw}");
+    }
+
+    /// A pack that runs the real atom gate. The stored body is what it kept.
+    fn serve_validating() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if !line.contains("POST /v1/atoms") {
+                return (200, "{}".into());
+            }
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            let Ok(mut atom) = serde_json::from_str::<serde_json::Map<String, Value>>(body) else {
+                return (400, r#"{"error":"atom text is required"}"#.into());
+            };
+            match packset_core::record::validate(&mut atom) {
+                Ok(()) => {
+                    if !atom.contains_key("id") {
+                        atom.insert("id".to_string(), Value::String("atom-1".into()));
+                    }
+                    let value = Value::Object(atom);
+                    slot.lock().unwrap().push(value.clone());
+                    (200, value.to_string())
+                }
+                Err(why) => (
+                    400,
+                    serde_json::json!({ "error": why.to_string() }).to_string(),
+                ),
+            }
+        });
+        (url, stored)
+    }
+
+    /// Length and grade are stored as written, with the pack's warning, for
+    /// remember and for prefer. A third sentence is still more than one atom.
+    #[test]
+    fn a_long_remember_is_stored_with_the_same_warning_as_prefer() {
+        let _g = env_guard();
+        let (url, stored) = serve_validating();
+        let _url = PackUrl::set(&url);
+        let grade = "The payments service retries webhooks three times with exponential backoff starting at two seconds.";
+        let words = format!("{}end.", "word ".repeat(29));
+        for text in [grade, words.as_str()] {
+            let remembered = packset_write_agent("Remember", text, None, Some(false))
+                .unwrap_or_else(|why| panic!("remember refused {text:?}: {why:#}"));
+            assert_eq!(remembered["text"], text);
+            let warning = remembered["prose"]["warning"].as_str().unwrap_or("");
+            assert!(!warning.is_empty(), "{remembered}");
+            assert!(prose_warning_line(&remembered).is_some(), "{warning}");
+            let preferred = packset_write_as("Prefer", text, None, Some(false))
+                .unwrap_or_else(|why| panic!("prefer refused {text:?}: {why:#}"));
+            assert_eq!(preferred["text"], text);
+            assert!(
+                preferred["prose"]["warning"]
+                    .as_str()
+                    .is_some_and(|warning| !warning.is_empty()),
+                "{preferred}"
+            );
+        }
+        let three = "The parser kept the hyphen. The test pins it. The release ships it.";
+        packset_write_agent("Remember", three, None, Some(false))
+            .unwrap_or_else(|why| panic!("three sentences refused: {why:#}"));
+        let copies: Vec<String> = stored
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom["text"].as_str().map(str::to_string))
+            .filter(|text| text != grade && text != &words)
+            .collect();
+        assert!(copies.len() > 1, "{copies:?}");
+        assert!(copies.iter().all(|text| text != three), "{copies:?}");
+        assert!(copies.iter().all(|text| {
+            packset_core::prose::sentences(text).len() <= packset_core::prose::MAX_ATOM_SENTENCES
+        }));
+    }
+
+    /// The pack is asked for the abbreviation, so a claim that only says
+    /// `COI` can match a query that says the phrase.
+    #[test]
+    fn a_search_asks_for_the_abbreviation() {
+        let _g = env_guard();
+        let (url, log) = serve_http(|_| (200, r#"{"hits":[]}"#.into()));
+        let _url = PackUrl::set(&url);
+        packset_search("JOSS conflict of interest rule").unwrap();
+        let lines = log.lock().unwrap().clone();
+        let line = lines
+            .iter()
+            .find(|line| line.contains("/v1/search"))
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(line.to_ascii_lowercase().contains("coi"), "{lines:?}");
     }
 
     /// Many requests, each answered by `on`. The log is the request line
@@ -41359,22 +44310,161 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             said.contains("completed the session node for probe-f1n5 as done"),
             "{said}"
         );
-        assert!(said.contains("the lesson was not kept"), "{said}");
+        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        if persons {
+            assert!(said.contains("the lesson was not kept"), "{said}");
+            assert!(
+                said.contains("readability grade 14.72 exceeds 14"),
+                "{said}"
+            );
+            assert!(
+                said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
+                "{said}"
+            );
+            assert!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.starts_with("POST /v1/atoms")),
+                "the lesson never reached the pack"
+            );
+        } else {
+            assert!(said.contains("proposed "), "{said}");
+            assert!(said.contains(" as agent-derived;"), "{said}");
+            assert!(
+                !seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.starts_with("POST /v1/atoms")),
+                "an agent's lesson is a proposal and is not posted"
+            );
+        }
+    }
+
+    /// Finish under `LJOS_TRACKER_GIT=commit` commits the tracker and the
+    /// pack log locally. The pack remote, which is that tracker's origin,
+    /// stays where it was: the sync used to push the whole branch with the
+    /// sealed log, so a ticket commit the setting had kept local left with it.
+    #[test]
+    fn finish_under_commit_pushes_nothing_to_the_pack_remote() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let root = dir.path().join("tracker");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* STARTED [#B] Finish a sitting\n:PROPERTIES:\n:ID:         probe-f1n5\n:END:\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            "name = \"surf\"\nrecipients = [\"age1test\"]\n",
+        )
+        .unwrap();
+        let atom = serde_json::json!({
+            "id": "a1",
+            "text": "A pack atom stays on this machine.",
+            "kind": "lesson",
+            "entities": []
+        });
+        let plain = sync::log_plaintext(std::slice::from_ref(&atom), "surf", "surf");
+        let digest = format!("{} {}\n", work_id(&plain), work_id("age1test"));
+        let atoms = root.join(".ljos/atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        let host = sync::host();
+        std::fs::write(atoms.join(format!("{host}.jsonl.age")), "sealed\n").unwrap();
+        std::fs::write(atoms.join(format!("{host}.digest")), digest).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        let remote_before = git(&remote, &["rev-parse", "HEAD"]);
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        let body = serde_json::json!({"atoms": [atom]}).to_string();
+        let (url, _seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("/v1/activate") {
+                (200, r#"{"island":[],"fired":0}"#.into())
+            } else if line.contains("/v1/atoms") {
+                (200, body.clone())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let state = dir.path().join("state");
+        let runtime = dir.path().join("run");
+        let config = dir.path().join("config");
+        for d in [&state, &runtime, &config] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "commit"),
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let said = with_fake_on_path(dir.path(), || {
+            finish(
+                "probe-f1n5",
+                "done",
+                None,
+                None,
+                false,
+                LEARN_BETA,
+                "alice",
+                Some(2),
+                false,
+            )
+        })
+        .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
+        let remote_after = git(&remote, &["rev-parse", "HEAD"]);
+        let subjects = git(&remote, &["log", "--format=%s"]);
+        let ahead = git(&root, &["rev-list", "--count", "origin/main..HEAD"]);
+        assert_eq!(remote_before, remote_after, "the pack remote moved");
+        assert_eq!(subjects, "seed", "the pack remote received {subjects}");
+        assert_ne!(
+            ahead, "0",
+            "nothing was committed locally to refuse pushing"
+        );
         assert!(
-            said.contains("readability grade 14.72 exceeds 14"),
+            said.contains("sync: not pushed (LJOS_TRACKER_GIT=commit)"),
             "{said}"
         );
-        assert!(
-            said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
-            "{said}"
-        );
-        assert!(
-            seen.lock()
-                .unwrap()
-                .iter()
-                .any(|l| l.starts_with("POST /v1/atoms")),
-            "the lesson never reached the pack"
-        );
+        assert!(!said.contains("pushed pending"), "{said}");
+        assert!(!said.contains("; pushed\n"), "{said}");
     }
 
     #[test]
@@ -41508,16 +44598,25 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let obj = hooks["hooks"].as_object().expect("hooks object");
         assert_eq!(obj.keys().cloned().collect::<Vec<_>>(), events);
         for event in &events {
-            let group = &obj[event][0];
-            assert_eq!(group["matcher"], super::hook_matcher(event));
-            let hook = &group["hooks"][0];
-            assert_eq!(hook["type"], "command");
-            assert_eq!(hook["timeout"], 20);
-            let command = hook["command"].as_str().unwrap();
-            assert!(
-                command.contains("CLAUDE_PLUGIN_ROOT") && command.ends_with("ljos hook"),
-                "{command}"
-            );
+            let groups = obj[event].as_array().expect("matcher groups");
+            let matchers: Vec<&str> = groups
+                .iter()
+                .map(|g| g["matcher"].as_str().unwrap_or(""))
+                .collect();
+            let want: Vec<&str> = std::iter::once(super::hook_matcher(event))
+                .chain(super::extra_hook_matchers(event).iter().copied())
+                .collect();
+            assert_eq!(matchers, want, "{event}");
+            for group in groups {
+                let hook = &group["hooks"][0];
+                assert_eq!(hook["type"], "command");
+                assert_eq!(hook["timeout"], 20);
+                let command = hook["command"].as_str().unwrap();
+                assert!(
+                    command.contains("CLAUDE_PLUGIN_ROOT") && command.ends_with("ljos hook"),
+                    "{command}"
+                );
+            }
         }
 
         let plugin: Value = serde_json::from_str(&read(".claude-plugin/plugin.json")).unwrap();
@@ -41917,6 +45016,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(adopts_holder("n1", "inky", ["inky@uhpdsahugi:n1"]));
         assert!(adopts_holder("n1", "inky@box", [" Inky "]));
         assert!(adopts_holder("n1", "inky", ["inky-p6a"]));
+        assert!(adopts_holder("n1", "ljosbot", ["ljos-bot"]));
+        assert!(adopts_holder("n1", "disk-saver", ["disk-saver-t4t"]));
         assert!(!adopts_holder("n1", "disk", ["disk-saver"]));
         assert!(!adopts_holder("n1", "inky", ["saddle"]));
         assert!(!adopts_holder("n1", "", ["inky"]));
@@ -42044,5 +45145,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let you = text.find("You are designer").expect("persona");
         assert!(rule_at < you, "{text}");
         assert_eq!(std::env::var("LJOS_SEAT").as_deref(), Ok("inky"));
+    }
+
+    #[test]
+    fn the_hold_names_the_nearest_program() {
+        let own = |names: &[&str]| {
+            let chain: Vec<(u32, String)> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (u32::try_from(i).unwrap() + 10, (*name).to_string()))
+                .collect();
+            super::owner_of(&chain).map(|(_, comm)| comm)
+        };
+        assert_eq!(own(&["sh", "node"]).as_deref(), Some("node"));
+        assert_eq!(own(&["python3", "sh", "node"]).as_deref(), Some("python3"));
+        assert_eq!(own(&["bash", "tmux"]).as_deref(), Some("bash"));
+        assert_eq!(own(&["bash"]).as_deref(), Some("bash"));
+        assert_eq!(own(&["tmux"]), None);
     }
 }

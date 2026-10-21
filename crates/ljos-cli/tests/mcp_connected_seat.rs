@@ -9,11 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
-    // The guard treats /tmp homes as scratch runs, so this fixture needs
-    // an isolated home in the build tree to exercise destructive policy.
-    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
-    std::fs::create_dir_all(&target).unwrap();
-    let root = tempfile::tempdir_in(target).unwrap();
+    // A temp home is a scratch run, so the server gets the explicit
+    // guard-on setting to judge destructive commands there.
+    let root = tempfile::tempdir().unwrap();
     let tracker = root.path().join("tracker");
     std::fs::create_dir(&tracker).unwrap();
     std::fs::write(
@@ -35,7 +33,7 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
          XDG_CONFIG_HOME={home}/config XDG_RUNTIME_DIR={home} \
          XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
          VISSUE_ROOT={tracker} ISSUE_ROOT={tracker} VISSUE_NO_ROUTE=1 \
-         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all {binary}\n",
+         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all LJOS_GUARD=on {binary}\n",
         home = quote(root.path().to_str().unwrap()),
         tracker = quote(tracker.to_str().unwrap()),
         binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),

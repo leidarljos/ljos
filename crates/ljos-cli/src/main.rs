@@ -13,12 +13,12 @@ use ljos_cli::{
     now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
     packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
     personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
-    prompt_hook_stdout, read_campaign, receive, release, remember_findings, rows_about, run,
-    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
-    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
-    PROTOCOL,
+    prompt_hook_stdout, protocol_text, read_campaign, receive, release, remember_findings,
+    rows_about, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
+    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
+    uncite_deed, with_discount, withdraw_prediction, write_outcome, write_persona_as,
+    write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust,
+    HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -213,6 +213,16 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
 }
 
 #[derive(Subcommand)]
+enum CloudCmd {
+    /// Install the release binaries, write the harness MCP command, and clone `LJOS_TRACKER_REMOTE`.
+    Up {
+        /// Download the release again.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
     Remember {
@@ -342,6 +352,22 @@ enum Cmd {
         /// The path in the tracker (`%P`).
         path: String,
     },
+    /// Field-merge one issue org file. git calls this as the `ljos-org`
+    /// merge driver (`%O` `%A` `%B`). The merged text replaces `ours`.
+    #[command(hide = true)]
+    MergeOrg {
+        /// The common ancestor (`%O`).
+        base: PathBuf,
+        /// The file git keeps (`%A`).
+        ours: PathBuf,
+        /// The other side (`%B`).
+        theirs: PathBuf,
+    },
+    /// Put this machine on the shared tracker.
+    Cloud {
+        #[command(subcommand)]
+        cmd: CloudCmd,
+    },
     /// What this seat's memory turns on: the claims most linked to, by a weighted PageRank over the pack's links.
     Hubs {
         /// Most hubs to print.
@@ -413,6 +439,9 @@ enum Cmd {
         /// Body prose under the heading. A decision's body names `Options: A, B`.
         #[arg(long)]
         body: Option<String>,
+        /// Comma-separated options. Two or more become the first body line `Options: A, B`.
+        #[arg(long, value_name = "A,B")]
+        options: Option<String>,
         /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
         /// lapses the vote once the deadline passes short of it.
         #[arg(long, value_name = "N", requires = "deadline")]
@@ -420,6 +449,13 @@ enum Cmd {
         /// RFC 3339 time the ballots are due, with `--quorum`.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
         deadline: Option<String>,
+    },
+    /// Append `Options: A, B` to an issue. Two or more, separated by commas.
+    Options {
+        /// The issue id.
+        issue: String,
+        /// The options, separated by commas.
+        options: String,
     },
     /// Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief.
     OpenPanel {
@@ -865,7 +901,8 @@ enum Cmd {
         /// gemini, windsurf, factory, kiro, cline, qwen or crush.
         #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
         runner: Option<String>,
-        /// Book the commit git just created. The hook scripts pass this. No stdin.
+        /// Book the commit git just created. The hook scripts pass this.
+        /// `post-commit` reads no stdin. `post-rewrite` reads the old and new shas.
         #[arg(long, conflicts_with_all = ["prompt", "runner", "fail_on_deny"])]
         git_commit: bool,
         /// Which git hook called `--git-commit`: `post-commit` or `post-rewrite`.
@@ -874,6 +911,14 @@ enum Cmd {
         /// Print the SessionStart brief on stderr once for this conversation.
         #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit"])]
         brief_once: bool,
+    },
+    /// Run the ljos part of one git hook. The block `ljos git-hooks install` appends calls this.
+    GitHook {
+        /// Hook name, for example `post-commit`.
+        name: String,
+        /// Arguments git passed the hook. They are not read.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
     },
     /// Install, remove, or show the global git hooks that book commits.
     GitHooks {
@@ -933,6 +978,9 @@ enum Cmd {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
+        /// Refresh runner skills and runner env files this ljos wrote. A skill edited by hand, and an env file ljos did not write, are left in place.
+        #[arg(long)]
+        fix: bool,
     },
     /// Read-only icedtea pane over due, claims, and trust. Execs sibling `ljos-hud`.
     Hud {
@@ -1182,6 +1230,7 @@ fn main() -> Result<()> {
 }
 
 fn run_command() -> Result<()> {
+    ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
     // SAFETY: resetting a signal disposition before any thread is spawned.
@@ -1189,6 +1238,19 @@ fn run_command() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cmd = Cli::parse().cmd;
+    // The first run of a new version refreshes skills and runner env
+    // files ljos wrote. Doctor stays read-only unless `--fix` is set.
+    match &cmd {
+        Cmd::Doctor { fix: true, .. } => {
+            ljos_cli::runner_skills::refresh_for_fix();
+            ljos_cli::runner_env::refresh_for_fix();
+        }
+        Cmd::Doctor { .. } => {}
+        _ => {
+            ljos_cli::runner_skills::refresh_on_new_version();
+            ljos_cli::runner_env::refresh_on_new_version();
+        }
+    }
     // A subagent with no seat would hold under its process tree ("bash").
     // The commands that name a holder refuse instead.
     if matches!(
@@ -1201,6 +1263,7 @@ fn run_command() -> Result<()> {
             | Cmd::Release { .. }
             | Cmd::Complete { .. }
             | Cmd::File { .. }
+            | Cmd::Options { .. }
             | Cmd::Deed { .. }
     ) && ljos_cli::unseated_subagent()
     {
@@ -1394,6 +1457,12 @@ fn run_command() -> Result<()> {
         Cmd::MergeAtoms { current, path } => {
             ljos_cli::merge_atoms(&current, &path)?;
         }
+        Cmd::MergeOrg { base, ours, theirs } => {
+            ljos_cli::cloud::merge_org_cli(&base, &ours, &theirs)?;
+        }
+        Cmd::Cloud { cmd } => match cmd {
+            CloudCmd::Up { force } => print!("{}", ljos_cli::cloud::up(force)?),
+        },
         Cmd::Sync {
             key,
             import,
@@ -1533,6 +1602,7 @@ fn run_command() -> Result<()> {
             tags,
             priority,
             body,
+            options,
             quorum,
             deadline,
         } => {
@@ -1540,6 +1610,7 @@ fn run_command() -> Result<()> {
                 chrono::DateTime::parse_from_rfc3339(d.trim())
                     .map_err(|e| anyhow::anyhow!("--deadline {d:?} is not RFC 3339: {e}"))?;
             }
+            let body = ljos_cli::body_with_options(body, &options.into_iter().collect::<Vec<_>>())?;
             let held = if top || parent.is_some() {
                 None
             } else {
@@ -1609,34 +1680,44 @@ fn run_command() -> Result<()> {
                 }
             }
         }
+        Cmd::Options { issue, options } => {
+            print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
+        }
         Cmd::Note { issue, text } => {
             let text = text.join(" ");
             run("vissue", &["note", &issue, &text])?;
             match ljos_cli::packset_write_note(&issue, &text) {
-                Ok(body) => {
-                    let id = body["id"].as_str().unwrap_or("?");
-                    let short: String = id.chars().take(8).collect();
-                    println!("noted in memory (id {short})");
-                    match ljos_cli::flush_note_queue() {
-                        Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
-                        Err(e) => eprintln!("ljos note: note queue: {e:#}"),
+                Ok(mem) => {
+                    if let Some(body) = mem.body.as_ref() {
+                        let id = body["id"].as_str().unwrap_or("?");
+                        let short: String = id.chars().take(8).collect();
+                        println!("noted in memory (id {short})");
                     }
-                }
-                Err(e) => {
-                    print!("{}", ljos_cli::note_memory_warning(&issue, &e));
-                    if ljos_cli::note_can_wait(&e) {
-                        match ljos_cli::queue_note(&issue, &text) {
-                            Ok(true) => println!(
-                                "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
-                            ),
-                            Ok(false) => println!("memory: the same note is already queued"),
-                            Err(q) => eprintln!("ljos note: could not queue the copy: {q:#}"),
+                    if let Some(e) = mem.error.as_ref() {
+                        print!("{}", ljos_cli::note_memory_warning(&issue, e));
+                    }
+                    match mem.queued {
+                        Some(true) => println!(
+                            "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
+                        ),
+                        Some(false) => println!("memory: the same note is already queued"),
+                        None => {}
+                    }
+                    if mem.body.is_some() {
+                        match ljos_cli::flush_note_queue() {
+                            Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
+                            Err(e) => eprintln!("ljos note: note queue: {e:#}"),
                         }
                     }
                 }
+                Err(e) => print!("{}", ljos_cli::note_memory_warning(&issue, &e)),
             }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
+            }
+            match ljos_cli::ballot_sig::sign_own_ballot(&issue) {
+                Ok(line) => print!("{line}"),
+                Err(e) => eprintln!("ljos note: {e:#}"),
             }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
@@ -1763,7 +1844,12 @@ fn run_command() -> Result<()> {
                     &["vote", &issue, "--withdraw"],
                     Some(&who),
                 ) {
-                    Ok(said) => print!("{}", said.stdout),
+                    Ok(said) => {
+                        print!("{}", said.stdout);
+                        if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&issue, &who) {
+                            eprintln!("ljos vote: {e:#}");
+                        }
+                    }
                     Err(e) if format!("{e:#}").contains("holds no ballot") => {
                         println!("{issue}: {who} holds no ballot; withdrawing the forecast");
                     }
@@ -2050,9 +2136,15 @@ fn run_command() -> Result<()> {
         } => {
             let assignee = cli_assignee(assignee.as_deref());
             if next || node.is_empty() {
-                print!("{}", claim_next(&assignee, role.as_deref(), slack)?);
+                let said = claim_next(&assignee, role.as_deref(), slack)?;
+                let taken = said.split_whitespace().next().unwrap_or("").to_string();
+                print!("{said}");
+                if !taken.is_empty() {
+                    print!("{}", ljos_cli::persist_tracker(&taken, "claimed"));
+                }
             } else {
                 print!("{}", claim(&node, &assignee)?);
+                print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
             }
         }
         Cmd::Release { node, assignee } => {
@@ -2147,6 +2239,7 @@ fn run_command() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::GitHook { name, .. } => ljos_cli::git_hooks::run_named(&name)?,
         Cmd::GitHooks { action } => ljos_cli::git_hooks::run(&action)?,
         Cmd::Hook {
             limit,
@@ -2191,6 +2284,9 @@ fn run_command() -> Result<()> {
                 ljos_cli::hook_call_as(&input, event.as_deref())
             };
             ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
+            if ljos_cli::subagent::note_hook_call(&input, &call.event) {
+                return Ok(());
+            }
             // A runner the seat asked for a judgment hears nothing from the
             // seat, so the judgment cannot open sittings or judge again;
             // the law on its tool calls still holds.
@@ -2313,6 +2409,7 @@ fn run_command() -> Result<()> {
                 // Finish or release after extract. A bookkeeping error stays
                 // off the answer: this event has nothing to say.
                 let _ = ljos_cli::bookkeep::observe(&input, &call);
+                let _ = ljos_cli::drain_tracker_pushes();
                 return Ok(());
             }
             // On a tool call the pack's rules give a verdict; on a prompt
@@ -2332,11 +2429,18 @@ fn run_command() -> Result<()> {
             // in the directory the tool would run in. A directory that
             // cannot be resolved is not a refusal.
             let dir = cwd.as_deref();
-            let fast = on_tool
-                .then(|| ljos_cli::static_guard_in(&call.cue, dir))
-                .flatten()
-                .or(posted);
-            let (rules, preferences) = if on_tool && fast.is_none() {
+            // LJOS_OFF and a temporary HOME switch the guard off. The push
+            // gate and the pack's rules stay out too, as the shim does.
+            let suspended = on_tool && ljos_cli::bookkeep::guard_suspended();
+            let fast = if suspended {
+                None
+            } else {
+                on_tool
+                    .then(|| ljos_cli::static_guard_in(&call.cue, dir))
+                    .flatten()
+                    .or(posted)
+            };
+            let (rules, preferences) = if on_tool && fast.is_none() && !suspended {
                 ljos_cli::gate_read()
             } else {
                 (Vec::new(), Vec::new())
@@ -2383,6 +2487,11 @@ fn run_command() -> Result<()> {
             // on the next call.
             let mut seen_later: Vec<String> = Vec::new();
             let mut ack_nudge = false;
+            // A lesson or a note queued while the pack was down is sent
+            // before this session reads memory, so the next prompt can recall it.
+            if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
+                let _ = ljos_cli::flush_note_queue();
+            }
             // Search on the prompt. A camel-case runner discards that
             // stdout, so each held note goes out on the next tool result.
             // Stop additionalContext starts another round, so that runner
@@ -2406,9 +2515,16 @@ fn run_command() -> Result<()> {
                         String::new()
                     };
                     // A timed-out or crashed guard allowed this call. Say so.
-                    match ljos_cli::take_guard_note() {
+                    let note = match ljos_cli::take_guard_note() {
                         Some(guard) if note.is_empty() => guard,
                         Some(guard) => format!("{guard}\n{note}"),
+                        None => note,
+                    };
+                    // A push whose tip has no passing test record runs,
+                    // and the agent reads why it was not held.
+                    match ljos_cli::gates::take_push_warning() {
+                        Some(warning) if note.is_empty() => warning,
+                        Some(warning) => format!("{warning}\n{note}"),
                         None => note,
                     }
                 }
@@ -2810,7 +2926,7 @@ fn run_command() -> Result<()> {
             let v = write_trust(&row, &why)?;
             println!("{v}");
         }
-        Cmd::Doctor { all } => {
+        Cmd::Doctor { all, .. } => {
             let rows = doctor();
             if all {
                 print!("{}", format_doctor(&rows));
@@ -2836,7 +2952,7 @@ fn run_command() -> Result<()> {
                 install_desktop,
             }));
         }
-        Cmd::Protocol => print!("{PROTOCOL}"),
+        Cmd::Protocol => print!("{}", protocol_text()),
         Cmd::Seat => print!("{}", format_seat_command()),
         Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
         Cmd::Onboard {
