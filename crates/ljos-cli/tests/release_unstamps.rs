@@ -250,3 +250,102 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("vissue update proj-ffff -s DONE"), "{calls}");
 }
+
+/// The claim graph refuses a release of a node nobody holds there: a
+/// lease reclaim already freed it, a completion ended it, or the graph
+/// never had it. The tracker can still read STARTED under this holder or
+/// under nobody, and a release is the only verb that hands it back, so it
+/// still has to (ljos-cjd8). A heading another name holds, or one that is
+/// not STARTED and unclaimed, is left alone and the release still fails.
+#[test]
+fn release_hands_the_tracker_back_when_the_claim_graph_holds_nothing() {
+    const UNHELD_ORG: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
+* STARTED [#C] lease reclaimed\n:PROPERTIES:\n:ID:         proj-gggg\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: saddle@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] completed, nobody on it\n:PROPERTIES:\n:ID:         proj-hhhh\n:CREATED:    [2026-10-11 Sun]\n:END:\n\
+:LOGBOOK:\n- State \"STARTED\" from \"BLOCKED\" [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] hex id the graph never had\n:PROPERTIES:\n:ID:         bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n\
+:CREATED:    [2026-10-11 Sun]\n:END:\n\n\
+* STARTED [#C] someone else's\n:PROPERTIES:\n:ID:         proj-iiii\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: inky@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* TODO [#C] nothing to hand back\n:PROPERTIES:\n:ID:         proj-jjjj\n:CREATED:    [2026-10-11 Sun]\n:END:\n";
+    let dir = tempfile::tempdir().unwrap();
+    // The refusals claimdag 0.8 gives for a node that is not claimed or
+    // running, and for an id it has no node for.
+    script(
+        dir.path(),
+        "claimdag",
+        "#!/bin/sh\ncase \"$1\" in\n  release)\n    case \"$2\" in\n      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) echo 'release: not found' >&2 ;;\n      *) echo 'release: status ready' >&2 ;;\n    esac\n    exit 1 ;;\nesac\nexit 0\n",
+    );
+    script(dir.path(), "vissue", "#!/bin/sh\nexit 0\n");
+    let tracker = dir.path().join("tracker");
+    let file = tracker.join("Software/proj/issues.org");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, UNHELD_ORG).unwrap();
+    let home = dir.path().join("home");
+    let runtime = dir.path().join("run");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let release = |id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(["release", id, "--assignee", "saddle@main"])
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_STATE_HOME", home.join(".state"))
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("VISSUE_ROOT", &tracker)
+            .env("LJOS_SEAT", "saddle")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .output()
+            .unwrap()
+    };
+    let hex_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    for (id, back) in [
+        (
+            "proj-gggg",
+            "no longer claimed by saddle@main; back to TODO",
+        ),
+        ("proj-hhhh", "back to BLOCKED; nobody held it"),
+        (hex_id, "back to TODO; nobody held it"),
+    ] {
+        let out = release(id);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "release {id}: {out:?}");
+        assert!(said.contains(back), "release {id}: {said}");
+    }
+    for id in ["proj-iiii", "proj-jjjj"] {
+        let out = release(id);
+        assert!(!out.status.success(), "release {id} passed: {out:?}");
+    }
+    let org = std::fs::read_to_string(&file).unwrap();
+    for (id, state) in [
+        ("proj-gggg", "TODO"),
+        ("proj-hhhh", "BLOCKED"),
+        (hex_id, "TODO"),
+        ("proj-iiii", "STARTED"),
+        ("proj-jjjj", "TODO"),
+    ] {
+        assert!(
+            heading(&org, id).starts_with(&format!("\n* {state}")),
+            "{id} is not {state}:\n{org}"
+        );
+    }
+    for id in ["proj-gggg", "proj-hhhh", hex_id] {
+        assert!(
+            !heading(&org, id).contains(":CLAIMED_BY:"),
+            "{id} still claimed:\n{org}"
+        );
+    }
+    assert!(
+        heading(&org, "proj-iiii").contains(":CLAIMED_BY: inky@main"),
+        "another name's claim went:\n{org}"
+    );
+}
