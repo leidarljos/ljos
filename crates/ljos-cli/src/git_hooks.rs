@@ -1,14 +1,23 @@
 //! Global git hooks that book a commit when the runner has no prompt hook.
 //!
-//! `install` writes a chaining stub for every standard git hook. The stub
-//! execs the repository's `.git/hooks/<name>` or, when that file is absent,
-//! the `core.hooksPath` that was set before install, with the same arguments
-//! and stdin. `post-commit` and `post-rewrite` also call `ljos hook
-//! --git-commit`. Booking never fails the hook.
+//! When `core.hooksPath` is unset, `install` writes a stub for every
+//! standard git hook and points the global config at ljos's directory. The
+//! stub calls `ljos git-hook <name>`, then runs the repository's
+//! `.git/hooks/<name>` or the previous path an older install recorded, with
+//! the same arguments and stdin.
 //!
-//! `pre-commit install` follows `core.hooksPath` and would replace these
-//! stubs. Install the framework into the repository, then let the stub chain
-//! to it:
+//! When `core.hooksPath` already names a directory, install leaves that
+//! setting alone and appends a delimited block to each hook there. The
+//! block calls `ljos git-hook <name>`. A missing hook file is created
+//! executable. Text that was already in the file is kept. Uninstall removes
+//! only that block, and deletes a file that held nothing else.
+//!
+//! `post-commit` and `post-rewrite` book the commit. Booking never fails
+//! the hook.
+//!
+//! `pre-commit install` follows `core.hooksPath` and would replace stubs
+//! ljos owns. Install the framework into the repository, then let the stub
+//! chain to it:
 //!
 //! ```text
 //! dir=$(git rev-parse --git-dir)
@@ -92,7 +101,11 @@ pub fn run(action: &str) -> Result<()> {
     }
 }
 
-/// Write the hook scripts and point `core.hooksPath` at them.
+/// Install the hooks `ljos doctor` checks.
+///
+/// An unset `core.hooksPath` is pointed at ljos's hook directory. A path
+/// that already names a directory is left alone, and each hook there gains
+/// a block that calls `ljos git-hook`.
 ///
 /// # Errors
 ///
@@ -111,58 +124,50 @@ pub fn install() -> Result<PathBuf> {
 ///
 /// The directory cannot be written, or `git config` fails.
 pub(crate) fn install_at(dir: &Path, git_env: &[(&str, &str)]) -> Result<PathBuf> {
-    fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
-    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ljos"));
-    for name in HOOK_NAMES {
-        let path = dir.join(name);
-        fs::write(&path, hook_body(&bin, name))
-            .with_context(|| format!("git-hooks: {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-        }
-    }
     let current = global_hooks_path(git_env);
-    let ours = dir.display().to_string();
-    if current.as_deref() != Some(ours.as_str()) {
-        match current {
-            Some(prev) => {
-                fs::write(dir.join("previous-hooks-path"), prev)?;
-            }
-            None => {
-                let _ = fs::remove_file(dir.join("previous-hooks-path"));
-            }
+    if let Some(path) = nonempty(current.as_deref()) {
+        if !same_dir(Path::new(path), dir) {
+            chain_user_hooks(Path::new(path))?;
+            return Ok(PathBuf::from(path));
         }
     }
-    set_global_hooks_path(dir, git_env)?;
+    write_owned_hooks(dir)?;
+    if nonempty(current.as_deref()).is_none() {
+        let _ = fs::remove_file(dir.join("previous-hooks-path"));
+        set_global_hooks_path(dir, git_env)?;
+    }
     Ok(dir.to_path_buf())
 }
 
-/// Remove the scripts and put `core.hooksPath` back.
+/// Remove ljos from the hooks git runs.
+///
+/// A directory ljos does not own loses only the ljos block. A file that
+/// held nothing else is deleted. When ljos owns `core.hooksPath`, the
+/// previous path is restored and the stubs are removed.
 ///
 /// # Errors
 ///
-/// `git config` cannot restore or unset the path.
+/// `git config` cannot restore or unset the path, or a hook file cannot
+/// be rewritten.
 pub fn uninstall() -> Result<()> {
     let dir = hooks_dir();
     let current = global_hooks_path(&[]);
-    let ours = dir.display().to_string();
-    if current.as_deref() == Some(ours.as_str()) {
-        let previous = fs::read_to_string(dir.join("previous-hooks-path"))
-            .ok()
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty());
-        if let Some(prev) = previous {
-            set_global_hooks_path(Path::new(&prev), &[])?;
-        } else {
-            unset_global_hooks_path(&[])?;
+    match nonempty(current.as_deref()) {
+        Some(path) if same_dir(Path::new(path), &dir) => {
+            let previous = fs::read_to_string(dir.join("previous-hooks-path"))
+                .ok()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty());
+            if let Some(prev) = previous {
+                set_global_hooks_path(Path::new(&prev), &[])?;
+            } else {
+                unset_global_hooks_path(&[])?;
+            }
+            remove_owned_hooks(&dir);
         }
+        Some(path) => strip_user_hooks(Path::new(path))?,
+        None => remove_owned_hooks(&dir),
     }
-    for name in HOOK_NAMES {
-        let _ = fs::remove_file(dir.join(name));
-    }
-    let _ = fs::remove_file(dir.join("previous-hooks-path"));
     Ok(())
 }
 
@@ -170,14 +175,23 @@ pub fn uninstall() -> Result<()> {
 #[must_use]
 pub fn status() -> String {
     let dir = hooks_dir();
-    let installed = HOOK_NAMES.iter().all(|name| dir.join(name).is_file());
-    let configured = global_hooks_path(&[]).unwrap_or_else(|| "(unset)".into());
-    let hooks = if installed {
+    let configured_path = global_hooks_path(&[]);
+    let configured = configured_path.clone().unwrap_or_else(|| "(unset)".into());
+    let reachable = nonempty(configured_path.as_deref())
+        .is_some_and(|path| hooks_reachable(Path::new(path), &dir));
+    let hooks = if reachable {
+        configured.clone()
+    } else if owned_installed(&dir) {
         dir.display().to_string()
     } else {
         "not installed".into()
     };
-    format!("hooks: {hooks}\ncore.hooksPath: {configured}\n")
+    let reach = if reachable {
+        "ljos hooks run".to_string()
+    } else {
+        format!("ljos hooks do not run; {HOOKS_FIX}")
+    };
+    format!("hooks: {hooks}\ncore.hooksPath: {configured}\n{reach}\n")
 }
 
 /// The start of the doctor's `git hooks` state when `core.hooksPath` is
@@ -185,17 +199,17 @@ pub fn status() -> String {
 /// commits, and nothing else is wrong.
 pub const HOOKS_UNSET: &str = "core.hooksPath is unset";
 
-/// The doctor's `git hooks` row: whether the global `core.hooksPath`
-/// names the hooks `ljos onboard` installs, and whether they are there.
-/// A path that names another directory books a commit only if that
-/// directory runs ljos, and an env file or a note that names it drifts
-/// from what onboard wrote, so the row says which path is set and which
-/// one onboard installs.
+/// The one command that installs the hooks doctor checks.
+pub const HOOKS_FIX: &str = "ljos git-hooks install";
+
+/// The doctor's `git hooks` row. It passes when `ljos git-hook` runs from
+/// the directory `core.hooksPath` names: ljos's own stubs, or a block in
+/// each hook of a directory the user already set. It does not ask to take
+/// that path over.
 #[must_use]
 pub fn doctor_row() -> crate::Habitat {
     let dir = hooks_dir();
-    let installed = HOOK_NAMES.iter().all(|name| dir.join(name).is_file());
-    let (ok, state) = hooks_state(&dir, global_hooks_path(&[]).as_deref(), installed);
+    let (ok, state) = hooks_state(&dir, global_hooks_path(&[]).as_deref());
     crate::Habitat {
         name: "git hooks",
         state,
@@ -203,32 +217,31 @@ pub fn doctor_row() -> crate::Habitat {
     }
 }
 
-/// [`doctor_row`]'s verdict for the onboard hooks at `dir`, the global
-/// `core.hooksPath` git reports, and whether every stub is in `dir`.
+/// [`doctor_row`]'s verdict for the onboard hooks at `ours` and the global
+/// `core.hooksPath` git reports.
 #[must_use]
-pub fn hooks_state(dir: &Path, configured: Option<&str>, installed: bool) -> (bool, String) {
-    let ours = dir.display().to_string();
-    match configured.map(str::trim).filter(|path| !path.is_empty()) {
-        None => (
+pub fn hooks_state(ours: &Path, configured: Option<&str>) -> (bool, String) {
+    let Some(path) = nonempty(configured) else {
+        return (
             false,
-            format!(
-                "{HOOKS_UNSET}, so commits are not booked; `ljos git-hooks install` points it at {ours}"
-            ),
-        ),
-        Some(path) if !same_dir(Path::new(path), dir) => (
-            false,
-            format!(
-                "core.hooksPath is {path}, not {ours}, the hooks `ljos onboard` installs; `ljos git-hooks install` points it back"
-            ),
-        ),
-        Some(_) if !installed => (
-            false,
-            format!(
-                "core.hooksPath is {ours}, but some hook stubs are missing there; `ljos git-hooks install` writes them"
-            ),
-        ),
-        Some(_) => (true, format!("core.hooksPath is {ours}; commits are booked")),
+            format!("{HOOKS_UNSET}, so commits are not booked; {HOOKS_FIX}"),
+        );
+    };
+    let dir = Path::new(path);
+    if hooks_reachable(dir, ours) {
+        let state = if same_dir(dir, ours) {
+            format!("core.hooksPath is {path}; commits are booked")
+        } else {
+            format!("core.hooksPath is {path}; ljos git-hook runs from those hooks")
+        };
+        return (true, state);
     }
+    let state = if same_dir(dir, ours) {
+        format!("core.hooksPath is {path}, but some hook stubs are missing there; {HOOKS_FIX}")
+    } else {
+        format!("core.hooksPath is {path}, and ljos is not chained there; {HOOKS_FIX}")
+    };
+    (false, state)
 }
 
 fn hooks_dir() -> PathBuf {
@@ -248,26 +261,229 @@ fn data_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn hook_body(bin: &Path, name: &str) -> String {
-    let bin = shell_quote(&bin.display().to_string());
-    let book = if books_commit(name) {
-        format!(
-            "\t\tif [ -z \"${{LJOS_GIT_HOOK:-}}\" ]; then\n\
-             \t\t\tline=$({bin} hook --git-commit --git-hook {name} 2>/dev/null || true)\n\
-             \t\t\tif [ -n \"$line\" ]; then\n\
-             \t\t\t\tprintf '%s\\n' \"$line\" >&2\n\
-             \t\t\tfi\n\
-             \t\tfi\n"
-        )
-    } else {
-        String::new()
+const BLOCK_BEGIN: &str = "# ljos:begin git-hook";
+const BLOCK_END: &str = "# ljos:end git-hook";
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|path| !path.is_empty())
+}
+
+fn ljos_executable() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "ljos".to_string())
+}
+
+/// The block appended to a hook. `post-commit` and `post-rewrite` book
+/// through `ljos git-hook`. The absolute path is the fallback when `ljos`
+/// is not on `PATH`.
+fn hook_block(name: &str) -> String {
+    let bin = shell_quote(&ljos_executable());
+    format!(
+        "{BLOCK_BEGIN}\n\
+         if command -v ljos >/dev/null 2>&1; then\n\
+         \tljos git-hook {name} \"$@\" >&2 || true\n\
+         else\n\
+         \t{bin} git-hook {name} \"$@\" >&2 || true\n\
+         fi\n\
+         {BLOCK_END}\n"
+    )
+}
+
+fn has_block(text: &str, name: &str) -> bool {
+    text.contains(&hook_block(name))
+}
+
+fn strip_block(text: &str) -> String {
+    let Some(start) = text.find(BLOCK_BEGIN) else {
+        return text.to_string();
     };
+    let Some(rel) = text[start..].find(BLOCK_END) else {
+        return text.to_string();
+    };
+    let mut end = start + rel + BLOCK_END.len();
+    if text[end..].starts_with('\n') {
+        end += 1;
+    }
+    let mut out = String::new();
+    out.push_str(&text[..start]);
+    out.push_str(&text[end..]);
+    out
+}
+
+fn strip_all(text: &str) -> String {
+    let mut out = text.to_string();
+    loop {
+        let next = strip_block(&out);
+        if next == out {
+            return out;
+        }
+        out = next;
+    }
+}
+
+fn merge_block(text: &str, name: &str) -> String {
+    if has_block(text, name) {
+        return text.to_string();
+    }
+    let stripped = strip_all(text);
+    let block = hook_block(name);
+    if stripped.trim().is_empty() {
+        return format!("#!/bin/sh\n{block}");
+    }
+    if stripped.ends_with('\n') {
+        format!("{stripped}{block}")
+    } else {
+        format!("{stripped}\n{block}")
+    }
+}
+
+fn block_only(text: &str) -> bool {
+    matches!(text.trim(), "" | "#!/bin/sh")
+}
+
+fn hook_calls_ljos(text: &str, name: &str) -> bool {
+    text.contains(&format!("ljos git-hook {name} "))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn ensure_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::metadata(path).with_context(|| format!("git-hooks: {}", path.display()))?;
+        let mode = meta.permissions().mode();
+        if mode & 0o111 == 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o111))?;
+        }
+    }
+    Ok(())
+}
+
+fn owned_installed(dir: &Path) -> bool {
+    HOOK_NAMES.iter().all(|name| {
+        let path = dir.join(name);
+        let Ok(text) = fs::read_to_string(&path) else {
+            return false;
+        };
+        is_executable(&path) && (text.contains("#!/bin/sh") || hook_calls_ljos(&text, name))
+    })
+}
+
+fn user_chained(dir: &Path) -> bool {
+    HOOK_NAMES.iter().all(|name| {
+        let path = dir.join(name);
+        let Ok(text) = fs::read_to_string(&path) else {
+            return false;
+        };
+        is_executable(&path) && hook_calls_ljos(&text, name)
+    })
+}
+
+fn hooks_reachable(configured: &Path, ours: &Path) -> bool {
+    if same_dir(configured, ours) {
+        owned_installed(configured)
+    } else {
+        user_chained(configured)
+    }
+}
+
+fn write_owned_hooks(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
+    for name in HOOK_NAMES {
+        let path = dir.join(name);
+        fs::write(&path, hook_body(name))
+            .with_context(|| format!("git-hooks: {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    Ok(())
+}
+
+fn chain_user_hooks(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
+    for name in HOOK_NAMES {
+        let path = dir.join(name);
+        let existing = if path.is_file() {
+            Some(fs::read(&path).with_context(|| format!("git-hooks: {}", path.display()))?)
+        } else {
+            None
+        };
+        if let Some(bytes) = &existing {
+            if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
+                eprintln!("ljos: {} is not a shell script; left it", path.display());
+                continue;
+            }
+        }
+        let text = existing
+            .as_deref()
+            .map(|bytes| std::str::from_utf8(bytes).unwrap_or(""))
+            .unwrap_or("");
+        let next = merge_block(text, name);
+        if existing.is_none() || next != text {
+            fs::write(&path, next).with_context(|| format!("git-hooks: {}", path.display()))?;
+        }
+        ensure_executable(&path)?;
+    }
+    Ok(())
+}
+
+fn strip_user_hooks(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for name in HOOK_NAMES {
+        let path = dir.join(name);
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if !text.contains(BLOCK_BEGIN) {
+            continue;
+        }
+        let stripped = strip_all(text);
+        if block_only(&stripped) {
+            fs::remove_file(&path).with_context(|| format!("git-hooks: {}", path.display()))?;
+        } else if stripped != text {
+            fs::write(&path, stripped).with_context(|| format!("git-hooks: {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_owned_hooks(dir: &Path) {
+    for name in HOOK_NAMES {
+        let _ = fs::remove_file(dir.join(name));
+    }
+    let _ = fs::remove_file(dir.join("previous-hooks-path"));
+}
+
+fn hook_body(name: &str) -> String {
+    let block = hook_block(name);
     format!(
         "#!/bin/sh\n\
-         # ljos chains to this repository's .git/hooks/{name}, or to the\n\
-         # core.hooksPath that was set before `ljos git-hooks install`.\n\
-         # post-commit and post-rewrite also book the commit. Booking cannot\n\
-         # fail the hook. The repository hook's exit status is kept.\n\
+         # ljos books the commit, then chains to this repository's\n\
+         # .git/hooks/{name}, or to the core.hooksPath recorded in\n\
+         # previous-hooks-path. Booking cannot fail the hook. The chained\n\
+         # hook's exit status is kept.\n\
          #\n\
          # pre-commit install follows core.hooksPath and would replace this\n\
          # file. Install the framework into the repository, then re-run\n\
@@ -276,12 +492,7 @@ fn hook_body(bin: &Path, name: &str) -> String {
          #   git config --local core.hooksPath \"$dir/hooks\"\n\
          #   pre-commit install\n\
          #   git config --local --unset core.hooksPath\n\
-         case \",1,true,TRUE,yes,YES,on,ON,\" in\n\
-         \t*,\"${{LJOS_OFF}}\",*) ;;\n\
-         \t*)\n\
-         {book}\
-         \t\t;;\n\
-         esac\n\
+         {block}\
          git_dir=$(git rev-parse --git-dir 2>/dev/null || true)\n\
          if [ -n \"$git_dir\" ]; then\n\
          \tcase \"$git_dir\" in\n\
@@ -320,6 +531,23 @@ pub fn run_git_commit(hook: &str) -> Result<()> {
         crate::bookkeep::log_line(&format!("git-hooks: {err:#}"));
     }
     Ok(())
+}
+
+/// Run the ljos part of git hook `name`.
+///
+/// `post-commit` and `post-rewrite` book the commit. Any other name
+/// succeeds and does nothing. Arguments git passed the hook are ignored.
+///
+/// # Errors
+///
+/// None. Booking that did not land is a line in the book log.
+pub fn run_named(name: &str) -> Result<()> {
+    let name = name.trim();
+    if books_commit(name) {
+        run_git_commit(name)
+    } else {
+        Ok(())
+    }
 }
 
 fn book_commit(hook: &str) -> Result<()> {
@@ -759,28 +987,61 @@ mod tests {
     fn the_doctor_names_a_hooks_path_that_is_not_the_onboard_one() {
         let dir = tempfile::tempdir().unwrap();
         let ours = dir.path().join("ljos").join("git-hooks");
-        std::fs::create_dir_all(&ours).unwrap();
-        let other = dir.path().join("leidarljos").join("git-hooks");
+        let other = dir.path().join("user-hooks");
         std::fs::create_dir_all(&other).unwrap();
+        let prior = "#!/bin/sh\nprintf 'user-hook\\n'\n";
+        std::fs::write(other.join("post-commit"), prior).unwrap();
         let ours_s = ours.display().to_string();
         let other_s = other.display().to_string();
 
-        let (ok, state) = super::hooks_state(&ours, None, true);
+        let (ok, state) = super::hooks_state(&ours, None);
         assert!(!ok);
         assert!(state.starts_with(super::HOOKS_UNSET), "{state}");
+        assert_eq!(state.matches(super::HOOKS_FIX).count(), 1, "{state}");
 
-        let (ok, state) = super::hooks_state(&ours, Some(&other_s), true);
-        assert!(!ok);
-        assert!(
-            state.contains(&other_s) && state.contains(&ours_s),
-            "{state}"
-        );
-
-        let (ok, state) = super::hooks_state(&ours, Some(&ours_s), false);
+        let (ok, state) = super::hooks_state(&ours, Some(&other_s));
         assert!(!ok, "{state}");
+        assert!(state.contains(&other_s), "{state}");
+        assert!(!state.contains(&ours_s), "{state}");
+        assert_eq!(state.matches(super::HOOKS_FIX).count(), 1, "{state}");
 
-        let (ok, state) = super::hooks_state(&ours, Some(&ours_s), true);
+        super::chain_user_hooks(&other).unwrap();
+        let (ok, state) = super::hooks_state(&ours, Some(&other_s));
         assert!(ok, "{state}");
+        assert!(state.contains("ljos git-hook runs"), "{state}");
+        let hooked = std::fs::read_to_string(other.join("post-commit")).unwrap();
+        assert!(hooked.starts_with(prior), "{hooked}");
+        assert_eq!(
+            hooked.matches("# ljos:begin git-hook").count(),
+            1,
+            "{hooked}"
+        );
+        super::chain_user_hooks(&other).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(other.join("post-commit")).unwrap(),
+            hooked
+        );
+        assert!(other.join("pre-push").is_file());
+
+        super::strip_user_hooks(&other).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(other.join("post-commit")).unwrap(),
+            prior
+        );
+        assert!(!other.join("pre-push").exists());
+
+        super::write_owned_hooks(&ours).unwrap();
+        let (ok, state) = super::hooks_state(&ours, Some(&ours_s));
+        assert!(ok, "{state}");
+        std::fs::remove_file(ours.join("pre-push")).unwrap();
+        let (ok, state) = super::hooks_state(&ours, Some(&ours_s));
+        assert!(!ok, "{state}");
+        assert!(state.contains(super::HOOKS_FIX), "{state}");
+    }
+
+    #[test]
+    fn a_hook_that_does_not_book_succeeds() {
+        super::run_named("pre-push").unwrap();
     }
 
     #[test]

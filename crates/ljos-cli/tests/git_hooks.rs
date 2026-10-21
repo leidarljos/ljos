@@ -631,6 +631,10 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
     let hab = Hab::new("repo");
     let saved = hab.root.join("saved-hooks");
     fs::create_dir_all(&saved).unwrap();
+    let marker = hab.root.join("repo-hook");
+    let user = format!("#!/bin/sh\nprintf ran >> {}\n", shellish(&marker));
+    fs::write(saved.join("post-commit"), &user).unwrap();
+    fs::set_permissions(saved.join("post-commit"), fs::Permissions::from_mode(0o755)).unwrap();
     hab.git(
         &hab.repo,
         &[
@@ -641,6 +645,7 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         ],
     );
     install(&hab);
+    install(&hab);
     let configured = String::from_utf8(
         hab.git(
             &hab.repo,
@@ -649,19 +654,22 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         .stdout,
     )
     .unwrap();
-    assert!(
-        configured.contains("git-hooks"),
-        "hooksPath was not installed: {configured}"
+    assert_eq!(
+        configured.trim(),
+        saved.display().to_string(),
+        "a hooksPath the user set was replaced: {configured}"
     );
-    let marker = hab.root.join("repo-hook");
-    let hook = hab.repo.join(".git/hooks/post-commit");
-    fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\nprintf ran >> {}\n", shellish(&marker)),
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let hooked = fs::read_to_string(saved.join("post-commit")).unwrap();
+    assert!(hooked.starts_with(&user), "{hooked}");
+    assert_eq!(
+        hooked.matches("# ljos:begin git-hook").count(),
+        1,
+        "{hooked}"
+    );
+    assert!(hooked.contains("ljos git-hook post-commit "), "{hooked}");
+    assert!(saved.join("pre-push").is_file());
+    let status = String::from_utf8(hab.ljos(&["git-hooks", "status"]).stdout).unwrap();
+    assert!(status.contains("ljos hooks run"), "{status}");
 
     fs::write(hab.repo.join("one.txt"), "x\n").unwrap();
     hab.git(&hab.repo, &["add", "one.txt"]);
@@ -680,10 +688,10 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         "{}",
         vissue_log(&hab.tracker)
     );
-    assert_eq!(
-        fs::read_to_string(&marker).unwrap(),
-        "ran",
-        "the repo hook did not run"
+    let marked = fs::read_to_string(&marker).unwrap();
+    assert!(
+        marked.starts_with("ran"),
+        "the user's hook did not run: {marked}"
     );
     assert_eq!(deeds(&hab.tracker), 1);
 
@@ -739,6 +747,61 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
     )
     .unwrap();
     assert_eq!(restored.trim(), saved.display().to_string());
+    assert_eq!(fs::read_to_string(saved.join("post-commit")).unwrap(), user);
+    assert!(!saved.join("pre-push").exists());
+    let before_marker = fs::read_to_string(&marker).unwrap();
+    let deeds_before = deeds(&hab.tracker);
+    fs::write(hab.repo.join("two.txt"), "y\n").unwrap();
+    hab.git(&hab.repo, &["add", "two.txt"]);
+    hab.git(&hab.repo, &["commit", "-q", "-m", "after uninstall"]);
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        format!("{before_marker}ran"),
+        "the user's hook stopped running"
+    );
+    assert_eq!(
+        deeds(&hab.tracker),
+        deeds_before,
+        "uninstall left the booking hook in place"
+    );
+}
+
+#[test]
+fn uninstall_restores_a_hooks_path_ljos_already_owns() {
+    let hab = Hab::new("repo");
+    let saved = hab.root.join("saved-hooks");
+    fs::create_dir_all(&saved).unwrap();
+    install(&hab);
+    let ours = hab.share.join("ljos/git-hooks");
+    let configured = String::from_utf8(
+        hab.git(
+            &hab.repo,
+            &["config", "--global", "--get", "core.hooksPath"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        configured.trim(),
+        ours.display().to_string(),
+        "{configured}"
+    );
+    fs::write(
+        ours.join("previous-hooks-path"),
+        format!("{}\n", saved.display()),
+    )
+    .unwrap();
+    hab.ljos(&["git-hooks", "uninstall"]);
+    let restored = String::from_utf8(
+        hab.git(
+            &hab.repo,
+            &["config", "--global", "--get", "core.hooksPath"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(restored.trim(), saved.display().to_string());
+    assert!(!ours.join("post-commit").exists());
 }
 
 #[test]
