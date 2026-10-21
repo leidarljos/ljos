@@ -1,5 +1,6 @@
-//! After an upgrade, a skill ljos wrote is refreshed, and a hand edit is not.
-//! A global hooks path the user already set is covered in `git_hooks.rs`.
+//! After an upgrade, a skill or a runner env ljos wrote is refreshed, and a
+//! hand edit is not. An env file ljos did not write is left alone. A global
+//! hooks path the user already set is covered in `git_hooks.rs`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -9,6 +10,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const OLD_SKILL: &str = "---\nname: ljos\ndescription: old\n---\n\n# The seat protocol\n\nold\n";
+
+/// An env an older ljos wrote: the seat header, a shell block this ljos no
+/// longer writes, the guard, and one line the user added.
+const OLD_ENV: &str = "\
+# Source this in the shell that runs the agent's commands.\n\
+# This runner has no MCP client, so the process tree is not its seat.\n\
+# LJOS_SEAT is the name memory, ballots and trust use.\n\
+export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n\
+if [ -z \"${LJOS_SEAT:-}\" ] && [ -n \"${CURSOR_CONVERSATION_ID:-}\" ]; then\n\
+\t_ljos_named=$(ljos seat 2>/dev/null | head -n 1 | awk '{ print $NF }')\n\
+\tcase \"$_ljos_named\" in\n\
+\t\t\"\"|*[!A-Za-z0-9_-]*) LJOS_SEAT=grokbot-$(printf %.8s \"$CURSOR_CONVERSATION_ID\") ;;\n\
+\t\t*) LJOS_SEAT=$_ljos_named ;;\n\
+\tesac\n\
+\texport LJOS_SEAT\n\
+\tunset _ljos_named\n\
+fi\n\
+export LJOS_OLD_MARKER=1\n\
+_ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n\
+export BOX_NOTES=keep-me\n";
+
+const FOREIGN_ENV: &str = "# written by an older ljos\nexport BOX_NOTES=keep-me\n";
 
 struct Home {
     root: PathBuf,
@@ -307,11 +330,12 @@ fn row<'a>(text: &'a str, what: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// A grokbot env an older ljos wrote, and a stale skill ljos wrote, are not
-/// ready. `ljos onboard --harness grokbot` makes both rows ok.
-#[test]
-fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
-    let home = Home::new();
+fn env_record(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap().to_string_lossy();
+    path.with_file_name(format!(".{name}.ljos-wrote"))
+}
+
+fn grokbot(home: &Home) -> PathBuf {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
@@ -320,18 +344,43 @@ fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
         "[[harness]]\nname = \"grokbot\"\n",
     )
     .unwrap();
+    config.join("grokbot.env")
+}
+
+fn parses(path: &Path) {
+    let out = Command::new("sh").arg("-n").arg(path).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        fs::read_to_string(path).unwrap(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A grokbot env an older ljos wrote, and a stale skill ljos wrote, are
+/// warnings. `ljos onboard --harness grokbot` refreshes both, and a line
+/// the user added stays.
+#[test]
+fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
+    let home = Home::new();
+    let env_path = grokbot(&home);
     let skill = home.root.join("home/.grokbot/skills/ljos/SKILL.md");
     plant(&skill, OLD_SKILL, OLD_SKILL);
-    fs::write(config.join("grokbot.env"), "# written by an older ljos\n").unwrap();
+    fs::write(&env_path, OLD_ENV).unwrap();
 
     let before = home.ljos(&["doctor", "--all"], "120");
+    assert_eq!(fs::read(&env_path).unwrap(), OLD_ENV.as_bytes());
     let text = String::from_utf8(before.stdout).unwrap();
     let env = row(&text, "runner env");
     let skill_row = row(&text, "runner skill");
     assert!(
-        env.starts_with("no\t") && env.contains("grokbot") && env.contains("stale"),
+        env.starts_with("warn\t")
+            && env.contains("grokbot")
+            && env.contains("is stale")
+            && env.contains("ljos doctor --fix"),
         "{text}"
     );
+    assert!(!env.starts_with("no\t"), "{text}");
     assert!(
         skill_row.starts_with("warn\t")
             && skill_row.contains("grokbot")
@@ -345,6 +394,15 @@ fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
         String::from_utf8_lossy(&onboard.stdout),
         String::from_utf8_lossy(&onboard.stderr)
     );
+    let got = fs::read_to_string(&env_path).unwrap();
+    assert!(got.contains("export LJOS_GIT_HOOKS="), "{got}");
+    assert!(got.contains("export BOX_NOTES=keep-me\n"), "{got}");
+    assert!(!got.contains("LJOS_OLD_MARKER"), "{got}");
+    parses(&env_path);
+    assert!(
+        onboard_out.contains("LJOS_GIT_HOOKS") && onboard_out.contains("BOX_NOTES"),
+        "{onboard_out}"
+    );
     let after = home.ljos(&["doctor", "--all"], "120");
     let text = String::from_utf8(after.stdout).unwrap();
     let env = row(&text, "runner env");
@@ -357,4 +415,226 @@ fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
         skill_row.starts_with("ok\t") && skill_row.contains("grokbot"),
         "onboard:\n{onboard_out}\ndoctor:\n{text}"
     );
+}
+
+#[test]
+fn the_first_run_refreshes_a_stale_env_and_leaves_what_ljos_did_not_write() {
+    let home = Home::new();
+    let config = home.root.join("config/ljos");
+    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(home.root.join("home")).unwrap();
+    let skills = home.root.join("box-skills");
+    fs::write(
+        config.join("harnesses.toml"),
+        format!(
+            "[[harness]]\nname = \"grokbot\"\n\n[[harness]]\nname = \"shell\"\n\n[[harness]]\nname = \"box\"\nshell = true\nskills = \"{}\"\n",
+            skills.display()
+        ),
+    )
+    .unwrap();
+    let grok = config.join("grokbot.env");
+    let foreign = config.join("shell.env");
+    let edited = config.join("box.env");
+    fs::write(&grok, OLD_ENV).unwrap();
+    fs::write(&foreign, FOREIGN_ENV).unwrap();
+    let body = "\
+# Source this in the shell that runs the agent's commands.\n\
+export LJOS_SEAT=\"${LJOS_SEAT:-box}\"\n\
+_ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n";
+    let hand = body.replacen(
+        "# Source this in the shell that runs the agent's commands.",
+        "# Source this in the shell that runs the agent's commands. edited",
+        1,
+    );
+    fs::write(&edited, &hand).unwrap();
+    fs::write(env_record(&edited), body).unwrap();
+    let foreign_bytes = fs::read(&foreign).unwrap();
+    let hand_bytes = fs::read(&edited).unwrap();
+
+    let out = home.ljos(&["protocol"], "30");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("refreshed grokbot:"), "{err}");
+    assert!(err.contains("LJOS_GIT_HOOKS"), "{err}");
+    assert!(err.contains("kept") && err.contains("BOX_NOTES"), "{err}");
+    assert!(err.contains("was not written by ljos"), "{err}");
+    assert!(err.contains("was edited by hand"), "{err}");
+    let got = fs::read_to_string(&grok).unwrap();
+    assert!(got.contains("export LJOS_GIT_HOOKS="), "{got}");
+    assert!(got.contains("export BOX_NOTES=keep-me\n"), "{got}");
+    assert!(!got.contains("LJOS_OLD_MARKER"), "{got}");
+    parses(&grok);
+    let wrote = fs::read_to_string(env_record(&grok)).unwrap();
+    assert!(
+        got.starts_with(&wrote),
+        "the record is not the text ljos wrote\n{got}"
+    );
+    assert_eq!(fs::read(&foreign).unwrap(), foreign_bytes);
+    assert_eq!(fs::read(&edited).unwrap(), hand_bytes);
+
+    let again = home.ljos(&["protocol"], "30");
+    assert!(again.status.success());
+    let err = String::from_utf8_lossy(&again.stderr);
+    assert!(!err.contains("refreshed"), "{err}");
+    assert_eq!(fs::read_to_string(&grok).unwrap(), got);
+    assert_eq!(fs::read(&foreign).unwrap(), foreign_bytes);
+    assert_eq!(fs::read(&edited).unwrap(), hand_bytes);
+    assert!(home.root.join("share/ljos/env-refresh-version").is_file());
+}
+
+#[test]
+fn doctor_warns_about_a_stale_env_and_fix_refreshes_it() {
+    let home = Home::new();
+    let env_path = grokbot(&home);
+    fs::write(&env_path, OLD_ENV).unwrap();
+
+    let out = home.ljos(&["doctor"], "120");
+    assert_eq!(
+        fs::read(&env_path).unwrap(),
+        OLD_ENV.as_bytes(),
+        "doctor rewrote an env"
+    );
+    assert!(!home.root.join("share/ljos/env-refresh-version").exists());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let env = row(&text, "runner env");
+    assert!(
+        env.starts_with("warn\t")
+            && env.contains("grokbot")
+            && env.contains("is stale")
+            && env.contains("ljos doctor --fix"),
+        "{text}"
+    );
+    assert!(!text.contains("no\trunner env"), "{text}");
+
+    let fixed = home.ljos(&["doctor", "--all", "--fix"], "120");
+    let err = String::from_utf8_lossy(&fixed.stderr);
+    assert!(err.contains("refreshed grokbot:"), "{err}");
+    assert!(
+        err.contains("LJOS_GIT_HOOKS") && err.contains("BOX_NOTES"),
+        "{err}"
+    );
+    let got = fs::read_to_string(&env_path).unwrap();
+    assert!(got.contains("export LJOS_GIT_HOOKS="), "{got}");
+    assert!(got.contains("export BOX_NOTES=keep-me\n"), "{got}");
+    assert!(!got.contains("LJOS_OLD_MARKER"), "{got}");
+    parses(&env_path);
+    let after = String::from_utf8(fixed.stdout).unwrap();
+    let env = row(&after, "runner env");
+    assert!(
+        env.starts_with("ok\t") && env.contains("grokbot"),
+        "{after}"
+    );
+    assert!(!after.contains("is stale"), "{after}");
+    assert!(home.root.join("share/ljos/env-refresh-version").is_file());
+
+    // The stamp does not block a later `--fix` once the file is stale again.
+    fs::write(&env_path, OLD_ENV).unwrap();
+    let _ = fs::remove_file(env_record(&env_path));
+    let quiet = home.ljos(&["protocol"], "30");
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("refreshed"),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert_eq!(fs::read(&env_path).unwrap(), OLD_ENV.as_bytes());
+    let again = home.ljos(&["doctor", "--all", "--fix"], "120");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("refreshed grokbot:"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(fs::read_to_string(&env_path)
+        .unwrap()
+        .contains("export LJOS_GIT_HOOKS="));
+}
+
+#[test]
+fn onboard_leaves_an_env_ljos_did_not_write() {
+    let home = Home::new();
+    let env_path = grokbot(&home);
+    fs::write(&env_path, FOREIGN_ENV).unwrap();
+    let kept = fs::read(&env_path).unwrap();
+
+    let doctor = home.ljos(&["doctor", "--all"], "120");
+    let text = String::from_utf8(doctor.stdout).unwrap();
+    let env = row(&text, "runner env");
+    assert!(
+        env.starts_with("no\t") && env.contains("was not written by ljos"),
+        "{text}"
+    );
+    assert_eq!(fs::read(&env_path).unwrap(), kept);
+
+    let fixed = home.ljos(&["doctor", "--fix"], "120");
+    assert!(
+        String::from_utf8_lossy(&fixed.stderr).contains("was not written by ljos"),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert_eq!(fs::read(&env_path).unwrap(), kept);
+    assert!(!env_record(&env_path).exists());
+
+    let onboard = home.ljos(&["onboard", "--harness", "grokbot"], "120");
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&onboard.stdout),
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    assert!(said.contains("did not write"), "{said}");
+    assert_eq!(
+        fs::read(&env_path).unwrap(),
+        kept,
+        "onboard wrote an env ljos did not"
+    );
+    assert!(!env_record(&env_path).exists());
+}
+
+#[test]
+fn the_mcp_server_refreshes_a_stale_env_on_start() {
+    let home = Home::new();
+    let env_path = grokbot(&home);
+    fs::write(&env_path, OLD_ENV).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .envs(home.env())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _stdin = child.stdin.take();
+    let mut stderr = child.stderr.take().unwrap();
+    let started = Instant::now();
+    let changed = loop {
+        if fs::read(&env_path).unwrap() != OLD_ENV.as_bytes() {
+            break true;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut err = String::new();
+            let _ = stderr.read_to_string(&mut err);
+            panic!("ljos-mcp exited {status} before refreshing\n{err}");
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut err = String::new();
+    let _ = stderr.read_to_string(&mut err);
+    assert!(changed, "ljos-mcp did not refresh the env\n{err}");
+    assert!(err.contains("refreshed grokbot:"), "{err}");
+    assert!(
+        err.contains("LJOS_GIT_HOOKS") && err.contains("BOX_NOTES"),
+        "{err}"
+    );
+    let got = fs::read_to_string(&env_path).unwrap();
+    assert!(got.contains("export LJOS_GIT_HOOKS="), "{got}");
+    assert!(got.contains("export BOX_NOTES=keep-me\n"), "{got}");
+    parses(&env_path);
 }

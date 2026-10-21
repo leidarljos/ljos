@@ -33,6 +33,7 @@ pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
 pub mod reap;
+pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
 pub mod subagent;
@@ -3846,7 +3847,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
 
 /// The env file a shell runner sources, beside the runners file unless
 /// the table names `env_file`.
-fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
+pub(crate) fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
     match &h.env_file {
         Some(path) => expand(path),
         None => file
@@ -3885,7 +3886,7 @@ fn keep_seat_assignment(name: &str) -> String {
 /// `LJOS_SESSION_ID=NAME-shell`: without it each shell hashed its own
 /// process into a new holder, and `ljos finish` in a second shell was
 /// refused as not the assignee.
-fn seat_env_text(name: &str) -> String {
+pub(crate) fn seat_env_text(name: &str) -> String {
     format!(
         "# Source this in the shell that runs the agent's commands.\n\
          # This runner has no MCP client, so the process tree is not its seat.\n\
@@ -4307,38 +4308,7 @@ pub fn shared_holder_note(node: &str, holder: &str, hold: &Hold) -> String {
 }
 
 fn env_step(path: &Path, name: &str, dry: bool) -> Step {
-    let text = seat_env_text(name);
-    let source = format!("source {}", path.display());
-    if std::fs::read_to_string(path).is_ok_and(|have| have == text) {
-        return Step {
-            what: "env".into(),
-            detail: format!("{} is current; {source}", path.display()),
-            ok: true,
-        };
-    }
-    if dry {
-        return Step {
-            what: "env".into(),
-            detail: format!("would write {}; {source}", path.display()),
-            ok: true,
-        };
-    }
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, text));
-    match written {
-        Ok(()) => Step {
-            what: "env".into(),
-            detail: format!("wrote {}; {source}", path.display()),
-            ok: true,
-        },
-        Err(e) => Step {
-            what: "env".into(),
-            detail: format!("{}: {e}", path.display()),
-            ok: false,
-        },
-    }
+    runner_env::install(path, name, dry)
 }
 
 fn shell_steps(
@@ -9952,20 +9922,6 @@ pub fn format_steps(steps: &[Step]) -> String {
         .collect()
 }
 
-/// The doctor's `runner env` row. A file an older ljos wrote is stale,
-/// not missing: the text this ljos writes changed, and `ljos onboard`
-/// rewrites it.
-fn runner_env_state(name: &str, env_path: &Path, ready: bool, exists: bool) -> String {
-    match (ready, exists) {
-        (true, _) => format!("{name}: source {}", env_path.display()),
-        (false, true) => format!(
-            "{name}: {} is stale, an older ljos wrote it; ljos onboard --harness {name}",
-            env_path.display()
-        ),
-        (false, false) => format!("{name}: no ljos env file; ljos onboard --harness {name}"),
-    }
-}
-
 /// The runner rows for `doctor`, one pair per runner the file names.
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
@@ -10011,12 +9967,11 @@ fn harness_rows() -> Vec<Habitat> {
             .map(|d| expand(d).join("ljos").join("SKILL.md"));
         if h.shell {
             let env_path = env_path_for(&path, h);
-            let written = std::fs::read_to_string(&env_path).ok();
-            let ready = written.as_deref() == Some(seat_env_text(&h.name).as_str());
+            let (env_ok, env_state) = runner_env::doctor_env(&h.name, &env_path);
             rows.push(Habitat {
                 name: "runner env",
-                state: runner_env_state(&h.name, &env_path, ready, written.is_some()),
-                ok: ready,
+                state: env_state,
+                ok: env_ok,
             });
         } else {
             let registered = is_registered(h, &server) == Some(true);
@@ -20945,10 +20900,10 @@ fn optional_bin(name: &str) -> bool {
 }
 
 /// `ok` when the row answers, `warn` when the policy row names an
-/// `ljos-policyd` without phronesis or a runner skill is stale or edited
-/// by hand, `info` when the row is optional and absent, `no` when a
-/// required row failed. A stale skill ljos wrote is a warning `ljos doctor
-/// --fix` rewrites, not a failure.
+/// `ljos-policyd` without phronesis or a runner skill or runner env ljos
+/// wrote is stale or edited by hand, `info` when the row is optional and
+/// absent, `no` when a required row failed. A stale skill or env ljos
+/// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "tracker" && names_unpushed(&row.state) {
@@ -20964,6 +20919,7 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         "info"
     } else if (row.name == "runner skill" && runner_skills::is_skill_warning(&row.state))
+        || (row.name == "runner env" && runner_env::is_env_warning(&row.state))
         || WARN_ROWS.contains(&row.name)
         || row.name == "guard"
     {
@@ -35489,6 +35445,7 @@ mod tests {
             .iter()
             .all(|s| s.what != "hook" && !s.what.contains("mcp")));
         assert!(!skills.exists(), "a dry run wrote the skill");
+        assert!(!dir.join("grokbot.env").exists(), "a dry run wrote the env");
 
         let steps =
             super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
@@ -36894,14 +36851,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_stale_runner_env_is_not_called_missing() {
-        let path = std::path::Path::new("/h/.config/ljos/grokbot.env");
-        assert!(super::runner_env_state("grokbot", path, true, true).contains("source /h/"));
-        let stale = super::runner_env_state("grokbot", path, false, true);
-        assert!(stale.contains("is stale"), "{stale}");
-        assert!(stale.contains("ljos onboard --harness grokbot"), "{stale}");
-        let none = super::runner_env_state("grokbot", path, false, false);
-        assert!(none.contains("no ljos env file"), "{none}");
+    fn a_stale_runner_env_is_a_warning_not_a_failure() {
+        let stale = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env is stale; ljos doctor --fix".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&stale), "warn");
+        assert!(super::healthy(std::slice::from_ref(&stale)));
+        let edited = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env was edited by hand; ljos left it".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&edited), "warn");
+        let foreign = super::Habitat {
+            name: "runner env",
+            state: "grokbot: /h/.config/ljos/grokbot.env was not written by ljos; ljos left it"
+                .into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&foreign), "no");
+        let none = super::Habitat {
+            name: "runner env",
+            state: "grokbot: no ljos env file; ljos onboard --harness grokbot".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&none), "no");
+        assert!(none.state.contains("no ljos env file"), "{none:?}");
     }
 
     #[test]

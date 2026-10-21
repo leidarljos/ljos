@@ -27,8 +27,10 @@ async fn main() -> anyhow::Result<()> {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    // Starting the server is a run of this version: refresh skills ljos wrote.
+    // Starting the server is a run of this version: refresh skills and
+    // runner env files ljos wrote.
     ljos_cli::runner_skills::refresh_on_new_version();
+    ljos_cli::runner_env::refresh_on_new_version();
     ljos_cli::bookkeep::spawn_idle_finish();
     // Dropped when the process returns, including after the client closes.
     // A name, not `let _`, so the finish runs at the end of main.
