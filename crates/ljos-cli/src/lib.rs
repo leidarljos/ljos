@@ -6479,17 +6479,112 @@ fn names_the_cue(text: &str, cue: &str) -> bool {
         .any(|w| have.binary_search(w).is_ok())
 }
 
+/// A word that does not start or end an abbreviation: too short to be a
+/// name, or a stop word. `of` is short, so `conflict of interest` keeps
+/// the `o`.
+fn glue_word(word: &str) -> bool {
+    word.len() < 3 || CUE_STOP.contains(&word) || CUE_STOP_SHORT.contains(&word)
+}
+
+/// Initials of a phrase that has a small word in the middle.
+/// `conflict of interest` is `coi`. A run of names with nothing between
+/// them is left alone, so `add lodash dependency` does not become a token.
+fn phrase_acronyms(text: &str) -> Vec<String> {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let mut out = Vec::new();
+    for start in 0..words.len() {
+        if glue_word(&words[start]) {
+            continue;
+        }
+        for len in 3..=6 {
+            let end = start + len;
+            if end > words.len() {
+                break;
+            }
+            if glue_word(&words[end - 1]) {
+                continue;
+            }
+            let window = &words[start..end];
+            if !window[1..len - 1].iter().any(|word| glue_word(word)) {
+                continue;
+            }
+            let acronym: String = window
+                .iter()
+                .filter_map(|word| word.chars().next())
+                .collect();
+            if !(3..=6).contains(&acronym.len())
+                || !acronym.chars().all(|c| c.is_ascii_alphabetic())
+                || CUE_STOP.contains(&acronym.as_str())
+                || CUE_STOP_SHORT.contains(&acronym.as_str())
+                || RULE_WORDS.contains(&acronym.as_str())
+            {
+                continue;
+            }
+            out.push(acronym);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Words plus the abbreviations of its phrases. A claim that says `COI`
+/// and a prompt that says `conflict of interest` share `coi`.
+fn match_tokens(text: &str) -> Vec<String> {
+    let mut words = prompt_words(text);
+    words.extend(phrase_acronyms(text));
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
+/// The cue's phrase abbreviates a word of the claim, or the claim's
+/// phrase abbreviates a word of the cue.
+fn abbreviation_match(text: &str, cue: &str) -> bool {
+    let have = prompt_words(text);
+    let want = prompt_words(cue);
+    phrase_acronyms(cue)
+        .iter()
+        .any(|token| have.binary_search(token).is_ok())
+        || phrase_acronyms(text)
+            .iter()
+            .any(|token| want.binary_search(token).is_ok())
+}
+
+/// The query the pack is asked, with each phrase's abbreviation appended
+/// so a claim that only says the short form can still match.
+fn recall_query(cue: &str) -> String {
+    let have = prompt_words(cue);
+    let extra: Vec<String> = phrase_acronyms(cue)
+        .into_iter()
+        .filter(|token| have.binary_search(token).is_err())
+        .collect();
+    if extra.is_empty() {
+        cue.to_string()
+    } else {
+        format!("{cue} {}", extra.join(" "))
+    }
+}
+
 /// Whether a claim names the cue's subject, which is the word test the
 /// prompt hook uses.
 ///
-/// An alias is the name of one tool or one thing. Two content words are a
-/// subject. One content word is the subject only when the cue has two
-/// content words or fewer, so the overlap is at least half of what the cue
-/// is about. A longer cue that shares one ordinary word (`test`, `commit`,
-/// `build`) is a coincidence: the cosines on such a cue sit within a few
-/// hundredths of each other, and the best of them stays under the encoder's
-/// confidence line.
+/// An alias is the name of one tool or one thing. An abbreviation is too:
+/// `COI` names `conflict of interest`, and the phrase names the short
+/// form. Two content words are a subject. One content word is the subject
+/// only when the cue has two content words or fewer, so the overlap is at
+/// least half of what the cue is about. A longer cue that shares one
+/// ordinary word (`test`, `commit`, `build`) is a coincidence: the cosines
+/// on such a cue sit within a few hundredths of each other, and the best
+/// of them stays under the encoder's confidence line.
 fn names_the_subject(text: &str, cue: &str) -> bool {
+    if abbreviation_match(text, cue) {
+        return true;
+    }
     if !names_the_cue(text, cue) {
         return false;
     }
@@ -6759,19 +6854,8 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     if rows.is_empty() {
         return None;
     }
-    let docs: Vec<Vec<String>> = rows.iter().map(|(_, body)| prompt_words(body)).collect();
-    let df = document_frequency(&docs);
-    let mut scored: Vec<(usize, f64)> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (_, body))| {
-            let mut score = bm25_distinctive(&docs, &df, i, cue);
-            if names_the_subject(body, cue) {
-                score = score.max(1.0);
-            }
-            (score > 0.0).then_some((i, score))
-        })
-        .collect();
+    let bodies: Vec<&str> = rows.iter().map(|(_, body)| body.as_str()).collect();
+    let mut scored = lexical_scores(&bodies, cue);
     if scored.is_empty() {
         return None;
     }
@@ -6792,9 +6876,9 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     Some((format!("{RECALL_HEADER}\n{}", lines.join("\n")), ids))
 }
 
-/// The text a cold prompt is matched on: the claim, plus the title, rule
-/// and command kept in `source`. The prose gate shortens the claim; the
-/// words a later prompt uses can survive only in `source`.
+/// The text a cold prompt is matched on: the claim, plus the title, rule,
+/// command and citation kept in `source`. The prose gate shortens the
+/// claim; the words a later prompt uses can survive only in `source`.
 fn recall_body(atom: &Value) -> String {
     let mut text = atom
         .get("text")
@@ -6804,7 +6888,7 @@ fn recall_body(atom: &Value) -> String {
     let Some(source) = atom.get("source").and_then(Value::as_object) else {
         return text;
     };
-    for key in ["title", "rule", "command"] {
+    for key in ["title", "rule", "command", "citation"] {
         if let Some(value) = source
             .get(key)
             .and_then(Value::as_str)
@@ -6831,7 +6915,8 @@ fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String,
     df
 }
 
-/// BM25 over the words of `cue` that are rare in `docs`.
+/// BM25 over the words of `cue` that are rare in `docs`, including an
+/// abbreviation standing in for a phrase.
 ///
 /// A word in one atom always counts, including when the pack holds only
 /// that atom. A word in half the atoms or more does not: `test` then
@@ -6843,7 +6928,7 @@ fn bm25_distinctive(
     index: usize,
     cue: &str,
 ) -> f64 {
-    let query = prompt_words(cue);
+    let query = match_tokens(cue);
     if query.is_empty() || docs.is_empty() {
         return 0.0;
     }
@@ -6869,6 +6954,26 @@ fn bm25_distinctive(
         score += idf * norm;
     }
     score
+}
+
+/// Rank of each body against `cue`, highest first. A shared abbreviation
+/// counts as naming the subject.
+fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
+    let docs: Vec<Vec<String>> = bodies.iter().map(|body| match_tokens(body)).collect();
+    let df = document_frequency(&docs);
+    let mut scored: Vec<(usize, f64)> = bodies
+        .iter()
+        .enumerate()
+        .filter_map(|(i, body)| {
+            let mut score = bm25_distinctive(&docs, &df, i, cue);
+            if names_the_subject(body, cue) {
+                score = score.max(1.0);
+            }
+            (score > 0.0).then_some((i, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored
 }
 
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
@@ -7361,9 +7466,10 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
+        let asked = recall_query(cue);
         let body: Value = packset_client::authorize(ureq::get(&url))
             .query("workspace", &client.workspace())
-            .query("q", cue)
+            .query("q", &asked)
             .query("limit", &limit.to_string())
             .timeout(std::time::Duration::from_millis(ms))
             .call()
@@ -10879,11 +10985,17 @@ pub fn atom_kind(label: &str) -> Result<&'static str> {
 /// one pack, and a reader can then see whose lesson it is reading.
 pub const SEAT_ENTITY: &str = "seat:";
 
-/// Explicit claim body. The text is stored as given; never harvested. The
+/// Explicit claim body. The text is stored as given; never harvested. A
+/// trailing citation is the atom's source, not another sentence. The
 /// entities open with the seat that wrote it.
 pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
+    let (text, citation) = peel_citations(text);
     let mut entities = vec![format!("{SEAT_ENTITY}{}", seat_name())];
     entities.extend(take_validity());
+    let mut source = atom_source();
+    if let Some(citation) = citation {
+        source["citation"] = Value::String(citation);
+    }
     serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
@@ -10891,8 +11003,79 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
         "text": text,
         "workspace": workspace,
         "entities": entities,
-        "source": atom_source(),
+        "source": source,
     })
+}
+
+/// Take citation tails off `text`. The claim is unchanged when nothing
+/// trailing is a citation, and when peeling would leave it empty.
+fn peel_citations(text: &str) -> (String, Option<String>) {
+    let parts = packset_core::prose::sentences(text);
+    if parts.len() < 2 {
+        return (text.to_string(), None);
+    }
+    let mut end = parts.len();
+    while end > 0 && citation_sentence(&parts[end - 1]) {
+        end -= 1;
+    }
+    if end == 0 || end == parts.len() {
+        return (text.to_string(), None);
+    }
+    (parts[..end].join(" "), Some(parts[end..].join("\n")))
+}
+
+/// A sentence that only cites a source: a `Source:` / `Citation:` /
+/// `Ref:` label with a URL or a DOI, a `See`/`Via` whose remainder is
+/// that URL, or a sentence that is the URL.
+fn citation_sentence(sentence: &str) -> bool {
+    let inner = citation_inner(sentence);
+    if inner.is_empty() {
+        return false;
+    }
+    let lower = inner.to_ascii_lowercase();
+    const LABELS: &[&str] = &[
+        "source:",
+        "sources:",
+        "citation:",
+        "citations:",
+        "reference:",
+        "references:",
+        "ref:",
+        "refs:",
+    ];
+    for label in LABELS {
+        if let Some(rest) = lower.strip_prefix(label) {
+            return has_url_or_doi(rest);
+        }
+    }
+    for label in ["see:", "see ", "via:", "via "] {
+        if let Some(rest) = lower.strip_prefix(label) {
+            return url_at_start(rest);
+        }
+    }
+    inner.split_whitespace().count() <= 3 && url_at_start(&lower)
+}
+
+fn citation_inner(sentence: &str) -> &str {
+    let sentence = sentence.trim();
+    let sentence = sentence.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | '"' | '\''));
+    sentence.trim().trim_end_matches(['.', '!', '?']).trim()
+}
+
+fn has_url_or_doi(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("https://")
+        || lower.contains("http://")
+        || lower.contains("doi.org/")
+        || lower.contains("doi:")
+}
+
+fn url_at_start(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("doi:")
+        || lower.starts_with("doi.org/")
 }
 
 /// The entity prefixes of a claim's validity window: the world time it
@@ -11028,14 +11211,61 @@ pub fn add_entities(atom: &mut Value, more: impl IntoIterator<Item = String>) {
 }
 
 /// The line a log prints for a failed `POST /v1/atoms`. The pack's status
-/// and body are in that line. The original error stays the source, so a
-/// refusal can still be told from a pack that did not answer.
+/// and reason are that line, with what to change when the reason is a
+/// prose refusal. The original error stays the source, so a refusal can
+/// still be told from a pack that did not answer.
 pub(crate) fn with_post_failure(prefix: &str, err: anyhow::Error) -> anyhow::Error {
     let why = format!("{err:#}");
     if why.contains(prefix) {
-        err
+        return err;
+    }
+    let Some(reason) = server_reason(&why) else {
+        return err.context(format!("{prefix}: {why}"));
+    };
+    let line = match fix_hint(&reason) {
+        Some(hint) => format!("{prefix}: {reason}. {hint}"),
+        None => format!("{prefix}: {reason}"),
+    };
+    err.context(line)
+}
+
+/// `400: atom has 3 sentences; one claim is at most 2` from a
+/// `bad response: URL: CODE: reason` chain. Parts split on colon
+/// followed by a space, so a colon in the URL stays with the URL.
+fn server_reason(chain: &str) -> Option<String> {
+    let parts: Vec<&str> = chain.split(": ").collect();
+    for (i, part) in parts.iter().enumerate() {
+        let code = part.trim();
+        let Ok(status) = code.parse::<u16>() else {
+            continue;
+        };
+        if !(400..=599).contains(&status) {
+            continue;
+        }
+        let rest = parts[i + 1..].join(": ");
+        if rest.is_empty() {
+            return Some(code.to_string());
+        }
+        return Some(format!("{code}: {rest}"));
+    }
+    None
+}
+
+/// What to change, when the pack's reason names the limit and not the edit.
+fn fix_hint(reason: &str) -> Option<&'static str> {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("one claim is at most") || reason.contains("sentences; one claim") {
+        Some("Split it into two remembers.")
+    } else if (reason.contains("very hard") || reason.contains("words, the limit"))
+        && !reason.contains("split it")
+    {
+        Some("Split that sentence at a conjunction or drop a clause.")
+    } else if reason.contains("readability grade") && !reason.contains("shorter") {
+        Some("Use shorter sentences and shorter words.")
+    } else if reason.contains("adverb") && !reason.contains("cut the") {
+        Some("Cut the -ly words or replace them with a number.")
     } else {
-        err.context(format!("{prefix}: {why}"))
+        None
     }
 }
 
@@ -11075,7 +11305,9 @@ fn post_claim_horizon(
 /// Write a claim an agent made, at once. No person approves it first: it
 /// carries origin `agent-derived` and its provenance in `source`, and
 /// `ljos memories review` keeps, edits, merges or drops it afterwards.
-/// The pack's own checks (secrets, size, the two-sentence cap) still apply.
+/// The pack still refuses a secret, the size cap and a third sentence.
+/// A sentence over 29 words, a grade over 14 or too many adverbs is stored
+/// as written, with the pack's warning, the same way `prefer` stores it.
 ///
 /// # Errors
 ///
@@ -22030,7 +22262,13 @@ pub fn packset_search_as_of(
         let client = pack()?;
         let workspace = client.workspace();
         client
-            .search_opts(&workspace, q, limit, stamp.as_deref(), rerank)
+            .search_opts(
+                &workspace,
+                &recall_query(q),
+                limit,
+                stamp.as_deref(),
+                rerank,
+            )
             .context("search: GET /v1/search failed")
     })?;
     // The cross-encoder replaces the head. When the fused leader is also
@@ -30821,6 +31059,80 @@ mod tests {
         ] {
             assert!(!names_the_subject(pnpm, cue), "{cue}");
             assert!(!names_the_subject(pg, cue), "{cue}");
+        }
+    }
+
+    /// `conflict of interest` and `COI` name one another. The phrase's
+    /// other words are common in the pack, so without the abbreviation the
+    /// claim shares nothing with the query and is not ranked.
+    #[test]
+    fn a_phrase_ranks_its_abbreviation_and_the_abbreviation_ranks_the_phrase() {
+        let cue = "JOSS conflict of interest rule";
+        let target = "Editors must declare COI before a review.";
+        assert!(
+            prompt_words(cue)
+                .iter()
+                .all(|word| prompt_words(target).binary_search(word).is_err()),
+            "the claim already shares a word with the query"
+        );
+        let docs = [
+            target,
+            "The build cache stays warm between test runs on this machine.",
+            "Pin the toolchain in the repository manifest before a release.",
+            "State the rule in the review notes for the next reader.",
+            "The rule for a review is written down before the meeting.",
+            "Every review follows that rule from the first comment.",
+            "A review without that rule waits for the editor.",
+            "Write the rule once and point the review at it.",
+        ];
+        let rank = lexical_scores(&docs, cue)
+            .iter()
+            .position(|(index, _)| docs[*index] == target);
+        assert_eq!(rank, Some(0), "abbreviation rank {rank:?}");
+
+        let expansion = "Editors follow the conflict of interest policy before a review.";
+        let reverse = "Apply the COI rule here";
+        assert!(
+            prompt_words(reverse)
+                .iter()
+                .all(|word| prompt_words(expansion).binary_search(word).is_err()),
+            "the expansion already shares a word with the short query"
+        );
+        let expanded = [
+            expansion,
+            "The rule for a review is written down before the meeting.",
+            "Every review follows that rule from the first comment.",
+            "A review without that rule waits for the editor.",
+            "Write the rule once and point the review at it.",
+            "Keep the build cache warm between test runs.",
+            "Pin the toolchain in the repository manifest.",
+            "The deploy script restarts the service.",
+        ];
+        let rank = lexical_scores(&expanded, reverse)
+            .iter()
+            .position(|(index, _)| expanded[*index] == expansion);
+        assert_eq!(rank, Some(0), "expansion rank {rank:?}");
+
+        let pnpm = "Use pnpm instead of npm for every JavaScript package install in this repo";
+        let pg = "Our staging Postgres is version 15; do not use features from Postgres 16";
+        assert!(!abbreviation_match(
+            pnpm,
+            "add the lodash dependency to the web app"
+        ));
+        assert!(!abbreviation_match(pnpm, "bring lodash into the web app"));
+        assert!(!abbreviation_match(
+            pg,
+            "can I use MERGE ... RETURNING in this query"
+        ));
+        for unrelated in [
+            "Run the tests and tell me what fails",
+            "Summarize the last three commits",
+            "Why is the build slow on my laptop",
+            "Add a docstring to every public function",
+        ] {
+            assert!(!abbreviation_match(pnpm, unrelated), "{unrelated}");
+            assert!(!abbreviation_match(pg, unrelated), "{unrelated}");
+            assert!(!abbreviation_match(target, unrelated), "{unrelated}");
         }
     }
 
@@ -41183,6 +41495,203 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(req.contains("horizon:transient"), "{req}");
         assert!(req.contains("\"origin\":\"user-declared\""), "{req}");
         assert!(!req.contains("extract"), "{req}");
+    }
+
+    /// The error a person reads names the pack's status and reason, and
+    /// says how to split a claim the sentence cap refused. The pack error
+    /// stays the cause, so a refusal is not queued.
+    #[test]
+    fn a_refused_remember_puts_the_pack_reason_on_the_error() {
+        let (url, _) = serve_http(|req| {
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if body.contains("grade") {
+                (
+                    400,
+                    r#"{"error":"readability grade 19.4 exceeds 14; use shorter sentences and shorter words"}"#
+                        .into(),
+                )
+            } else {
+                (
+                    400,
+                    r#"{"error":"atom has 3 sentences; one claim is at most 2"}"#.into(),
+                )
+            }
+        });
+        let client = PacksetClient::new(&url);
+        let err = post_claim(&client, "Remember", "One. Two. Three.", "ws").unwrap_err();
+        let top = err.to_string();
+        assert!(
+            top.starts_with(
+                "Remember: POST /v1/atoms failed: 400: atom has 3 sentences; one claim is at most 2"
+            ),
+            "{top}"
+        );
+        assert!(top.contains("Split it into two remembers."), "{top}");
+        assert!(err
+            .chain()
+            .any(|cause| cause.downcast_ref::<packset_client::Error>().is_some()));
+        assert!(!note_can_wait(&err), "{err:#}");
+
+        let grade = post_claim(
+            &client,
+            "Remember",
+            "the grade stays on the error line",
+            "ws",
+        )
+        .unwrap_err();
+        let top = grade.to_string();
+        assert!(
+            top.starts_with(
+                "Remember: POST /v1/atoms failed: 400: readability grade 19.4 exceeds 14"
+            ),
+            "{top}"
+        );
+        assert!(!note_can_wait(&grade), "{grade:#}");
+    }
+
+    /// A trailing citation is the atom's source. The claim that remains
+    /// is two sentences, and the pack accepts it.
+    #[test]
+    fn a_citation_tail_is_the_atoms_source() {
+        for tail in [
+            "Source: https://example.com/doc",
+            "(Source: https://example.com/doc)",
+            "Sources: https://a.example/one https://b.example/two",
+            "Citation: Smith 2024, https://doi.org/10.1000/abc",
+            "Ref: https://example.com/doc",
+            "See https://example.com/doc.",
+            "https://example.com/doc",
+        ] {
+            let cited = format!("The parser kept the hyphen. The test pins it. {tail}");
+            let body = atom_body("lesson", &cited, "ws");
+            let text = body["text"].as_str().unwrap();
+            assert_eq!(
+                packset_core::prose::sentences(text).len(),
+                2,
+                "{tail} -> {text}"
+            );
+            assert!(
+                packset_core::prose_refuse(text, packset_core::ProseRole::Atom).is_ok(),
+                "{text}"
+            );
+            assert!(!text.to_ascii_lowercase().contains("source:"), "{text}");
+            assert!(!text.contains("https://"), "{text}");
+            let citation = body["source"]["citation"].as_str().unwrap_or("");
+            assert!(
+                citation.contains("https://") || citation.contains("doi.org"),
+                "{tail} -> {citation}"
+            );
+            let mut value = body.clone();
+            admit::stamp_origin(&mut value, admit::ORIGIN_AGENT);
+            let mut map = value.as_object().cloned().unwrap();
+            packset_core::record::validate(&mut map).unwrap_or_else(|why| {
+                panic!("cited claim refused ({tail}): {why}");
+            });
+        }
+        let logged = atom_body(
+            "lesson",
+            "The parser kept the hyphen. Source: the log.",
+            "ws",
+        );
+        assert!(
+            logged["text"].as_str().unwrap().contains("Source:"),
+            "{logged}"
+        );
+        assert!(logged["source"].get("citation").is_none(), "{logged}");
+        let raw = atom_body("lesson", "Remember: pin the review set", "ws");
+        assert_eq!(raw["text"], "Remember: pin the review set");
+        assert!(raw["source"].get("citation").is_none(), "{raw}");
+    }
+
+    /// A pack that runs the real atom gate. The stored body is what it kept.
+    fn serve_validating() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if !line.contains("POST /v1/atoms") {
+                return (200, "{}".into());
+            }
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            let Ok(mut atom) = serde_json::from_str::<serde_json::Map<String, Value>>(body) else {
+                return (400, r#"{"error":"atom text is required"}"#.into());
+            };
+            match packset_core::record::validate(&mut atom) {
+                Ok(()) => {
+                    if !atom.contains_key("id") {
+                        atom.insert("id".to_string(), Value::String("atom-1".into()));
+                    }
+                    let value = Value::Object(atom);
+                    slot.lock().unwrap().push(value.clone());
+                    (200, value.to_string())
+                }
+                Err(why) => (
+                    400,
+                    serde_json::json!({ "error": why.to_string() }).to_string(),
+                ),
+            }
+        });
+        (url, stored)
+    }
+
+    /// Length and grade are stored as written, with the pack's warning, for
+    /// remember and for prefer. A third sentence is still more than one atom.
+    #[test]
+    fn a_long_remember_is_stored_with_the_same_warning_as_prefer() {
+        let _g = env_guard();
+        let (url, stored) = serve_validating();
+        let _url = PackUrl::set(&url);
+        let grade = "The payments service retries webhooks three times with exponential backoff starting at two seconds.";
+        let words = format!("{}end.", "word ".repeat(29));
+        for text in [grade, words.as_str()] {
+            let remembered = packset_write_agent("Remember", text, None, Some(false))
+                .unwrap_or_else(|why| panic!("remember refused {text:?}: {why:#}"));
+            assert_eq!(remembered["text"], text);
+            let warning = remembered["prose"]["warning"].as_str().unwrap_or("");
+            assert!(!warning.is_empty(), "{remembered}");
+            assert!(prose_warning_line(&remembered).is_some(), "{warning}");
+            let preferred = packset_write_as("Prefer", text, None, Some(false))
+                .unwrap_or_else(|why| panic!("prefer refused {text:?}: {why:#}"));
+            assert_eq!(preferred["text"], text);
+            assert!(
+                preferred["prose"]["warning"]
+                    .as_str()
+                    .is_some_and(|warning| !warning.is_empty()),
+                "{preferred}"
+            );
+        }
+        let three = "The parser kept the hyphen. The test pins it. The release ships it.";
+        packset_write_agent("Remember", three, None, Some(false))
+            .unwrap_or_else(|why| panic!("three sentences refused: {why:#}"));
+        let copies: Vec<String> = stored
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom["text"].as_str().map(str::to_string))
+            .filter(|text| text != grade && text != &words)
+            .collect();
+        assert!(copies.len() > 1, "{copies:?}");
+        assert!(copies.iter().all(|text| text != three), "{copies:?}");
+        assert!(copies.iter().all(|text| {
+            packset_core::prose::sentences(text).len() <= packset_core::prose::MAX_ATOM_SENTENCES
+        }));
+    }
+
+    /// The pack is asked for the abbreviation, so a claim that only says
+    /// `COI` can match a query that says the phrase.
+    #[test]
+    fn a_search_asks_for_the_abbreviation() {
+        let _g = env_guard();
+        let (url, log) = serve_http(|_| (200, r#"{"hits":[]}"#.into()));
+        let _url = PackUrl::set(&url);
+        packset_search("JOSS conflict of interest rule").unwrap();
+        let lines = log.lock().unwrap().clone();
+        let line = lines
+            .iter()
+            .find(|line| line.contains("/v1/search"))
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(line.to_ascii_lowercase().contains("coi"), "{lines:?}");
     }
 
     /// Many requests, each answered by `on`. The log is the request line
