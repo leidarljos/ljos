@@ -151,6 +151,10 @@ fn is_wrapper(p: &Proc) -> bool {
     WRAPPERS.contains(&p.comm.as_str())
 }
 
+fn is_harness(p: &Proc) -> bool {
+    crate::is_harness_process(p.pid, &p.comm)
+}
+
 /// The shell that ran the process whose ancestors are `chain`: past any
 /// wrappers, the outermost of the shells nested directly above it, so a
 /// script that starts a fresh `sh -c` per line is still one shell. `None`
@@ -178,14 +182,18 @@ fn ends_the_walk(p: &Proc) -> bool {
 
 /// The program that ran the process whose ancestors are `chain`, read up
 /// to the session ([`ends_the_walk`]), which is never the program: the
-/// nearest one that is neither a shell nor a wrapper, else the outermost
-/// of the shells and wrappers below the session. `None` when the session
-/// ran the process itself.
+/// nearest harness ([`crate::is_harness_process`]), so a `uv`, `npx` or
+/// `node` that only started the hook and exits with it does not outrank
+/// the harness above it; else the nearest one that is neither a shell
+/// nor a wrapper, which keeps a harness that runs as plain `node`; else
+/// the outermost of the shells and wrappers below the session. `None`
+/// when the session ran the process itself.
 #[must_use]
 pub fn runner(chain: &[Proc]) -> Option<&Proc> {
     let own = chain.iter().take_while(|p| !ends_the_walk(p));
     own.clone()
-        .find(|p| !is_shell(p) && !is_wrapper(p))
+        .find(|p| is_harness(p))
+        .or_else(|| own.clone().find(|p| !is_shell(p) && !is_wrapper(p)))
         .or_else(|| own.last())
 }
 
@@ -284,5 +292,59 @@ mod tests {
         }
         let chain = [named(4, "sh"), named(7, "git"), named(2, "kitty")];
         assert_eq!(runner(&chain).map(|p| p.pid), Some(7));
+    }
+
+    /// A process no kernel runs, so no `/proc` entry names it: pids stop
+    /// below 2^22.
+    fn fake(n: u32, comm: &str) -> Proc {
+        named((1 << 22) + n, comm)
+    }
+
+    #[test]
+    fn a_harness_outranks_a_runtime_that_only_started_the_hook() {
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "uv"),
+            fake(3, "uv"),
+            fake(4, "claude"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[3]));
+        let chain = [fake(1, "sh"), fake(2, "node"), fake(3, "claude")];
+        assert_eq!(runner(&chain), Some(&chain[2]));
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "npx"),
+            fake(3, "bash"),
+            fake(4, "cursor-agent"),
+            fake(5, "tmux"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[3]));
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "uv"),
+            fake(3, "codex"),
+            fake(4, "agy"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[2]), "the nearest harness");
+    }
+
+    #[test]
+    fn a_node_harness_with_no_known_harness_above_is_the_runner() {
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "node"),
+            fake(3, "bash"),
+            fake(4, "tmux"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[1]));
+        assert_eq!(runner(&chain[..2]), Some(&chain[1]));
+        // The walk stops at the session: a harness above it is not read.
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "node"),
+            fake(3, "tmux"),
+            fake(4, "claude"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[1]));
     }
 }
