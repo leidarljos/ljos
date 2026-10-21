@@ -293,11 +293,19 @@ Every piece of work has an issue before it has a claim.
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
-  session, the MCP call's session, or a `*_SESSION_ID` in the environment) and
+  session, the MCP call's session, a `*_SESSION_ID` in the environment, else
+  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and
   a nonce of that process, and the signature covers both. `ljos consensus`
   refuses to settle when one session authored more than one ballot, when a
   session authored a candidate and also voted, or when every ballot traces to
-  one session: a seat minted inside a session does not multiply its vote. A
+  one session: a seat minted inside a session does not multiply its vote.
+  Each reviewer casts its own ballot from its own run, `ljos vote ISSUE --for X
+  --confidence C --used DEED`, with ljos installed on its machine (`ljos cloud
+  up`) and the tracker synced through the shared tracker repository
+  (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing names the run
+  but the seat, every run of that seat is one session, and `ljos vote` and the
+  tally call it unverified. Persona ballots and Jev ballots are advisory. The
+  push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
   session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a

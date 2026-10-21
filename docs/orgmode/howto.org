@@ -795,6 +795,21 @@ name (=link_weights_by=), leaving the seat's weights as they were. Two
 personas that read the same island differently end up with different
 islands over the same claims.
 
+* Cast a reviewer's ballot from its own run
+
+Each reviewer is its own run, such as a cloud agent or a CI job, and casts its own ballot.
+=ljos cloud up= installs ljos on that machine and clones the shared tracker repository that =LJOS_TRACKER_REMOTE= names, so the ballot is pushed where the other runs fetch it.
+
+#+begin_src console
+$ ljos cloud up
+$ ljos vote $id --for ship --confidence 0.8 --used none
+#+end_src
+
+The run's harness id is the ballot's session, so two runs count twice and a run that votes again counts once.
+When nothing names the run but the seat, =ljos vote= and the tally call the session unverified.
+Persona ballots and Jev ballots are advisory.
+The push gate counts seat ballots from another seat.
+
 * Cast persona ballots through Jev
 
 With Jev on, a persona's ballot can come from Jev instead of a subagent.
