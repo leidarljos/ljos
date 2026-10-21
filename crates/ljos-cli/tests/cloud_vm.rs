@@ -1170,6 +1170,62 @@ fn doctor_respects_env_path_in_the_entry() {
 }
 
 #[test]
+fn doctor_reads_path_from_the_ljos_entry_only() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n\n[mcp_servers.ljos.env]\nNODE_PATH = \"/no/such/node\"\nLD_LIBRARY_PATH = \"/no/such/lib\"\n\n[mcp_servers.other]\ncommand = \"other\"\nPATH = \"/no/such/bin\"\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    let line = ljos_cli::cloud::missing_mcp_line();
+    assert!(
+        line.is_none(),
+        "NODE_PATH and another table are not ljos env.PATH: {}",
+        line.unwrap_or_default()
+    );
+
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\n\n[mcp_servers.ljos.env]\nPATH = \"/no/such/bin\"\nNODE_PATH = \"/no/such/node\"\n",
+    )
+    .unwrap();
+    let owned = ljos_cli::cloud::missing_mcp_line().unwrap_or_default();
+    assert!(
+        owned.contains("not on env.PATH"),
+        "the ljos table's own PATH still counts: {owned}"
+    );
+
+    fs::remove_file(home.join(".codex/config.toml")).unwrap();
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    for value in ["${env:PATH}", "$PATH"] {
+        fs::write(
+            home.join(".cursor/mcp.json"),
+            format!(
+                "{{\"mcpServers\":{{\"ljos\":{{\"command\":\"ljos-mcp\",\"args\":[],\"env\":{{\"PATH\":\"{value}\"}}}}}}}}\n"
+            ),
+        )
+        .unwrap();
+        let expanded = ljos_cli::cloud::missing_mcp_line();
+        assert!(
+            expanded.is_none(),
+            "{value} in JSON env.PATH should expand: {}",
+            expanded.unwrap_or_default()
+        );
+    }
+}
+
+#[test]
 fn install_sh_cloud_reuses_binaries_that_already_answer() {
     let root = tempfile::tempdir().unwrap();
     let bins = root.path().join("bin");

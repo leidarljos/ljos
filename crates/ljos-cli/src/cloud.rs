@@ -436,7 +436,7 @@ fn command_and_args(entry: &serde_json::Value) -> Option<LaunchSpec> {
         .and_then(serde_json::Value::as_object)
         .and_then(|env| env.get("PATH"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+        .map(expand_json_path);
     match entry.get("command").or_else(|| entry.get("cmd"))? {
         serde_json::Value::String(command) => {
             let command = command.trim();
@@ -481,8 +481,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 /// The `command` or `cmd` in the section the harness marker names.
 fn read_text_launch(path: &Path, marker: &str) -> Option<LaunchSpec> {
     let text = fs::read_to_string(path).ok()?;
-    let idx = text.find(marker)?;
-    let window: String = text[idx..].lines().take(24).collect::<Vec<_>>().join("\n");
+    let window = entry_text(&text, marker)?;
     let command = keyed_value(&window, "command").or_else(|| keyed_value(&window, "cmd"))?;
     if command.is_empty() {
         None
@@ -495,12 +494,131 @@ fn read_text_launch(path: &Path, marker: &str) -> Option<LaunchSpec> {
     }
 }
 
+/// The marker's own table, including dotted children such as
+/// `[mcp_servers.ljos.env]`. A fixed window runs into the next server,
+/// and `NODE_PATH` used to count as `PATH`.
+fn entry_text(text: &str, marker: &str) -> Option<String> {
+    if !text.contains(marker) {
+        return None;
+    }
+    let header = marker.trim();
+    if header.starts_with('[') && header.ends_with(']') && !header.contains('\n') {
+        return toml_entry(text, header);
+    }
+    yaml_entry(text, marker)
+}
+
+fn toml_entry(text: &str, header: &str) -> Option<String> {
+    let name = header.trim_matches(|c| c == '[' || c == ']').trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut keeping = false;
+    let mut seen = false;
+    for line in text.split_inclusive('\n') {
+        if let Some(table) = toml_table_name(line) {
+            keeping = table == name
+                || table
+                    .strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('.'));
+            if keeping {
+                seen = true;
+            }
+        }
+        if keeping {
+            out.push_str(line);
+        }
+    }
+    seen.then_some(out)
+}
+
+fn toml_table_name(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('#') {
+        return None;
+    }
+    let header = trimmed.split('#').next().unwrap_or(trimmed).trim();
+    let inner = if let Some(rest) = header.strip_prefix("[[") {
+        rest.strip_suffix("]]")?
+    } else if let Some(rest) = header.strip_prefix('[') {
+        let rest = rest.strip_suffix(']')?;
+        if rest.contains('[') {
+            return None;
+        }
+        rest
+    } else {
+        return None;
+    };
+    let name = inner.trim();
+    (!name.is_empty()).then_some(name)
+}
+
+fn yaml_entry(text: &str, marker: &str) -> Option<String> {
+    let found = text.find(marker)?;
+    let start = if marker.starts_with('\n') {
+        found + 1
+    } else {
+        text[..found].rfind('\n').map_or(0, |at| at + 1)
+    };
+    let rest = &text[start..];
+    let mut lines = rest.split_inclusive('\n');
+    let first = lines.next()?;
+    let indent = first.chars().take_while(|c| *c == ' ').count();
+    let mut out = String::new();
+    out.push_str(first);
+    if !first.ends_with('\n') {
+        out.push('\n');
+    }
+    for line in lines {
+        if line.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let ind = line.chars().take_while(|c| *c == ' ').count();
+        if ind <= indent {
+            break;
+        }
+        out.push_str(line);
+    }
+    Some(out)
+}
+
+/// `${env:PATH}` and `$PATH` in a JSON `env.PATH`, the same kind of
+/// expansion a command already applies to `${env:HOME}`.
+fn expand_json_path(value: &str) -> String {
+    let path = std::env::var("PATH").unwrap_or_default();
+    replace_dollar_path(&value.replace("${env:PATH}", &path), &path)
+}
+
+fn replace_dollar_path(value: &str, path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(at) = rest.find("$PATH") {
+        let after = at + "$PATH".len();
+        let boundary = rest[after..].chars().next().is_none_or(|c| !is_key_char(c));
+        out.push_str(&rest[..at]);
+        if boundary {
+            out.push_str(path);
+        } else {
+            out.push_str("$PATH");
+        }
+        rest = &rest[after..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
 fn keyed_value(window: &str, key: &str) -> Option<String> {
     let mut rest = window;
     while let Some(at) = rest.find(key) {
-        let before = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+        let before = at == 0 || !is_key_byte(rest.as_bytes()[at - 1]);
         let after_idx = at + key.len();
-        let after = after_idx >= rest.len() || !rest.as_bytes()[after_idx].is_ascii_alphanumeric();
+        let after = after_idx >= rest.len() || !is_key_byte(rest.as_bytes()[after_idx]);
         if before && after {
             let tail = rest[after_idx..].trim_start();
             if let Some(value) = tail.strip_prefix('=').or_else(|| tail.strip_prefix(':')) {
@@ -513,6 +631,10 @@ fn keyed_value(window: &str, key: &str) -> Option<String> {
         rest = &rest[after_idx..];
     }
     None
+}
+
+fn is_key_byte(b: u8) -> bool {
+    is_key_char(char::from(b))
 }
 
 fn parse_scalar(rest: &str) -> String {
