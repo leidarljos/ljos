@@ -38,6 +38,7 @@ pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod slot;
 pub mod subagent;
 pub mod sync;
 pub mod tools;
