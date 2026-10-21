@@ -126,7 +126,7 @@ pub fn public_key() -> Result<String> {
         if let Some(dir) = key.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let made = Command::new("age-keygen")
+        let made = keygen_cmd()
             .arg("-o")
             .arg(&key)
             .stdin(Stdio::null())
@@ -139,7 +139,7 @@ pub fn public_key() -> Result<String> {
             );
         }
     }
-    let out = Command::new("age-keygen")
+    let out = keygen_cmd()
         .arg("-y")
         .arg(&key)
         .output()
@@ -231,7 +231,7 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     if recipients.is_empty() {
         bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
     }
-    let mut cmd = Command::new("age");
+    let mut cmd = age_cmd();
     for r in recipients {
         cmd.arg("-r").arg(r);
     }
@@ -261,7 +261,7 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
 /// Open a sealed log with this machine's identity; none when this machine
 /// is not one of its recipients.
 fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
-    let out = Command::new("age")
+    let out = age_cmd()
         .arg("-d")
         .arg("-i")
         .arg(identity)
@@ -306,7 +306,32 @@ fn age_on_path() -> bool {
     if let Some(present) = AGE_ON_PATH.with(|cell| cell.get()) {
         return present;
     }
-    crate::on_path("age")
+    crate::on_path("age") || crate::on_path("rage")
+}
+
+/// Run an age-compatible tool in the C locale. rage's French
+/// "Aucune clef correspondante" would not match the English miss text,
+/// and import would abort every later host.
+fn c_locale(mut cmd: Command) -> Command {
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
+    cmd
+}
+
+fn age_compatible<'a>(age_name: &'a str, rage_name: &'a str) -> &'a str {
+    if crate::on_path(age_name) || !crate::on_path(rage_name) {
+        age_name
+    } else {
+        rage_name
+    }
+}
+
+fn age_cmd() -> Command {
+    c_locale(Command::new(age_compatible("age", "rage")))
+}
+
+fn keygen_cmd() -> Command {
+    c_locale(Command::new(age_compatible("age-keygen", "rage-keygen")))
 }
 
 /// Hide `age` on this thread until the guard drops. `PATH` stays as it is.
@@ -1923,6 +1948,37 @@ mod tests {
         );
         assert_eq!(open(&out, &other).unwrap(), None);
         assert!(seal("x", &[], &out).is_err(), "no recipients is refused");
+    }
+
+    /// rage under fr_FR says "Aucune clef correspondante" instead of
+    /// "no matching keys found". That used to abort import for every
+    /// host still waiting.
+    #[test]
+    fn a_localized_rage_miss_stays_a_miss_under_lc_all_c() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ]; then echo 'no matching keys found' >&2; exit 1; fi\necho 'Aucune clef correspondante' >&2; exit 1\n";
+        for name in ["age", "rage"] {
+            let path = bin.join(name);
+            std::fs::write(&path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        // Only the fakes. A real age later on PATH would hide rage.
+        std::env::set_var("PATH", &bin);
+        let log = dir.path().join("peer.jsonl.age");
+        std::fs::write(&log, b"sealed").unwrap();
+        let id = dir.path().join("age.key");
+        std::fs::write(&id, b"key").unwrap();
+        let opened = open(&log, &id);
+        std::fs::remove_file(bin.join("age")).unwrap();
+        let via_rage = open(&log, &id);
+        std::env::set_var("PATH", &old_path);
+        assert!(matches!(opened, Ok(None)), "age: {opened:?}");
+        assert!(matches!(via_rage, Ok(None)), "rage: {via_rage:?}");
     }
 
     #[test]
