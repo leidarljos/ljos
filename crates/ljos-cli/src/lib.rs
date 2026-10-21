@@ -24899,6 +24899,34 @@ impl CommitLock {
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
         Self(ok.then_some(file))
     }
+
+    /// [`CommitLock::acquire`], given up at `deadline`: `None` when another
+    /// holder still has it then.
+    #[must_use]
+    pub fn acquire_by(path: &std::path::Path, deadline: std::time::Instant) -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return Some(Self(None));
+        };
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Some(Self(Some(file)));
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Some(Self(None)),
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for CommitLock {
@@ -24969,6 +24997,15 @@ fn exclude_tracker_lock(common: &Path) {
 /// `index.lock`. Taking it twice in one thread waits forever.
 pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
     tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
+}
+
+/// [`tracker_commit_lock`] for a caller with a time budget: `None` when
+/// another writer still holds the checkout at `deadline`.
+pub fn tracker_commit_lock_by(dir: &Path, deadline: std::time::Instant) -> Option<CommitLock> {
+    match tracker_lock_path(dir) {
+        Some(path) => CommitLock::acquire_by(&path, deadline),
+        None => Some(CommitLock(None)),
+    }
 }
 
 /// The seat a tracker commit and its logbook line name. One token, so
