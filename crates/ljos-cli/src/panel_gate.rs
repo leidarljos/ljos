@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::ballot_sig;
+use crate::proc_tree;
 
 /// The read log at the tracker root: one line
 /// `TIME HARNESS NONCE ISSUE` per recall.
@@ -362,6 +363,175 @@ pub fn session_cast_refusal(
 static CAST: std::sync::Mutex<std::collections::BTreeSet<String>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
+/// The processes a cast on this machine runs under, each a
+/// [`proc_tree::token`]: the shell that ran this `ljos`, and the harness
+/// whose hook saw its line. The environment names the session; it cannot
+/// cheaply change either of these.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CastTree {
+    shell: Option<String>,
+    harness: Option<String>,
+}
+
+impl CastTree {
+    /// This process's tree. Only the `ljos` command line has one: the MCP
+    /// server answers a parent and its subagents alike, and names each
+    /// call's session itself.
+    fn here() -> Self {
+        if !crate::subagent::runs_as_ljos() {
+            return Self::default();
+        }
+        let chain = proc_tree::ancestors();
+        Self {
+            shell: proc_tree::calling_shell(&chain).map(proc_tree::token),
+            harness: crate::subagent::taken_harness().map(|p| proc_tree::token(&p)),
+        }
+    }
+}
+
+/// One cast recorded under `ballot-trees/ISSUE` in the runtime directory:
+/// `SHELL HARNESS SESSION STATE`, tab-separated, `-` for a process not
+/// known. The state is `cast`, or the token of the process that holds the
+/// claim until its cast lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreeRow {
+    shell: String,
+    harness: String,
+    session: String,
+    state: String,
+}
+
+const CAST_STATE: &str = "cast";
+
+impl TreeRow {
+    fn parse(line: &str) -> Option<Self> {
+        let mut f = line.split('\t');
+        let row = Self {
+            shell: f.next()?.to_string(),
+            harness: f.next()?.to_string(),
+            session: f.next()?.to_string(),
+            state: f.next()?.to_string(),
+        };
+        f.next().is_none().then_some(row)
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}",
+            self.shell, self.harness, self.session, self.state
+        )
+    }
+
+    /// Whether the row can still refuse a cast: a process it names runs,
+    /// and its claim was kept or its holder is still at it.
+    fn live(&self) -> bool {
+        let runs = |t: &str| t != "-" && proc_tree::token_alive(t);
+        (runs(&self.shell) || runs(&self.harness))
+            && (self.state == CAST_STATE || runs(&self.state))
+    }
+
+    /// Why a cast as `key` under `tree` repeats this row's voice. A shell
+    /// runs one agent's commands, so any other session from it is a second
+    /// voice. A harness runs a parent and its subagents, so only another
+    /// root session from it is.
+    fn refuses(&self, issue: &str, key: &str, tree: &CastTree) -> Option<String> {
+        let same = |mine: &Option<String>, theirs: &str| mine.as_deref() == Some(theirs);
+        let root = |k: &str| k.split(':').next().unwrap_or(k).to_string();
+        let whose = if same(&tree.shell, &self.shell) && self.session != key {
+            "this shell"
+        } else if same(&tree.harness, &self.harness) && root(&self.session) != root(key) {
+            "the harness running this line"
+        } else {
+            return None;
+        };
+        Some(format!(
+            "{whose} already cast a ballot on {issue} as session {}. A session id set in the environment does not make another voice. Nothing was cast. {OWN_BALLOT}",
+            self.session
+        ))
+    }
+}
+
+/// The rows of `issue` on this tracker: another tracker's issue of the
+/// same name is another question.
+fn tree_path(issue: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let tracker = std::env::var_os("VISSUE_ROOT").unwrap_or_default();
+    let tracker = hex::encode(Sha256::digest(tracker.as_encoded_bytes()));
+    crate::runtime_dir()
+        .join("ballot-trees")
+        .join(&tracker[..16])
+        .join(crate::subagent::token(issue))
+}
+
+/// Rewrite the rows of `path` under its lock. `edit` sees the rows still
+/// live and may refuse; what it leaves is written back.
+fn edit_rows<R>(path: &Path, edit: impl FnOnce(&mut Vec<TreeRow>) -> Result<R>) -> Result<R> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let _lock = crate::CommitLock::acquire(&path.with_extension("lock"));
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut rows: Vec<TreeRow> = text
+        .lines()
+        .filter_map(TreeRow::parse)
+        .filter(TreeRow::live)
+        .collect();
+    let out = edit(&mut rows)?;
+    let body: String = rows.iter().map(|r| r.line() + "\n").collect();
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(out)
+}
+
+/// This process's row on an issue, held until the cast lands or fails.
+#[derive(Debug)]
+struct TreeHold {
+    path: PathBuf,
+    row: TreeRow,
+}
+
+/// Refuse a cast as `key` whose shell or harness already cast on `issue`
+/// as another session, else hold this process's row.
+fn hold_tree(issue: &str, key: &str, tree: &CastTree) -> Result<Option<TreeHold>> {
+    if tree.shell.is_none() && tree.harness.is_none() {
+        return Ok(None);
+    }
+    let me =
+        proc_tree::of(std::process::id()).map_or_else(|| "-".to_string(), |p| proc_tree::token(&p));
+    let row = TreeRow {
+        shell: tree.shell.clone().unwrap_or_else(|| "-".into()),
+        harness: tree.harness.clone().unwrap_or_else(|| "-".into()),
+        session: key.to_string(),
+        state: me,
+    };
+    let path = tree_path(issue);
+    edit_rows(&path, |rows| {
+        if let Some(why) = rows.iter().find_map(|r| r.refuses(issue, key, tree)) {
+            bail!("{why}");
+        }
+        rows.push(row.clone());
+        Ok(())
+    })?;
+    Ok(Some(TreeHold { path, row }))
+}
+
+impl TreeHold {
+    /// Mark the row cast, or drop it when the cast did not land.
+    fn settle(&self, kept: bool) {
+        let _ = edit_rows(&self.path, |rows| {
+            if let Some(at) = rows.iter().position(|r| *r == self.row) {
+                if kept {
+                    rows[at].state = CAST_STATE.into();
+                } else {
+                    rows.remove(at);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 /// A claim on this connection's one ballot for an issue. Dropped without
 /// [`SessionBallot::keep`], the claim is released so a failed cast can be
 /// tried again. Kept, a later seat argument in this process is refused.
@@ -369,6 +539,7 @@ static CAST: std::sync::Mutex<std::collections::BTreeSet<String>> =
 pub struct SessionBallot {
     mark: String,
     kept: bool,
+    tree: Option<TreeHold>,
 }
 
 impl SessionBallot {
@@ -380,6 +551,9 @@ impl SessionBallot {
 
 impl Drop for SessionBallot {
     fn drop(&mut self) {
+        if let Some(tree) = &self.tree {
+            tree.settle(self.kept);
+        }
         if self.kept {
             return;
         }
@@ -394,12 +568,14 @@ impl Drop for SessionBallot {
 /// process. A later ballot from this session is refused, whoever it names,
 /// including the same persona in a new process once the note is on the
 /// tracker. This process also holds the one claim across the gap before
-/// that note is written.
+/// that note is written. A shell, or a hooked harness, that already cast
+/// on `issue` as one session is refused as another (see [`CastTree`]).
 ///
 /// # Errors
 ///
 /// This connection already cast on `issue`, this process already holds the
-/// claim, or it authored a candidate tied to `issue`.
+/// claim, it authored a candidate tied to `issue`, or its shell or harness
+/// cast on `issue` as another session.
 pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let id = ballot_sig::identity();
     let key = session_key(&id.harness, &id.nonce);
@@ -418,7 +594,13 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         );
     }
     drop(held);
-    Ok(SessionBallot { mark, kept: false })
+    let mut ballot = SessionBallot {
+        mark,
+        kept: false,
+        tree: None,
+    };
+    ballot.tree = hold_tree(issue, &key, &CastTree::here())?;
+    Ok(ballot)
 }
 
 /// The refusal for `issue` as the counted ballots hold it now, or `None`
@@ -1072,6 +1254,50 @@ pub fn designer_prompt_for(issue: &str, n: usize, of: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_casts_as_one_session_and_a_harness_as_one_root() {
+        let row = TreeRow {
+            shell: "b:10:1".into(),
+            harness: "b:20:2".into(),
+            session: "sess-root:agent-a".into(),
+            state: CAST_STATE.into(),
+        };
+        assert_eq!(TreeRow::parse(&row.line()), Some(row.clone()));
+        let tree = |shell: &str, harness: &str| CastTree {
+            shell: Some(shell.into()),
+            harness: Some(harness.into()),
+        };
+        let shell = row.refuses("demo-a", "sess-root:agent-b", &tree("b:10:1", "b:30:3"));
+        assert!(
+            shell.as_deref().is_some_and(|w| w.starts_with(
+                "this shell already cast a ballot on demo-a as session sess-root:agent-a."
+            ) && w.contains("Nothing was cast")),
+            "{shell:?}"
+        );
+        assert_eq!(
+            row.refuses("demo-a", "sess-root:agent-a", &tree("b:10:1", "b:20:2")),
+            None,
+            "the same session is the cast gate's to judge"
+        );
+        assert_eq!(
+            row.refuses("demo-a", "sess-root:agent-b", &tree("b:11:1", "b:20:2")),
+            None,
+            "a subagent of the same root in its own shell is its own voice"
+        );
+        let harness = row.refuses("demo-a", "sess-other", &tree("b:11:1", "b:20:2"));
+        assert!(
+            harness
+                .as_deref()
+                .is_some_and(|w| w.starts_with("the harness running this line already cast")),
+            "{harness:?}"
+        );
+        assert_eq!(
+            row.refuses("demo-a", "sess-other", &CastTree::default()),
+            None
+        );
+        assert!(!row.live(), "a row naming no running process is dropped");
+    }
 
     fn seat(voter: &str, harness: &str) -> BallotTrace {
         BallotTrace {

@@ -32,6 +32,7 @@ pub mod pack_copy;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
+pub mod proc_tree;
 pub mod reap;
 pub mod runner_env;
 pub mod runner_hooks;
@@ -27172,8 +27173,8 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 }
 
 /// Give a child this process's connection. A nested `ljos vote` then signs
-/// with the same session instead of minting a nonce of its own, a
-/// subagent's included. The seat argument is not copied onto the session.
+/// with the same session, a subagent's included. The seat argument is not
+/// copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
     let id = ballot_sig::identity();
