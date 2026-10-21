@@ -282,6 +282,14 @@ Every piece of work has an issue before it has a claim.
   then the seat runs `ljos consensus`; over MCP the `run_a_panel` prompt
   orders it, and without MCP `ljos panel ISSUE --out DIR` writes one brief
   per persona.
+  `ljos panel ISSUE --cloud` writes one prompt file per persona in that
+  directory. Each file names the seat environment (`LJOS_SEAT`,
+  `VISSUE_AGENT`, `LJOS_TRACKER_GIT=push`), the slot
+  (`slot: SEAT model=FAMILY`) and the push rules: a ref under `cursor/`
+  stays unpushed, `gh pr create` and `gh pr merge` stay unrun, and a push
+  is not forced. The run starts from that file and `ljos brief NAME ISSUE`,
+  and it does not read ballots before it casts. Families rotate grok, opus,
+  codex in persona name order, so the first two seats differ.
   A panel is refused until a playbook is bound (`ljos playbook ISSUE NAME`
   or `ljos sitting ISSUE --playbook NAME`). Both seat the personas whose
   `--about` domains the issue's title or tags name. A persona the
