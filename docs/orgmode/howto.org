@@ -770,10 +770,15 @@ the ticket proj-1a2b stays open and nobody holds it; `ljos finish proj-1a2b --cl
 #+begin_src console
 $ ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
 $ ljos persona reader --anchor 0.8 --view "Reads as a first-time user of the docs." --about docs
-$ ljos vote $id --for hold --as reviewer
-$ ljos vote $id --for ship --as reader
-$ ljos consensus $id
+$ ljos brief reviewer $id
+$ ljos brief reader $id
 #+end_src
+
+Each brief goes to its own subagent or run, which casts as its persona:
+the reviewer's runs =ljos vote $id --for hold --as reviewer= and the
+reader's =ljos vote $id --for ship --as reader=. One session that cast
+both would be refused at the second, since a seat argument does not
+make another voice. The seat then runs =ljos consensus $id=.
 
 Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor, never below the 0.5 every other voter on the

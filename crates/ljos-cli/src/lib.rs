@@ -23999,7 +23999,8 @@ workflow. The stage and the next step, the same reading as `ljos workflow`.",
         name: "panel",
         optional: true,
         step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
-the issue speaks to. Start one subagent per brief.",
+the issue speaks to. Each brief goes to its own subagent or run, which\n   \
+casts `ljos vote --as NAME` itself.",
     },
     SittingSection {
         name: "recall",
