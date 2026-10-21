@@ -291,15 +291,49 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
 }
 
 /// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
+///
+/// The directory keeps ASCII letters, digits, `-` and `.`, and writes any
+/// other byte, `_` included, and a leading `.` as `%HH`, so no two seats
+/// share a file. Older builds folded those bytes to `_`; a key at that
+/// folded name moves here on first use. No name written here has a `_`,
+/// so the folded file is no seat's current key.
 #[must_use]
 pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    let name: String = seat
-        .trim()
-        .chars()
+    let seats = base.join("ljos").join("seats");
+    let seat = seat.trim();
+    let name = seat_dir_name(seat);
+    let path = seats.join(&name).join("ballot.key");
+    let folded = folded_seat_dir_name(seat);
+    if folded != name && !folded.starts_with('.') && !path.exists() {
+        let old = seats.join(folded).join("ballot.key");
+        if old.is_file() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::rename(&old, &path);
+        }
+    }
+    Some(path)
+}
+
+fn seat_dir_name(seat: &str) -> String {
+    let mut out = String::with_capacity(seat.len());
+    for (at, b) in seat.bytes().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b'-' || (b == b'.' && at > 0) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02x}"));
+        }
+    }
+    out
+}
+
+fn folded_seat_dir_name(seat: &str) -> String {
+    seat.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
                 c
@@ -307,13 +341,7 @@ pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
                 '_'
             }
         })
-        .collect();
-    Some(
-        base.join("ljos")
-            .join("seats")
-            .join(name)
-            .join("ballot.key"),
-    )
+        .collect()
 }
 
 /// The machine deed key. A seat key must not be this file.
@@ -1321,6 +1349,26 @@ mod tests {
             std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn a_key_at_its_folded_name_moves_to_the_seat_file() {
+        let _lock = crate::test_env_lock();
+        let data = tempfile::tempdir().unwrap();
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+        });
+        let folded = data.path().join("ljos/seats/judge_model-1.5/ballot.key");
+        std::fs::create_dir_all(folded.parent().unwrap()).unwrap();
+        std::fs::write(&folded, [7u8; 32]).unwrap();
+        let path = seat_key_file("judge:model-1.5").unwrap();
+        assert_ne!(path, folded);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![7u8; 32]);
+        assert!(!folded.exists());
+        assert_eq!(seat_key_file("judge:model-1.5").unwrap(), path);
+        let slug = seat_key_file("disk-saver").unwrap();
+        assert_eq!(slug, data.path().join("ljos/seats/disk-saver/ballot.key"));
     }
 
     #[test]
