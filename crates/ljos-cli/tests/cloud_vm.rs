@@ -328,7 +328,10 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(!signing.contains("host.key"), "{env}");
     assert_eq!(fs::read(&host_key).unwrap(), vec![9u8; 32]);
     let profile = fs::read_to_string(home.join(".profile")).unwrap();
-    assert!(profile.contains(&home.join(".local/bin").display().to_string()), "{profile}");
+    assert!(
+        profile.contains(&home.join(".local/bin").display().to_string()),
+        "{profile}"
+    );
     let tracker = home.join(".local/share/ljos/tracker");
     assert_eq!(
         git(&tracker, &["rev-parse", "--is-inside-work-tree"]).trim(),
@@ -936,7 +939,10 @@ fn doctor_flags_a_command_from_another_home() {
     )
     .unwrap();
     let literal = ljos_cli::cloud::missing_mcp_line().unwrap();
-    assert!(literal.contains("$HOME/.local/bin/ljos-mcp does not exist"), "{literal}");
+    assert!(
+        literal.contains("$HOME/.local/bin/ljos-mcp does not exist"),
+        "{literal}"
+    );
     assert!(literal.contains("onboard --harness codex"), "{literal}");
 }
 

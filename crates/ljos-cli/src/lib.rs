@@ -3574,7 +3574,10 @@ fn heal_json_command(
     }
     let note = format!("set the command in {} to {replacement}", path.display());
     if dry {
-        return Ok(Some(format!("would set the command in {} to {replacement}", path.display())));
+        return Ok(Some(format!(
+            "would set the command in {} to {replacement}",
+            path.display()
+        )));
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -3652,9 +3655,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
     let end = marker_section_end(text, start, marker);
     let mut at = start;
     while at < end {
-        let line_end = text[at..]
-            .find('\n')
-            .map_or(text.len(), |rel| at + rel + 1);
+        let line_end = text[at..].find('\n').map_or(text.len(), |rel| at + rel + 1);
         let line = &text[at..line_end];
         if let Some((value_start, value_end)) = command_value_span(line) {
             let value_start = at + value_start;
@@ -3678,7 +3679,12 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
     (text.to_string(), false)
 }
 
-fn heal_text_command(path: &Path, marker: &str, replacement: &str, dry: bool) -> Result<Option<String>> {
+fn heal_text_command(
+    path: &Path,
+    marker: &str,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
     if marker.is_empty() {
         return Ok(None);
     }
@@ -3726,9 +3732,12 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
     // table does not name.
     if h.name == "claude" {
         if let Ok(home) = home() {
-            if let Some(note) =
-                heal_json_command(&home.join(".claude.json"), "/mcpServers/ljos", replacement, dry)?
-            {
+            if let Some(note) = heal_json_command(
+                &home.join(".claude.json"),
+                "/mcpServers/ljos",
+                replacement,
+                dry,
+            )? {
                 notes.push(note);
             }
         }

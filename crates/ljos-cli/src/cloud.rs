@@ -296,7 +296,9 @@ fn mcp_problem() -> McpProblem {
             continue;
         };
         match launch_check(&file, &launch) {
-            LaunchCheck::Ready => ready.push(format!("{} starts {}", file.path.display(), launch.command)),
+            LaunchCheck::Ready => {
+                ready.push(format!("{} starts {}", file.path.display(), launch.command))
+            }
             LaunchCheck::Warn(why) => warned.push(format!(
                 "ljos-mcp: {why} ({}). Run `{}`.",
                 file.path.display(),
@@ -327,21 +329,22 @@ fn mcp_problem() -> McpProblem {
 fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut push = |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expands_home: bool| {
-        let kind = match &probe {
-            McpProbe::Json(pointer) => format!("json:{pointer}"),
-            McpProbe::Text(marker) => format!("text:{marker}"),
+    let mut push =
+        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expands_home: bool| {
+            let kind = match &probe {
+                McpProbe::Json(pointer) => format!("json:{pointer}"),
+                McpProbe::Text(marker) => format!("text:{marker}"),
+            };
+            if seen.insert(format!("{kind}:{}", path.display())) {
+                out.push(McpFile {
+                    path,
+                    probe,
+                    advice,
+                    expands_home,
+                    strict,
+                });
+            }
         };
-        if seen.insert(format!("{kind}:{}", path.display())) {
-            out.push(McpFile {
-                path,
-                probe,
-                advice,
-                expands_home,
-                strict,
-            });
-        }
-    };
     if let Some(path) = std::env::var_os("LJOS_MCP_CONFIG").filter(|p| !p.is_empty()) {
         push(
             PathBuf::from(path),
@@ -600,7 +603,10 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
     let name = Path::new(&command).file_name().and_then(|n| n.to_str());
     if name == Some("ljos-plugin") {
         if let Some(bin) = launch.args.first() {
-            if !bin.contains('/') && command_path(bin, search_path).is_none() && !home_bin_exists(bin) {
+            if !bin.contains('/')
+                && command_path(bin, search_path).is_none()
+                && !home_bin_exists(bin)
+            {
                 return LaunchCheck::Missing(format!("{bin} is not installed"));
             }
         }
@@ -1067,9 +1073,10 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
 }
 
 fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
-    let mut notes = Vec::new();
-    notes.push(ensure_path_file(&home.join(".profile"), bin_dir, false)?);
-    notes.push(ensure_path_file(&home.join(".bashrc"), bin_dir, true)?);
+    let notes = [
+        ensure_path_file(&home.join(".profile"), bin_dir, false)?,
+        ensure_path_file(&home.join(".bashrc"), bin_dir, true)?,
+    ];
     Ok(notes.join("; "))
 }
 
