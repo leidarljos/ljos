@@ -3847,7 +3847,7 @@ pub fn onboard_from(file: &Path, harness: &str, dry: bool) -> Result<Vec<Step>> 
 
 /// The env file a shell runner sources, beside the runners file unless
 /// the table names `env_file`.
-fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
+pub(crate) fn env_path_for(file: &Path, h: &Harness) -> PathBuf {
     match &h.env_file {
         Some(path) => expand(path),
         None => file

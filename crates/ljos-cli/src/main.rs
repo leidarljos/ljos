@@ -1238,12 +1238,15 @@ fn run_command() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cmd = Cli::parse().cmd;
-    // The first run of a new version refreshes skills ljos wrote. Doctor
-    // stays read-only unless `--fix` is set.
+    // The first run of a new version refreshes skills and runner env
+    // files ljos wrote. `ljos doctor` does not.
     match &cmd {
         Cmd::Doctor { fix: true, .. } => ljos_cli::runner_skills::refresh_for_fix(),
         Cmd::Doctor { .. } => {}
-        _ => ljos_cli::runner_skills::refresh_on_new_version(),
+        _ => {
+            ljos_cli::runner_skills::refresh_on_new_version();
+            ljos_cli::runner_env::refresh_on_new_version();
+        }
     }
     // A subagent with no seat would hold under its process tree ("bash").
     // The commands that name a holder refuse instead.
