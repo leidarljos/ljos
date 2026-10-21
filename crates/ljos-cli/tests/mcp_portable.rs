@@ -243,7 +243,10 @@ fn onboard_keeps_an_absolute_server_path_that_exists_here() {
     );
     assert!(out.status.success(), "{}", said(&out));
     let text = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert!(text.contains(&format!("command = \"{}\"", installed.display())), "{text}");
+    assert!(
+        text.contains(&format!("command = \"{}\"", installed.display())),
+        "{text}"
+    );
 }
 
 #[test]
@@ -262,7 +265,10 @@ fn onboard_writes_an_absolute_command_when_path_cannot_find_ljos_mcp() {
     let (command, _) = json_command(&home.join(".cursor/mcp.json"));
     assert_eq!(command, bin.join("ljos-mcp").display().to_string());
     let output = said(&out);
-    assert!(output.contains("PATH does not resolve ljos-mcp"), "{output}");
+    assert!(
+        output.contains("PATH does not resolve ljos-mcp"),
+        "{output}"
+    );
 
     let out = onboard_with_path(
         &bin.join("ljos"),
@@ -295,7 +301,11 @@ fn onboard_writes_an_absolute_command_when_path_points_to_another_install() {
     );
     assert!(out.status.success(), "{}", said(&out));
     let (command, _) = json_command(&home.join(".cursor/mcp.json"));
-    assert_eq!(command, bin.join("ljos-mcp").display().to_string(), "{command}");
+    assert_eq!(
+        command,
+        bin.join("ljos-mcp").display().to_string(),
+        "{command}"
+    );
     let said = said(&out);
     assert!(
         said.contains(&format!(
@@ -321,7 +331,10 @@ fn onboard_rewrites_only_the_ljos_entry_in_toml() {
     let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "codex"]);
     assert!(out.status.success(), "{}", said(&out));
     let text = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert!(text.contains("[mcp_servers.ljos]\ncommand = \"ljos-mcp\""), "{text}");
+    assert!(
+        text.contains("[mcp_servers.ljos]\ncommand = \"ljos-mcp\""),
+        "{text}"
+    );
     assert!(
         text.contains("[mcp_servers.ljos-dev]\ncommand = \"/opt/pinned/ljos-mcp\""),
         "{text}"
