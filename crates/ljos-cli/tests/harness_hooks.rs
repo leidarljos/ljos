@@ -1739,3 +1739,81 @@ fn a_missing_workdir_is_not_a_seat_rule_deny() {
     let out = hook_in(&hab, &as_cwd, &hab.repo, true, &[]);
     assert_ordinary(&out, &as_cwd);
 }
+
+/// ljos-qpiw: the opencode plugin reports each bash call, and no post
+/// cites these commits: one ran from a script, so no command names
+/// `git commit`, and one was chained before a push that exited 128. The
+/// idle Stop cites both. The upstream commit a fast-forward brought in is
+/// not this sitting's deed.
+#[test]
+fn an_opencode_commit_no_post_cited_is_deeded_at_stop() {
+    let (_dir, hab) = habitat();
+    git(&hab.repo, &["checkout", "-q", "-b", "upstream"]);
+    let upstream = commit_file(&hab.repo, "upstream.txt");
+    git(&hab.repo, &["checkout", "-q", "main"]);
+    let session = "ses_7f3a91c2d4e5ffa1b2c3d4e5";
+    let env = [("OPENCODE_SESSION_ID", session)];
+    let cwd = hab.repo.clone();
+    let send = |event: &str, extra: serde_json::Value| {
+        ljos(&hab, &claude(event, session, &cwd, extra), &env);
+    };
+    let bash = |command: &str, exit: i64, run: &dyn Fn()| {
+        let input = serde_json::json!({"command": command});
+        send(
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_input": input}),
+        );
+        run();
+        send(
+            "PostToolUse",
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": input,
+                "tool_response": {"exit_code": exit}
+            }),
+        );
+    };
+    send(
+        "UserPromptSubmit",
+        serde_json::json!({"prompt": "Add slugify with tests, then commit"}),
+    );
+    send("SessionStart", serde_json::json!({}));
+    bash("git merge --ff-only upstream", 0, &|| {
+        git(&hab.repo, &["merge", "-q", "--ff-only", "upstream"]);
+    });
+    let write = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {"filePath": hab.repo.join("slug.py"), "content": "x\n"}
+    });
+    send("PreToolUse", write.clone());
+    std::fs::write(hab.repo.join("slug.py"), "x\n").unwrap();
+    send("PostToolUse", write);
+    bash("python3 commit.py && git log --oneline -1", 0, &|| {
+        git(&hab.repo, &["add", "slug.py"]);
+        git(&hab.repo, &["commit", "-q", "-m", "add slugify"]);
+    });
+    let scripted = head(&hab.repo);
+    let pushed = "git add test_slug.py && git commit -m tests && git push origin main";
+    bash(pushed, 128, &|| {
+        commit_file(&hab.repo, "test_slug.py");
+    });
+    let chained = head(&hab.repo);
+    send("Stop", serde_json::json!({}));
+    let deeds = std::fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
+    for (sha, how) in [(&scripted, "script"), (&chained, "chained")] {
+        assert!(
+            deeds.contains(&format!("--id deed-file-commit-{sha}")),
+            "the {how} commit got no deed\n{deeds}"
+        );
+    }
+    assert!(
+        !deeds.contains(&upstream),
+        "a fast-forward is not the sitting's commit\n{deeds}"
+    );
+    let org = std::fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains(&format!("cited deed-file-commit-{scripted}")),
+        "{org}"
+    );
+    assert!(org.contains("* DONE"), "{org}");
+}
