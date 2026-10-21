@@ -152,20 +152,29 @@ Each stub chains to the repository's =.git/hooks/<name>= when that file is execu
 Booking never fails the hook. A line it prints goes to stderr, and a habitat that did not answer is a line in the book log.
 =LJOS_OFF= set to =1=, =true=, =yes= or =on=, in either case, skips the booking, and the stub still chains.
 
-=ljos hook --git-commit= books the commit git just created and reads no stdin.
+=ljos hook --git-commit= books the commit git just created.
+=post-commit= reads no stdin.
+=post-rewrite= reads the old and new shas and moves the citation onto the new commit. A dropped commit, an all-zero new sha, loses its citation.
 =--git-hook= is =post-commit= or =post-rewrite=.
-The commit is booked once, so an amend and a rebase do not book it again.
+An amend or a rebase moves the deed onto the new sha and does not leave the replaced sha cited.
 A =post-commit= in the middle of a rebase or a merge does not book. =post-rewrite= does.
 A commit already cited on an open sitting in that checkout is not opened as a second book.
 
 The hook books as a seat. The process tree is not one.
+The holder is =SEAT@TAG=, the same name =ljos claim= uses for that conversation. =LJOS_SESSION_ID= alone is kept as written.
 =LJOS_SEAT= wins when it is set and is not =seat=, =you=, =agent=, or a name that slugs to =runner=.
 Otherwise =seats.toml= is read through =CURSOR_CONVERSATION_ID=.
 The file is =$LJOS_SEATS= when that is set, otherwise =$XDG_CONFIG_HOME/ljos/seats.toml=, otherwise =~/.config/ljos/seats.toml=.
 Each key is a conversation id and each value is the seat name.
 An id with no row is =grokbot-= plus the first eight characters of the id.
+With none of these, an =ANTIGRAVITY_CONVERSATION_ID= books as =antigravity= and an =OPENCODE_SESSION_ID= books as =opencode=.
 With none of these the commit stays unbooked.
-A Claude Code, Codex, or opencode session, named by =CLAUDECODE=, =CODEX_THREAD_ID=, =CODEX_SESSION_ID= or =OPENCODE_SESSION_ID=, is not booked.
+A Claude Code or Codex session, named by =CLAUDECODE=, =CODEX_THREAD_ID= or =CODEX_SESSION_ID=, is not booked.
+An opencode session is booked by this hook, including a commit from its shell or a subprocess.
+An agy session is booked the same way when no seat was named.
+
+The env file =ljos onboard= writes sets =LJOS_GIT_HOOKS= to =${LJOS_GIT_HOOKS:-${XDG_DATA_HOME:-$HOME/.local/share}/ljos/git-hooks}=, the same directory the hooks install into.
+=ljos doctor= reports an env file that sets a different directory.
 
 Commits under =[git_hooks] skip= in =ljos.toml= are not booked, and neither are =/tmp=, =/var/tmp=, =/dev/shm=, the tracker (=VISSUE_ROOT= or =ISSUE_ROOT=), =CLAIMDAG_DIR=, and the deedar store.
 The table is read from =$LJOS_CONFIG=, from =./ljos.toml=, from =~/.config/ljos/ljos.toml=, and from =~/.config/ljos/seats/$LJOS_SEAT/ljos.toml=.

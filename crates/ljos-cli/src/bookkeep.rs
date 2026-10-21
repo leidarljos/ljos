@@ -1740,6 +1740,147 @@ fn cite_deed(issue: &str, sha: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop the citation of `sha` from `issue`. Absent is success: an amend
+/// that already moved the deed must not fail the hook.
+fn drop_citation(issue: &str, sha: &str) -> Result<(), String> {
+    let seat = super::holder_name();
+    let id = deed_id(sha);
+    run_timed(
+        "vissue",
+        &["deed", issue, "--remove", &id],
+        &[("VISSUE_AGENT", seat.as_str())],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn null_sha(sha: &str) -> bool {
+    !sha.is_empty() && sha.chars().all(|c| c == '0')
+}
+
+struct LessonRewrite {
+    issue: String,
+    title: String,
+    deeds: Vec<String>,
+    failures: Vec<String>,
+    asks: Vec<String>,
+}
+
+/// Move citations off commits that an amend or a rebase replaced.
+/// An all-zero new sha drops the old citation and cites nothing.
+/// A sha already in the book is not cited again.
+pub(crate) fn repoint_commits(repo: &str, pairs: &[(String, String)]) {
+    let pairs: Vec<(String, String)> = pairs
+        .iter()
+        .filter(|(old, new)| old != new && !old.is_empty() && !new.is_empty())
+        .cloned()
+        .collect();
+    if pairs.is_empty() || repo.is_empty() {
+        return;
+    }
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    for path in book_files() {
+        let mut book = load_book(&path);
+        let keys: Vec<String> = book
+            .repos
+            .iter()
+            .filter(|(key, row)| row.issue.is_some() && same_checkout(key, repo))
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut changed = false;
+        let mut rewrites = Vec::new();
+        for key in keys {
+            if let Some(rewrite) = repoint_row(&mut book, &key, &pairs) {
+                changed = true;
+                if let Some(rewrite) = rewrite {
+                    rewrites.push(rewrite);
+                }
+            }
+        }
+        if changed {
+            store_book(&path, &book);
+        }
+        for rewrite in rewrites {
+            match write_lesson(
+                &rewrite.issue,
+                &rewrite.title,
+                &rewrite.deeds,
+                &rewrite.failures,
+                &rewrite.asks,
+            ) {
+                Ok(()) => {
+                    if let Some(row) = book
+                        .repos
+                        .values_mut()
+                        .find(|row| row.issue.as_deref() == Some(rewrite.issue.as_str()))
+                    {
+                        row.lesson = true;
+                    }
+                    store_book(&path, &book);
+                }
+                Err(e) => log_line(&format!("lesson: {e}")),
+            }
+        }
+    }
+}
+
+/// `Some(None)` when the deeds moved and no lesson was waiting.
+/// `Some(Some(...))` when a finished lesson has to be written again.
+fn repoint_row(
+    book: &mut Book,
+    key: &str,
+    pairs: &[(String, String)],
+) -> Option<Option<LessonRewrite>> {
+    let row = book.repos.get(key)?;
+    let issue = row.issue.clone()?;
+    let mut deeds = row.deeds.clone();
+    let mut touched = false;
+    for (old, new) in pairs {
+        if !deeds.iter().any(|sha| sha == old) {
+            continue;
+        }
+        deeds.retain(|sha| sha != old);
+        if let Err(e) = drop_citation(&issue, old) {
+            log_line(&format!("deed: {e}"));
+        }
+        touched = true;
+        if !null_sha(new) && !deeds.iter().any(|sha| sha == new) {
+            match cite_deed(&issue, new) {
+                Ok(()) => deeds.push(new.clone()),
+                Err(e) => log_line(&format!("deed: {e}")),
+            }
+        }
+    }
+    if !touched {
+        return None;
+    }
+    let rewrite = {
+        let row = book.repos.get(key)?;
+        if row.finished && row.lesson {
+            let heard = heard_title(book, key, row);
+            let title = title_from(&heard, key);
+            Some(LessonRewrite {
+                issue: issue.clone(),
+                title,
+                deeds: deeds.clone(),
+                failures: row.failures.clone(),
+                asks: row.asks.clone(),
+            })
+        } else {
+            None
+        }
+    };
+    if let Some(row) = book.repos.get_mut(key) {
+        row.deeds.clone_from(&deeds);
+        row.landed.retain(|sha| deeds.contains(sha));
+        row.landed_head = None;
+        if rewrite.is_some() {
+            row.lesson = false;
+        }
+    }
+    Some(rewrite)
+}
+
 /// A short-lived hook must not replace the runner that owns the sitting.
 /// Session start and a new prompt are that runner. A pid of zero has never
 /// been set, so the first call of any kind may set it.
@@ -1929,6 +2070,13 @@ fn reconcile_deeds(
             None => return false,
         }
     }
+    let issue = row.issue.clone();
+    let dropped: Vec<String> = row
+        .deeds
+        .iter()
+        .filter(|sha| !kept.contains(sha))
+        .cloned()
+        .collect();
     let all_landed = kept.len() == row.deeds.len();
     if head.is_some() && !(same_head && all_landed) {
         if let Some(row) = book.repos.get_mut(repo) {
@@ -1941,8 +2089,16 @@ fn reconcile_deeds(
         return false;
     }
     if let Some(row) = book.repos.get_mut(repo) {
-        row.deeds = kept;
+        row.deeds.clone_from(&kept);
         row.lesson = false;
+        row.landed.retain(|sha| kept.contains(sha));
+    }
+    if let Some(issue) = issue {
+        for sha in &dropped {
+            if let Err(e) = drop_citation(&issue, sha) {
+                log_line(&format!("deed: {e}"));
+            }
+        }
     }
     let _ = ensure_deed(book, repo);
     true
@@ -4849,7 +5005,17 @@ elif cmd == "update":
     state = rest[rest.index("-s") + 1]
     rewrite(rest[0], state)
 elif cmd == "deed":
-    iid, acc = rest[0], rest[rest.index("--add") + 1]
+    iid = rest[0]
+    if "--remove" in rest:
+        acc = rest[rest.index("--remove") + 1]
+        line = f"cited {acc}\n"
+        for f in files():
+            text = f.read_text()
+            if f":ID:         {iid}\n" in text:
+                f.write_text(text.replace(line, "", 1))
+                sys.exit(0)
+        sys.exit(0)
+    acc = rest[rest.index("--add") + 1]
     needle = f":ID:         {iid}\n:END:\n"
     for f in files():
         text = f.read_text()
@@ -7377,6 +7543,64 @@ print(f"id={ident}")
         assert!(!lesson.contains(&abandoned[..7]), "{lesson}");
         let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
         assert!(org.contains(&format!("deed-file-commit-{landed}")), "{org}");
+        assert!(
+            !org.contains(&format!("deed-file-commit-{abandoned}")),
+            "the replaced sha is still cited:\n{org}"
+        );
+    }
+
+    /// ljos-6x14: a PostToolUse whose `toolCall` is null names no command.
+    /// The before-hook's command is the commit, and the deed is cited.
+    #[test]
+    fn agy_post_without_a_tool_call_cites_the_remembered_commit() {
+        let bare = r#"{"conversationId":"agy-shape","stepIdx":2,"error":""}"#;
+        assert_eq!(crate::hook_call(bare).event, "PostToolUse");
+        let null_call = r#"{"conversationId":"agy-shape","stepIdx":3,"toolCall":null}"#;
+        assert_eq!(crate::hook_call(null_call).event, "PostToolUse");
+
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "agy-null-tool";
+        let cwd = repo.to_str().unwrap();
+        let (prompt, prompt_call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "Add a readme line"}),
+        );
+        let _ = observe(&prompt, &prompt_call);
+        let pre = serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "toolCall": {"args": {"CommandLine": "git add README.md && git commit -m land"}},
+        });
+        let pre_text = pre.to_string();
+        let pre_call = crate::hook_call(&pre_text);
+        assert_eq!(pre_call.event, "PreToolUse");
+        assert!(pre_call.cue.contains("git commit"), "{}", pre_call.cue);
+        let _ = observe(&pre_text, &pre_call);
+        let sha = commit_file(&repo, "README.md", "hello from a null toolCall\n");
+        let post = serde_json::json!({
+            "conversationId": session,
+            "cwd": cwd,
+            "stepIdx": 4,
+            "toolCall": null,
+        });
+        let post_text = post.to_string();
+        let post_call = crate::hook_call(&post_text);
+        assert_eq!(post_call.event, "PostToolUse");
+        assert!(
+            post_call.cue.contains("git commit"),
+            "the after payload lost the command: {}",
+            post_call.cue
+        );
+        let _ = observe(&post_text, &post_call);
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+        let book = book_json(dir.path(), session);
+        assert_eq!(deeds_of(&book), vec![sha], "{book}");
     }
 
     /// A prompt answers inside the sweep budget however many past sittings

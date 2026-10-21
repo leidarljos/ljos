@@ -865,7 +865,8 @@ enum Cmd {
         /// gemini, windsurf, factory, kiro, cline, qwen or crush.
         #[arg(long, conflicts_with_all = ["prompt", "fail_on_deny"])]
         runner: Option<String>,
-        /// Book the commit git just created. The hook scripts pass this. No stdin.
+        /// Book the commit git just created. The hook scripts pass this.
+        /// `post-commit` reads no stdin. `post-rewrite` reads the old and new shas.
         #[arg(long, conflicts_with_all = ["prompt", "runner", "fail_on_deny"])]
         git_commit: bool,
         /// Which git hook called `--git-commit`: `post-commit` or `post-rewrite`.

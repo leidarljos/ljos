@@ -2827,7 +2827,13 @@ fn conversation_seat() -> Option<Seat> {
     if slug == "runner" || omitted_actor_name(&slug) {
         return None;
     }
-    Some(Seat::whole(&name, source))
+    // `ljos claim` holds as `SEAT@TAG` once the seat is named. The hook
+    // used to hold as the bare mapped name, so one conversation had two.
+    Some(Seat {
+        holder: holder_for_session(&name, id),
+        seat: name,
+        source: source.to_string(),
+    })
 }
 
 /// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
@@ -2853,7 +2859,7 @@ pub(crate) struct HookActor {
 
 impl HookActor {
     pub(crate) fn enter(seat: &str) -> Self {
-        let holder = hook_holder_for(seat, &resolve_seat());
+        let holder = booking_holder(seat);
         let previous = HOOK_ACTOR.with(|slot| slot.replace(Some((seat.to_string(), holder))));
         Self { previous }
     }
@@ -2887,11 +2893,53 @@ pub fn hook_holder_for(seat: &str, resolved: &Seat) -> String {
     let tagged = holder
         .split_once('@')
         .is_some_and(|(name, tag)| name == seat && !tag.is_empty());
-    if resolved.seat.trim() == seat && (holder == seat || tagged) {
+    // `LJOS_SESSION_ID` is kept as written by `ljos claim`. The hook keeps
+    // it when it names this seat. A process-tree holder is still dropped.
+    let chosen = resolved.seat.trim() == seat
+        && resolved.source.contains("LJOS_SESSION_ID")
+        && !holder.is_empty();
+    if resolved.seat.trim() == seat && (holder == seat || tagged || chosen) {
         holder.to_string()
     } else {
         seat.to_string()
     }
+}
+
+/// The holder a git hook books under. [`hook_holder_for`] when that is
+/// already `SEAT@TAG` or a chosen `LJOS_SESSION_ID`. A bare seat is tagged
+/// with the harness conversation id, the form `ljos claim` uses.
+fn booking_holder(seat: &str) -> String {
+    let holder = hook_holder_for(seat, &resolve_seat());
+    if holder.contains('@') || holder != seat.trim() {
+        return holder;
+    }
+    if let Some(id) = stamped_id("OPENCODE_SESSION_ID")
+        .or_else(|| stamped_id("ANTIGRAVITY_CONVERSATION_ID"))
+        .or_else(|| stamped_id("CURSOR_CONVERSATION_ID"))
+    {
+        return holder_for_session(seat, &id);
+    }
+    holder
+}
+
+/// A runner conversation id long enough to be one. Shorter values are
+/// ignored, the same rule as [`runner_session_var`].
+fn stamped_id(key: &str) -> Option<String> {
+    let id = std::env::var(key).ok()?;
+    let id = id.trim();
+    if id.len() >= 8 {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+/// The opencode or agy conversation this process belongs to, when the
+/// runner stamped one. The git hook books into that session so a later
+/// plugin observe sees the deed and does not cite it again.
+#[must_use]
+pub fn harness_book_session() -> Option<String> {
+    stamped_id("OPENCODE_SESSION_ID").or_else(|| stamped_id("ANTIGRAVITY_CONVERSATION_ID"))
 }
 
 /// Whether two holder names are one holder: the same name, or a seat's
@@ -2994,8 +3042,9 @@ fn legacy_tag(tag: &str) -> bool {
 
 /// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
 /// `CURSOR_CONVERSATION_ID`, then `grokbot-` plus the first eight characters
-/// of that id. Nothing here reads the process tree. `None` means the hook
-/// does not book.
+/// of that id, then `antigravity` when `ANTIGRAVITY_CONVERSATION_ID` is
+/// set, then `opencode` when `OPENCODE_SESSION_ID` is set. Nothing here
+/// reads the process tree. `None` means the hook does not book.
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
@@ -3004,10 +3053,19 @@ pub fn git_hook_seat() -> Option<String> {
             return Some(name);
         }
     }
-    grokbot_seat_name().filter(|name| {
+    if let Some(name) = grokbot_seat_name().filter(|name| {
         let slug = seat_slug(name);
         slug != "runner" && !omitted_actor_name(&slug)
-    })
+    }) {
+        return Some(name);
+    }
+    if stamped_id("ANTIGRAVITY_CONVERSATION_ID").is_some() {
+        return Some("antigravity".to_string());
+    }
+    if stamped_id("OPENCODE_SESSION_ID").is_some() {
+        return Some("opencode".to_string());
+    }
+    None
 }
 
 /// The seat `CURSOR_CONVERSATION_ID` maps to: `seats.toml`, else `grokbot-`
@@ -3689,10 +3747,12 @@ fn seat_env_text(name: &str) -> String {
          # Before a command: ljos policy --fail-on-deny -- COMMAND\n\
          {}\n\
          {}\n\
+         {}\n\
          {}\n",
         shared_holder_id(name),
         seat_lines(name),
         session_assignment(name),
+        git_hooks::HOOKS_ENV_LINE,
         GUARD_PATH_LINES
     )
 }
@@ -5391,15 +5451,20 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
     let event = event
         .map(|name| normalize_hook_event(name).to_string())
         .unwrap_or_else(|| {
-            // PreToolUse and PostToolUse both carry `toolCall`. PostToolUse is
-            // the one with `error` (empty when the command exited 0). Without
-            // that, a commit the gate allowed is never cited.
-            if v.get("toolCall").is_some() {
+            // A `toolCall` object is a call. PostToolUse is the one with
+            // `error` (empty when the command exited 0). A null or missing
+            // `toolCall` with `stepIdx` or `error` is the after-hook: agy
+            // often sends no command there. The before-hook's command is
+            // reused. A `toolCall` object with no `error` stays PreToolUse.
+            let tool_is_call = v.get("toolCall").is_some_and(Value::is_object);
+            if tool_is_call {
                 if v.get("error").is_some() {
                     "PostToolUse"
                 } else {
                     "PreToolUse"
                 }
+            } else if v.get("stepIdx").is_some() || v.get("error").is_some() {
+                "PostToolUse"
             } else if v.get("executionNum").is_some() {
                 "Stop"
             } else if v.get("invocationNum").is_some() {
@@ -5426,7 +5491,7 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         event == "PreInvocation" && v["invocationNum"].as_u64().is_some_and(|n| n <= 1),
         std::sync::atomic::Ordering::Relaxed,
     );
-    let (event, cue) = match event.as_str() {
+    let (event, mut cue) = match event.as_str() {
         "PreToolUse" => {
             let args = &v["toolCall"]["args"];
             let cue = args["CommandLine"]
@@ -5493,12 +5558,46 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
         "UserPromptSubmit" => ("UserPromptSubmit", prompt_of(v)),
         _ => ("TurnEnd", String::new()),
     };
+    // The after payload often names no command. The before payload did.
+    if event == "PreToolUse" {
+        if let Some(id) = session.as_deref().filter(|id| !id.is_empty()) {
+            remember_agy_command(id, &cue);
+        }
+    } else if matches!(event, "PostToolUse" | "PostToolUseFailure") && cue.trim().is_empty() {
+        if let Some(id) = session.as_deref().filter(|id| !id.is_empty()) {
+            let restored = recall_agy_command(id);
+            if !restored.is_empty() {
+                cue = restored;
+            }
+        }
+    }
     HookCall {
         event: event.to_string(),
         cue,
         session,
         shape: HookShape::Steps,
     }
+}
+
+/// Where the command from agy's before-hook is kept until the after-hook.
+fn agy_cmd_path(session: &str) -> PathBuf {
+    runtime_dir().join(format!("agy-cmd-{}", session_tag(session)))
+}
+
+fn remember_agy_command(session: &str, command: &str) {
+    let command = command.trim();
+    if command.is_empty() {
+        return;
+    }
+    let path = agy_cmd_path(session);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, command);
+}
+
+fn recall_agy_command(session: &str) -> String {
+    std::fs::read_to_string(agy_cmd_path(session)).unwrap_or_default()
 }
 
 /// Whether `prompt` is a user turn conversation `session` has not raised
@@ -5527,7 +5626,12 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
             shape: HookShape::Asks,
         };
     };
-    if v.get("conversationId").is_some() || v.get("toolCall").is_some() {
+    if v.get("conversationId").is_some()
+        || v.get("toolCall").is_some()
+        || v.get("stepIdx").is_some()
+        || v.get("invocationNum").is_some()
+        || v.get("executionNum").is_some()
+    {
         return steps_call(&v, event);
     }
     let raw_event = v["hook_event_name"].as_str().unwrap_or("");
@@ -33439,6 +33543,10 @@ mod tests {
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
             "{env}"
         );
+        assert!(
+            env.contains("${XDG_DATA_HOME:-$HOME/.local/share}/ljos/git-hooks"),
+            "{env}"
+        );
         let saved = std::fs::read_to_string(&file).unwrap();
         assert!(saved.contains("name = \"grokbot\""), "{saved}");
         assert!(
@@ -34534,6 +34642,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         assert_eq!(super::hook_holder_for("ljosbot", &tree), "ljosbot");
         assert_eq!(super::hook_holder_for("inky", &session), "inky");
+        let chosen = super::Seat {
+            seat: "saddle".into(),
+            holder: "saddle-review".into(),
+            source: "LJOS_SEAT; session LJOS_SESSION_ID".into(),
+        };
+        assert_eq!(super::hook_holder_for("saddle", &chosen), "saddle-review");
     }
 
     #[test]
