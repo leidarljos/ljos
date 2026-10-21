@@ -1,10 +1,13 @@
-//! Memory copies of `ljos note` that the pack did not take.
+//! Memory copies the pack did not take because it was down or did not know
+//! this seat.
 //!
 //! `ljos note` writes the logbook line first, then a `note` atom to the
-//! pack. When the pack is off or not answering, the atom waits here, one
-//! JSON line per note, and the next note that reaches the pack, `ljos
-//! finish`, or `ljos doctor` sends it. A refusal is not queued: the pack
-//! would refuse it again. The queue holds one entry per issue and text,
+//! pack. When the pack is off, not answering, or answers 401, the fitted
+//! copy waits here, one JSON line per copy, and the next note that reaches
+//! the pack, `ljos finish`, `ljos doctor`, or the next session start sends
+//! it. A refusal is not queued: the pack would refuse it again. A line left
+//! from before that rule is cut to what the pack takes, or dropped, on the
+//! next send. The queue holds one entry per issue, text, workspace and kind,
 //! and packsetd answers an identical issue and text with the claim it
 //! already holds, so a resend after a lost answer stores nothing new.
 
@@ -14,7 +17,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// One note waiting for the pack.
+fn default_kind() -> String {
+    "note".into()
+}
+
+/// One memory waiting for the pack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Queued {
     pub issue: String,
@@ -23,6 +30,9 @@ pub struct Queued {
     pub workspace: String,
     /// Unix seconds when the pack did not take it.
     pub at: u64,
+    /// `note` or `lesson`. A line written before this field reads as `note`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
 }
 
 impl Queued {
@@ -30,6 +40,7 @@ impl Queued {
         self.issue.trim() == other.issue.trim()
             && self.text.trim() == other.text.trim()
             && self.workspace == other.workspace
+            && self.kind == other.kind
     }
 }
 
@@ -107,6 +118,16 @@ fn write(dir: &Path, notes: &[Queued]) -> Result<()> {
 pub fn pending_in(dir: &Path) -> Vec<Queued> {
     let _held = lock(dir);
     read(dir)
+}
+
+/// Replace the waiting memories in `dir`.
+///
+/// # Errors
+///
+/// The queue file cannot be rewritten.
+pub fn replace_in(dir: &Path, notes: Vec<Queued>) -> Result<()> {
+    let _held = lock(dir);
+    write(dir, &notes)
 }
 
 /// Add `note` to the queue in `dir`. `false` when the same issue and
@@ -206,6 +227,7 @@ mod tests {
             text: text.into(),
             workspace: "ws".into(),
             at: 1,
+            kind: "note".into(),
         }
     }
 
@@ -216,6 +238,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_old_line_without_kind_is_a_note() {
+        let dir = dir("old");
+        std::fs::write(
+            dir.join("note-queue.jsonl"),
+            "{\"issue\":\"p-1\",\"text\":\"one line\",\"workspace\":\"ws\",\"at\":1}\n",
+        )
+        .unwrap();
+        let pending = pending_in(&dir);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, "note");
+        assert_eq!(pending[0].text, "one line");
     }
 
     #[test]

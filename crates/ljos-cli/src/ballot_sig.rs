@@ -10,25 +10,28 @@
 //! when its latest signature covers exactly that voter, issue and choice
 //! under the pinned key.
 //!
-//! A ballot carries the harness session and a nonce (`ljos-ballot/v2`).
-//! The session is the harness id, else `VISSUE_AGENT`, else `LJOS_SEAT`,
-//! else the MCP connection. It is never a fresh nonce of this process.
+//! A ballot carries the harness session and a marker (`ljos-ballot/v2`):
+//! `-`, or [`SEAT_NONCE`] when only the seat named the session. The
+//! session is the harness id, else `VISSUE_AGENT`, else `LJOS_SEAT`, else
+//! the MCP connection. It is never a fresh nonce of this process.
 //! Minting another seat inside the same session does not make a second voter.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The note prefix a signature rides under.
 pub const SIG_NOTE: &str = "ballot-sig: ";
+/// The note prefix a withdrawn ballot rides under.
+pub const WITHDRAWN_NOTE: &str = "ballot-withdrawn: ";
 /// The pin file at the tracker root.
 pub const PIN_FILE: &str = ".ljos-seat-keys";
 
 /// The bytes a ballot signature covers. v1 is the choice alone. v2 also
-/// covers the harness session and the process nonce, so a later edit of
-/// either fails the check.
+/// covers the harness session and its marker, so a later edit of either
+/// fails the check.
 #[must_use]
 pub fn message(issue: &str, voter: &str, choice: &str) -> Vec<u8> {
     format!(
@@ -64,6 +67,14 @@ pub struct SigNote {
     pub sig: String,
     pub harness: Option<String>,
     pub nonce: Option<String>,
+}
+
+impl SigNote {
+    /// Whether only the seat named the session this ballot is bound to.
+    #[must_use]
+    pub fn seat_only(&self) -> bool {
+        self.nonce.as_deref() == Some(SEAT_NONCE)
+    }
 }
 
 /// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
@@ -107,8 +118,9 @@ pub fn parse_note(note: &str) -> Option<SigNote> {
 
 /// The session a ballot note binds, as [`crate::panel_gate::session_key`]
 /// reads it. A note that does not parse but has six or more fields still
-/// names its session in the last two, so the cast gate holds whatever the
-/// choice text is. `None` when the note is not a ballot signature.
+/// names its session in the last two. The cast gate does not use that
+/// fallback: it requires [`parse_note`] and [`verifies`] on the issue's own
+/// logbook. `None` when the note is not a ballot signature.
 #[must_use]
 pub fn note_session(note: &str) -> Option<(String, String)> {
     if let Some(sig) = parse_note(note) {
@@ -125,6 +137,41 @@ pub fn note_session(note: &str) -> Option<(String, String)> {
     }
     let tok = |i: usize| rest[at[i].0..at[i].1].to_string();
     Some((tok(n - 2), tok(n - 1)))
+}
+
+/// A withdrawn ballot: `ballot-withdrawn: VOTER HARNESS NONCE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawnNote {
+    pub voter: String,
+    pub harness: String,
+    pub nonce: String,
+}
+
+/// One token per field, so the note stays three words.
+#[must_use]
+pub fn withdrawn_line(voter: &str, harness: &str, nonce: &str) -> String {
+    format!(
+        "{WITHDRAWN_NOTE}{} {} {}",
+        field(voter),
+        field(harness),
+        field(nonce)
+    )
+}
+
+/// `ballot-withdrawn: VOTER HARNESS NONCE`, or `None` when the note is not
+/// that shape.
+#[must_use]
+pub fn parse_withdrawn(note: &str) -> Option<WithdrawnNote> {
+    let rest = note.trim().strip_prefix(WITHDRAWN_NOTE)?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [voter, harness, nonce] = parts.as_slice() else {
+        return None;
+    };
+    Some(WithdrawnNote {
+        voter: (*voter).to_string(),
+        harness: (*harness).to_string(),
+        nonce: (*nonce).to_string(),
+    })
 }
 
 /// Byte ranges of the whitespace-separated fields of `text`.
@@ -164,14 +211,25 @@ fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
 /// signature.
 pub const SIGNING_SINCE: i64 = 1_791_984_778;
 
-/// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when set, else
+/// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when that path is this
+/// seat's own key and not the machine key, else
 /// `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (`~/.local/share` when unset).
-/// Seats that share one HOME still get one key each.
+/// Seats that share one HOME still get one key each. The machine key at
+/// `~/.config/deedar/host.key` is never used.
 #[must_use]
 pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
+        let path = PathBuf::from(p);
+        if !is_box_host_key(&path) && seat_may_use_override(seat) {
+            return Some(path);
+        }
     }
+    seat_key_file(seat)
+}
+
+/// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
+#[must_use]
+pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -193,6 +251,28 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
             .join(name)
             .join("ballot.key"),
     )
+}
+
+/// The machine deed key. A seat key must not be this file.
+#[must_use]
+pub fn is_box_host_key(path: &std::path::Path) -> bool {
+    path.ends_with("deedar/host.key")
+}
+
+fn seat_may_use_override(seat: &str) -> bool {
+    let seat = seat.trim();
+    let own = |key: &str| std::env::var(key).ok().is_some_and(|v| v.trim() == seat);
+    match (
+        std::env::var("LJOS_SEAT")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+        std::env::var("VISSUE_AGENT")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
+    ) {
+        (None, None) => true,
+        _ => own("LJOS_SEAT") || own("VISSUE_AGENT"),
+    }
 }
 
 /// The key at `path`, made on first use: 32 random bytes, mode 0600.
@@ -260,7 +340,7 @@ pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> St
     )
 }
 
-/// The note text for a ballot bound to a harness session and a process nonce.
+/// The note text for a ballot bound to a harness session and its marker.
 #[must_use]
 pub fn sign_bound(
     key: &SigningKey,
@@ -356,16 +436,40 @@ pub fn field(raw: &str) -> String {
 
 /// The harness session, and a nonce that is not a process id. The session
 /// comes from the MCP connection, the hook, or the environment, then from
-/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce stays `-`: one holder is one
-/// session across processes.
+/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce is `-`, or [`SEAT_NONCE`] when
+/// the seat stands in for the session: one holder is one session across
+/// processes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {
     pub harness: String,
     pub nonce: String,
 }
 
+/// The nonce of a session only the seat names: no harness session and no
+/// run id was found. [`crate::panel_gate::session_key`] reads the harness
+/// alone when one is set, so the key is still the seat.
+pub const SEAT_NONCE: &str = "seat";
+
+impl SessionIdentity {
+    /// Whether only the seat names this session.
+    #[must_use]
+    pub fn seat_only(&self) -> bool {
+        self.nonce == SEAT_NONCE
+    }
+}
+
+/// What a session only the seat names means, where a ballot is cast or
+/// counted.
+#[must_use]
+pub fn unverified_sentence(seat: &str) -> String {
+    format!(
+        "unverified session: nothing named the run but seat {seat}, so every run of that seat is one session"
+    )
+}
+
 tokio::task_local! {
     static CALL_SESSION: String;
+    static CALL_AGENT: String;
 }
 
 std::thread_local! {
@@ -381,12 +485,79 @@ pub fn call_session() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Run `f` as an MCP call that named `session`.
-pub async fn scope_session<F: std::future::Future>(session: Option<String>, f: F) -> F::Output {
+/// Run `f` as an MCP call that named `session`, made by the subagent
+/// `agent`. One server answers a parent and all its subagents, so a call
+/// that names no agent is the parent's, whatever this process holds.
+pub async fn scope_session<F: std::future::Future>(
+    session: Option<String>,
+    agent: Option<String>,
+    f: F,
+) -> F::Output {
+    let agent = agent
+        .map(|a| field(&a))
+        .filter(|a| a != "-")
+        .unwrap_or_default();
+    let f = CALL_AGENT.scope(agent, f);
     match session.map(|s| field(&s)).filter(|s| s != "-") {
         Some(s) => CALL_SESSION.scope(s, f).await,
         None => f.await,
     }
+}
+
+static PROCESS_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Name the subagent a hook payload says this hook process runs for.
+pub fn hook_agent(agent: Option<String>) {
+    let _ = PROCESS_AGENT.set(agent);
+}
+
+/// The subagent this process or MCP call runs for under `parent`, when the
+/// harness named one: the agent a hook saw make this call, else a Codex
+/// thread under its root session. The command line takes no agent, so a
+/// parent cannot cast as its subagent.
+fn subagent(parent: &str) -> Option<String> {
+    if let Ok(agent) = CALL_AGENT.try_with(Clone::clone) {
+        return (!agent.is_empty()).then_some(agent);
+    }
+    PROCESS_AGENT
+        .get_or_init(|| {
+            crate::subagent::claim_command(parent)
+                .filter(|a| !a.is_empty())
+                .map(|a| field(&a))
+                .or_else(|| codex_thread(parent))
+        })
+        .clone()
+}
+
+static HOOKED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The session a hook saw run this process's `ljos` line, plus its
+/// subagent, for a process whose environment names no session: a seat
+/// whose runner stamps no id in the shell still binds what its hook saw,
+/// rather than the seat. An MCP call names its own session.
+fn hooked_session() -> Option<String> {
+    if CALL_AGENT.try_with(|_| ()).is_ok() {
+        return None;
+    }
+    HOOKED
+        .get_or_init(|| {
+            let (session, agent) = crate::subagent::claim_unsessioned_command()?;
+            let (session, agent) = (field(&session), field(&agent));
+            Some(if agent == "-" {
+                session
+            } else {
+                format!("{session}:{agent}")
+            })
+        })
+        .clone()
+}
+
+/// The thread Codex runs a subagent in, under the root session:
+/// `CODEX_THREAD_ID` when it is not `CODEX_SESSION_ID`, the root's.
+fn codex_thread(parent: &str) -> Option<String> {
+    let root = env_token("CODEX_SESSION_ID")?;
+    let thread = env_token("CODEX_THREAD_ID")?;
+    (root == parent && thread != root).then_some(thread)
 }
 
 /// Remember the hook payload's session for this process, and export it for
@@ -443,7 +614,8 @@ pub fn connection_session() -> Option<String> {
 }
 
 /// The harness session id: the MCP connection, then the MCP call, then the
-/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread id.
+/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread
+/// id, then the run ([`run_session`]).
 /// The connection pin is the process, not the `seat` argument.
 #[must_use]
 pub fn harness_session() -> String {
@@ -462,22 +634,47 @@ pub fn harness_session() -> String {
     const PREFER: &[&str] = &[
         "CURSOR_SESSION_ID",
         "CLAUDE_SESSION_ID",
-        "CODEX_THREAD_ID",
+        // A Codex subagent's thread is not its session: [`codex_thread`]
+        // names it under the root.
         "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
         "GROK_SESSION_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",
+        // Claude Code also stamps a remote-control id that comes and goes,
+        // and opencode may run under another runner's id. Each names its
+        // own session here, so the ballot binds the id its hook reports.
+        "CLAUDE_CODE_SESSION_ID",
+        "OPENCODE_SESSION_ID",
     ];
     for key in PREFER {
         if let Some(s) = env_token(key) {
-            if s.len() >= 8 {
+            // A shell runner's env file shares `NAME-shell` across every
+            // conversation; it holds claims and names no session.
+            if s.len() >= 8 && !(*key == "LJOS_SESSION_ID" && crate::is_shared_holder_id(&s)) {
                 return s;
             }
         }
     }
     crate::runner_session_id()
         .map(|s| field(&s))
+        .or_else(run_session)
         .unwrap_or_default()
+}
+
+/// The run this process belongs to, when no conversation id was stamped:
+/// a GitHub Actions run, else a cloud agent. Every process of one run is
+/// one session, as `ljos cloud up` gives the run one seat.
+fn run_session() -> Option<String> {
+    let actions = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && !matches!(v, "0" | "false")
+    });
+    let ci: &[&str] = if actions { &["GITHUB_RUN_ID"] } else { &[] };
+    ci.iter()
+        .chain(&["CURSOR_AGENT_ID", "CLOUD_AGENT_ID"])
+        .filter_map(|key| env_token(key))
+        .find(|s| s.len() >= 8)
 }
 
 fn random_hex(n: usize) -> String {
@@ -494,7 +691,8 @@ fn random_hex(n: usize) -> String {
 
 static PROCESS_NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// The nonce of this process. Seats this process mints share it.
+/// The nonce of this process, handed to a child `ljos`. No ballot carries
+/// it: [`identity`] binds the session alone.
 #[must_use]
 pub fn process_nonce() -> String {
     if let Some(s) = env_token("LJOS_PROCESS_NONCE") {
@@ -516,19 +714,37 @@ fn named_session_actor(key: &str) -> Option<String> {
 }
 
 /// This process's session identity. Stable across processes of one holder.
+/// A subagent the harness named is `SESSION:AGENT`, a session of its own.
+/// With no session in the environment, the one the hook saw run this
+/// line comes before the seat.
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
-    let harness = if !harness.is_empty() {
-        harness
-    } else {
-        named_session_actor("VISSUE_AGENT")
-            .or_else(|| named_session_actor("LJOS_SEAT"))
-            .unwrap_or_else(|| "-".into())
-    };
-    SessionIdentity {
-        harness,
-        nonce: "-".into(),
+    if !harness.is_empty() {
+        let harness = match subagent(&harness) {
+            Some(agent) => format!("{harness}:{agent}"),
+            None => harness,
+        };
+        return SessionIdentity {
+            harness,
+            nonce: "-".into(),
+        };
+    }
+    if let Some(harness) = hooked_session() {
+        return SessionIdentity {
+            harness,
+            nonce: "-".into(),
+        };
+    }
+    match named_session_actor("VISSUE_AGENT").or_else(|| named_session_actor("LJOS_SEAT")) {
+        Some(seat) => SessionIdentity {
+            harness: seat,
+            nonce: SEAT_NONCE.into(),
+        },
+        None => SessionIdentity {
+            harness: "-".into(),
+            nonce: "-".into(),
+        },
     }
 }
 
@@ -538,30 +754,36 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
         .ok_or_else(|| anyhow::anyhow!("no place for a seat key: HOME and XDG_DATA_HOME are unset; the ballot is unsigned and no gate counts it"))?;
     let key = load_or_create(&path)?;
     let mine = hex::encode(key.verifying_key().to_bytes());
-    let mut pinned = pins();
-    match pinned.get(voter.trim()) {
-        Some(k) if *k != mine => bail!(
+    let pinned = match pin_path() {
+        Some(p) if !pins().contains_key(voter.trim()) => pin_first(&p, voter.trim(), &mine)?,
+        _ => pins(),
+    };
+    if let Some(k) = pinned.get(voter.trim()).filter(|k| **k != mine) {
+        bail!(
             "seat {voter} is pinned to key {}…, and this key is {}…; the ballot is unsigned and no gate counts it",
             &k[..12.min(k.len())],
             &mine[..12]
-        ),
-        Some(_) => {}
-        None => {
-            if let Some(p) = pin_path() {
-                pinned.insert(voter.trim().to_string(), mine.clone());
-                let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
-                std::fs::write(&p, text)?;
-                if let Some(root) = p.parent() {
-                    let _ = std::process::Command::new("git")
-                        .arg("-C")
-                        .arg(root)
-                        .args(["add", PIN_FILE])
-                        .output();
-                }
-            }
-        }
+        );
     }
     Ok((key, mine))
+}
+
+/// Pin `mine` for `voter` unless another pin for it landed first, and
+/// return the pins. Seats pin on their first ballot, often at once: the
+/// read and the write hold the tracker's commit lock, so no seat's pin is
+/// lost, and the file is replaced whole, so a `git add` never hashes half
+/// of it. The seat's tracker commit carries the pin.
+fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, String>> {
+    let _held = crate::tracker_commit_lock(path.parent().unwrap_or_else(|| Path::new(".")));
+    let mut pinned = std::fs::read_to_string(path)
+        .map(|t| parse_pins(&t))
+        .unwrap_or_default();
+    if !pinned.contains_key(voter) {
+        pinned.insert(voter.to_string(), mine.to_string());
+        let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
+        vissue_core::store::replace_file_atomically(path, &text)?;
+    }
+    Ok(pinned)
 }
 
 /// Sign this seat's ballot, bound to the harness session, and leave the
@@ -574,19 +796,125 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
 /// No seat key, a key that does not match the pin, or a tracker write that
 /// failed.
 pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
+    if let Some(existing) = newest_sig(issue, voter) {
+        if verifies(issue, &existing) {
+            match resign_of(&existing, choice, voter) {
+                Resign::Keep => {
+                    return Ok(format!("ballot already signed by {voter}\n"));
+                }
+                Resign::Refuse => {
+                    bail!("will not re-sign {voter}'s ballot");
+                }
+                Resign::Sign => {}
+            }
+        }
+    }
     let (key, mine) = signing_key(voter)?;
     let id = identity();
     let note = sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce);
-    crate::run_captured("vissue", &["note", issue, &note])?;
+    if write_sig_note(issue, &note).is_err() {
+        crate::run_captured("vissue", &["note", issue, &note])?;
+    }
     let session = if id.harness == "-" {
         format!("nonce {}", &id.nonce[..12.min(id.nonce.len())])
     } else {
         id.harness.clone()
     };
-    Ok(format!(
+    let mut said = format!(
         "ballot signed by {voter} with key {}… session {session}\n",
         &mine[..12.min(mine.len())]
-    ))
+    );
+    if id.seat_only() {
+        said.push_str(&format!("{}\n", unverified_sentence(&id.harness)));
+    }
+    Ok(said)
+}
+
+enum Resign {
+    Keep,
+    Refuse,
+    Sign,
+}
+
+/// A signature that already verifies stays. The same key may sign a new
+/// choice. Any other key, including the machine key, does not sign again.
+fn resign_of(existing: &SigNote, choice: &str, voter: &str) -> Resign {
+    let mine = current_public_hex(voter);
+    if mine.as_deref() == Some(existing.key.as_str()) {
+        if existing.choice == choice {
+            Resign::Keep
+        } else {
+            Resign::Sign
+        }
+    } else {
+        Resign::Refuse
+    }
+}
+
+fn current_public_hex(voter: &str) -> Option<String> {
+    let path = seat_key_path(voter)?;
+    let key = key_from_file(&path).ok()?;
+    Some(hex::encode(key.verifying_key().to_bytes()))
+}
+
+fn newest_sig(issue: &str, voter: &str) -> Option<SigNote> {
+    let layout = vissue_core::Layout::resolve(None, None).ok()?;
+    let (heading, _, _) = vissue_core::store::find_by_id(&layout, issue).ok()??;
+    heading.logbook.iter().find_map(|entry| {
+        let text = entry.note.as_deref()?;
+        let sig = parse_note(text)?;
+        (sig.voter == voter).then_some(sig)
+    })
+}
+
+fn write_sig_note(issue: &str, note: &str) -> Result<()> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    vissue_core::ops::note(&layout, issue, note)?;
+    Ok(())
+}
+
+/// Sign the ballot this process's seat cast on `issue`, when it has one.
+///
+/// # Errors
+///
+/// The tracker cannot be read, or the ballot is already signed by another key.
+pub fn sign_own_ballot(issue: &str) -> Result<String> {
+    let voter = std::env::var("VISSUE_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("LJOS_SEAT")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let Some(voter) = voter else {
+        return Ok(String::new());
+    };
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    let ballots = vissue_core::ops::ballots(&layout, issue)?;
+    let Some(choice) = ballots
+        .iter()
+        .find(|b| b.agent == voter)
+        .map(|b| b.choice.clone())
+    else {
+        return Ok(String::new());
+    };
+    sign_ballot(issue, &voter, &choice)
+}
+
+/// Leave `ballot-withdrawn: VOTER HARNESS NONCE` on `issue` for this session.
+///
+/// # Errors
+///
+/// The tracker did not take the note.
+pub fn note_withdrawn(issue: &str, voter: &str) -> Result<String> {
+    let id = identity();
+    let note = withdrawn_line(voter, &id.harness, &id.nonce);
+    crate::run_captured("vissue", &["note", issue, &note])
+        .with_context(|| format!("ballot withdrawn; the note on {issue} was not written"))?;
+    Ok(note)
 }
 
 /// The note prefix a design candidate's signature rides under.
@@ -936,6 +1264,18 @@ mod tests {
     }
 
     #[test]
+    fn a_withdrawn_note_is_three_fields() {
+        let line = withdrawn_line("seat a", "sess-1", "-");
+        assert_eq!(line, "ballot-withdrawn: seat_a sess-1 -");
+        let parsed = parse_withdrawn(&line).unwrap();
+        assert_eq!(parsed.voter, "seat_a");
+        assert_eq!(parsed.harness, "sess-1");
+        assert_eq!(parsed.nonce, "-");
+        assert!(parse_withdrawn("ballot-withdrawn: only-one").is_none());
+        assert!(parse_withdrawn("ballot-sig: seat-a ship").is_none());
+    }
+
+    #[test]
     fn a_session_binding_is_signed_and_a_changed_session_is_not() {
         let alice = key(4);
         let note = sign_bound(&alice, "d-1", "alice", "ship", "sess-alice-0001", "nonce-1");
@@ -955,5 +1295,22 @@ mod tests {
         )]
         .into();
         assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
+    /// One server answers a parent and its subagents: each call is the
+    /// session plus the agent it names, and a call that names none is the
+    /// parent's.
+    #[tokio::test]
+    async fn an_mcp_call_from_a_subagent_is_a_session_of_its_own() {
+        let call = |agent: Option<&str>| {
+            scope_session(
+                Some("sess-mcp-0001".into()),
+                agent.map(str::to_string),
+                async { identity().harness },
+            )
+        };
+        assert_eq!(call(Some("thread-a")).await, "sess-mcp-0001:thread-a");
+        assert_eq!(call(Some("thread-b")).await, "sess-mcp-0001:thread-b");
+        assert_eq!(call(None).await, "sess-mcp-0001");
     }
 }

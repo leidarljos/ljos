@@ -78,9 +78,10 @@ First minute
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-   07be8829... lesson due 2026-09-26T23:27:31.528Z
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+     id 07be8829, next review 2026-09-26 23:27 +00:00
    $ ljos search lexical default
-   1.0000 3/3 lesson 07be8829... today The lexical default is BM25+. It beat BM25 by two points on turns.
+   1.0000  3/3 lesson  07be8829... today   The lexical default is BM25+. It beat BM25 by two points on turns.
    $ ljos due
    0 due; 1 scheduled, next at 2026-09-26T23:27:31.528Z
 

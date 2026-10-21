@@ -2,7 +2,7 @@ name: docs
 
 on:
   push:
-    branches: [main, develop]
+    branches: ['**']
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
     paths: ["docs/**", ".github/workflows/docs.yml", ".github/render-og-png.sh", ".impeccable/**"]
   # A pull request builds the docs and checks them; it never publishes.
@@ -13,22 +13,27 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Develop and a release tag build the docs and do not publish them. The
-# github-pages environment takes main only, and main is moved to the tag's
-# commit before the tag, so main's deploy publishes the same docs. Main
-# has its own group, so no other run can cancel a deploy.
+# Develop builds the docs and does not publish them. Main publishes on its
+# push. A release tag builds and checks the docs here. docs-deploy.yml
+# publishes that tag: the github-pages environment allows main only, and a
+# workflow_run on the default branch checks out the tagged commit. Main
+# has its own group, so no other run of this workflow can cancel a deploy.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && 'pages' || format('docs-{0}', github.ref) }}
   cancel-in-progress: true
 
 jobs:
   build:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -39,6 +44,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+          package-manager-cache: false
       # Exit 2 on any finding the .impeccable config does not ignore.
       - run: npx -y impeccable@4.5.2 detect docs/build
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
@@ -52,6 +58,9 @@ jobs:
   deploy:
     needs: build
     if: github.ref == 'refs/heads/main'
+    permissions:
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     environment:
       name: github-pages

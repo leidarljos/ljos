@@ -45,13 +45,35 @@ function seatTool(name: string): { tool: string; bash: boolean } | undefined {
   return tool ? { tool, bash: false } : undefined
 }
 
+function sessionId(event: any): string | undefined {
+  const props = event?.properties ?? {}
+  const info = props.info ?? event?.info ?? {}
+  const id =
+    props.sessionID ??
+    props.sessionId ??
+    event?.sessionID ??
+    event?.sessionId ??
+    info.id ??
+    info.sessionID ??
+    info.sessionId ??
+    event?.session?.id
+  return typeof id === "string" && id !== "" ? id : undefined
+}
+
 async function hook(payload: Record<string, unknown>): Promise<Answer> {
   let proc
+  const session = payload.session_id
   try {
     proc = Bun.spawn([LJOS, "hook"], {
       stdin: new Blob([JSON.stringify(payload)]),
       stdout: "pipe",
       stderr: "pipe",
+      env: {
+        ...process.env,
+        ...(typeof session === "string" && session !== ""
+          ? { OPENCODE_SESSION_ID: session }
+          : {}),
+      },
     })
   } catch (e) {
     return { ok: false, why: `${LJOS} did not start: ${e}` }
@@ -80,6 +102,10 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   // The before hook sees the command. Some builds do not put it on the
   // after hook's input, and the deed still has to be cited.
   const commands = new Map<string, string>()
+  let lastSession: string | undefined
+  const remember = (id: string | undefined) => {
+    if (id) lastSession = id
+  }
   const blockKey = (sessionID: string | undefined, tool: string) =>
     `${sessionID ?? ""}:${tool}`
   return {
@@ -90,6 +116,7 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   },
 
   "chat.message": async (input, output) => {
+    remember(input.sessionID)
     const prompt = output.parts
       .filter((p: any) => p.type === "text" && !p.synthetic)
       .map((p: any) => p.text)
@@ -123,6 +150,7 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   // so an ask stops the command and tells the agent to ask the person.
   // An edit is told to the seat and still runs when the hook cannot answer.
   "tool.execute.before": async (input, output) => {
+    remember(input.sessionID)
     const seat = seatTool(input.tool)
     if (!seat) return
     const command = output.args?.command
@@ -202,14 +230,23 @@ export const LjosSeat: Plugin = async ({ directory }) => {
 
   event: async ({ event }) => {
     if (event.type === "session.idle") {
-      const id = (event as any).properties?.sessionID ?? (event as any).properties?.info?.id
+      const id =
+        sessionId(event) ??
+        (event as any).properties?.sessionID ??
+        (event as any).properties?.info?.id ??
+        lastSession
+      if (!id) return
+      remember(id)
       await hook({ session_id: id, hook_event_name: "Stop", cwd: directory })
       return
     }
     if (event.type === "session.deleted") {
-      const id = (event as any).properties?.info?.id
+      const id =
+        sessionId(event) ?? (event as any).properties?.info?.id ?? lastSession
       held.delete(id)
       started.delete(id)
+      if (lastSession === id) lastSession = undefined
+      if (!id) return
       await hook({ session_id: id, hook_event_name: "SessionEnd", cwd: directory })
     }
   },

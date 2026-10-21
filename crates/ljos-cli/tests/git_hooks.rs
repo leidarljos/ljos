@@ -242,7 +242,17 @@ elif cmd == "update":
     state = rest[rest.index("-s") + 1]
     rewrite(rest[0], state)
 elif cmd == "deed":
-    iid, acc = rest[0], rest[rest.index("--add") + 1]
+    iid = rest[0]
+    if "--remove" in rest:
+        acc = rest[rest.index("--remove") + 1]
+        line = f"cited {acc}\n"
+        for f in files():
+            text = f.read_text()
+            if f":ID:         {iid}\n" in text:
+                f.write_text(text.replace(line, "", 1))
+                sys.exit(0)
+        sys.exit(0)
+    acc = rest[rest.index("--add") + 1]
     needle = f":ID:         {iid}\n:END:\n"
     for f in files():
         text = f.read_text()
@@ -631,6 +641,10 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
     let hab = Hab::new("repo");
     let saved = hab.root.join("saved-hooks");
     fs::create_dir_all(&saved).unwrap();
+    let marker = hab.root.join("repo-hook");
+    let user = format!("#!/bin/sh\nprintf ran >> {}\n", shellish(&marker));
+    fs::write(saved.join("post-commit"), &user).unwrap();
+    fs::set_permissions(saved.join("post-commit"), fs::Permissions::from_mode(0o755)).unwrap();
     hab.git(
         &hab.repo,
         &[
@@ -641,6 +655,7 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         ],
     );
     install(&hab);
+    install(&hab);
     let configured = String::from_utf8(
         hab.git(
             &hab.repo,
@@ -649,19 +664,22 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         .stdout,
     )
     .unwrap();
-    assert!(
-        configured.contains("git-hooks"),
-        "hooksPath was not installed: {configured}"
+    assert_eq!(
+        configured.trim(),
+        saved.display().to_string(),
+        "a hooksPath the user set was replaced: {configured}"
     );
-    let marker = hab.root.join("repo-hook");
-    let hook = hab.repo.join(".git/hooks/post-commit");
-    fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\nprintf ran >> {}\n", shellish(&marker)),
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let hooked = fs::read_to_string(saved.join("post-commit")).unwrap();
+    assert!(hooked.starts_with(&user), "{hooked}");
+    assert_eq!(
+        hooked.matches("# ljos:begin git-hook").count(),
+        1,
+        "{hooked}"
+    );
+    assert!(hooked.contains("ljos git-hook post-commit "), "{hooked}");
+    assert!(saved.join("pre-push").is_file());
+    let status = String::from_utf8(hab.ljos(&["git-hooks", "status"]).stdout).unwrap();
+    assert!(status.contains("ljos hooks run"), "{status}");
 
     fs::write(hab.repo.join("one.txt"), "x\n").unwrap();
     hab.git(&hab.repo, &["add", "one.txt"]);
@@ -680,10 +698,10 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         "{}",
         vissue_log(&hab.tracker)
     );
-    assert_eq!(
-        fs::read_to_string(&marker).unwrap(),
-        "ran",
-        "the repo hook did not run"
+    let marked = fs::read_to_string(&marker).unwrap();
+    assert!(
+        marked.starts_with("ran"),
+        "the user's hook did not run: {marked}"
     );
     assert_eq!(deeds(&hab.tracker), 1);
 
@@ -712,21 +730,49 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
         &hab.repo,
         &["commit", "--amend", "-q", "-m", "book the readme again"],
     );
-    assert_ne!(head(&hab, &hab.repo), sha, "amend did not move HEAD");
+    let amended = head(&hab, &hab.repo);
+    assert_ne!(amended, sha, "amend did not move HEAD");
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains(&format!("deed-file-commit-{amended}")),
+        "{org}"
+    );
+    assert!(
+        !org.contains(&format!("deed-file-commit-{sha}")),
+        "the amended sha is still cited:\n{org}"
+    );
     assert_eq!(deeds(&hab.tracker), 2, "an amend was booked more than once");
 
     hab.git(&hab.repo, &["checkout", "-q", "-b", "side"]);
-    commit_file(&hab, "a.txt", "side a");
-    commit_file(&hab, "b.txt", "side b");
+    let side_a = commit_file(&hab, "a.txt", "side a");
+    let side_b = commit_file(&hab, "b.txt", "side b");
     hab.git(&hab.repo, &["checkout", "-q", "main"]);
     commit_file(&hab, "c.txt", "main c");
     let before = deeds(&hab.tracker);
     hab.git(&hab.repo, &["checkout", "-q", "side"]);
     hab.git(&hab.repo, &["rebase", "main"]);
+    let tip = head(&hab, &hab.repo);
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains(&format!("deed-file-commit-{tip}")),
+        "the rebased tip is not cited:\n{org}"
+    );
+    assert!(
+        org.contains(&format!("deed-file-commit-{amended}")),
+        "the commit on main lost its citation:\n{org}"
+    );
+    assert!(
+        !org.contains(&format!("deed-file-commit-{side_a}")),
+        "a rewritten sha is still cited:\n{org}"
+    );
+    assert!(
+        !org.contains(&format!("deed-file-commit-{side_b}")),
+        "a rewritten sha is still cited:\n{org}"
+    );
     assert_eq!(
         deeds(&hab.tracker),
-        before + 1,
-        "a rebase was booked more than once"
+        before + 2,
+        "each rewritten commit is cited once"
     );
 
     hab.ljos(&["git-hooks", "uninstall"]);
@@ -739,6 +785,95 @@ fn git_hooks_book_a_commit_once_and_uninstall_restores_the_config() {
     )
     .unwrap();
     assert_eq!(restored.trim(), saved.display().to_string());
+    assert_eq!(fs::read_to_string(saved.join("post-commit")).unwrap(), user);
+    assert!(!saved.join("pre-push").exists());
+    let before_marker = fs::read_to_string(&marker).unwrap();
+    let deeds_before = deeds(&hab.tracker);
+    fs::write(hab.repo.join("two.txt"), "y\n").unwrap();
+    hab.git(&hab.repo, &["add", "two.txt"]);
+    hab.git(&hab.repo, &["commit", "-q", "-m", "after uninstall"]);
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        format!("{before_marker}ran"),
+        "the user's hook stopped running"
+    );
+    assert_eq!(
+        deeds(&hab.tracker),
+        deeds_before,
+        "uninstall left the booking hook in place"
+    );
+}
+
+#[test]
+fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let sha = commit_file(&hab, "one.txt", "book the readme");
+    let rewrite_in = hab.root.join("rewrite-stdin");
+    let rewrite_hook = hab.repo.join(".git/hooks/post-rewrite");
+    fs::write(
+        &rewrite_hook,
+        format!("#!/bin/sh\ncat > {}\n", shellish(&rewrite_in)),
+    )
+    .unwrap();
+    fs::set_permissions(&rewrite_hook, fs::Permissions::from_mode(0o755)).unwrap();
+    hab.git(
+        &hab.repo,
+        &["commit", "--amend", "-q", "-m", "book the readme again"],
+    );
+    let amended = head(&hab, &hab.repo);
+    let seen = fs::read_to_string(&rewrite_in).unwrap_or_default();
+    assert!(
+        seen.contains(&sha) && seen.contains(&amended),
+        "the chained post-rewrite lost stdin: {seen}"
+    );
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
+    assert!(
+        org.contains(&format!("deed-file-commit-{amended}")),
+        "{org}"
+    );
+    assert!(
+        !org.contains(&format!("deed-file-commit-{sha}")),
+        "the amended sha is still cited:\n{org}"
+    );
+}
+
+#[test]
+fn uninstall_restores_a_hooks_path_ljos_already_owns() {
+    let hab = Hab::new("repo");
+    let saved = hab.root.join("saved-hooks");
+    fs::create_dir_all(&saved).unwrap();
+    install(&hab);
+    let ours = hab.share.join("ljos/git-hooks");
+    let configured = String::from_utf8(
+        hab.git(
+            &hab.repo,
+            &["config", "--global", "--get", "core.hooksPath"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        configured.trim(),
+        ours.display().to_string(),
+        "{configured}"
+    );
+    fs::write(
+        ours.join("previous-hooks-path"),
+        format!("{}\n", saved.display()),
+    )
+    .unwrap();
+    hab.ljos(&["git-hooks", "uninstall"]);
+    let restored = String::from_utf8(
+        hab.git(
+            &hab.repo,
+            &["config", "--global", "--get", "core.hooksPath"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(restored.trim(), saved.display().to_string());
+    assert!(!ours.join("post-commit").exists());
 }
 
 #[test]
@@ -1112,16 +1247,17 @@ fn a_git_hook_under_exec_daemon_books_the_seat() {
     let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", id)]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
+    let holder = format!("rgoswami@{}", ljos_cli::session_tag(id));
     let vlog = vissue_log(&hab.tracker);
     let dlog = fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
     let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
     assert!(
-        vlog.contains("VISSUE_AGENT=rgoswami"),
-        "the claim was not the seat:\n{vlog}\n{err}"
+        vlog.contains(&format!("VISSUE_AGENT={holder}")),
+        "the claim was not {holder}:\n{vlog}\n{err}"
     );
     assert!(
-        dlog.contains("--agent rgoswami"),
-        "the deed was not the seat:\n{dlog}"
+        dlog.contains(&format!("--agent {holder}")),
+        "the deed was not {holder}:\n{dlog}"
     );
     assert!(
         org.contains("by rgoswami"),
@@ -1142,14 +1278,15 @@ fn a_git_hook_under_exec_daemon_books_the_seat() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let holder = format!("grokbot-zzzzzzzz@{}", ljos_cli::session_tag(unknown));
     let vlog = vissue_log(&hab.tracker);
     let dlog = fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
     assert!(
-        vlog.contains("VISSUE_AGENT=grokbot-zzzzzzzz"),
-        "an unmapped conversation did not fall back to grokbot-<id8>:\n{vlog}"
+        vlog.contains(&format!("VISSUE_AGENT={holder}")),
+        "an unmapped conversation did not fall back to grokbot-<id8>@tag:\n{vlog}"
     );
     assert!(
-        dlog.contains("--agent grokbot-zzzzzzzz"),
+        dlog.contains(&format!("--agent {holder}")),
         "the deed did not use the fallback:\n{dlog}"
     );
     assert!(!vlog.contains("exec-daemon"), "{vlog}");
@@ -1398,4 +1535,105 @@ fn a_skip_list_books_nothing_and_reinstall_keeps_the_config() {
     );
     commit_file(&hab, "skipped-again.txt", "still do not book");
     assert_eq!(vissue_log(&hab.tracker), "");
+}
+
+fn commit_with(
+    hab: &Hab,
+    name: &str,
+    message: &str,
+    extra: &[(&str, &str)],
+    drop_seat: bool,
+) -> String {
+    fs::write(hab.repo.join(name), "x\n").unwrap();
+    let env: Vec<(String, String)> = hab
+        .base_env()
+        .into_iter()
+        .filter(|(key, _)| !drop_seat || key != "LJOS_SEAT")
+        .chain(
+            extra
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+        )
+        .collect();
+    let run = |args: &[&str]| {
+        let out = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&hab.repo)
+            .args(args)
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(env.clone())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&["add", name]);
+    run(&["commit", "-q", "-m", message]);
+    head(hab, &hab.repo)
+}
+
+/// ljos-6x14: agy stamps a conversation id and no seat. The git hook books
+/// the commit under antigravity@tag.
+#[test]
+fn an_agy_commit_is_booked_from_the_git_hook() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let id = "agy-conv-0001-deed";
+    let sha = commit_with(
+        &hab,
+        "agy.txt",
+        "land from agy",
+        &[("ANTIGRAVITY_CONVERSATION_ID", id)],
+        true,
+    );
+    let holder = format!("antigravity@{}", ljos_cli::session_tag(id));
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
+    let vlog = vissue_log(&hab.tracker);
+    assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+    assert!(vlog.contains(&format!("VISSUE_AGENT={holder}")), "{vlog}");
+    assert!(!vlog.contains("exec-daemon"), "{vlog}");
+}
+
+/// ljos-qpiw: OpenCode's shell sets OPENCODE_SESSION_ID and does not call
+/// the plugin after the command. The git hook books that commit.
+#[test]
+fn an_opencode_shell_commit_is_booked() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let id = "ses_cloudflare96de8ec";
+    let sha = commit_with(
+        &hab,
+        "cf.txt",
+        "hello from cloudflare",
+        &[("OPENCODE_SESSION_ID", id)],
+        true,
+    );
+    let holder = format!("opencode@{}", ljos_cli::session_tag(id));
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
+    let vlog = vissue_log(&hab.tracker);
+    assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+    assert!(vlog.contains(&format!("VISSUE_AGENT={holder}")), "{vlog}");
+}
+
+/// Claude and Codex book from their own hooks. The git hook stays out.
+#[test]
+fn a_claude_session_is_not_booked_by_the_git_hook() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    commit_with(
+        &hab,
+        "claude.txt",
+        "from claude",
+        &[("CLAUDECODE", "1")],
+        false,
+    );
+    assert_eq!(vissue_log(&hab.tracker), "");
+    assert_eq!(
+        fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default(),
+        ""
+    );
 }

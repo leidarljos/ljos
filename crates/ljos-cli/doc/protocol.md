@@ -10,12 +10,12 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
-| who votes with a view of its own | pack, persona atoms | `persona`, `vote --as` |
+| who votes with a view of its own | pack, persona atoms | `persona`; its own subagent or run casts `vote --as` |
 | which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
 | what another seat sent | pack, message atoms | `send`, `inbox`, `reply`, `read`, `group` |
 
@@ -60,77 +60,16 @@ does not answer:
 ljos sitting ISSUE --assignee NAME [--playbook NAME]
 ```
 
-It prints nine sections, and each one is a step you would otherwise run by
-hand. Each answers something the next one needs. Between the island and the
-recall it reads the issue's blockers from the tracker: an issue whose
-blockers are still open is refused before anything is claimed, because the
-graph says it is not workable; `--anyway` sits on it regardless and says so.
-Then it copies one playbook into `== playbook` before recall: `--playbook`
-names it, else a name already bound on the issue, else a closed-set token
-in the title, else `sit`. Sitting always binds one of the five before
-claim. A panel is refused until one is bound. The name lives on the
-tracker as a `playbook:` note until `finish` or `release`.
-
-1. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
-   `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
-   A `warn` on `host` means the kernel killed a process within a day. The
-   sitting opens; run one build or test suite at a time.
-2. `ljos cards`. What the human froze. Read, never write.
-3. `ljos due`. What is due for review: the soonest eight and the total.
-   The verb prints a page; it does not grade. Grade it after the sitting:
-   check a shown claim against the work, then run `ljos graded ID`
-   (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the
-   last hour, so a saved list cannot be graded unread; `ljos due --all`
-   lists everything to read and puts none of it up. The review clock
-   moves only when you grade, and a backlog is left due, not drained.
-4. `ljos island` on the issue's title. The sitting takes the strongest
-   eight. The number on a row is the activation spread along links.
-   `--as NAME` walks that persona's weights. `--fire` after the island
-   was used rewrites those weights, and the next walk follows them. A
-   weak island does not fire. `ljos search TOPIC` and a full
-   `ljos island TASK` are during the work, not this opening.
-5. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
-   six built-in recipes are `sit`, `arena`, `land`, `company-panel`,
-   `overnight`, `feature`. Kind `playbook`, weighed not recalled. Pack
-   latest per name is the copy; built-in bodies seed only when the pack
-   has no live atom of that name. Write, list, bind, and copy refuse any
-   other name. `ljos playbooks` lists the six. Absent a name, the sitting
-   matches the title (any name but `feature`) or binds `sit`. Mid-sitting
-   turns re-read the same note; a new task is a new sitting. Finish and
-   release write `playbook:` so the next sitting does not reprint the
-   previous recipe.    Feature work runs on a parent issue:
-   `ljos workflow PARENT --start feature` files its design child, and
-   `ljos workflow PARENT` prints the stage and the next step. A sitting
-   on the parent or a child prints the same in `== workflow`, and
-   `ljos finish PARENT --close` is refused until the panel passed.
-   `ljos workflow PARENT --round` files the next panel. Once the substance
-   has settled, a nit, a wording note or a style note stays on the issue.
-   A blocking finding with a reason is one `fix:` child. The same objection
-   is not filed again. At the round limit the parent closes as
-   settled-with-notes and does not wait.
-6. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
-   cited so far.
-7. `ljos timeline ISSUE`. The last twelve dated events across the three
-   stores; `ljos timeline` without a sitting prints them all.
-8. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
-   two conversations hold two tickets. The same issue is still one
-   holder. `busy` on a named worker means that name still has another
-   node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
-   `vissue claims` answers who has it; a tracker that refuses the name
-   refuses the sitting, and `ljos release` frees the claim graph.
-   A background worker you start sits under its own conversation's
-   name and the same seat. The conversation that started it can
-   complete, finish or release the worker's claim, and the worker can
-   finish a claim its parent took.
-   Another seat's claim is still refused, and the refusal names who
-   has it.
+@@SITTING_SECTIONS@@
 
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
 binds the `company-panel` recipe, and the sitting writes one brief per
-persona the issue speaks to under `== panel`. Start one subagent per
-brief; each ends with `ljos vote ISSUE --for OPTION --as NAME`, then
-`ljos consensus ISSUE`. `ljos finish ISSUE --close` refuses a decision
+persona the issue speaks to under `== panel`. Each brief goes to its own
+subagent or run, which casts `ljos vote ISSUE --for OPTION --as NAME`
+itself; the seat then runs `ljos consensus ISSUE`. The seat does not cast
+`--as` for its personas: one session is one ballot, and its second `--as`
+is refused. `ljos finish ISSUE --close` refuses a decision
 with fewer than two ballots. Put any choice with more than one defensible
 answer on an issue this way before building it.
 
@@ -138,13 +77,16 @@ Memory crosses machines through the tracker repository. A repository
 whose `.ljos/sync.toml` names a scope and its age recipients carries one
 sealed log per machine under `.ljos/atoms/`. The sitting pulls and takes
 the other machines' logs before the island is walked; finish writes and
-pushes this machine's. `ljos sync --key` prints this machine's public key
+pushes this machine's. `commit` skips that pull and that push.
+`ljos sync --key` prints this machine's public key
 for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
 A repository with no `.ljos/sync.toml` is not synced, and the sitting and
 finish say nothing about it; only `ljos sync` names the missing file.
-The sitting and finish follow `LJOS_TRACKER_GIT`: `commit` commits the log
-and pushes nothing, and `off` leaves the tracker alone. `ljos sync` by hand
-always pulls and pushes. An
+The sitting and finish follow `LJOS_TRACKER_GIT`: `push` commits, rebases
+with the per-issue field merge, and pushes; `commit` commits the log and
+neither fetches nor pushes it; `off` leaves the tracker alone. A push that
+fails stays queued for the next write and the end of the session. `ljos sync`
+by hand always pulls and pushes. An
 atom goes to the scope its `scope:NAME` entity names, else the machine's
 `default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
 takes the scope of the repository its issue lives in, and a
@@ -170,8 +112,8 @@ Every piece of work has an issue before it has a claim.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
-  is written at once as an `agent-derived` preference; nobody approves
-  it first, and `ljos memories review` keeps or drops it later. When a
+  is filed as a proposal in the person's words, origin `user-declared`.
+  `ljos accept` writes it. It is not stored on the hook. When a
   lesson rewrites an earlier one, it closes the earlier one's window. The
   verb says `revises N earlier memories` when it did. `ljos consolidate`
   reports the pairs the rule would close across what is held, and
@@ -246,8 +188,9 @@ Every piece of work has an issue before it has a claim.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
-  `ljos personas` prints the roster in the pack. Then
-  `ljos vote ISSUE --for OPTION --as NAME` casts as it. The anchor in
+  `ljos personas` prints the roster in the pack. Each persona's brief
+  then goes to its own subagent or run, which casts
+  `ljos vote ISSUE --for OPTION --as NAME` itself. The anchor in
   `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
   carries that word; `learn` writes its rows scoped to what the issue's
@@ -255,9 +198,10 @@ Every piece of work has an issue before it has a claim.
   A panel is one subagent per persona, each started from
   `ljos brief NAME ISSUE` (the view, the bound playbook's full recipe,
   the five named principles, the arena rubric, what the seat knows on its
-  domains, the working set), each casting one ballot as itself, then
-  `ljos consensus`; over MCP the `run_a_panel` prompt orders it, and
-  without MCP `ljos panel ISSUE --out DIR` writes one brief per persona.
+  domains, the working set), each casting its own `ljos vote --as NAME`,
+  then the seat runs `ljos consensus`; over MCP the `run_a_panel` prompt
+  orders it, and without MCP `ljos panel ISSUE --out DIR` writes one brief
+  per persona.
   A panel is refused until a playbook is bound (`ljos playbook ISSUE NAME`
   or `ljos sitting ISSUE --playbook NAME`). Both seat the personas whose
   `--about` domains the issue's title or tags name. A persona the
@@ -268,18 +212,57 @@ Every piece of work has an issue before it has a claim.
   stops: write the voters it needs (`--about` takes one domain per flag,
   many after it, or a comma list). A panel that seats everyone is a
   count. Model names on a
-  playbook are optional spawn hints; every member still ends with
-  `ljos vote --as` then `ljos consensus`. One playbook step per
-  subagent; no resume across phases. Each brief is a file to start a
+  playbook are optional spawn hints; every member still casts its own
+  `ljos vote --as NAME`, then the seat runs `ljos consensus`. One playbook
+  step per subagent; no resume across phases. Each brief is a file to start a
   subagent from. A panel
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
-  session, the MCP call's session, or a `*_SESSION_ID` in the environment) and
-  a nonce of that process, and the signature covers both. `ljos consensus`
+  session, the MCP call's session, a `*_SESSION_ID` in the environment, else
+  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and a marker, `-`, or
+  `seat` when only the seat named the session; the signature covers both.
+  No nonce of the process goes in: every process of one session signs the
+  same binding. `ljos consensus`
   refuses to settle when one session authored more than one ballot, when a
   session authored a candidate and also voted, or when every ballot traces to
-  one session: a seat minted inside a session does not multiply its vote. A
+  one session: a seat minted inside a session does not multiply its vote.
+  Each reviewer casts its own ballot from its own subagent or run, `ljos vote
+  ISSUE --for X --confidence C --used DEED`, never a verdict reported in prose.
+  A subagent's ballot binds the parent session plus the subagent,
+  `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
+  under its root session. An opencode subagent is a session of its own. A
+  seat whose shell names no session, as on a shared box, binds the session
+  and the subagent its hook saw run the line, not the seat. Two
+  subagents of one session count twice, the parent and a subagent count as
+  two, a subagent that votes again counts once, and a subagent that wrote a
+  candidate cannot vote. A voter changes its ballot by withdrawing it,
+  `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
+  it still holds one is refused and names those two steps. A run on
+  another machine has ljos installed there
+  (`ljos cloud up`) and the tracker synced through the shared tracker
+  repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
+  names the run but the seat, every run of that seat is one session, and
+  `ljos vote` and the tally call it unverified; the `NAME-shell` holder a
+  shell runner's env file shares names no run either. The binding stops an
+  honest but careless agent from voicing a panel from one session: minting
+  seats, passing another `--as`, running a line again, or setting another
+  session id between casts. A cast records, in the runtime directory, the
+  shell that ran `ljos` and the harness whose hook saw the line, each by pid
+  and start time; that shell casts on an issue as one session, and that
+  harness as one root session and its subagents, so a harness that clears
+  its conversation and votes again on the issue is refused. A hook's call
+  record names a session only for an `ljos` under the harness that ran the
+  hook. A process running as the same user that rewrites the tracker, the
+  seat keys, the runtime directory or another process's environment is out
+  of scope, and nothing here stops it: the call records are not signed, and
+  one written by hand naming a live ancestor of a later `ljos` still binds.
+  Within scope, three cases are not caught: a runner that starts each
+  command in a fresh shell under one shared daemon with no hook, as a cloud
+  box does, since nothing below the daemon tells its conversations apart; a
+  program other than a shell that runs `ljos` itself; and a cast on another
+  machine, whose processes are not compared. Persona ballots and Jev
+  ballots are advisory. The push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
   session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a
@@ -311,6 +294,8 @@ Every piece of work has an issue before it has a claim.
   names another parent and `--top` none. A bug in a tool found
   mid-sitting goes to the tool's project: `-p PROJECT` naming another
   project than the held issue's files at its top level, and says so.
+  `ljos file "TITLE" --options A,B` writes `Options: A, B` as the first body
+  line. `ljos options ISSUE A,B` appends that line and refuses fewer than two.
   A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.
@@ -352,7 +337,8 @@ Every typed finding the campaign records is a lesson once somebody
 resolved it: `ljos findings out/campaign.json --remember --issue ISSUE`
 (the MCP `ljos_findings`) files one lesson per resolved finding under
 the recipe's name, the package and the failure class, with origin
-`agent-derived`, written at once, and cites the state file on the issue. A finding a later attempt merely got past is
+`tool-echo` at L0 (`derived`), and cites the state file on the issue.
+`ljos accept` promotes that proposal to `explicit` and writes it. A finding a later attempt merely got past is
 not a lesson; `--all` takes those too. A lesson the seat writes by hand
 names the recipe, the step, the error line and the fix: "GCCcore-15.2.0
 on terra: compile failed in the build step with linux/scc.h missing.
@@ -361,15 +347,19 @@ lock exists before proceeding": the next seat cannot act on that.
 
 - A subagent works under its parent's sitting and opens none of its
   own. What it finds joins the parent's issue. A judgement between
-  options is `ljos vote ISSUE --for OPTION --as NAME`. A lesson still
+  options is `ljos vote ISSUE --for OPTION --as NAME`, cast by the
+  subagent itself; the parent never casts it for the subagent. A lesson still
   true next time is `ljos remember "..." --as NAME`, and a finding is
   `ljos note ISSUE "..."`. `NAME` is its persona, else its subagent
   type. On a runner that fires subagent events, the hook names the
   parent's issue on the subagent's first tool result. It keeps the
   subagent working once at its stop while that issue is open.
 
-- A tracker or sync commit queues under `ljos-commit.lock` in the git
-  directory, and a commit waits out another git process's `index.lock`.
+- A tracker or sync commit queues under `.ljos-commit.lock` at the top of
+  the tracker worktree, outside `.git` and kept out of `git status`, and a
+  commit waits out another git process's `index.lock`. An `index.lock`
+  more than a minute old with no git running in the checkout is named,
+  with the `rm` that clears it.
   Never wrap a verb in a lock of your own, and never stash, reset or
   check out files another seat is editing to get a commit through.
 
@@ -381,12 +371,13 @@ One verb closes the sitting:
 ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 ```
 
-It writes the lesson at once as a standing lesson with origin `agent-derived`
-and its provenance (seat, harness, session, time, reason). Nobody approves
-it first: `ljos memories review` (or `ljos memories tui`) keeps, edits,
-merges or drops it later, and `ljos memories prune --stale` names duplicates.
-A lesson the person types with `ljos remember` stays `user-declared`, and
-the same words satisfy the open proposal. The verb then fires the island,
+An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`
+and its provenance (seat, harness, session, time, reason). `ljos accept`
+promotes it to `explicit` and writes it. A lesson the person types at
+`ljos finish` in a terminal of their own, with no agent runner above it,
+is written at once as `user-declared`. A lesson the person types with
+`ljos remember` stays `user-declared`, and the same words satisfy the open
+proposal. The verb then fires the island,
 completes the session node, and learns from a named outcome. Without
 `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
@@ -405,14 +396,14 @@ same four steps are:
    outcome cannot. A persona it refuted weighs less on its next ballot.
 
 Whatever the outcome, the claim and the finish commit the ticket when the
-tracker is a git checkout. `sitting` commits after its claim and `finish` at the end of the work.
+tracker is a git checkout. `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
 Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a
 `tracker git:` line. A claim or a closure that stays in one
-working tree does not exist for any other host. `LJOS_TRACKER_GIT=commit`
-keeps it local; `=off` skips it. A refused push is reported, not raised:
-push the tracker yourself before you leave. `ljos doctor` names how many
-commits origin lacks, and fails the tracker row when that count sits
-through the push wait; a leftover refused-push log is named on the row.
+working tree does not exist for any other host. `LJOS_TRACKER_GIT=push`
+commits, rebases with the per-issue field merge, and pushes, and never
+forces. A failed push stays queued. `=commit` keeps it local; `=off` skips
+it. `ljos doctor` warns while commits are still unpushed, and a leftover
+refused-push log is named on the row.
 
 `ljos handover --out DIR --issue ISSUE [--to user@host:path]` is a separate
 verb for when another seat takes over. The receiver runs `ljos receive DIR`,
@@ -479,9 +470,12 @@ under equal weights is a count; under calibrated rows it is not.
   passing `ljos evidence record -- <test command>` run, the push still runs
   and the answer carries a warning. A force, mirror or delete push asks. A
   push onto a protected branch asks only when `owners` is set and the
-  remote's owner is not in it. A merge pushed to your own repository runs;
-  `gh pr merge` needs green CI on the head sha and every Cursor Bugbot
-  thread resolved or replied to. A commit that carries a
+  remote's owner is not in it. A merge pushed to your own repository runs.
+  `gh pr merge` with red or pending checks is refused. A head sha with no
+  CI checks asks, and that ask names the sha and a local evidence record
+  when one exists for it. A fine-grained token with no Checks permission
+  uses the REST fallback when the rollup read is denied. Every Cursor
+  Bugbot thread must be resolved or replied to. A commit that carries a
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.

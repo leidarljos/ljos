@@ -58,6 +58,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to r
 `gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush`, `cline`,
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
+A fresh machine runs `ljos cloud up`, or `sh scripts/install.sh --cloud`.
+The binaries land in `~/.local/bin`, that file points at the `ljos-mcp` on this machine, and `LJOS_TRACKER_REMOTE` is cloned as the shared tracker. `docs/cloud-vm.md` has the environment file, the push mode, and a job step.
 Codex runs a hook only once you trust it. After `ljos onboard`, open
 `/hooks` in Codex and trust each ljos hook before the guard runs, and
 trust it again after an upgrade rewrites one. Until then only the `rm`,
@@ -169,7 +171,7 @@ The sitting prints a short report: whether ljos is ready, what needs action, wha
 `--verbose` prints every section in full.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
-goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
+goes in as a proposal at L0 (`derived`) with origin `agent-derived`. `ljos accept` promotes it to `explicit` and writes it as a
 standing lesson and records that the person accepted it. Under an agent runner
 it accepts only a proposal another conversation filed, such as a worker's, so
 an agent can't accept its own proposal. A lesson you type at `ljos finish` in a
@@ -188,9 +190,8 @@ both. `LJOS_TRACKER_GIT=commit` keeps it local; `off` skips
 it. A tracker whose `.ljos/sync.toml` names a sync scope also gets this
 machine's memory from each finish, sealed with age to that file's recipients,
 committed as `.ljos/atoms/<host>.jsonl.age` and pushed with the branch.
-`LJOS_TRACKER_GIT` governs that commit and push too. A tracker with no
-`.ljos/sync.toml` is not synced. `ljos doctor` counts the commits origin lacks, and it fails the tracker
-row when that count stays above zero through the push wait.
+`LJOS_TRACKER_GIT` governs that commit and push too. `=push` commits, rebases with the per-issue field merge, and pushes; a failed push stays queued for the next write and the end of the session. `=commit` commits the sealed log and does not fetch or push it. A tracker with no
+`.ljos/sync.toml` is not synced. `ljos doctor` counts the commits origin lacks and warns while any remain unpushed.
 
 ## Claude Code plugin
 
@@ -410,8 +411,8 @@ guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
-Every listed tool costs its description and schema on every session: about
-8,200 tokens for the core set against 17,800 for all forty-nine (o200k_base
+Every listed tool costs its description and schema on every session: 7,702
+tokens for the core set against 16,298 for all forty-nine (o200k_base
 count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads

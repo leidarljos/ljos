@@ -58,6 +58,16 @@
             "timeout": 20
           }
         ]
+      },
+      {
+        "matcher": "^mcp__.+__ljos_.+$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+            "timeout": 20
+          }
+        ]
       }
     ],
     "SubagentStop": [

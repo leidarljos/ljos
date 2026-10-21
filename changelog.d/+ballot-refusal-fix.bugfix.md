@@ -1,0 +1,1 @@
+A refused ballot or settle now says that each persona brief goes to its own subagent or run, which casts `ljos vote --as NAME` itself, so a coordinator neither voices its panel from one session nor reports verdicts in prose.

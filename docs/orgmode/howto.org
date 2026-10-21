@@ -81,7 +81,7 @@ machine into =harnesses.toml=, then one verb each:
 
 #+begin_src console
 $ for h in opencode hermes omp grok; do ljos onboard --harness $h; done
-$ ljos doctor | grep runner
+$ ljos doctor --all | grep runner
 ok	runner mcp	opencode: ljos registered
 ok	runner skill	opencode: /home/you/.config/opencode/skills/ljos/SKILL.md
 ok	runner mcp	hermes: ljos registered
@@ -133,11 +133,21 @@ writes to the other members. =--interrupt= puts the message ahead of the
 others on the next prompt. =--issue ID= threads it on that vissue issue,
 and a reply keeps the issue. =ljos inbox= lists what this seat has not
 read, and writes no receipt. A pack that does not answer is an error.
+A writer that refuses kind =message= is an error too: the command exits
+non-zero, names packset 0.13.0, and does not print an empty inbox.
 =ljos send= names the packset version that keeps mail. =ljos read ID=
 writes one receipt. =ljos reply ID TEXT= writes back to the sender.
 
-=ljos hook --prompt= shows unread mail at the start of the next prompt
-and writes a receipt for each message it shows. Shown there is read.
+=ljos hook --prompt= shows unread mail at the start of the next prompt,
+at most eight messages and interrupts first, and writes one receipt for
+each message it shows. The rest stay unread. The receipt atom's text is
+four lines, =read ID=, =by SEAT=, =at STAMP= and =msg ID=. The sender's
+next inbox prints that receipt once, as the message id, the reader and
+the stamp, and a second prompt writes nothing. Shown there is read.
+A shell writes the receipt before the hook exits. Cursor holds the note
+on the prompt and writes the receipt when it is delivered: =postToolUse=
+puts the note in =additional_context=, and a turn with no tool puts it
+in =followup_message= on =Stop=.
 A shell seat has no hook, so it polls =ljos inbox= and reads with
 =ljos read=.
 
@@ -206,7 +216,7 @@ Computing Base (TCB)
 
 #+begin_src console
 $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
 #+end_src
 
 An =ask= rule uses the caller's approval UI when that UI is supported.
@@ -328,8 +338,8 @@ $ cat > ~/.config/ljos/jev.toml <<'TOML'
 enabled = true
 key_cmd = ["pass", "show", "api/typesafe/jev"]
 TOML
-$ ljos doctor | grep jev
-ok	jev	on  jev-1.13.0  0 calls  $0.0000 of $4.00 this month
+$ ljos doctor --all | grep jev
+ok	jev	on  jev jev-1.13.0  0 calls, 0 cached  $0.0000 of $4.00 this month
 #+end_src
 
 The hook runs the key command once per login, with no terminal and
@@ -452,7 +462,7 @@ because a lapse says that a reader forgot it.
 =ljos doctor= names the tool persona panes open in:
 
 #+begin_src console
-$ ljos doctor | grep panes
+$ ljos doctor --all | grep panes
 ok	panes	herdr opens persona panes; tmux also here
 #+end_src
 
@@ -647,8 +657,9 @@ ljos findings out/campaign.json --remember --issue demo-319z
 
 The first prints one line per finding. The second files one lesson per
 finding a person or a seat resolved, under the recipe's name, the
-package and the failure class, with origin =agent-derived=. It does not
-write the atom. =ljos accept ID= writes it as a standing lesson, and the command cites the
+package and the failure class, with origin =tool-echo= at L0 (=derived=).
+It does not write the atom. =ljos accept ID= promotes it to =explicit=
+and writes it as a standing lesson, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
 past is skipped; =--all= takes it too. Once someone accepts the
 proposal, the recipe's next bump recalls this lesson from its island.
@@ -717,6 +728,8 @@ unreviewed	conclusion	3f9c...	The lexical default is BM25+.
 1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
 == island: Ship the fuse change?
 1.000	seed	ab8c...	3 weeks ago	CombMNZ over RRF for fusing two ballots.
+== blockers
+none open; the issue is workable
 == playbook
 sit
 A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
@@ -745,11 +758,11 @@ and =ljos release= hands it back.
 
 #+begin_src console
 $ ljos finish proj-1a2b --lesson "CombMNZ held on turns. RRF lost two points." --outcome ship
-proposed 51778929d855529fcb8df3f4d1c4d692 as agent-derived; `ljos accept 51778929d855529fcb8df3f4d1c4d692` writes it
-fired the island for "Ship the fuse change?": 8 memories
 completed the session node for proj-1a2b as done
-learned from outcome "ship": 6 trust rows rewritten
-the ticket stays proj-1a2b's state; `vissue update proj-1a2b -s DONE` closes it
+remembered the lesson (id 51778929) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it
+fired the island for "Ship the fuse change?": 8 memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.
+Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 5 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
+the ticket proj-1a2b stays open and nobody holds it; `ljos finish proj-1a2b --close` or `vissue update proj-1a2b -s DONE` closes it when the work is accepted
 #+end_src
 
 * Vote with personas
@@ -757,10 +770,15 @@ the ticket stays proj-1a2b's state; `vissue update proj-1a2b -s DONE` closes it
 #+begin_src console
 $ ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about release
 $ ljos persona reader --anchor 0.8 --view "Reads as a first-time user of the docs." --about docs
-$ ljos vote $id --for hold --as reviewer
-$ ljos vote $id --for ship --as reader
-$ ljos consensus $id
+$ ljos brief reviewer $id
+$ ljos brief reader $id
 #+end_src
+
+Each brief goes to its own subagent or run, which casts as its persona:
+the reviewer's runs =ljos vote $id --for hold --as reviewer= and the
+reader's =ljos vote $id --for ship --as reader=. One session that cast
+both would be refused at the second, since a seat argument does not
+make another voice. The seat then runs =ljos consensus $id=.
 
 Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor, never below the 0.5 every other voter on the
@@ -782,10 +800,31 @@ name (=link_weights_by=), leaving the seat's weights as they were. Two
 personas that read the same island differently end up with different
 islands over the same claims.
 
+* Cast a reviewer's ballot from its own run
+
+Each reviewer is its own subagent or run, such as a cloud agent or a CI job, and casts its own ballot rather than reporting a verdict in prose.
+A subagent's ballot binds the parent session plus the subagent, =SESSION:AGENT=: the =agent_id= Claude Code's hook sees, or the Codex thread under its root session.
+An opencode subagent is a session of its own.
+Two subagents of one session count twice, the parent and a subagent count as two, and a subagent that wrote a candidate cannot vote.
+A run on another machine needs ljos and the tracker there.
+=ljos cloud up= installs ljos on that machine and clones the shared tracker repository that =LJOS_TRACKER_REMOTE= names, so the ballot is pushed where the other runs fetch it.
+
+#+begin_src console
+$ ljos cloud up
+$ ljos vote $id --for ship --confidence 0.8 --used none
+#+end_src
+
+The run's harness id is the ballot's session, so two runs count twice and a run or subagent that votes again counts once.
+When nothing names the run but the seat, =ljos vote= and the tally call the session unverified.
+Persona ballots and Jev ballots are advisory.
+The push gate counts seat ballots from another seat.
+
 * Cast persona ballots through Jev
 
 With Jev on, a persona's ballot can come from Jev instead of a subagent.
 The issue needs an =Options: A, B= line.
+=ljos file "TITLE" --options A,B= writes that line as the first line of the body.
+=ljos options ISSUE A,B= appends it to an issue that already exists, and refuses fewer than two.
 
 #+begin_src console
 $ ljos vote ljos-abcd --as security-reviewer --jev
@@ -878,7 +917,7 @@ where the seat writes.
 #+begin_src console
 $ head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key
 $ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
-$ ljos doctor | grep 'host key'
+$ ljos doctor --all | grep 'host key'
 ok	host key	/home/you/.config/deedar/host.key (32-byte seed)
 #+end_src
 
@@ -959,17 +998,17 @@ $ ljos-consensus settle --issue ID --susceptibility 0.8 --trust '[["alice","caro
 
 =ljos doctor= prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer.
 =ljos doctor --all= prints every row.
-The block is an example of that listing.
-On this tree =ljos doctor= read these versions from crates.io: ljos 0.31.0, vissue-cli 0.21.0, packset 0.15.3.
-=ljos --version= printed =ljos 0.31.0=.
-The rows are the shape when the binary on =PATH= is that version: no =behind= and no =ahead of= in front of =crates.io=.
-Paths stand in for those binaries.
+The block is the =ljos= row that command printed, taken from ljos 0.32.1.
+=ljos --version= printed =ljos 0.32.1=.
+The row is the shape when the binary on =PATH= is that version: no =behind= and no =ahead of= in front of =crates.io=.
+A day cache that already holds the crates.io answer prints =crates.io (cached)= in that place.
+The path stands in for the binary.
+On this tree the same run also read vissue-cli 0.21.0 and packset 0.15.3 from crates.io.
+Those binaries were not on =PATH=, so the sample does not show them as =ok=.
 
 #+begin_src text
 $ ljos doctor --all
-ok	ljos	/path/to/ljos  0.31.0  crates.io 0.31.0
-ok	vissue	/path/to/vissue  0.21.0  crates.io (cached) 0.21.0; evidence ballots supported
-ok	packsetd	/path/to/packsetd  0.15.3  crates.io (cached) 0.15.3
+ok	ljos	/path/to/ljos  0.32.1  crates.io 0.32.1
 #+end_src
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The

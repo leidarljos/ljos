@@ -1,23 +1,26 @@
-//! Push a tracker checkout without losing another bot's headings.
+//! Push a tracker checkout without losing another seat's edits.
 //!
 //! Seats share one tracker. A later push is rejected as non-fast-forward.
 //! The push fetches and rebases with autostash. When that rebase stops on
-//! a conflict, the checkout merges instead. Org files union on `:ID:`.
-//! Atom logs are re-exported by the `ljos-atoms` driver, which writes this
-//! machine's log again rather than keeping either side. A union that left
-//! two headings with one `:ID:` is folded. Nothing is force-pushed.
+//! a conflict, issue org files are merged field by field. Atom logs are
+//! re-exported by the `ljos-atoms` driver, which writes this machine's log
+//! again rather than keeping either side. A file that still has two
+//! headings with one `:ID:` is folded. Nothing is force-pushed.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
 const ATTEMPTS: usize = 6;
-const ATTR_ORG: &str = "*.org merge=union";
+const ATTR_ORG: &str = "*.org merge=ljos-org";
 const ATTR_ATOMS: &str = ".ljos/atoms/* merge=ljos-atoms";
 const DRIVER_KEY: &str = "merge.ljos-atoms.driver";
 const DRIVER_NAME_KEY: &str = "merge.ljos-atoms.name";
 const DRIVER_NAME: &str = "re-export local atoms";
-const ATTR_COMMIT: &str = "chore(tracker): union org files and re-export atoms on merge";
+const ORG_DRIVER_KEY: &str = "merge.ljos-org.driver";
+const ORG_DRIVER_NAME_KEY: &str = "merge.ljos-org.name";
+const ORG_DRIVER_NAME: &str = "field-merge issue org files";
+const ATTR_COMMIT: &str = "chore(tracker): field-merge org files and re-export atoms on merge";
 const FOLD_COMMIT: &str = "chore(tracker): fold duplicate issue headings";
 
 /// Commit `dir`'s branch and the headings already on the remote.
@@ -26,14 +29,16 @@ const FOLD_COMMIT: &str = "chore(tracker): fold duplicate issue headings";
 /// committed before the push. A branch with no upstream is pushed with
 /// `-u origin <branch>`. A non-fast-forward fetch is rebased with
 /// `--autostash`. A rebase that stops is aborted and merged. Org conflicts
-/// keep every heading, keyed by `:ID:`. This machine's atom logs are
+/// take the per-issue field merge. This machine's atom logs are
 /// re-exported. Duplicate `:ID:` headings are folded afterwards.
 ///
 /// # Errors
 ///
 /// The push still failed after a few attempts, or a conflict was not an
 /// org file or this machine's atoms log.
-pub(crate) fn push_checkout(dir: &Path) -> Result<(), String> {
+pub(crate) fn push_checkout(start: &Path) -> Result<(), String> {
+    let owned = repo_root(start);
+    let dir = owned.as_path();
     prepare_tracker(dir, false, true)?;
     let mut last = String::from("push refused");
     for _ in 0..ATTEMPTS {
@@ -50,6 +55,51 @@ pub(crate) fn push_checkout(dir: &Path) -> Result<(), String> {
     }
     Err(format!(
         "{last}; still not a fast-forward after {ATTEMPTS} attempts"
+    ))
+}
+
+/// Fetch, rebase with the org field merge, and push. Never force.
+///
+/// A failure leaves the local commits where they are. The next call tries
+/// again. `ATTEMPTS` bounds the retries.
+///
+/// # Errors
+///
+/// The remote still does not have the commits, or an issue file could not
+/// be merged.
+pub(crate) fn publish(start: &Path) -> Result<(), String> {
+    let owned = repo_root(start);
+    let dir = owned.as_path();
+    prepare_tracker(dir, false, true)?;
+    let mut last = String::from("push refused");
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                200 * u64::try_from(attempt).unwrap_or(1),
+            ));
+        }
+        if let Err(e) = integrate(dir) {
+            last = e;
+            if last.starts_with("fetch failed") {
+                continue;
+            }
+            let _held = crate::tracker_commit_lock(dir);
+            let _ = abort_rebase(dir);
+            let _ = git(dir, &["merge", "--abort"]);
+            return Err(last);
+        }
+        let out = push_once(dir);
+        if out.status.success() {
+            return push_mirrors(dir);
+        }
+        let said = output_text(&out);
+        last = first_line(&said);
+        if rejected(&said) {
+            continue;
+        }
+    }
+    Err(format!(
+        "{last}; still not pushed after {ATTEMPTS} attempts"
     ))
 }
 
@@ -274,6 +324,7 @@ fn primary_push(dir: &Path) -> String {
 }
 
 fn push_once(dir: &Path) -> Output {
+    // Never `--force`. A rejected update is rebased and tried again.
     if upstream_set(dir) {
         git(dir, &["push", "-q"])
     } else if let Some(branch) = branch_name(dir) {
@@ -303,6 +354,10 @@ fn push_mirrors(dir: &Path) -> Result<(), String> {
 
 fn integrate(dir: &Path) -> Result<(), String> {
     let fetched = git(dir, &["fetch", "-q", "origin"]);
+    // The replay rewrites the index and the working tree, so it waits for
+    // a seat's commit in flight and no commit starts until it is done. The
+    // fetch, which may wait on the network, is outside.
+    let _held = crate::tracker_commit_lock(dir);
     if !fetched.status.success() {
         let _ = abort_rebase(dir);
         return Err(format!(
@@ -402,10 +457,11 @@ fn resolve_unmerged(dir: &Path) -> Result<(), String> {
 }
 
 fn resolve_org(dir: &Path, file: &str) -> Result<(), String> {
+    let base = stage(dir, 1, file).unwrap_or_default();
     let ours = stage(dir, 2, file);
     let theirs = stage(dir, 3, file);
     let merged = match (ours, theirs) {
-        (Some(a), Some(b)) => fold_org_text(&union_org(&a, &b)),
+        (Some(a), Some(b)) => field_or_union(&base, &a, &b, file)?,
         (Some(a), None) | (None, Some(a)) => fold_org_text(&a),
         (None, None) => {
             return Err(format!(
@@ -417,6 +473,48 @@ fn resolve_org(dir: &Path, file: &str) -> Result<(), String> {
         return Err(format!("{file} still has conflict markers"));
     }
     write_resolved(dir, file, merged.as_bytes())
+}
+
+/// An issue board merges field by field. A file that is not one still
+/// unions, so a note outside the tracker is not refused.
+fn field_or_union(base: &str, ours: &str, theirs: &str, file: &str) -> Result<String, String> {
+    match field_merge(base, ours, theirs) {
+        Ok(text) => Ok(text),
+        Err(err) if looks_like_issue(ours) || looks_like_issue(theirs) => {
+            Err(format!("{file}: {err}"))
+        }
+        Err(_) => Ok(fold_org_text(&union_org(ours, theirs))),
+    }
+}
+
+fn looks_like_issue(text: &str) -> bool {
+    text.lines().any(|line| line.contains(":ID:"))
+}
+
+fn field_merge(base: &str, ours: &str, theirs: &str) -> Result<String, String> {
+    let merged = vissue_core::merge::merge_tracker("tracker", base, ours, theirs)
+        .map_err(|e| e.to_string())?;
+    if merged.text.contains("<<<<<<<") {
+        return Err("merged org still has conflict markers".into());
+    }
+    Ok(merged.text)
+}
+
+/// git's `ljos-org` merge driver. `ours` is `%A` and is replaced.
+pub(crate) fn merge_org_files(base: &Path, ours: &Path, theirs: &Path) -> Result<(), String> {
+    let base_txt = std::fs::read_to_string(base).unwrap_or_default();
+    let ours_txt = std::fs::read_to_string(ours).map_err(|e| e.to_string())?;
+    let theirs_txt = std::fs::read_to_string(theirs).map_err(|e| e.to_string())?;
+    let merged = field_or_union(
+        &base_txt,
+        &ours_txt,
+        &theirs_txt,
+        &ours.display().to_string(),
+    )?;
+    if merged.contains("<<<<<<<") {
+        return Err("merged org still has conflict markers".into());
+    }
+    std::fs::write(ours, merged).map_err(|e| e.to_string())
 }
 
 fn resolve_attributes(dir: &Path) -> Result<(), String> {
@@ -556,6 +654,19 @@ fn branch_name(dir: &Path) -> Option<String> {
     })?
 }
 
+/// The checkout that holds `start`. Commands below name paths from the
+/// root; a subdirectory makes `git diff` and `git add` disagree about them.
+pub(crate) fn repo_root(start: &Path) -> PathBuf {
+    let out = git(start, &["rev-parse", "--show-toplevel"]);
+    if out.status.success() {
+        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        if path.is_dir() {
+            return path;
+        }
+    }
+    start.to_path_buf()
+}
+
 fn git(dir: &Path, args: &[&str]) -> Output {
     use std::os::unix::process::ExitStatusExt;
     let mut cmd = std::process::Command::new("git");
@@ -609,6 +720,7 @@ pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(
         }
         init_repo(root)?;
     }
+    let _held = crate::tracker_commit_lock(root);
     write_attributes(root)?;
     register_driver(root)?;
     if commit {
@@ -674,23 +786,42 @@ fn is_work_tree(root: &Path) -> bool {
 fn write_attributes(root: &Path) -> Result<(), String> {
     let path = root.join(".gitattributes");
     let have = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut extra = String::new();
-    for line in [ATTR_ORG, ATTR_ATOMS] {
-        if attr_present(&have, line) || attr_present(&extra, line) {
+    let mut lines = Vec::new();
+    let mut saw_org = false;
+    let mut saw_atoms = false;
+    for line in have.lines() {
+        let trimmed = line.trim();
+        if org_merge_line(trimmed) {
+            if !saw_org {
+                lines.push(ATTR_ORG.to_string());
+                saw_org = true;
+            }
             continue;
         }
-        if !have.is_empty() && !have.ends_with('\n') && extra.is_empty() {
-            extra.push('\n');
+        if attr_present(line, ATTR_ATOMS) {
+            saw_atoms = true;
         }
-        extra.push_str(line);
-        extra.push('\n');
+        lines.push(line.to_string());
     }
-    if extra.is_empty() {
+    if !saw_org {
+        lines.push(ATTR_ORG.to_string());
+    }
+    if !saw_atoms {
+        lines.push(ATTR_ATOMS.to_string());
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if out == have {
         return Ok(());
     }
-    let mut out = have;
-    out.push_str(&extra);
     std::fs::write(path, out).map_err(|e| e.to_string())
+}
+
+fn org_merge_line(trimmed: &str) -> bool {
+    let mut parts = trimmed.split_whitespace();
+    parts.next() == Some("*.org") && parts.any(|word| word.starts_with("merge="))
 }
 
 fn attr_present(text: &str, line: &str) -> bool {
@@ -714,6 +845,21 @@ fn driver_command() -> String {
     }
 }
 
+fn org_driver_command() -> String {
+    if let Ok(over) = std::env::var("LJOS_ORG_DRIVER") {
+        if !over.trim().is_empty() {
+            return over;
+        }
+    }
+    match std::env::current_exe() {
+        Ok(path) if path.file_name().and_then(|n| n.to_str()) == Some("ljos") => format!(
+            "{} merge-org %O %A %B",
+            crate::tools::sh_quote(&path.display().to_string())
+        ),
+        _ => "ljos merge-org %O %A %B".to_string(),
+    }
+}
+
 fn register_driver(root: &Path) -> Result<(), String> {
     let want = driver_command();
     if local_config(root, DRIVER_KEY).as_deref() != Some(want.as_str()) {
@@ -730,6 +876,28 @@ fn register_driver(root: &Path) -> Result<(), String> {
         if !set.status.success() {
             return Err(format!(
                 "could not name the atoms merge driver: {}",
+                first_line(&output_text(&set))
+            ));
+        }
+    }
+    let org = org_driver_command();
+    if local_config(root, ORG_DRIVER_KEY).as_deref() != Some(org.as_str()) {
+        let set = git(root, &["config", "--local", ORG_DRIVER_KEY, &org]);
+        if !set.status.success() {
+            return Err(format!(
+                "could not register the org merge driver: {}",
+                first_line(&output_text(&set))
+            ));
+        }
+    }
+    if local_config(root, ORG_DRIVER_NAME_KEY).as_deref() != Some(ORG_DRIVER_NAME) {
+        let set = git(
+            root,
+            &["config", "--local", ORG_DRIVER_NAME_KEY, ORG_DRIVER_NAME],
+        );
+        if !set.status.success() {
+            return Err(format!(
+                "could not name the org merge driver: {}",
                 first_line(&output_text(&set))
             ));
         }
@@ -1031,6 +1199,35 @@ mod tests {
     }
 
     #[test]
+    fn two_notes_on_one_issue_merge_by_field() {
+        let head = "#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\n";
+        let issue = |log: &str| {
+            format!("* TODO [#A] Work\n:PROPERTIES:\n:ID:       acme-1a2b\n:END:\n:LOGBOOK:\n{log}:END:\n")
+        };
+        let n0 = "- Note: \"started\" [2026-09-20 Sun 10:00]\n";
+        let na = "- Note: \"ours saw the build go green\" [2026-09-27 Sun 11:00]\n";
+        let nb = "- Note: \"theirs filed the log\" [2026-09-27 Sun 12:00]\n";
+        let merged = field_merge(
+            &format!("{head}{}", issue(n0)),
+            &format!("{head}{}", issue(&format!("{na}{n0}"))),
+            &format!("{head}{}", issue(&format!("{nb}{n0}"))),
+        )
+        .unwrap();
+        assert!(merged.contains("ours saw the build go green"), "{merged}");
+        assert!(merged.contains("theirs filed the log"), "{merged}");
+        assert_eq!(merged.matches("* TODO").count(), 1, "{merged}");
+        assert!(!merged.contains("<<<<<<<"), "{merged}");
+    }
+
+    #[test]
+    fn the_push_script_does_not_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = push_script(dir.path(), &[]);
+        assert!(!script.contains("force"), "{script}");
+        assert!(!script.contains(" -f "), "{script}");
+    }
+
+    #[test]
     fn the_same_id_keeps_lines_from_both_sides() {
         let ours = "\
 * STARTED [#C] Seed
@@ -1234,7 +1431,7 @@ body b
         assert_eq!(
             attrs
                 .lines()
-                .filter(|line| line.trim() == "*.org merge=union")
+                .filter(|line| line.trim() == "*.org merge=ljos-org")
                 .count(),
             1,
             "{attrs}"

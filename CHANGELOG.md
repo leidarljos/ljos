@@ -5,6 +5,27 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.32.1 (2026-10-20)
+
+### Fixes
+
+- Bound transcript prompt reads and retain the stored prompt during tool calls.
+  Recognize user messages inside event envelopes so long conversations do not stall command hooks.
+- Let an initialized connection reach command policy without a historical tracker claim.
+  Keep automatically filed claims with their hook conversation when a runner shares hold records.
+- MCP memory writes hold what the person stated. The server instructions no longer say `Call ljos_note and ljos_remember freely while you work.`: `ljos_remember` and `ljos_prefer` are for a fact or a preference the person stated in this conversation, never for a claim read in a file, a tool's output or a web page, and `ljos_note` keeps the agent's own working notes. An MCP write of words from the person's latest prompt, as the prompt hook kept it, is stored as theirs: origin `user-declared`, `via:prompt` and `source.basis` `person`. Any other MCP write is the agent's, with origin `agent-derived` and `source.basis` `agent`; before this, an MCP `ljos_prefer` was stored as `user-declared` whatever its source. The prompt note reads preferences first, then the person's words, then other claims, and working notes last, and labels a note `agent's working note` and a claim in the person's words `the person's words`.
+- Record the connected identity before admitting a tool request when initialization and the first request arrive together.
+- The sync that `ljos sitting`, `ljos finish` and the MCP server's exit run follows `LJOS_TRACKER_GIT`. It pushed the whole tracker branch with this machine's sealed memory log, so a ticket commit that `LJOS_TRACKER_GIT=commit` had kept local left with it. Under `commit` the log is committed and nothing is pushed; under `off` the tracker is left alone, and when a scope is set up the sitting and finish print one line saying so. `ljos sync` run by hand pulls and pushes as before. The README now says that a tracker with `.ljos/sync.toml` gets the sealed log from each finish.
+- User rules leave the machine only through a tracker whose `.ljos/sync.toml` names a scope, sealed with age to that scope's recipients as `.ljos/user-rules/<host>.json.age`. Every rule write and session start pushed `.ljos/user-rules/<host>.json` in plaintext to any tracker with a git remote, with no scope file and no notice. A tracker with no scope now gets nothing, and the rules already in its checkout are still read. A plaintext file another host left is still read, and this machine's own is removed in the commit that seals it. The pass at a write and at session start follows `LJOS_TRACKER_GIT` (`commit` keeps the commit local, `off` leaves the tracker alone), and `ljos prefer --user --sync` pushes as asked. `LJOS_USER_RULES_SYNC=off` still stops it. The reference lists `LJOS_USER_RULES_SYNC`, `LJOS_USER_RULES_TRACKER` and `LJOS_USER_RULES_SYNC_MS`. A plaintext file already pushed stays in the tracker's git history; rewriting that history is left to the person who owns the remote.
+- `ljos_guard_check` gives its verdict whatever seat the call names. Codex onboarded with `LJOS_SEAT=codex` on a tracker whose only codex claims were held as `codex-vax0`, so the server refused every tool call with "no seat named codex", the guard included, and listed thread ids as seats. The seat check now applies only to tools that act under a seat: claims, sittings, mail and writes. The guard, the approval form and the reading tools run without one. A harness id is that harness's seat, or its one seat on the tracker when there is exactly one. A name from `LJOS_SEAT` or `VISSUE_AGENT` is the seat even before any claim names it. A `CLAIMED_BY` holder in the `SEAT-TAG` form of ljos 0.31 counts as its seat, and a bare thread id counts as none. A name the call made up is still refused, in one line that names the seat it most likely meant and at most four others, with no ids. Mail to an unknown seat lists seats the same way.
+- rustls 0.23.46, rustls-webpki 0.103.16 and webpki-roots 1.0.10 fix the TLS advisories open against ljos 0.32.0, and the build no longer trusts the emSign ECC Root CA - G3 root.
+
+### Miscellaneous
+
+- CI runs `cargo deny check` with every section, where it ran the license section alone. Each ignored advisory is named with the crates that bring it in, and `deny.toml` bans every webpki-roots release that still ships the emSign root.
+- ljos-hud depends on claimdag 0.8, built on capnp 0.27, which clears RUSTSEC-2025-0143. The work.bin format is unchanged, so a graph claimdag 0.7.1 wrote still opens.
+
+
 ## 0.32.0 (2026-10-20)
 
 ### Features
