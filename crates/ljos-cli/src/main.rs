@@ -1418,7 +1418,7 @@ fn run_command() -> Result<()> {
             let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
             println!("{}", write_ack(&body));
             for rule in &rules {
-                println!("{}", ljos_cli::atom_out(&write_rule(rule)?, false)?);
+                println!("{}", write_ack(&write_rule(rule)?));
             }
             if !proposed.is_empty() && ljos_cli::under_a_runner() {
                 for rule in &proposed {
@@ -2225,7 +2225,14 @@ fn run_command() -> Result<()> {
                     verdict,
                     reason: why,
                 })?;
-                println!("{}", ljos_cli::atom_out(&body, json)?);
+                println!(
+                    "{}",
+                    if json {
+                        ljos_cli::atom_out(&body, true)?
+                    } else {
+                        write_ack(&body)
+                    }
+                );
             }
         }
         Cmd::Rules { json } => {

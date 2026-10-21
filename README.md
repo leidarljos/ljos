@@ -27,7 +27,9 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 The installer downloads each program from its GitHub release, checks it
 against the published SHA-256 sum, and builds from source with `cargo` where a
 platform has no release. It then runs `ljos onboard` for every coding agent it
-finds and shows the guard asking before a force push. Its programs are ljos,
+finds. With none found it still sets up the tracker, the memory writer and the
+deed store, and names `ljos onboard --harness NAME` for later. It shows the
+guard asking before a force push. Its programs are ljos,
 packset (memory), vissue (the tracker), deedar (records of work), claimdag
 (who works on what), ljos-policyd (the command check) and ljos-consensus
 (voting), plus `packset-embed`, the encoder for meaning-based search.
@@ -50,7 +52,7 @@ Read the script before you run it; it is
 cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard                                # every coding tool found on this machine: MCP server, hooks and skill
 ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
-ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to run."
+ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
 
 `--harness` takes `claude`, `codex`, `grok`, `cursor`, `antigravity`,
@@ -91,7 +93,7 @@ only your own rule covers, such as `terraform destroy -auto-approve`, meets
 that rule:
 
 ```
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Infra teardown is mine to run. (ljos rule `terraform destroy*`)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destroy only from the release runbook. (ljos rule `terraform destroy*`)"}}
 ```
 
 The hook shows what you write from the moment it is written: a preference
@@ -368,7 +370,7 @@ ljos playbooks                                 # sit, arena, land, company-panel
 ljos playbook vissue-xxxx company-panel        # bind a recipe; sitting copies the body before recall; panel refuses until then
 ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer
-ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the runbook."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
+ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
