@@ -57,7 +57,7 @@ pub fn up(force: bool) -> Result<String> {
 
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
-    lines.push(ensure_profile(&home)?);
+    lines.push(ensure_profile(&home, &bin_dir)?);
     lines.push(write_mcp(
         &home,
         &bin_dir.join("ljos-mcp"),
@@ -1066,32 +1066,73 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-fn ensure_profile(home: &Path) -> Result<String> {
+fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
     let mut notes = Vec::new();
-    for name in [".profile", ".bashrc"] {
-        notes.push(ensure_path_file(&home.join(name))?);
-    }
+    notes.push(ensure_path_file(&home.join(".profile"), bin_dir, false)?);
+    notes.push(ensure_path_file(&home.join(".bashrc"), bin_dir, true)?);
     Ok(notes.join("; "))
 }
 
-fn ensure_path_file(path: &Path) -> Result<String> {
+fn path_export_line(bin_dir: &Path) -> String {
+    format!("export PATH=\"{}:$PATH\"", bin_dir.display())
+}
+
+fn first_interactive_guard(text: &str) -> Option<usize> {
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let guard =
+            (trimmed.contains("$PS1") || trimmed.contains("$-")) && trimmed.contains("return");
+        if guard {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
+}
+
+fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool) -> Result<String> {
     let have = fs::read_to_string(path).unwrap_or_default();
-    if have.contains(".local/bin") {
+    let line = path_export_line(bin_dir);
+    if have.lines().any(|l| l.trim() == line) {
         return Ok(format!(
-            "path: {} already names ~/.local/bin",
-            path.display()
+            "path: {} already names {}",
+            path.display(),
+            bin_dir.display()
         ));
     }
     let mut out = have;
-    if !out.is_empty() && !out.ends_with('\n') {
+    if before_interactive_guard {
+        if let Some(at) = first_interactive_guard(&out) {
+            let mut next = String::with_capacity(out.len() + line.len() + 1);
+            next.push_str(&out[..at]);
+            next.push_str(&line);
+            next.push('\n');
+            next.push_str(&out[at..]);
+            out = next;
+        } else {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    } else {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&line);
         out.push('\n');
     }
-    out.push_str("export PATH=\"$HOME/.local/bin:$PATH\"\n");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
-    Ok(format!("path: {} adds ~/.local/bin", path.display()))
+    Ok(format!(
+        "path: {} adds {}",
+        path.display(),
+        bin_dir.display()
+    ))
 }
 
 /// Prepend `bin_dir` to this process's PATH when it is not already there.
