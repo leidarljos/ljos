@@ -176,7 +176,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
         entries: entries.len(),
         ..CheckReport::default()
     };
-    let mut pins = crate::ballot_sig::pins();
+    let (mut pins, pin_source) = crate::ballot_sig::pins_for_check()?;
     let mut ballots = Vec::new();
     for entry in entries {
         verify_entry(entry)?;
@@ -187,11 +187,13 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
                     &mut pins,
                     &question.opened_by,
                     &entry.signature.key,
-                )?;
+                )
+                .with_context(|| format!("pin source: {pin_source}"))?;
             }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
-                crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)?;
+                crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 ballots.push(ballot.clone());
             }
         }
@@ -924,7 +926,9 @@ mod tests {
             2,
         );
         let err = check_entries(&[first, second]).expect_err("must reject run key mismatch");
-        assert!(err.to_string().contains("pinned"));
+        let text = err_chain(&err);
+        assert!(text.contains("pinned"), "{text}");
+        assert!(text.contains("none: first-seen in this check"), "{text}");
     }
 
     #[test]
@@ -1320,9 +1324,66 @@ mod tests {
             2,
         );
         let line = format!("alpha/run-101 {}\n", other.signature.key);
-        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        std::fs::write(&pin_path, line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("pinned key");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        let text = err_chain(&err);
+        assert!(text.contains("pinned"), "{text}");
+        assert!(text.contains(pin_path.to_string_lossy().as_ref()), "{text}");
+    }
+
+    #[test]
+    fn unreadable_pin_file_is_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        std::fs::write(&pin_path, "alpha/run-101 deadbeef\n").expect("pin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&pin_path).expect("meta").permissions();
+            perms.set_mode(0o000);
+            std::fs::set_permissions(&pin_path, perms).expect("chmod");
+        }
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("unreadable pin file");
+        assert!(
+            err_chain(&err).contains(pin_path.to_string_lossy().as_ref()),
+            "{}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
+    fn duplicate_pin_voter_lines_are_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let line = format!(
+            "alpha/run-101 {}\nalpha/run-101 {}\n",
+            entry.signature.key, entry.signature.key
+        );
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("duplicate pin voter");
+        assert!(
+            err_chain(&err).contains("duplicate"),
+            "{}",
+            err_chain(&err)
+        );
     }
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
