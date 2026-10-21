@@ -238,7 +238,8 @@ Every piece of work has an issue before it has a claim.
   (`ljos cloud up`) and the tracker synced through the shared tracker
   repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
   names the run but the seat, every run of that seat is one session, and
-  `ljos vote` and the tally call it unverified. Persona ballots and Jev
+  `ljos vote` and the tally call it unverified; the `NAME-shell` holder a
+  shell runner's env file shares names no run either. Persona ballots and Jev
   ballots are advisory. The push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own

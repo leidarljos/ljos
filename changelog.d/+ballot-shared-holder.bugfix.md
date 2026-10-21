@@ -1,0 +1,1 @@
+A ballot is no longer bound to the `NAME-shell` holder a shell runner's env file shares across every conversation on a box: with no other session the seat is the session, and `ljos vote` and the tally call it unverified, so two seats on one box are two voices and a hooked subagent binds its own session.

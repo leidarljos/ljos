@@ -648,7 +648,9 @@ pub fn harness_session() -> String {
     ];
     for key in PREFER {
         if let Some(s) = env_token(key) {
-            if s.len() >= 8 {
+            // A shell runner's env file shares `NAME-shell` across every
+            // conversation; it holds claims and names no session.
+            if s.len() >= 8 && !(*key == "LJOS_SESSION_ID" && crate::is_shared_holder_id(&s)) {
                 return s;
             }
         }

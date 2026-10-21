@@ -1222,6 +1222,55 @@ fn a_box_seat_with_no_session_counts_each_subagent() {
 }
 
 #[test]
+fn a_shared_shell_holder_is_not_a_ballot_session() {
+    // A shell runner's env file gives every conversation on the box the
+    // holder `grokbot-shell`. Two seats are two voices, each unverified,
+    // and a subagent its hook saw still binds its own session.
+    let world = World::new();
+    let issue = "demo-shared-holder";
+    let shared: &[(&str, &str)] = &[("LJOS_SESSION_ID", "grokbot-shell")];
+    let args = |name: &'static str| {
+        [
+            "vote", issue, "--for", "ship", "--used", "none", "--as", name,
+        ]
+    };
+    for (seat, name) in [("eessi", "reviewer-a"), ("inky", "reviewer-b")] {
+        let out = world.ljos_env(seat, shared, &args(name));
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains(&format!("session {seat}\n")), "{said}");
+        let unverified = ljos_cli::ballot_sig::unverified_sentence(seat);
+        assert!(said.contains(&unverified), "{said}");
+    }
+    let parent = "3c7a90e1-shared-parent";
+    let line = args("reviewer-c");
+    let hook = world.hook(
+        shared,
+        &serde_json::json!({
+            "session_id": parent,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_s1",
+            "agent_id": "agent-s1",
+            "tool_input": {"command": format!("ljos {}", line.join(" "))},
+        }),
+    );
+    assert!(hook.status.success(), "{}", text(&hook));
+    let out = world.ljos_env("eessi", shared, &line);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("session {parent}:agent-s1\n")),
+        "{said}"
+    );
+    let tally = world.ljos("eessi", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("3 ballots count"), "{said}");
+    assert!(!stdout.contains("grokbot-shell"), "{said}");
+}
+
+#[test]
 fn claude_subagents_voting_over_mcp_each_count() {
     // One ljos-mcp answers the parent and both subagents. Only the hook
     // payload names the agent; the call carries the tool use id.
