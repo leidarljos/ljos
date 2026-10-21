@@ -1085,17 +1085,47 @@ fn path_export_line(bin_dir: &Path) -> String {
 }
 
 fn first_interactive_guard(text: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let mut at = 0usize;
-    for line in text.split_inclusive('\n') {
+    for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let guard =
+        let one_line =
             (trimmed.contains("$PS1") || trimmed.contains("$-")) && trimmed.contains("return");
-        if guard {
+        // Ubuntu's skel bashrc splits the test and the return:
+        // `case $- in` / `*i*) ;;` / `*) return;;` / `esac`.
+        // A one-line search appends PATH after that return, so a
+        // non-interactive shell never sees it.
+        if one_line || (case_tests_shell(trimmed) && case_body_returns(&lines[i + 1..])) {
             return Some(at);
         }
         at += line.len();
     }
     None
+}
+
+/// `case $- in` or `case "$PS1" in`, the interactive test on its own line.
+fn case_tests_shell(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("case") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let word = rest.split_whitespace().next().unwrap_or("");
+    let word = word.trim_matches(|c| c == '"' || c == '\'');
+    word == "$-" || word == "$PS1"
+}
+
+/// Whether this `case` returns before `esac`. A `case "$TERM"` does not.
+fn case_body_returns(lines: &[&str]) -> bool {
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("esac") {
+            return false;
+        }
+        if trimmed.contains("return") {
+            return true;
+        }
+    }
+    false
 }
 
 fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool) -> Result<String> {

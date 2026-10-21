@@ -453,6 +453,67 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     assert!(line_at < guard_at, "{bashrc}");
 }
 
+/// Ubuntu's skel bashrc returns from a `case $-` before any later PATH
+/// export. A non-interactive `bash -c '. ~/.bashrc'` never sees a line
+/// appended after that case.
+#[test]
+fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
+    let _g = Guard::new();
+    let skel = fs::read_to_string("/etc/skel/.bashrc").unwrap();
+    assert!(
+        skel.contains("case $- in\n    *i*) ;;\n      *) return;;\n"),
+        "expected the Ubuntu skel case guard, got:\n{skel}"
+    );
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bashrc"), &skel).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let bin = home.join(".local/bin");
+    let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
+    let line = format!("export PATH=\"{}:$PATH\"", bin.display());
+    let path_at = bashrc.find(&line).unwrap_or_else(|| panic!("{bashrc}"));
+    let guard_at = bashrc
+        .find("case $- in")
+        .unwrap_or_else(|| panic!("{bashrc}"));
+    assert!(path_at < guard_at, "{bashrc}");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$HOME/.bashrc\"; command -v ljos-mcp")
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let found = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        found.trim(),
+        bin.join("ljos-mcp").display().to_string(),
+        "stderr {}\n{bashrc}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn two_vms_land_different_issues_and_merge_notes_on_one() {
     let _g = Guard::new();
