@@ -564,6 +564,122 @@ fn a_gone_vm_does_not_keep_a_started_claim() {
 }
 
 #[test]
+fn a_live_hold_keeps_its_issue_and_a_dead_process_is_released() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let origin = init_bare(root.path());
+    let old = ":CLAIMED_BY: seat-live\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
+    let dead = ":CLAIMED_BY: seat-dead\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
+    seed(
+        root.path(),
+        &origin,
+        &board(&[
+            issue_block("probe-live", "STARTED", old, &[]),
+            issue_block("probe-other", "STARTED", old, &[]),
+            issue_block("probe-dead", "STARTED", dead, &[]),
+        ]),
+    );
+    let vm = clone_of(root.path(), &origin, "vm");
+    let runtime = root.path().join("run");
+    fs::create_dir_all(runtime.join("ljos")).unwrap();
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let open = stat.find('(').unwrap();
+    let close = stat.rfind(')').unwrap();
+    let comm = &stat[open + 1..close];
+    let hold = |actor: &str, assignee: &str, pid: u32, comm: &str, issue: &str| {
+        fs::write(
+            runtime.join("ljos").join(format!("hold-{actor}")),
+            format!("{assignee}\n{assignee}\n{pid}\n{comm}\n2020-01-01T00:00:00Z\n{issue}\n-\n"),
+        )
+        .unwrap();
+    };
+    // The filename is the claim-graph actor, not the seat the tracker stores.
+    hold(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "seat-live",
+        std::process::id(),
+        comm,
+        "probe-live",
+    );
+    hold(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "seat-dead",
+        4_194_303,
+        "no-such-runner",
+        "probe-dead",
+    );
+    std::env::set_var("HOME", root.path().join("home"));
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("VISSUE_ROOT", &vm);
+    std::env::set_var("ISSUE_ROOT", &vm);
+    let said = ljos_cli::cloud::reap_gone_owners(5);
+    assert!(said.contains("probe-dead"), "{said}");
+    assert!(said.contains("probe-other"), "{said}");
+    assert!(!said.contains("probe-live"), "{said}");
+    let local = fs::read_to_string(vm.join("Software/probe/issues.org")).unwrap();
+    assert_eq!(state_of(&local, "probe-live"), "STARTED", "{local}");
+    assert_eq!(state_of(&local, "probe-other"), "TODO", "{local}");
+    assert_eq!(state_of(&local, "probe-dead"), "TODO", "{local}");
+    let remote = show(&origin, "Software/probe/issues.org");
+    assert_eq!(state_of(&remote, "probe-live"), "STARTED", "{remote}");
+    assert_eq!(state_of(&remote, "probe-dead"), "TODO", "{remote}");
+}
+
+#[test]
+fn ljos_claim_commits_the_issue() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let origin = init_bare(root.path());
+    seed(
+        root.path(),
+        &origin,
+        &board(&[issue_block("probe-1a2b", "TODO", "", &[])]),
+    );
+    let vm = clone_of(root.path(), &origin, "vm");
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+    );
+    executable(&bin.join("vissue"), "#!/bin/sh\nexit 0\n");
+    let home = root.path().join("home");
+    let runtime = root.path().join("run");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["claim", "probe-1a2b"])
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_CACHE_HOME", root.path().join("cache"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("VISSUE_ROOT", &vm)
+        .env("ISSUE_ROOT", &vm)
+        .env("LJOS_TRACKER_GIT", "push")
+        .env("LJOS_SEAT", "proof-seat")
+        .env("VISSUE_AGENT", "proof-seat")
+        .env("PACKSET_URL", "off")
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_SYSTEM", root.path().join("gitconfig"))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("tracker git:"),
+        "claim did not commit the tracker: {said}"
+    );
+}
+
+#[test]
 fn doctor_warns_on_unpushed_commits_and_not_on_zero() {
     let row = |state: &str, ok: bool| ljos_cli::Habitat {
         name: "tracker",

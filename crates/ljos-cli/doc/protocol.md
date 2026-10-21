@@ -407,7 +407,7 @@ same four steps are:
    outcome cannot. A persona it refuted weighs less on its next ballot.
 
 Whatever the outcome, the claim and the finish commit the ticket when the
-tracker is a git checkout. `sitting` commits after its claim and `finish` at the end of the work.
+tracker is a git checkout. `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
 Each commits the ticket's `issues.org` (that file alone), pushes it, and prints a
 `tracker git:` line. A claim or a closure that stays in one
 working tree does not exist for any other host. `LJOS_TRACKER_GIT=push`

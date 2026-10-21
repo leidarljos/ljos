@@ -204,7 +204,7 @@ pub fn reap_gone_owners(lease: u64) -> String {
         let Some(who) = heading.claimed_by().map(str::to_string) else {
             continue;
         };
-        if holder_running(&who) {
+        if holder_running(&who, &heading.id) {
             continue;
         }
         let idle = match heading.claimed_at().and_then(crate::reap::org_ts) {
@@ -764,7 +764,7 @@ fn release_started(id: &str, holder: &str) -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())
 }
 
-fn holder_running(assignee: &str) -> bool {
+fn holder_running(assignee: &str, issue: &str) -> bool {
     let Ok(entries) = fs::read_dir(crate::runtime_dir()) else {
         return false;
     };
@@ -773,7 +773,7 @@ fn holder_running(assignee: &str) -> bool {
         let Some(actor) = name.strip_prefix("hold-") else {
             continue;
         };
-        if !crate::same_holder(actor, assignee) {
+        if !hold_names_claim(actor, assignee, issue) {
             continue;
         }
         if let Some(hold) = crate::read_hold(actor) {
@@ -783,6 +783,32 @@ fn holder_running(assignee: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether this hold record is the one `ljos claim` wrote for `issue`.
+///
+/// The filename is the claim-graph actor, a hash, while the tracker stores
+/// the seat under `:CLAIMED_BY:`. The record's first line is that seat and
+/// its sixth line is the issue. A filename that is already the seat still
+/// matches, which is how a hand-written hold keeps its claim. A live hold
+/// for another issue does not keep this one.
+fn hold_names_claim(actor: &str, assignee: &str, issue: &str) -> bool {
+    let path = crate::runtime_dir().join(format!("hold-{actor}"));
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let record_assignee = lines.first().copied().unwrap_or("");
+    let node = lines.get(5).copied().unwrap_or("");
+    let name_ok =
+        crate::same_holder(actor, assignee) || crate::same_holder(record_assignee, assignee);
+    if !name_ok {
+        return false;
+    }
+    if node.is_empty() {
+        return crate::same_holder(actor, assignee);
+    }
+    node == issue
 }
 
 fn bin_dir(home: &Path) -> PathBuf {

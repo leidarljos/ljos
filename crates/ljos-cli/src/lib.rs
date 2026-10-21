@@ -22450,28 +22450,31 @@ fn hold_record_path(actor: &str) -> PathBuf {
     runtime_dir().join(format!("hold-{actor}"))
 }
 
-/// The process that owns this conversation: the first ancestor that is
+/// The process that owns this conversation: the nearest ancestor that is
 /// not a shell or a wrapper. For the MCP server that is the runner; for
 /// the command line it is the runner above the shell, else the shell the
-/// person types into.
+/// person types into. A short-lived program that ran this command is that
+/// owner, so its claim is not kept by the daemon above it after it exits.
 fn conversation_process() -> (u32, String) {
-    let chain = ancestry();
-    // A command whose runner the tree lost (a detached pty, a reparented
-    // shell) reaches the multiplexer first; the pane's own shell below it is
-    // the conversation, since the multiplexer is every pane's parent.
-    let mut below = chain.get(1);
-    for entry in chain.iter().skip(1) {
-        if is_session(&entry.1) {
+    owner_of(&ancestry()).unwrap_or_else(|| (std::process::id(), String::new()))
+}
+
+/// [`conversation_process`] for one ancestry, nearest first.
+fn owner_of(chain: &[(u32, String)]) -> Option<(u32, String)> {
+    let mut shell = None;
+    for (pid, comm) in chain {
+        if is_session(comm) {
             break;
         }
-        if !WRAPPERS.contains(&entry.1.as_str()) {
-            return entry.clone();
+        if WRAPPERS.contains(&comm.as_str()) {
+            if shell.is_none() {
+                shell = Some((*pid, comm.clone()));
+            }
+            continue;
         }
-        below = Some(entry);
+        return Some((*pid, comm.clone()));
     }
-    below
-        .cloned()
-        .unwrap_or((std::process::id(), String::new()))
+    shell
 }
 
 fn write_hold(actor: &str, assignee: &str, node: &str) {
@@ -42415,5 +42418,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let you = text.find("You are designer").expect("persona");
         assert!(rule_at < you, "{text}");
         assert_eq!(std::env::var("LJOS_SEAT").as_deref(), Ok("inky"));
+    }
+
+    #[test]
+    fn the_hold_names_the_nearest_program() {
+        let own = |names: &[&str]| {
+            let chain: Vec<(u32, String)> = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (u32::try_from(i).unwrap() + 10, (*name).to_string()))
+                .collect();
+            super::owner_of(&chain).map(|(_, comm)| comm)
+        };
+        assert_eq!(own(&["sh", "node"]).as_deref(), Some("node"));
+        assert_eq!(own(&["python3", "sh", "node"]).as_deref(), Some("python3"));
+        assert_eq!(own(&["bash", "tmux"]).as_deref(), Some("bash"));
+        assert_eq!(own(&["bash"]).as_deref(), Some("bash"));
+        assert_eq!(own(&["tmux"]), None);
     }
 }

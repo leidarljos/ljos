@@ -18,7 +18,7 @@ Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SE
 
 `ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that is not a file on this machine fails the `mcp` row.
 
-A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when `ljos cloud up` or a sitting runs under `LJOS_TRACKER_GIT=push`. The release is pushed with the other tracker writes. A claim this machine still holds is kept.
+A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when `ljos cloud up` or a sitting runs under `LJOS_TRACKER_GIT=push`. The release is pushed with the other tracker writes. A claim this machine still holds is kept. The hold is the nearest program above the command that is not a shell, and it keeps only the issue it names, for as long as that program is still running. `ljos claim` commits and pushes that issue the same way a note does.
 
 ## A job step
 
@@ -67,4 +67,4 @@ Another repository, once a release contains `cloud up`:
 
 Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
 
-A private clone through the machine's credential helper, the MCP process starting after a synced config is rewritten, a claim from the machine landing on the shared tracker, and a `STARTED` claim from a machine that is gone being released after the lease, are what a boot of that machine still has to show.
+`cloud up` rewrites the harness MCP command to the `ljos-mcp` it installed. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.

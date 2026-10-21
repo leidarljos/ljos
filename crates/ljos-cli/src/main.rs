@@ -2090,9 +2090,15 @@ fn run_command() -> Result<()> {
         } => {
             let assignee = cli_assignee(assignee.as_deref());
             if next || node.is_empty() {
-                print!("{}", claim_next(&assignee, role.as_deref(), slack)?);
+                let said = claim_next(&assignee, role.as_deref(), slack)?;
+                let taken = said.split_whitespace().next().unwrap_or("").to_string();
+                print!("{said}");
+                if !taken.is_empty() {
+                    print!("{}", ljos_cli::persist_tracker(&taken, "claimed"));
+                }
             } else {
                 print!("{}", claim(&node, &assignee)?);
+                print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
             }
         }
         Cmd::Release { node, assignee } => {
