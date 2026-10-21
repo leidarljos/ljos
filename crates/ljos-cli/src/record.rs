@@ -222,7 +222,10 @@ fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &
     if seat_or_run.starts_with("run-") {
         return Ok(());
     }
-    if let Some(seat_key) = tracker_pins.get(seat_or_run).filter(|pinned| *pinned != key) {
+    if let Some(seat_key) = tracker_pins
+        .get(seat_or_run)
+        .filter(|pinned| *pinned != key)
+    {
         bail!(
             "{voter} is pinned through seat {seat_or_run} to key {}…, got {}…",
             &seat_key[..12.min(seat_key.len())],
@@ -904,9 +907,9 @@ mod tests {
         let Entry::Ballot(ballot) = &mut entry.entry else {
             panic!("ballot expected");
         };
-        // `stance` feeds the ballot id. Recompute it so the failure is the
+        // `lineage` feeds the ballot id. Recompute it so the failure is the
         // signature, not the id check that used to hide this edit.
-        ballot.stance.replace_range(5..6, "u");
+        ballot.lineage.push('x');
         ballot.id = Some(ballot_id(ballot).expect("id"));
         let err = verify_entry(&entry).expect_err("edited ballot");
         assert!(
@@ -1005,7 +1008,7 @@ mod tests {
             2,
         );
         let err = check_entries(&[first, second]).expect_err("seat pin");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        assert!(err_chain(&err).contains("pinned"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -1017,7 +1020,7 @@ mod tests {
             2,
         );
         let err = check_entries(&[question, ballot]).expect_err("opener pin");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        assert!(err_chain(&err).contains("pinned"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -1372,8 +1375,11 @@ mod tests {
         );
         let text = serde_json::to_string(&signed).expect("json");
 
-        let dup_stance =
-            text.replacen("\"stance\":\"accept\",", "\"stance\":\"accept\",\"stance\":\"accept\",", 1);
+        let dup_stance = text.replacen(
+            "\"stance\":\"accept\",",
+            "\"stance\":\"accept\",\"stance\":\"accept\",",
+            1,
+        );
         assert_ne!(dup_stance, text, "duplicate stance fixture");
         let err = check_raw(&dup_stance).expect_err("duplicate stance");
         assert!(
@@ -1465,11 +1471,7 @@ mod tests {
         );
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("duplicate pin voter");
-        assert!(
-            err_chain(&err).contains("duplicate"),
-            "{}",
-            err_chain(&err)
-        );
+        assert!(err_chain(&err).contains("duplicate"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -1491,11 +1493,7 @@ mod tests {
         let line = format!("seat-a {}\n", pinned.signature.key);
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
-        assert!(
-            err_chain(&err).contains("seat-a"),
-            "{}",
-            err_chain(&err)
-        );
+        assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
     }
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
