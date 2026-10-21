@@ -16,7 +16,7 @@ Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SE
 
 `LJOS_TRACKER_DIR` is the clone. The default is `~/.local/share/ljos/tracker`. `LJOS_BIN_DIR` is the binary directory. The default is `~/.local/bin`. `LJOS_RELEASE_DIR` is an offline directory of binaries and a `SHA256SUMS` file. `LJOS_TRACKER_PUSH_WAIT` is how many seconds `ljos doctor` waits before an unpushed commit counts as stuck. The default is 5.
 
-`ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row, and the row says to run `ljos cloud up`. The row reads every harness file ljos writes, not only Cursor's `mcp.json`.
+`ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row. On a cloud VM, a codespace, or CI the row says to run `ljos cloud up`. Anywhere else it names `ljos onboard --harness` for that file, including Cursor's `mcp.json`. The row reads every harness file ljos writes.
 
 A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when `ljos cloud up` or a sitting runs under `LJOS_TRACKER_GIT=push`. The release is pushed with the other tracker writes. A claim this machine still holds is kept. The hold is the nearest program above the command that is not a shell, and it keeps only the issue it names, for as long as that program is still running. `ljos claim` commits and pushes that issue the same way a note does.
 
