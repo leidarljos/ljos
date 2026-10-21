@@ -269,12 +269,13 @@ fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
         .stdin(Stdio::null())
         .output()
         .context("age not on PATH; install age")?;
-    if out.status.success() {
-        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
-    } else if {
+    let decrypt_miss = {
         let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
         stderr.contains("no identity matched") || stderr.contains("no matching keys found")
-    } {
+    };
+    if out.status.success() {
+        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    } else if decrypt_miss {
         Ok(None)
     } else {
         bail!(
