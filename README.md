@@ -169,7 +169,7 @@ The sitting prints a short report: whether ljos is ready, what needs action, wha
 `--verbose` prints every section in full.
 
 `ljos finish ISSUE --lesson "..." [--outcome OPTION]` closes it. The lesson
-goes in as a proposal with origin `agent-derived`. `ljos accept` writes it as a
+goes in as a proposal at L0 (`derived`) with origin `agent-derived`. `ljos accept` promotes it to `explicit` and writes it as a
 standing lesson and records that the person accepted it. Under an agent runner
 it accepts only a proposal another conversation filed, such as a worker's, so
 an agent can't accept its own proposal. A lesson you type at `ljos finish` in a

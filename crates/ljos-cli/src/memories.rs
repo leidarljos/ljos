@@ -1,10 +1,11 @@
 //! An agent's memories, written first and reviewed afterwards.
 //!
-//! An agent's `ljos remember`, `ljos finish --lesson` and the prompt hook's
-//! correction write at once, with origin `agent-derived` and a `source`
-//! naming the seat, the harness, the session, the time and, when there is
-//! one, the reason. Nobody approves a write. A person, or a seat they ask,
-//! reviews afterwards: `ljos memories review` lists the unreviewed ones
+//! An agent's `ljos remember` writes at once, with origin `agent-derived`
+//! and a `source` naming the seat, the harness, the session, the time and,
+//! when there is one, the reason. `ljos finish --lesson`, `ljos findings
+//! --remember` and the prompt hook's correction file a proposal instead,
+//! and `ljos accept` is what writes that claim. A person, or a seat they
+//! ask, reviews afterwards: `ljos memories review` lists the unreviewed ones
 //! newest first and keeps, edits, merges or drops each, and
 //! `ljos memories tui` browses and prunes them in the terminal.
 //!

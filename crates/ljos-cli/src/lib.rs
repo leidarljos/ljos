@@ -9040,8 +9040,9 @@ pub fn correction_cue(text: &str) -> Option<&'static str> {
     CORRECTION_CUES.iter().find(|c| lower.contains(*c)).copied()
 }
 
-/// Write a correction as an agent-derived preference, reviewed later.
-/// Once per session per cue. A pack that does not answer is left for the note.
+/// File a correction as a proposal in the person's words. The hook does not
+/// write the preference. Once per session per cue. A pack that does not
+/// answer is left for the note.
 pub fn store_correction(call: &HookCall) {
     let Some(hit) = correction_cue(&call.cue) else {
         return;
@@ -9076,7 +9077,13 @@ fn file_correction(call: &HookCall, key: &str) {
         let workspace = client.workspace();
         let mut atom = atom_body("preference", &text, &workspace);
         stamp_horizon(&mut atom, "preference", &text, Some(false));
-        admit::write_agent(&client, atom).is_ok()
+        // The words are the person's. The hook files them; it does not store
+        // them. Accept is what writes the preference.
+        admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+        if let Some(map) = atom.as_object_mut() {
+            map.insert("hook".into(), Value::Bool(true));
+        }
+        admit::propose_admission(&client, atom).is_ok()
     });
     if wrote {
         mark_seen(call.session.as_deref(), &[key]);
@@ -24036,7 +24043,8 @@ pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
 /// File the lesson of a finished sitting. A lesson learned on an issue
 /// belongs to the scope of the repository that holds the issue, wherever
 /// it was written. One the person typed in a terminal of their own is
-/// `user-declared`; any other is written at once as `agent-derived`. Called after the node completed, so
+/// `user-declared`; any other is a proposal at L0 (`derived`) with origin
+/// `agent-derived`. Called after the node completed, so
 /// a refusal is a line that names the pack's reason and the command that
 /// keeps the lesson, never an error.
 /// A lesson cut into claims the pack takes: at most two sentences each.
@@ -24096,11 +24104,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         let scope = sync::scope_for_issue(issue);
         let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
-        let client = if persons {
-            pack()?
-        } else {
-            client_or_queue(prefix, "lesson", text, issue)?
-        };
+        let client = pack()?;
         let workspace = client.workspace();
         let mut atom = atom_body("lesson", text, &workspace);
         let mut tags = vec![format!("issue:{}", issue.trim())];
@@ -24109,7 +24113,8 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         }
         add_entities(&mut atom, tags);
         stamp_issue(&mut atom, issue);
-        // Standing at once; the review comes afterwards.
+        // Standing once accepted. Until then the proposal holds it and no
+        // search returns it. An agent's lesson starts at L0.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
         if persons {
             // Typed by the person in a terminal of their own: no
@@ -24129,15 +24134,11 @@ fn finish_lesson(issue: &str, text: &str) -> String {
                 "remembered your lesson (id {id}); the hook shows it from the next prompt\n"
             ));
         }
-        let posted = store_agent_atom(&client, atom, prefix)?;
-        let id: String = posted["id"]
-            .as_str()
-            .unwrap_or("?")
-            .chars()
-            .take(8)
-            .collect();
+        admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+        let filed = admit::propose_admission(&client, atom)?;
         Ok(format!(
-            "remembered the lesson (id {id}) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it\n"
+            "proposed {} as agent-derived; `ljos accept {}` writes it\n",
+            filed.id, filed.id
         ))
     })();
     match filed {
@@ -26946,18 +26947,12 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
         if let Some(id) = issue_id {
             stamp_issue(&mut atom, id);
         }
-        // Standing at once, like a finish lesson; reviewed afterwards.
+        // A campaign file is tool output. It stays a proposal at L0 until
+        // a person accepts it.
         stamp_horizon(&mut atom, "lesson", &lesson, Some(false));
-        let result = match admit::write_agent(&client, atom) {
-            Ok(posted) => format!(
-                "remembered {}",
-                posted["id"]
-                    .as_str()
-                    .unwrap_or("?")
-                    .chars()
-                    .take(8)
-                    .collect::<String>()
-            ),
+        admit::stamp_origin(&mut atom, admit::ORIGIN_TOOL);
+        let result = match admit::propose_admission(&client, atom) {
+            Ok(filed) => format!("proposed {}", filed.id),
             Err(e) => format!("refused: {e}"),
         };
         out.push(Remembered {
@@ -33264,15 +33259,166 @@ mod tests {
             session: Some("plain".into()),
             shape: HookShape::Asks,
         });
+        let proposals = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        let rec: Value = serde_json::from_str(proposals.lines().next().unwrap()).unwrap();
+        assert_eq!(rec["status"], "open", "{rec}");
+        assert_eq!(rec["origin"], "user-declared", "{rec}");
+        assert_eq!(rec["atom"]["level"], "explicit", "{rec}");
+        assert_eq!(rec["atom"]["hook"], true, "{rec}");
         assert!(
-            !state.path().join("ljos/proposals.jsonl").exists(),
-            "a plain correction is written, not proposed"
+            rec["text"]
+                .as_str()
+                .unwrap()
+                .contains("you should have used the cluster"),
+            "{rec}"
         );
         assert_eq!(
             posts.load(Ordering::SeqCst),
-            1,
-            "the correction was written once"
+            0,
+            "a correction is a proposal, not a write"
         );
+    }
+
+    /// `finish --lesson` under an agent files one proposal. The origin is
+    /// this seat's own agent and the level is packset's L0. Nothing is posted.
+    #[test]
+    fn finish_lesson_files_the_agents_proposal_at_l0() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&posts);
+        let (url, _) = serve_http(move |req| {
+            if req.contains("POST /v1/") {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            (500, r#"{"error":"down"}"#.into())
+        });
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("CLAUDECODE", "1"),
+        ]);
+        let _url = PackUrl::set(&url);
+        let line = finish_lesson("Software-3z37", "Build the lesson on the cluster fuse.");
+        assert!(line.contains("proposed "), "{line}");
+        assert!(line.contains(" as agent-derived;"), "{line}");
+        assert!(line.contains("ljos accept "), "{line}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "the lesson was not written"
+        );
+        let rec = proposal_on(&state);
+        assert_eq!(rec["status"], "open", "{rec}");
+        assert_eq!(rec["origin"], admit::ORIGIN_AGENT, "{rec}");
+        assert_eq!(rec["atom"]["origin"], admit::ORIGIN_AGENT, "{rec}");
+        assert_eq!(rec["atom"]["level"], admit::LEVEL_L0, "{rec}");
+        assert_eq!(rec["atom"]["kind"], "lesson", "{rec}");
+        assert!(
+            rec["atom"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("cluster fuse"),
+            "{rec}"
+        );
+    }
+
+    /// A resolved campaign finding is tool output. The proposal carries
+    /// `tool-echo` and cannot start above L0.
+    #[test]
+    fn findings_remember_files_a_tool_proposal_at_l0() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let posts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&posts);
+        let (url, _) = serve_http(move |req| {
+            if req.contains("POST /v1/") {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            (500, r#"{"error":"down"}"#.into())
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let path = state.path().join("campaign.json");
+        std::fs::write(
+            &path,
+            r#"{"package":"gcc","version":"15.2.0","target":"terra","status":"done","attempts":1,
+            "findings":[{"id":"f1","status":"resolved","class":"compile","disposition":"fixed",
+            "stage":"build","recipe":"GCCcore-15.2.0.eb","summary":"header missing",
+            "evidence":"fatal error: linux/scc.h","resolution":{"action":"applied the headers patch","changes":[]}}]}"#,
+        )
+        .unwrap();
+        let rows = remember_findings(&path, None, false).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].result.starts_with("proposed "), "{rows:?}");
+        assert!(!rows[0].lesson.is_empty(), "{rows:?}");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            0,
+            "the finding was not written"
+        );
+        let rec = proposal_on(&state);
+        assert_eq!(rec["status"], "open", "{rec}");
+        assert_eq!(rec["origin"], admit::ORIGIN_TOOL, "{rec}");
+        assert_eq!(rec["atom"]["origin"], admit::ORIGIN_TOOL, "{rec}");
+        assert_eq!(rec["atom"]["level"], admit::LEVEL_L0, "{rec}");
+        assert_eq!(rec["kind"], "lesson", "{rec}");
+    }
+
+    /// Accept is the promotion. A tool proposal filed at L0 is stored at
+    /// packset's `explicit` level, and the origin stays `tool-echo`.
+    #[test]
+    fn accept_promotes_a_tool_proposal_above_l0() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let path = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if path.contains("POST /v1/atoms") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                atom["id"] = Value::String("atom-promoted".into());
+                slot.lock().unwrap().push(atom.clone());
+                return (200, atom.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let _url = PackUrl::set(&url);
+        let path = state.path().join("campaign.json");
+        std::fs::write(
+            &path,
+            r#"{"package":"gcc","version":"15.2.0","target":"terra","status":"done","attempts":1,
+            "findings":[{"id":"f1","status":"resolved","class":"compile","disposition":"fixed",
+            "stage":"build","recipe":"GCCcore-15.2.0.eb","summary":"header missing",
+            "evidence":"fatal error: linux/scc.h","resolution":{"action":"applied the headers patch","changes":[]}}]}"#,
+        )
+        .unwrap();
+        let rows = remember_findings(&path, None, false).unwrap();
+        let id = rows[0].result.trim_start_matches("proposed ").trim();
+        let before = proposal_on(&state);
+        assert_eq!(before["atom"]["level"], admit::LEVEL_L0, "{before}");
+        assert!(
+            stored.lock().unwrap().is_empty(),
+            "not stored before accept"
+        );
+        let said = admit::accept(id).unwrap();
+        assert!(
+            said.contains("explicit") || said.contains("tool-echo"),
+            "{said}"
+        );
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["level"], admit::LEVEL_EXPLICIT, "{live:?}");
+        assert_eq!(live[0]["origin"], admit::ORIGIN_TOOL, "{live:?}");
+        assert_eq!(live[0]["kind"], "lesson");
+        let after = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        assert!(after.contains("\"status\":\"accepted\""), "{after}");
+    }
+
+    fn proposal_on(state: &tempfile::TempDir) -> Value {
+        let text = std::fs::read_to_string(state.path().join("ljos/proposals.jsonl")).unwrap();
+        serde_json::from_str(text.lines().next().unwrap()).unwrap()
     }
 
     #[test]
@@ -42376,22 +42522,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             said.contains("completed the session node for probe-f1n5 as done"),
             "{said}"
         );
-        assert!(said.contains("the lesson was not kept"), "{said}");
-        assert!(
-            said.contains("readability grade 14.72 exceeds 14"),
-            "{said}"
-        );
-        assert!(
-            said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
-            "{said}"
-        );
-        assert!(
-            seen.lock()
-                .unwrap()
-                .iter()
-                .any(|l| l.starts_with("POST /v1/atoms")),
-            "the lesson never reached the pack"
-        );
+        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        if persons {
+            assert!(said.contains("the lesson was not kept"), "{said}");
+            assert!(
+                said.contains("readability grade 14.72 exceeds 14"),
+                "{said}"
+            );
+            assert!(
+                said.contains(&format!("ljos remember {}", tools::sh_quote(lesson))),
+                "{said}"
+            );
+            assert!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.starts_with("POST /v1/atoms")),
+                "the lesson never reached the pack"
+            );
+        } else {
+            assert!(said.contains("proposed "), "{said}");
+            assert!(said.contains(" as agent-derived;"), "{said}");
+            assert!(
+                !seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.starts_with("POST /v1/atoms")),
+                "an agent's lesson is a proposal and is not posted"
+            );
+        }
     }
 
     #[test]
