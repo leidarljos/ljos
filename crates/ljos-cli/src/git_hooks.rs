@@ -1046,7 +1046,7 @@ fn git_dir() -> Option<PathBuf> {
 /// `GIT_*` values a hook exports. A later `git -C` follows `GIT_DIR` and
 /// ignores `-C`, so a tracker commit would land in the checkout that just
 /// finished.
-pub(crate) const HOOK_GIT_ENV: &[&str] = &[
+const HOOK_GIT_ENV: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
