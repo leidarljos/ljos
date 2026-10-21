@@ -17,7 +17,7 @@
 //! Minting another seat inside the same session does not make a second voter.
 
 use anyhow::{bail, Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -198,6 +198,10 @@ pub(crate) fn is_hex_len(text: &str, len: usize) -> bool {
 }
 
 /// Whether `sig_hex` is an ed25519 signature by `key_hex` over `message`.
+///
+/// The check is strict: a small-order key or `R` never verifies. The
+/// plain equation holds for the identity key, `R` the identity and
+/// `s = 0` over every message.
 #[must_use]
 pub fn signature_ok(key_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
     let (Ok(key), Ok(sig)) = (hex::decode(key_hex), hex::decode(sig_hex)) else {
@@ -210,8 +214,17 @@ pub fn signature_ok(key_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
         return false;
     };
     verifying
-        .verify(message, &Signature::from_bytes(&sig))
+        .verify_strict(message, &Signature::from_bytes(&sig))
         .is_ok()
+}
+
+/// Whether `key_hex` is an ed25519 point of small order.
+#[must_use]
+pub fn weak_key(key_hex: &str) -> bool {
+    let Ok(Ok(key)) = hex::decode(key_hex).map(<[u8; 32]>::try_from) else {
+        return false;
+    };
+    VerifyingKey::from_bytes(&key).is_ok_and(|key| key.is_weak())
 }
 
 /// Public key and signature, both lower-case hex, for `message` under `key`.
@@ -278,15 +291,49 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
 }
 
 /// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
+///
+/// The directory keeps ASCII letters, digits, `-` and `.`, and writes any
+/// other byte, `_` included, and a leading `.` as `%HH`, so no two seats
+/// share a file. Older builds folded those bytes to `_`; a key at that
+/// folded name moves here on first use. No name written here has a `_`,
+/// so the folded file is no seat's current key.
 #[must_use]
 pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    let name: String = seat
-        .trim()
-        .chars()
+    let seats = base.join("ljos").join("seats");
+    let seat = seat.trim();
+    let name = seat_dir_name(seat);
+    let path = seats.join(&name).join("ballot.key");
+    let folded = folded_seat_dir_name(seat);
+    if folded != name && !folded.starts_with('.') && !path.exists() {
+        let old = seats.join(folded).join("ballot.key");
+        if old.is_file() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::rename(&old, &path);
+        }
+    }
+    Some(path)
+}
+
+fn seat_dir_name(seat: &str) -> String {
+    let mut out = String::with_capacity(seat.len());
+    for (at, b) in seat.bytes().enumerate() {
+        if b.is_ascii_alphanumeric() || b == b'-' || (b == b'.' && at > 0) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02x}"));
+        }
+    }
+    out
+}
+
+fn folded_seat_dir_name(seat: &str) -> String {
+    seat.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
                 c
@@ -294,13 +341,7 @@ pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
                 '_'
             }
         })
-        .collect();
-    Some(
-        base.join("ljos")
-            .join("seats")
-            .join(name)
-            .join("ballot.key"),
-    )
+        .collect()
 }
 
 /// The machine deed key. A seat key must not be this file.
@@ -471,7 +512,8 @@ fn parse_pins_strict(text: &str) -> Result<BTreeMap<String, String>> {
 /// The pinned keys for record checking, and where they came from.
 ///
 /// When there is no pin file, checking starts with no pins and the source is
-/// `none: first-seen in this check`.
+/// `none: first-seen in this check`. A link to a missing file is a pin file
+/// that cannot be read, not an absent one.
 pub fn pins_for_check() -> Result<(BTreeMap<String, String>, String)> {
     let none = "none: first-seen in this check".to_string();
     let Some(path) = pin_path() else {
@@ -480,6 +522,9 @@ pub fn pins_for_check() -> Result<(BTreeMap<String, String>, String)> {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(&path).is_ok() {
+                bail!("pin file {} is a link to a missing file", path.display());
+            }
             return Ok((BTreeMap::new(), none));
         }
         Err(err) => return Err(err).with_context(|| format!("pin file {}", path.display())),
@@ -1304,6 +1349,26 @@ mod tests {
             std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn a_key_at_its_folded_name_moves_to_the_seat_file() {
+        let _lock = crate::test_env_lock();
+        let data = tempfile::tempdir().unwrap();
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+        });
+        let folded = data.path().join("ljos/seats/judge_model-1.5/ballot.key");
+        std::fs::create_dir_all(folded.parent().unwrap()).unwrap();
+        std::fs::write(&folded, [7u8; 32]).unwrap();
+        let path = seat_key_file("judge:model-1.5").unwrap();
+        assert_ne!(path, folded);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![7u8; 32]);
+        assert!(!folded.exists());
+        assert_eq!(seat_key_file("judge:model-1.5").unwrap(), path);
+        let slug = seat_key_file("disk-saver").unwrap();
+        assert_eq!(slug, data.path().join("ljos/seats/disk-saver/ballot.key"));
     }
 
     #[test]
