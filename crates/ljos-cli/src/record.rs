@@ -225,12 +225,10 @@ fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &
     if seat_or_run.starts_with("run-") {
         return Ok(());
     }
-    if let Some(seat_key) = tracker_pins
-        .get(seat_or_run)
-        .filter(|pinned| *pinned != key)
-    {
+    let seat = crate::seat_slug(seat_or_run);
+    if let Some(seat_key) = tracker_pins.get(&seat).filter(|pinned| *pinned != key) {
         bail!(
-            "{voter} is pinned through seat {seat_or_run} to key {}…, got {}…",
+            "{voter} is pinned through seat {seat} to key {}…, got {}…",
             &seat_key[..12.min(seat_key.len())],
             &key[..12.min(key.len())]
         );
@@ -1530,6 +1528,44 @@ mod tests {
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
         assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
+    }
+
+    #[test]
+    fn a_seat_spelling_is_checked_against_its_slug_pin() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let line = format!("seat-a {}\n", pinned.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        for spelling in ["Seat-a", "SEAT-A", "seat_a", "seat.a"] {
+            let other = sign_as(
+                ballot_entry(
+                    &format!("alpha/{spelling}"),
+                    "accept",
+                    "2026-10-21T10:00:00Z",
+                ),
+                2,
+            );
+            let ballots = [as_ballot(pinned.clone()), as_ballot(other.clone())];
+            match check_entries(&[pinned.clone(), other]) {
+                Ok(_) => panic!(
+                    "alpha/{spelling} passed beside the seat-a pin: {:?}",
+                    tally(&ballots)
+                ),
+                Err(err) => assert!(
+                    err_chain(&err).contains("through seat seat-a"),
+                    "{spelling}: {}",
+                    err_chain(&err)
+                ),
+            }
+        }
     }
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
