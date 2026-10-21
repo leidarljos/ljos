@@ -161,6 +161,9 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
     if !crate::ballot_sig::is_hex_len(&entry.signature.sig, 128) {
         bail!("signature must be 128 hex chars");
     }
+    if crate::ballot_sig::weak_key(&entry.signature.key) {
+        bail!("signature key is a small-order point");
+    }
     if !crate::ballot_sig::signature_ok(&entry.signature.key, &entry.signature.sig, &payload) {
         bail!("entry signature does not verify");
     }
@@ -176,15 +179,18 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Any entry fails validation or signature verification, voter-key pinning
-/// detects a mismatch, or two unreplaced ballots from one voter share an
-/// hour.
+/// Any entry fails validation or signature verification, a pin file voter
+/// is not spelled the way the check looks it up, voter-key pinning detects
+/// a mismatch, or two unreplaced ballots from one voter share an hour.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     let mut report = CheckReport {
         entries: entries.len(),
         ..CheckReport::default()
     };
     let (mut pins, pin_source) = crate::ballot_sig::pins_for_check()?;
+    for voter in pins.keys() {
+        validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
+    }
     let tracker_pins = pins.clone();
     let mut ballots = Vec::new();
     for entry in entries {
@@ -215,19 +221,32 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     Ok(report)
 }
 
+/// Refuse a pin row the lookups would never match. Nothing is stripped:
+/// a BOM or a zero-width space before `seat-a` would leave that seat's
+/// pin unread. A row naming a tracker voter no record voter can spell,
+/// such as `judge:<model>`, is left alone.
+fn validate_pin_voter(voter: &str) -> Result<()> {
+    if !voter.bytes().all(|b| b.is_ascii_graphic()) {
+        bail!("pin voter {voter:?} is not printable ASCII");
+    }
+    if voter.contains('/') {
+        return validate_voter_id(voter).with_context(|| format!("pin voter `{voter}`"));
+    }
+    let seat = crate::seat_slug(voter);
+    if valid_voter_part(voter) && seat != voter {
+        bail!("pin voter `{voter}` is not a canonical seat; the seat is `{seat}`");
+    }
+    Ok(())
+}
+
 fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
     let Some((_, seat_or_run)) = split_voter(voter) else {
         return Ok(());
     };
-    if seat_or_run.starts_with("run-") {
-        return Ok(());
-    }
-    if let Some(seat_key) = tracker_pins
-        .get(seat_or_run)
-        .filter(|pinned| *pinned != key)
-    {
+    let seat = crate::seat_slug(seat_or_run);
+    if let Some(seat_key) = tracker_pins.get(&seat).filter(|pinned| *pinned != key) {
         bail!(
-            "{voter} is pinned through seat {seat_or_run} to key {}…, got {}…",
+            "{voter} is pinned through seat {seat} to key {}…, got {}…",
             &seat_key[..12.min(seat_key.len())],
             &key[..12.min(key.len())]
         );
@@ -478,8 +497,12 @@ fn validate_question_id(id: &str, expected_type: Option<&str>) -> Result<()> {
         .split_once('-')
         .context("question id must be `<type>-<8 hex>`")?;
     validate_question_type(kind)?;
-    if !is_hex_len(suffix, 8) {
-        bail!("question id suffix must be 8 hex chars");
+    if suffix.len() != 8
+        || !suffix
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        bail!("question id suffix must be 8 lowercase hex chars");
     }
     if let Some(expected_type) = expected_type {
         if expected_type != kind {
@@ -813,6 +836,22 @@ mod tests {
         sign_entry(unsigned, &seat).unwrap_or_else(|err| panic!("seat-{seed}: {err:#}"))
     }
 
+    /// Sign under the `[seed; 32]` key without the schema checks
+    /// [`sign_entry`] runs first.
+    fn sign_unchecked(mut unsigned: UnsignedEntry, seed: u8) -> SignedEntry {
+        if let Entry::Ballot(ballot) = &mut unsigned.entry {
+            ballot.id = Some(ballot_id(ballot).expect("id"));
+        }
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let payload = signing_payload(&unsigned).expect("payload");
+        let (key, sig) = crate::ballot_sig::signed_hex(&key, &payload);
+        SignedEntry {
+            schema: unsigned.schema,
+            entry: unsigned.entry,
+            signature: EntrySignature { key, sig },
+        }
+    }
+
     fn signer_on_entry(unsigned: &UnsignedEntry) -> &str {
         match &unsigned.entry {
             Entry::Question(question) => &question.opened_by,
@@ -883,6 +922,24 @@ mod tests {
     }
 
     #[test]
+    fn each_voter_signs_with_its_own_key_file() {
+        let _home = test_home();
+        let at = "2026-10-21T10:00:00Z";
+        let one = sign_entry(ballot_entry("a/b_c", "accept", at), "a/b_c").expect("a/b_c");
+        let two = sign_entry(ballot_entry("a_b/c", "accept", at), "a_b/c").expect("a_b/c");
+        assert_ne!(
+            one.signature.key, two.signature.key,
+            "a/b_c and a_b/c signed with one key file"
+        );
+        let names = ["a/b_c", "a_b/c", "a_b_c", "a:b_c", "a%2fb_c", "", ".", ".."];
+        let files: BTreeSet<PathBuf> = names
+            .iter()
+            .map(|name| crate::ballot_sig::seat_key_file(name).expect("path"))
+            .collect();
+        assert_eq!(files.len(), names.len(), "{files:?}");
+    }
+
+    #[test]
     fn sign_entry_refuses_a_signer_not_named_on_the_entry() {
         let _home = test_home();
         let err = sign_entry(
@@ -915,6 +972,39 @@ mod tests {
         assert!(
             err.to_string().contains("does not verify"),
             "edit never reached signature verification: {err}"
+        );
+    }
+
+    #[test]
+    fn a_small_order_key_is_refused() {
+        let _home = test_home();
+        let key = format!("01{}", "00".repeat(31));
+        let sig = format!("01{}", "00".repeat(63));
+        for stance in ["accept", "reject"] {
+            let mut unsigned = ballot_entry("alpha/seat-a", stance, "2026-10-21T10:00:00Z");
+            let Entry::Ballot(ballot) = &mut unsigned.entry else {
+                panic!("ballot");
+            };
+            ballot.id = Some(ballot_id(ballot).expect("id"));
+            let forged = SignedEntry {
+                schema: unsigned.schema,
+                entry: unsigned.entry,
+                signature: EntrySignature {
+                    key: key.clone(),
+                    sig: sig.clone(),
+                },
+            };
+            let err = check_value(&serde_json::to_value(&forged).expect("value"))
+                .expect_err("a small-order key passed record check");
+            assert!(
+                err_chain(&err).contains("small-order"),
+                "{stance}: {}",
+                err_chain(&err)
+            );
+        }
+        assert!(
+            !crate::ballot_sig::signature_ok(&key, &sig, b"any message"),
+            "the identity key verified a signature"
         );
     }
 
@@ -974,8 +1064,20 @@ mod tests {
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalized.contains("first key seen in this check is the pin for this check only"),
-            "record-v1.md must state that first-seen pins are check-local"
+            normalized.contains(
+                "none for its seat, the first key seen in this check is the pin for this check only"
+            ),
+            "record-v1.md must state that first-seen pins are check-local and yield to a seat pin"
+        );
+    }
+
+    #[test]
+    fn docs_name_the_deleted_withdrawal_limit() {
+        let doc = include_str!("../doc/record-v1.md");
+        let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("A deleted withdrawal revives the earlier ballot"),
+            "record-v1.md must say the check cannot see a deleted withdrawal"
         );
     }
 
@@ -1063,6 +1165,24 @@ mod tests {
         let by_stance = read.get("correct-3f9a1c2e").expect("question tally");
         assert_eq!(by_stance.get("accept"), Some(&1));
         assert_eq!(by_stance.get("withdrawn"), None);
+    }
+
+    #[test]
+    fn a_question_id_in_capitals_is_refused() {
+        let _home = test_home();
+        let at = "2026-10-21T10:00:00Z";
+        let lower = sign_as(ballot_entry("alpha/seat-a", "accept", at), 3);
+        let mut upper = ballot_entry("alpha/seat-a", "accept", at);
+        let Entry::Ballot(ballot) = &mut upper.entry else {
+            panic!("ballot");
+        };
+        ballot.question = "correct-3F9A1C2E".to_string();
+        let upper = sign_unchecked(upper, 3);
+        let ballots = [as_ballot(lower.clone()), as_ballot(upper.clone())];
+        let Err(err) = check_entries(&[lower, upper]) else {
+            panic!("one voter counted twice: {:?}", tally(&ballots));
+        };
+        assert!(err_chain(&err).contains("lowercase"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -1454,6 +1574,29 @@ mod tests {
     }
 
     #[test]
+    fn a_dangling_pin_file_link_is_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        std::os::unix::fs::symlink(root.path().join("gone"), &pin_path).expect("symlink");
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let err = check_entries(std::slice::from_ref(&entry))
+            .expect_err("a dangling pin file link read as no pin file");
+        assert!(
+            err_chain(&err).contains(pin_path.to_string_lossy().as_ref()),
+            "{}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
     fn duplicate_pin_voter_lines_are_refused() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
@@ -1494,6 +1637,109 @@ mod tests {
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
         assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
+    }
+
+    #[test]
+    fn a_pin_voter_that_is_not_canonical_is_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let entry = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let key = &pinned.signature.key;
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        for voter in ["\u{feff}seat-a", "\u{200b}seat-a", "Seat-a", "seat_a"] {
+            std::fs::write(&pin_path, format!("{voter} {key}\n")).expect("pin");
+            let Err(err) = check_entries(std::slice::from_ref(&entry)) else {
+                panic!("the {voter:?} pin row was skipped");
+            };
+            assert!(
+                err_chain(&err).contains("pin voter"),
+                "{voter:?}: {}",
+                err_chain(&err)
+            );
+        }
+        std::fs::write(
+            &pin_path,
+            format!("judge:model-1.5 {key}\ninky@39u {key}\nseat-b {key}\nalpha/run-101 {key}\n"),
+        )
+        .expect("pin");
+        check_entries(std::slice::from_ref(&entry))
+            .expect("tracker-only voters are not record seats");
+    }
+
+    #[test]
+    fn a_run_seat_with_a_pin_row_is_held_to_it() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let line = format!("run-101 {}\n", pinned.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry))
+            .expect_err("alpha/run-101 passed beside a run-101 pin row");
+        assert!(
+            err_chain(&err).contains("through seat run-101"),
+            "{}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
+    fn a_seat_spelling_is_checked_against_its_slug_pin() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let line = format!("seat-a {}\n", pinned.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        for spelling in ["Seat-a", "SEAT-A", "seat_a", "seat.a"] {
+            let other = sign_as(
+                ballot_entry(
+                    &format!("alpha/{spelling}"),
+                    "accept",
+                    "2026-10-21T10:00:00Z",
+                ),
+                2,
+            );
+            let ballots = [as_ballot(pinned.clone()), as_ballot(other.clone())];
+            match check_entries(&[pinned.clone(), other]) {
+                Ok(_) => panic!(
+                    "alpha/{spelling} passed beside the seat-a pin: {:?}",
+                    tally(&ballots)
+                ),
+                Err(err) => assert!(
+                    err_chain(&err).contains("through seat seat-a"),
+                    "{spelling}: {}",
+                    err_chain(&err)
+                ),
+            }
+        }
     }
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
