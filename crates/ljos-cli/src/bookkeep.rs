@@ -5115,20 +5115,6 @@ fn run_timed(bin: &str, args: &[&str], env: &[(&str, &str)]) -> anyhow::Result<S
     for (key, value) in env {
         cmd.env(key, value);
     }
-    if bin == "git" {
-        for key in crate::git_hooks::HOOK_GIT_ENV {
-            cmd.env_remove(key);
-        }
-        if let Some(dir) = args
-            .windows(2)
-            .find(|pair| pair[0] == "-C")
-            .map(|pair| Path::new(pair[1]))
-        {
-            if let Some(ceiling) = crate::checkout_ceiling(dir) {
-                cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
-            }
-        }
-    }
     crate::git_hooks::hook_child_env(&mut cmd);
     let mut child = cmd
         .args(args)
