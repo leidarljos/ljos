@@ -444,6 +444,50 @@ pub fn parse_pins(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+fn parse_pins_strict(text: &str) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (idx, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let Some(voter) = it.next() else {
+            continue;
+        };
+        let key = it
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("pin line {} must be `voter key`", idx + 1))?;
+        if it.next().is_some() {
+            bail!("pin line {} must be `voter key`", idx + 1);
+        }
+        if out.insert(voter.to_string(), key.to_string()).is_some() {
+            bail!("duplicate pin voter `{voter}`");
+        }
+    }
+    Ok(out)
+}
+
+/// The pinned keys for record checking, and where they came from.
+///
+/// When there is no pin file, checking starts with no pins and the source is
+/// `none: first-seen in this check`.
+pub fn pins_for_check() -> Result<(BTreeMap<String, String>, String)> {
+    let none = "none: first-seen in this check".to_string();
+    let Some(path) = pin_path() else {
+        return Ok((BTreeMap::new(), none));
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((BTreeMap::new(), none));
+        }
+        Err(err) => return Err(err).with_context(|| format!("pin file {}", path.display())),
+    };
+    let pins = parse_pins_strict(&text).with_context(|| format!("pin file {}", path.display()))?;
+    Ok((pins, path.display().to_string()))
+}
+
 /// The pinned keys, empty when there is no pin file.
 #[must_use]
 pub fn pins() -> BTreeMap<String, String> {

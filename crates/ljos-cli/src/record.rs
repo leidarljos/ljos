@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -13,6 +14,7 @@ pub const SCHEMA_V1: &str = "record/v1";
 const SIGNING_LABEL: &str = "ljos-record-entry/v1";
 const RESERVED_PLAIN_FIELDS: &[&str] = &["host", "session", "agent"];
 const QUESTION_TYPES: &[&str] = &["correct", "locate", "change", "design", "lead"];
+const BALLOT_STANCES: &[&str] = &["accept", "reject", "withdrawn"];
 
 /// One signed entry in the plain record layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +44,7 @@ pub struct UnsignedEntry {
 
 /// Signature material for one entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntrySignature {
     pub key: String,
     pub sig: String,
@@ -123,6 +126,13 @@ pub fn sign_entry(mut unsigned: UnsignedEntry, seat: &str) -> Result<SignedEntry
         }
     }
     validate_unsigned(&unsigned)?;
+    let (role, named) = match &unsigned.entry {
+        Entry::Question(question) => ("opener", question.opened_by.as_str()),
+        Entry::Ballot(ballot) => ("voter", ballot.voter.as_str()),
+    };
+    if seat.trim() != named {
+        bail!("record signer `{seat}` must match entry {role} `{named}`");
+    }
     let path = crate::ballot_sig::seat_key_path(seat)
         .context("no seat key path: HOME and XDG_DATA_HOME are unset")?;
     let key = crate::ballot_sig::load_or_create(&path)?;
@@ -174,28 +184,55 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
         entries: entries.len(),
         ..CheckReport::default()
     };
-    let mut pins = crate::ballot_sig::pins();
+    let (mut pins, pin_source) = crate::ballot_sig::pins_for_check()?;
+    let tracker_pins = pins.clone();
     let mut ballots = Vec::new();
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
             Entry::Question(question) => {
                 report.questions += 1;
+                observe_seat_pin(&tracker_pins, &question.opened_by, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(
                     &mut pins,
                     &question.opened_by,
                     &entry.signature.key,
-                )?;
+                )
+                .with_context(|| format!("pin source: {pin_source}"))?;
             }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
-                crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)?;
+                observe_seat_pin(&tracker_pins, &ballot.voter, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
+                crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 ballots.push(ballot.clone());
             }
         }
     }
     report.questions_with_live_ballots = tally(&ballots)?.len();
     Ok(report)
+}
+
+fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
+    let Some((_, seat_or_run)) = split_voter(voter) else {
+        return Ok(());
+    };
+    if seat_or_run.starts_with("run-") {
+        return Ok(());
+    }
+    if let Some(seat_key) = tracker_pins
+        .get(seat_or_run)
+        .filter(|pinned| *pinned != key)
+    {
+        bail!(
+            "{voter} is pinned through seat {seat_or_run} to key {}…, got {}…",
+            &seat_key[..12.min(seat_key.len())],
+            &key[..12.min(key.len())]
+        );
+    }
+    Ok(())
 }
 
 /// Validate every `.json` entry under `dir`.
@@ -272,10 +309,41 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 /// A `cast_at` is not an hour timestamp, or two unreplaced ballots from
 /// one voter share an hour.
 pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
-    let replaced: BTreeSet<&str> = ballots
+    let by_id: BTreeMap<&str, &BallotEntry> = ballots
         .iter()
-        .filter_map(|ballot| ballot.replaces.as_deref())
+        .filter_map(|ballot| ballot.id.as_deref().map(|id| (id, ballot)))
         .collect();
+    let mut replaced = BTreeSet::new();
+    for ballot in ballots {
+        let Some(target_id) = ballot.replaces.as_deref() else {
+            continue;
+        };
+        let source_id = ballot.id.as_deref().unwrap_or("<missing-id>");
+        let target = by_id.get(target_id).copied().ok_or_else(|| {
+            anyhow!(
+                "ballot {source_id} from {} on {} replaces {target_id}, but no ballot has that id",
+                ballot.voter,
+                ballot.question
+            )
+        })?;
+        if target.voter != ballot.voter {
+            bail!(
+                "ballot {source_id} from {} on {} replaces {target_id} from {}; replaces must stay on the same voter",
+                ballot.voter,
+                ballot.question,
+                target.voter
+            );
+        }
+        if target.question != ballot.question {
+            bail!(
+                "ballot {source_id} from {} on {} replaces {target_id} on {}; replaces must stay on the same question",
+                ballot.voter,
+                ballot.question,
+                target.question
+            );
+        }
+        replaced.insert(target_id);
+    }
     let mut grouped: BTreeMap<(String, String), Vec<(i64, &BallotEntry)>> = BTreeMap::new();
     for ballot in ballots {
         if ballot.id.as_deref().is_some_and(|id| replaced.contains(id)) {
@@ -301,7 +369,7 @@ pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String
         let Some((_, ballot)) = group.iter().max_by_key(|(stamp, _)| *stamp) else {
             continue;
         };
-        if ballot.stance.eq_ignore_ascii_case("withdrawn") {
+        if ballot.stance == "withdrawn" {
             continue;
         }
         *counts
@@ -362,8 +430,8 @@ fn validate_ballot(ballot: &BallotEntry) -> Result<()> {
         bail!("ballot id mismatch: expected {computed}, got {id}");
     }
     validate_question_id(&ballot.question, None)?;
-    if ballot.stance.trim().is_empty() {
-        bail!("ballot stance is required");
+    if !BALLOT_STANCES.contains(&ballot.stance.as_str()) {
+        bail!("ballot stance must be one of `accept`, `reject` or `withdrawn`");
     }
     if let Some(confidence) = ballot.confidence {
         if !(confidence > 0.0 && confidence <= 1.0) {
@@ -522,11 +590,104 @@ fn signing_payload(unsigned: &UnsignedEntry) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
+struct NoDuplicateKeys(Value);
+
+impl<'de> Deserialize<'de> for NoDuplicateKeys {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ValueVisitor;
+
+        impl<'de> Visitor<'de> for ValueVisitor {
+            type Value = Value;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> std::result::Result<Value, E> {
+                Ok(Value::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Value, E> {
+                Ok(Value::Number(value.into()))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> std::result::Result<Value, E>
+            where
+                E: de::Error,
+            {
+                let number = serde_json::Number::from_f64(value)
+                    .ok_or_else(|| E::custom("JSON number is not finite"))?;
+                Ok(Value::Number(number))
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Value, E> {
+                Ok(Value::String(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Value, E> {
+                Ok(Value::String(value))
+            }
+
+            fn visit_none<E>(self) -> std::result::Result<Value, E> {
+                Ok(Value::Null)
+            }
+
+            fn visit_unit<E>(self) -> std::result::Result<Value, E> {
+                Ok(Value::Null)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut items = Vec::new();
+                while let Some(value) = seq.next_element::<NoDuplicateKeys>()? {
+                    items.push(value.0);
+                }
+                Ok(Value::Array(items))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut out = serde_json::Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if out.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate key `{key}`")));
+                    }
+                    let value = map.next_value::<NoDuplicateKeys>()?;
+                    out.insert(key, value.0);
+                }
+                Ok(Value::Object(out))
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor).map(Self)
+    }
+}
+
+fn parse_json_without_duplicate_keys(raw: &str) -> Result<Value> {
+    let mut de = serde_json::Deserializer::from_str(raw);
+    let value = NoDuplicateKeys::deserialize(&mut de)
+        .map(|value| value.0)
+        .context("record entry is not JSON")?;
+    de.end().context("record entry is not JSON")?;
+    Ok(value)
+}
+
 /// Parse one record file. Unknown keys are not dropped before the reserved
 /// name walk, and the canonical bytes without `signature` must be the typed
 /// entry. A field added after signing then fails instead of riding along.
 fn parse_signed_json(raw: &str) -> Result<SignedEntry> {
-    let value: Value = serde_json::from_str(raw).context("record entry is not JSON")?;
+    let value = parse_json_without_duplicate_keys(raw)?;
     reject_reserved_plain_fields(&value)?;
     let entry: SignedEntry =
         serde_json::from_value(value.clone()).context("record entry does not match schema v1")?;
@@ -643,13 +804,20 @@ mod tests {
     }
 
     fn sign_as(unsigned: UnsignedEntry, seed: u8) -> SignedEntry {
-        let seat = format!("seat-{seed}");
+        let seat = signer_on_entry(&unsigned).to_string();
         let path = crate::ballot_sig::seat_key_path(&seat).expect("seat key path");
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("seat dir");
         }
         std::fs::write(&path, [seed; 32]).expect("seed");
         sign_entry(unsigned, &seat).unwrap_or_else(|err| panic!("seat-{seed}: {err:#}"))
+    }
+
+    fn signer_on_entry(unsigned: &UnsignedEntry) -> &str {
+        match &unsigned.entry {
+            Entry::Question(question) => &question.opened_by,
+            Entry::Ballot(ballot) => &ballot.voter,
+        }
     }
 
     fn question_entry() -> UnsignedEntry {
@@ -705,13 +873,28 @@ mod tests {
     fn a_record_entry_is_signed_with_the_seat_ballot_key() {
         let _home = test_home();
         let entry = sign_as(question_entry(), 7);
-        let path = crate::ballot_sig::seat_key_path("seat-7").expect("path");
+        let path = crate::ballot_sig::seat_key_path("alpha/seat-a").expect("path");
         let key = crate::ballot_sig::load_or_create(&path).expect("seat key");
         assert_eq!(
             entry.signature.key,
             hex::encode(key.verifying_key().to_bytes())
         );
         verify_entry(&entry).expect("verifies under the seat key");
+    }
+
+    #[test]
+    fn sign_entry_refuses_a_signer_not_named_on_the_entry() {
+        let _home = test_home();
+        let err = sign_entry(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            "seat-8",
+        )
+        .expect_err("mismatched signer");
+        assert!(
+            err_chain(&err).contains("voter"),
+            "mismatched signer passed: {}",
+            err_chain(&err)
+        );
     }
 
     #[test]
@@ -724,9 +907,9 @@ mod tests {
         let Entry::Ballot(ballot) = &mut entry.entry else {
             panic!("ballot expected");
         };
-        // `stance` feeds the ballot id. Recompute it so the failure is the
+        // `lineage` feeds the ballot id. Recompute it so the failure is the
         // signature, not the id check that used to hide this edit.
-        ballot.stance.replace_range(5..6, "u");
+        ballot.lineage.push('x');
         ballot.id = Some(ballot_id(ballot).expect("id"));
         let err = verify_entry(&entry).expect_err("edited ballot");
         assert!(
@@ -787,6 +970,16 @@ mod tests {
     }
 
     #[test]
+    fn docs_name_first_seen_pin_scope() {
+        let doc = include_str!("../doc/record-v1.md");
+        let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("first key seen in this check is the pin for this check only"),
+            "record-v1.md must state that first-seen pins are check-local"
+        );
+    }
+
+    #[test]
     fn a_second_key_under_one_run_id_is_a_mismatch() {
         let _home = test_home();
         let first = sign_as(
@@ -798,7 +991,9 @@ mod tests {
             2,
         );
         let err = check_entries(&[first, second]).expect_err("must reject run key mismatch");
-        assert!(err.to_string().contains("pinned"));
+        let text = err_chain(&err);
+        assert!(text.contains("pinned"), "{text}");
+        assert!(text.contains("none: first-seen in this check"), "{text}");
     }
 
     #[test]
@@ -813,7 +1008,7 @@ mod tests {
             2,
         );
         let err = check_entries(&[first, second]).expect_err("seat pin");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        assert!(err_chain(&err).contains("pinned"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -825,7 +1020,7 @@ mod tests {
             2,
         );
         let err = check_entries(&[question, ballot]).expect_err("opener pin");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        assert!(err_chain(&err).contains("pinned"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -833,7 +1028,7 @@ mod tests {
         let _home = test_home();
         let err = sign_entry(
             ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
-            "seat-1",
+            "run/run-101",
         )
         .expect_err("bare run identity");
         assert!(err_chain(&err).contains("identity"), "{}", err_chain(&err));
@@ -846,7 +1041,7 @@ mod tests {
             2,
         );
         let err = check_entries(&[first, second]).expect_err("run pin");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        assert!(err_chain(&err).contains("pinned"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -948,6 +1143,59 @@ mod tests {
     }
 
     #[test]
+    fn replaces_must_target_the_same_voter_and_question() {
+        let _home = test_home();
+        let missing = as_ballot(sign_as(
+            with_replaces(
+                ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
+                "deadbeefdeadbeef",
+            ),
+            3,
+        ));
+        let err = tally(std::slice::from_ref(&missing)).expect_err("missing replace target");
+        assert!(
+            err_chain(&err).contains("replaces"),
+            "missing replace target passed: {}",
+            err_chain(&err)
+        );
+
+        let cast = as_ballot(sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        ));
+        let cast_id = cast.id.clone().expect("id");
+        let other_voter = as_ballot(sign_as(
+            with_replaces(
+                ballot_entry("beta/seat-b", "withdrawn", "2026-10-21T11:00:00Z"),
+                &cast_id,
+            ),
+            4,
+        ));
+        let err = tally(&[cast.clone(), other_voter]).expect_err("cross-voter replace");
+        assert!(
+            err_chain(&err).contains("same voter"),
+            "cross-voter replace passed: {}",
+            err_chain(&err)
+        );
+
+        let mut other_question_unsigned = with_replaces(
+            ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
+            &cast_id,
+        );
+        let Entry::Ballot(ballot) = &mut other_question_unsigned.entry else {
+            panic!("ballot");
+        };
+        ballot.question = "change-deadbeef".to_string();
+        let other_question = as_ballot(sign_as(other_question_unsigned, 3));
+        let err = tally(&[cast, other_question]).expect_err("cross-question replace");
+        assert!(
+            err_chain(&err).contains("same question"),
+            "cross-question replace passed: {}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
     fn check_dir_reads_and_verifies_json_entries() {
         let _home = test_home();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -989,8 +1237,8 @@ mod tests {
             "2026-10-21 10:00:00Z",
             "2026-10-21T10:30:00Z",
         ] {
-            let err =
-                sign_entry(ballot_entry("alpha/seat-a", "accept", bad), "seat-8").expect_err(bad);
+            let err = sign_entry(ballot_entry("alpha/seat-a", "accept", bad), "alpha/seat-a")
+                .expect_err(bad);
             let text = err_chain(&err);
             assert!(
                 text.contains("YYYY-MM-DDTHH:00:00Z"),
@@ -1002,7 +1250,7 @@ mod tests {
             panic!("question");
         };
         question.opened_at = "2026-10-21T09:00:00+00:00".to_string();
-        let err = sign_entry(opened, "seat-8").expect_err("offset opened_at");
+        let err = sign_entry(opened, "alpha/seat-a").expect_err("offset opened_at");
         assert!(
             err_chain(&err).contains("YYYY-MM-DDTHH:00:00Z"),
             "{}",
@@ -1012,6 +1260,30 @@ mod tests {
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
             8,
         );
+    }
+
+    #[test]
+    fn stance_spelling_must_be_exact_lowercase() {
+        let _home = test_home();
+        for bad in ["accept ", "accept\u{200b}", "Accept", "WITHDRAWN"] {
+            let err = sign_entry(
+                ballot_entry("alpha/seat-a", bad, "2026-10-21T10:00:00Z"),
+                "alpha/seat-a",
+            )
+            .expect_err(bad);
+            assert!(
+                err_chain(&err).contains("stance"),
+                "{bad} passed stance validation: {}",
+                err_chain(&err)
+            );
+        }
+        for ok in ["accept", "reject", "withdrawn"] {
+            sign_entry(
+                ballot_entry("alpha/seat-a", ok, "2026-10-21T10:00:00Z"),
+                "alpha/seat-a",
+            )
+            .unwrap_or_else(|err| panic!("{ok}: {err:#}"));
+        }
     }
 
     /// Reserved names and any key the signature does not cover are refused
@@ -1063,6 +1335,71 @@ mod tests {
     }
 
     #[test]
+    fn unknown_signature_fields_are_refused() {
+        let _home = test_home();
+        let signed = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            8,
+        );
+        let base = serde_json::to_value(&signed).expect("value");
+        for (field, value) in [
+            ("rationale", serde_json::json!("because")),
+            ("findings", serde_json::json!(["one"])),
+            ("Host", serde_json::json!("box")),
+        ] {
+            let mut changed = base.clone();
+            changed["signature"][field] = value;
+            let err = check_value(&changed).expect_err(field);
+            assert!(
+                err_chain(&err).contains(field),
+                "{field} passed under signature: {}",
+                err_chain(&err)
+            );
+        }
+        let mut nested = base.clone();
+        nested["signature"]["note"] = serde_json::json!({"Session": "s"});
+        let err = check_value(&nested).expect_err("nested note.Session");
+        assert!(
+            err_chain(&err).contains("note"),
+            "nested note.Session passed under signature: {}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
+    fn duplicate_json_keys_are_refused() {
+        let _home = test_home();
+        let signed = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            8,
+        );
+        let text = serde_json::to_string(&signed).expect("json");
+
+        let dup_stance = text.replacen(
+            "\"stance\":\"accept\",",
+            "\"stance\":\"accept\",\"stance\":\"accept\",",
+            1,
+        );
+        assert_ne!(dup_stance, text, "duplicate stance fixture");
+        let err = check_raw(&dup_stance).expect_err("duplicate stance");
+        assert!(
+            err_chain(&err).contains("duplicate key `stance`"),
+            "duplicate stance was not refused as duplicate: {}",
+            err_chain(&err)
+        );
+
+        let sig = format!("\"sig\":\"{}\"", signed.signature.sig);
+        let dup_sig = text.replacen(&sig, &format!("{sig},{sig}"), 1);
+        assert_ne!(dup_sig, text, "duplicate signature fixture");
+        let err = check_raw(&dup_sig).expect_err("duplicate signature");
+        assert!(
+            err_chain(&err).contains("duplicate key `sig`"),
+            "duplicate signature key was not refused as duplicate: {}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
     fn a_pin_file_rejects_a_different_run_key() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
@@ -1079,9 +1416,84 @@ mod tests {
             2,
         );
         let line = format!("alpha/run-101 {}\n", other.signature.key);
-        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        std::fs::write(&pin_path, line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("pinned key");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        let text = err_chain(&err);
+        assert!(text.contains("pinned"), "{text}");
+        assert!(text.contains(pin_path.to_string_lossy().as_ref()), "{text}");
+    }
+
+    #[test]
+    fn unreadable_pin_file_is_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        std::fs::write(&pin_path, "alpha/run-101 deadbeef\n").expect("pin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&pin_path).expect("meta").permissions();
+            perms.set_mode(0o000);
+            std::fs::set_permissions(&pin_path, perms).expect("chmod");
+        }
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("unreadable pin file");
+        assert!(
+            err_chain(&err).contains(pin_path.to_string_lossy().as_ref()),
+            "{}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
+    fn duplicate_pin_voter_lines_are_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let line = format!(
+            "alpha/run-101 {}\nalpha/run-101 {}\n",
+            entry.signature.key, entry.signature.key
+        );
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("duplicate pin voter");
+        assert!(err_chain(&err).contains("duplicate"), "{}", err_chain(&err));
+    }
+
+    #[test]
+    fn a_seat_voter_must_match_the_tracker_seat_pin() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let entry = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let line = format!("seat-a {}\n", pinned.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
+        assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
     }
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
@@ -1091,6 +1503,12 @@ mod tests {
             serde_json::to_vec(value).expect("json"),
         )
         .expect("write");
+        check_dir(dir.path())
+    }
+
+    fn check_raw(raw: &str) -> anyhow::Result<CheckReport> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("entry.json"), raw).expect("write");
         check_dir(dir.path())
     }
 }
