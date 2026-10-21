@@ -43544,6 +43544,131 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// Finish under `LJOS_TRACKER_GIT=commit` commits the tracker and the
+    /// pack log locally. The pack remote, which is that tracker's origin,
+    /// stays where it was: the sync used to push the whole branch with the
+    /// sealed log, so a ticket commit the setting had kept local left with it.
+    #[test]
+    fn finish_under_commit_pushes_nothing_to_the_pack_remote() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let root = dir.path().join("tracker");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* STARTED [#B] Finish a sitting\n:PROPERTIES:\n:ID:         probe-f1n5\n:END:\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            "name = \"surf\"\nrecipients = [\"age1test\"]\n",
+        )
+        .unwrap();
+        let atom = serde_json::json!({
+            "id": "a1",
+            "text": "A pack atom stays on this machine.",
+            "kind": "lesson",
+            "entities": []
+        });
+        let plain = sync::log_plaintext(std::slice::from_ref(&atom), "surf", "surf");
+        let digest = format!("{} {}\n", work_id(&plain), work_id("age1test"));
+        let atoms = root.join(".ljos/atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        let host = sync::host();
+        std::fs::write(atoms.join(format!("{host}.jsonl.age")), "sealed\n").unwrap();
+        std::fs::write(atoms.join(format!("{host}.digest")), digest).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        let remote_before = git(&remote, &["rev-parse", "HEAD"]);
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        let body = serde_json::json!({"atoms": [atom]}).to_string();
+        let (url, _seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("/v1/activate") {
+                (200, r#"{"island":[],"fired":0}"#.into())
+            } else if line.contains("/v1/atoms") {
+                (200, body.clone())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let state = dir.path().join("state");
+        let runtime = dir.path().join("run");
+        let config = dir.path().join("config");
+        for d in [&state, &runtime, &config] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "commit"),
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let said = with_fake_on_path(dir.path(), || {
+            finish(
+                "probe-f1n5",
+                "done",
+                None,
+                None,
+                false,
+                LEARN_BETA,
+                "alice",
+                Some(2),
+                false,
+            )
+        })
+        .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
+        let remote_after = git(&remote, &["rev-parse", "HEAD"]);
+        let subjects = git(&remote, &["log", "--format=%s"]);
+        let ahead = git(&root, &["rev-list", "--count", "origin/main..HEAD"]);
+        assert_eq!(remote_before, remote_after, "the pack remote moved");
+        assert_eq!(subjects, "seed", "the pack remote received {subjects}");
+        assert_ne!(
+            ahead, "0",
+            "nothing was committed locally to refuse pushing"
+        );
+        assert!(
+            said.contains("sync: not pushed (LJOS_TRACKER_GIT=commit)"),
+            "{said}"
+        );
+        assert!(!said.contains("pushed pending"), "{said}");
+        assert!(!said.contains("; pushed\n"), "{said}");
+    }
+
     #[test]
     fn only_claims_past_the_lease_are_expired() {
         let holder = "a".repeat(32);

@@ -190,7 +190,7 @@ both. `LJOS_TRACKER_GIT=commit` keeps it local; `off` skips
 it. A tracker whose `.ljos/sync.toml` names a sync scope also gets this
 machine's memory from each finish, sealed with age to that file's recipients,
 committed as `.ljos/atoms/<host>.jsonl.age` and pushed with the branch.
-`LJOS_TRACKER_GIT` governs that commit and push too. `=push` commits, rebases with the per-issue field merge, and pushes; a failed push stays queued for the next write and the end of the session. A tracker with no
+`LJOS_TRACKER_GIT` governs that commit and push too. `=push` commits, rebases with the per-issue field merge, and pushes; a failed push stays queued for the next write and the end of the session. `=commit` commits the sealed log and does not fetch or push it. A tracker with no
 `.ljos/sync.toml` is not synced. `ljos doctor` counts the commits origin lacks and warns while any remain unpushed.
 
 ## Claude Code plugin
