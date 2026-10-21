@@ -17,11 +17,13 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
     let log_s = log.display();
+    let drawer = dir.path().join("drawer.json");
+    let drawer_s = drawer.display();
     script(
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1 $3\" in\n  show*) echo '{{}}' ;;\n  'vote --json') echo '[{{\"agent\":\"reviewer\",\"choice\":\"a\"}}]' ;;\nesac\nexit 0\n"
+            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1 $3\" in\n  show*) echo '{{}}' ;;\n  'vote --for') echo \"[{{\\\"agent\\\":\\\"$VISSUE_AGENT\\\",\\\"choice\\\":\\\"$4\\\"}}]\" > '{drawer_s}' ;;\n  'vote --json') cat '{drawer_s}' 2>/dev/null || echo '[]' ;;\nesac\nexit 0\n"
         ),
     );
     let home = dir.path().join("home");
@@ -71,8 +73,8 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(!calls.contains("vissue vote"), "nothing was cast: {calls}");
 
-    // The stub tracker answers the read-back with the ballot, so the cast
-    // is proved by the tracker, not by the exit of `vissue vote`.
+    // The stub tracker holds the ballot once `vissue vote` wrote it, so the
+    // cast is proved by the tracker's read-back, not by the exit of the vote.
     let cast = ljos(Some("saddle"), &vote);
     assert!(cast.status.success(), "{cast:?}");
     assert!(
