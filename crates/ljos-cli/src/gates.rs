@@ -221,16 +221,26 @@ struct ApiMerge {
 }
 
 fn deny(pattern: &str, token: &str, detail: &str) -> super::Rule {
-    let base = super::policyd_reason(token);
-    let reason = if detail.is_empty() {
-        base
-    } else {
-        format!("{base} {detail}")
-    };
     super::Rule {
         pattern: pattern.into(),
         verdict: "deny".into(),
-        reason,
+        reason: join_sentences(&super::policyd_reason(token), detail),
+    }
+}
+
+/// `base` and `detail` as two sentences. When `base` already ends with
+/// `.`, `!` or `?`, that stop stays. Otherwise a full stop is added
+/// before `detail`.
+fn join_sentences(base: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return base.to_string();
+    }
+    let base = base.trim_end();
+    if base.ends_with(['.', '!', '?']) {
+        format!("{base} {detail}")
+    } else {
+        format!("{base}. {detail}")
     }
 }
 
@@ -3053,6 +3063,25 @@ esac
         assert_denies(&refuse, "git commit -m TEXT");
     }
 
+    /// The detail a gate adds after the rule's reason is its own sentence,
+    /// in the verdict and in every harness's answer.
+    #[test]
+    fn a_refusal_puts_a_full_stop_before_its_detail() {
+        let dir = repo();
+        let line = "git commit -m \"Co-authored-by: Cursor <cursoragent@cursor.com>\"";
+        let rule = guard_verdict(line, Some(dir.path()), &[]).expect("a trailer is refused");
+        assert!(
+            rule.reason
+                .contains("`git commit -m TEXT`. Remove Co-authored-by from the message"),
+            "{}",
+            rule.reason
+        );
+        assert_denies(
+            &answers(line, dir.path(), &[]),
+            "`git commit -m TEXT`. Remove Co-authored-by",
+        );
+    }
+
     /// `git commit --amend --no-edit` keeps the last message, so it runs in
     /// a stock seat: in a repository with no commit yet (git refuses it
     /// there itself) and after one. New text still goes through the gate:
@@ -3247,6 +3276,17 @@ esac
         assert_allows(&unrecorded);
         let warned = take_push_warning().expect("a missing record is a warning");
         assert!(warned.contains("ljos evidence record -- true"), "{warned}");
+        let sha = tip(dir.path());
+        assert!(
+            warned.starts_with(&format!(
+                "This push runs without a passing test record. Tip {sha}:"
+            )),
+            "the warning names the missing record, then the tip: {warned}"
+        );
+        assert!(
+            !warned.contains("could not read this command"),
+            "the gate read this push: {warned}"
+        );
         record_in(dir.path(), &["true".into()]).unwrap();
         let allowed = answers("git push origin main", dir.path(), &rules);
         assert_allows(&allowed);
