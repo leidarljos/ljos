@@ -2244,6 +2244,7 @@ const HARNESS_NAMES: &[&str] = &[
     "claude",
     "claude-code",
     "codex",
+    "cursor-agent",
     "opencode",
     "opencode-ai",
     "agy",
@@ -2251,6 +2252,23 @@ const HARNESS_NAMES: &[&str] = &[
     "grok",
     "gemini",
 ];
+
+/// Whether a process is a harness, by its kernel name or by the program
+/// it was started as: one of [`HARNESS_NAMES`] or a runner in `harnesses`.
+fn is_harness_program(comm: &str, program: &str, harnesses: &[String]) -> bool {
+    let (c, p) = (seat_slug(comm), program_seat(program));
+    HARNESS_NAMES.iter().any(|h| *h == c || *h == p)
+        || harnesses
+            .iter()
+            .any(|h| seat_slug(h) == c || seat_slug(h) == p)
+}
+
+/// Whether the process `pid`, which the kernel names `comm`, is one of
+/// [`HARNESS_NAMES`]. A runner installed as `versions/2.1.266` is known
+/// by the program it was started as ([`program_name`]).
+fn is_harness_process(pid: u32, comm: &str) -> bool {
+    is_harness_program(comm, &program_name(pid, comm), &[])
+}
 
 /// The ancestor to name a seat after, in a chain already cut at the
 /// session: the nearest harness when one is there, so a harness run under
@@ -2260,20 +2278,13 @@ fn pick_program<'a>(
     chain: &'a [(u32, String, String)],
     harnesses: &[String],
 ) -> Option<&'a (u32, String, String)> {
-    let is_harness = |comm: &str, program: &str| {
-        let (c, p) = (seat_slug(comm), program_seat(program));
-        HARNESS_NAMES.iter().any(|h| *h == c || *h == p)
-            || harnesses
-                .iter()
-                .any(|h| seat_slug(h) == c || seat_slug(h) == p)
-    };
     let programs = || {
         chain
             .iter()
             .filter(|(_, comm, _)| !WRAPPERS.contains(&comm.as_str()))
     };
     programs()
-        .find(|(_, comm, program)| is_harness(comm, program))
+        .find(|(_, comm, program)| is_harness_program(comm, program, harnesses))
         .or_else(|| programs().next())
 }
 

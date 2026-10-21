@@ -385,3 +385,31 @@ fn a_session_above_the_hooks_shell_does_not_own_its_sitting() {
         stop(session);
     }
 }
+
+/// A `uv`, `npx` or `node` that only starts the hook's shell and exits
+/// with it does not own the sitting while a harness above it runs on, so
+/// the start keeps the Write's claim.
+#[test]
+fn a_runtime_that_only_wraps_the_hook_does_not_own_its_sitting() {
+    for runtime in ["uv", "npx", "node"] {
+        let hab = habitat();
+        let procs = hab.home.with_file_name("procs");
+        std::fs::create_dir_all(&procs).unwrap();
+        script(
+            &procs,
+            runtime,
+            &format!("#!/bin/sh\n{HOOK_IN_A_SHELL}\nexit $?\n"),
+        );
+        let body = format!("\"$(dirname \"$0\")/{runtime}\"\necho $? > \"$DONE\"");
+        let harness = long_lived(&hab, "claude", &body, &write_slug(&hab));
+        hook_done(&hab);
+        assert_eq!(book_owner(&hab), harness.id(), "{runtime} owns the sitting");
+        let said = mcp_start(&hab, "add a slug helper");
+        let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();
+        let context = format!("{runtime}: {said}\nbook.log:\n{log}");
+        assert_eq!(said.lines().next(), Some("claimed probe-0001"), "{context}");
+        assert_eq!(creates(&hab), 1, "{context}");
+        assert_eq!(state_of(&hab, "probe-0001"), "STARTED", "{context}");
+        stop(harness);
+    }
+}
