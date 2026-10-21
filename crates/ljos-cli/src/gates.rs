@@ -3864,7 +3864,7 @@ esac
     }
 
     #[test]
-    fn a_denied_check_rollup_still_refuses_a_different_head() {
+    fn a_push_of_a_merge_ignores_a_different_pull_request_head() {
         let dir = repo();
         seed(dir.path());
         git(dir.path(), &["checkout", "-q", "-b", "feature"]);
@@ -3886,24 +3886,12 @@ esac
         );
         spec.list = format!(r#"[{{"number":7,"headRefOid":"{head}","state":"OPEN"}}]"#);
         let _hold = stub_rest(&spec);
-        let denied = guard_verdict("git push origin main", Some(dir.path()), &[])
-            .expect("a different head is refused");
-        assert_eq!(denied.verdict, "deny");
+        // The forge head is `other` and this merge publishes `head`. A push
+        // does not read the pull request, so the difference does not refuse it.
         assert!(
-            denied
-                .reason
-                .contains(&format!("The pull request head is {other}")),
-            "{}",
-            denied.reason
+            guard_verdict("git push origin main", Some(dir.path()), &[]).is_none(),
+            "a push does not read the pull request"
         );
-        assert!(
-            denied
-                .reason
-                .contains(&format!("this merge publishes {head}")),
-            "{}",
-            denied.reason
-        );
-        assert!(!denied.reason.contains("no CI"), "{}", denied.reason);
     }
 
     #[test]
