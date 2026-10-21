@@ -309,6 +309,8 @@ With none of these the commit stays unbooked.
 A Claude Code or Codex session, named by ``CLAUDECODE``, ``CODEX_THREAD_ID`` or ``CODEX_SESSION_ID``, is not booked.
 An opencode session is booked by this hook, including a commit from its shell or a subprocess.
 An agy session is booked the same way when no seat was named.
+Without these hooks, ``Stop`` and ``SessionEnd`` cite each commit HEAD's reflog says the checkout wrote since the sitting began, so a commit from a script, or one chained before a step that failed, still has a deed.
+A pull, a merge or a checkout adds none.
 
 The env file ``ljos onboard`` writes sets ``LJOS_GIT_HOOKS`` to ``${LJOS_GIT_HOOKS:-${XDG_DATA_HOME:-$HOME/.local/share}/ljos/git-hooks}``, the same directory the hooks install into.
 ``ljos doctor`` reports an env file that sets a different directory.
