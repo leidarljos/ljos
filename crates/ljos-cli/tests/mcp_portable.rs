@@ -44,7 +44,7 @@ fn stub(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn onboard(ljos: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+fn onboard_with_path(ljos: &Path, home: &Path, path: &str, args: &[&str]) -> std::process::Output {
     let tracker = home.join("tracker");
     fs::create_dir_all(tracker.join("Software")).unwrap();
     fs::create_dir_all(home.join(".local/share")).unwrap();
@@ -53,10 +53,7 @@ fn onboard(ljos: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .env_clear()
         .env("HOME", home)
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", ljos.parent().unwrap().display()),
-        )
+        .env("PATH", path)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))
         .env("XDG_CACHE_HOME", home.join(".cache"))
@@ -75,6 +72,15 @@ fn onboard(ljos: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .unwrap()
+}
+
+fn onboard(ljos: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+    onboard_with_path(
+        ljos,
+        home,
+        &format!("{}:/usr/bin:/bin", ljos.parent().unwrap().display()),
+        args,
+    )
 }
 
 fn said(out: &std::process::Output) -> String {
@@ -211,4 +217,130 @@ fn onboard_replaces_an_absolute_server_path() {
     let (command, _) = json_command(&home.join(".cursor/mcp.json"));
     assert_eq!(command, "ljos-mcp");
     assert!(!command.contains("/home/box"), "{command}");
+}
+
+#[test]
+fn onboard_keeps_an_absolute_server_path_that_exists_here() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    let installed = bin.join("ljos-mcp");
+    fs::write(
+        home.join(".codex/config.toml"),
+        format!(
+            "[mcp_servers.ljos]\ncommand = \"{}\"\nargs = []\n",
+            installed.display()
+        ),
+    )
+    .unwrap();
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "codex"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(
+        text.contains(&format!("command = \"{}\"", installed.display())),
+        "{text}"
+    );
+}
+
+#[test]
+fn onboard_writes_an_absolute_command_when_path_cannot_find_ljos_mcp() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "cursor"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let (command, _) = json_command(&home.join(".cursor/mcp.json"));
+    assert_eq!(command, bin.join("ljos-mcp").display().to_string());
+    let output = said(&out);
+    assert!(
+        output.contains("PATH does not resolve ljos-mcp"),
+        "{output}"
+    );
+
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "json"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let pasted: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        pasted["mcpServers"]["ljos"]["command"],
+        bin.join("ljos-mcp").display().to_string()
+    );
+}
+
+#[test]
+fn onboard_writes_an_absolute_command_when_path_points_to_another_install() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let stale = root.path().join("stale/bin");
+    stub(&stale.join("ljos-mcp"));
+    let path = format!("{}:{}:/usr/bin:/bin", stale.display(), bin.display());
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        &path,
+        &["onboard", "--harness", "cursor"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let (command, _) = json_command(&home.join(".cursor/mcp.json"));
+    assert_eq!(
+        command,
+        bin.join("ljos-mcp").display().to_string(),
+        "{command}"
+    );
+    let said = said(&out);
+    assert!(
+        said.contains(&format!(
+            "PATH resolves ljos-mcp to {}/ljos-mcp",
+            stale.display()
+        )),
+        "{said}"
+    );
+}
+
+#[test]
+fn onboard_rewrites_only_the_ljos_entry_in_toml() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"/home/box/.cargo/bin/ljos-mcp\"\nargs = []\n\n[mcp_servers.ljos-dev]\ncommand = \"/opt/pinned/ljos-mcp\"\nargs = []\n# keep /home/box/.cargo/bin/ljos-mcp in this comment\n",
+    )
+    .unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "codex"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(
+        text.contains("[mcp_servers.ljos]\ncommand = \"ljos-mcp\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("[mcp_servers.ljos-dev]\ncommand = \"/opt/pinned/ljos-mcp\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("# keep /home/box/.cargo/bin/ljos-mcp in this comment"),
+        "{text}"
+    );
 }

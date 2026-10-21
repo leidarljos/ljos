@@ -57,7 +57,7 @@ pub fn up(force: bool) -> Result<String> {
 
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
-    lines.push(ensure_profile(&home)?);
+    lines.push(ensure_profile(&home, &bin_dir)?);
     lines.push(write_mcp(
         &home,
         &bin_dir.join("ljos-mcp"),
@@ -154,6 +154,11 @@ pub fn mcp_row() -> crate::Habitat {
             state,
             ok: true,
         },
+        McpProblem::Warn(state) => crate::Habitat {
+            name: "mcp",
+            state: format!("warning: {state}"),
+            ok: true,
+        },
         McpProblem::Missing(state) => crate::Habitat {
             name: "mcp",
             state,
@@ -168,7 +173,7 @@ pub fn mcp_row() -> crate::Habitat {
 pub fn missing_mcp_line() -> Option<String> {
     match mcp_problem() {
         McpProblem::Missing(state) => Some(state),
-        McpProblem::None | McpProblem::Ready(_) => None,
+        McpProblem::None | McpProblem::Ready(_) | McpProblem::Warn(_) => None,
     }
 }
 
@@ -233,12 +238,15 @@ pub fn reap_gone_owners(lease: u64) -> String {
 enum McpProblem {
     None,
     Ready(String),
+    Warn(String),
     Missing(String),
 }
 
 struct McpFile {
     path: PathBuf,
     probe: McpProbe,
+    advice: String,
+    expands_home: bool,
     /// Parse and read errors fail the row. Harness files are skipped when
     /// they are not the JSON this probe expects (Zed's settings are JSONC).
     strict: bool,
@@ -249,8 +257,21 @@ enum McpProbe {
     Text(String),
 }
 
+struct LaunchSpec {
+    command: String,
+    args: Vec<String>,
+    env_path: Option<String>,
+}
+
+enum LaunchCheck {
+    Ready,
+    Warn(String),
+    Missing(String),
+}
+
 fn mcp_problem() -> McpProblem {
     let mut missing = Vec::new();
+    let mut warned = Vec::new();
     let mut ready = Vec::new();
     for file in mcp_files() {
         if !file.path.is_file() {
@@ -261,8 +282,9 @@ fn mcp_problem() -> McpProblem {
                 Ok(found) => found,
                 Err(e) if file.strict => {
                     missing.push(format!(
-                        "ljos-mcp: {} is not readable ({e}), so the MCP client has no tools",
-                        file.path.display()
+                        "ljos-mcp: {} is not readable ({e}), so the MCP client has no tools. Run `{}`.",
+                        file.path.display(),
+                        file.advice
                     ));
                     continue;
                 }
@@ -270,19 +292,30 @@ fn mcp_problem() -> McpProblem {
             },
             McpProbe::Text(marker) => read_text_launch(&file.path, marker),
         };
-        let Some((command, args)) = launch else {
+        let Some(launch) = launch else {
             continue;
         };
-        match launch_missing(&command, &args) {
-            Some(why) => missing.push(format!(
-                "ljos-mcp: {why} ({}), so the MCP client has no tools. Run `ljos cloud up`.",
-                file.path.display()
+        match launch_check(&file, &launch) {
+            LaunchCheck::Ready => {
+                ready.push(format!("{} starts {}", file.path.display(), launch.command))
+            }
+            LaunchCheck::Warn(why) => warned.push(format!(
+                "ljos-mcp: {why} ({}). Run `{}`.",
+                file.path.display(),
+                file.advice
             )),
-            None => ready.push(format!("{} starts {command}", file.path.display())),
+            LaunchCheck::Missing(why) => missing.push(format!(
+                "ljos-mcp: {why} ({}), so the MCP client has no tools. Run `{}`.",
+                file.path.display(),
+                file.advice
+            )),
         }
     }
     if !missing.is_empty() {
         return McpProblem::Missing(missing.join("; "));
+    }
+    if !warned.is_empty() {
+        return McpProblem::Warn(warned.join("; "));
     }
     if !ready.is_empty() {
         return McpProblem::Ready(ready.join("; "));
@@ -296,23 +329,28 @@ fn mcp_problem() -> McpProblem {
 fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut push = |path: PathBuf, probe: McpProbe, strict: bool| {
-        let kind = match &probe {
-            McpProbe::Json(pointer) => format!("json:{pointer}"),
-            McpProbe::Text(marker) => format!("text:{marker}"),
+    let mut push =
+        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expands_home: bool| {
+            let kind = match &probe {
+                McpProbe::Json(pointer) => format!("json:{pointer}"),
+                McpProbe::Text(marker) => format!("text:{marker}"),
+            };
+            if seen.insert(format!("{kind}:{}", path.display())) {
+                out.push(McpFile {
+                    path,
+                    probe,
+                    advice,
+                    expands_home,
+                    strict,
+                });
+            }
         };
-        if seen.insert(format!("{kind}:{}", path.display())) {
-            out.push(McpFile {
-                path,
-                probe,
-                strict,
-            });
-        }
-    };
     if let Some(path) = std::env::var_os("LJOS_MCP_CONFIG").filter(|p| !p.is_empty()) {
         push(
             PathBuf::from(path),
             McpProbe::Json("/mcpServers/ljos".into()),
+            true,
+            "ljos onboard --harness cursor".into(),
             true,
         );
     }
@@ -321,26 +359,40 @@ fn mcp_files() -> Vec<McpFile> {
             home.join(".cursor/mcp.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
+            "ljos cloud up".into(),
+            true,
         );
         push(
             home.join(".claude.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             false,
+            "ljos onboard --harness claude".into(),
+            true,
         );
     }
     for harness in harness_shapes() {
+        let advice = format!("ljos onboard --harness {}", harness.name);
+        let expands_home = harness.name != "codex";
         if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
             if !pointer.is_empty() {
                 push(
                     crate::expand(config),
                     McpProbe::Json(pointer.clone()),
                     false,
+                    advice.clone(),
+                    expands_home,
                 );
             }
         }
         if let (Some(config), Some(marker)) = (&harness.config, &harness.marker) {
             if !marker.is_empty() {
-                push(crate::expand(config), McpProbe::Text(marker.clone()), false);
+                push(
+                    crate::expand(config),
+                    McpProbe::Text(marker.clone()),
+                    false,
+                    advice.clone(),
+                    expands_home,
+                );
             }
         }
     }
@@ -364,7 +416,7 @@ fn harness_shapes() -> Vec<crate::Harness> {
     shapes
 }
 
-fn read_json_launch(path: &Path, pointer: &str) -> Result<Option<(String, Vec<String>)>> {
+fn read_json_launch(path: &Path, pointer: &str) -> Result<Option<LaunchSpec>> {
     let text = fs::read_to_string(path).with_context(|| path.display().to_string())?;
     if text.trim().is_empty() {
         return Ok(None);
@@ -377,12 +429,22 @@ fn read_json_launch(path: &Path, pointer: &str) -> Result<Option<(String, Vec<St
     Ok(command_and_args(entry))
 }
 
-fn command_and_args(entry: &serde_json::Value) -> Option<(String, Vec<String>)> {
+fn command_and_args(entry: &serde_json::Value) -> Option<LaunchSpec> {
     let extra = string_list(entry.get("args"));
+    let env_path = entry
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|env| env.get("PATH"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     match entry.get("command").or_else(|| entry.get("cmd"))? {
         serde_json::Value::String(command) => {
             let command = command.trim();
-            (!command.is_empty()).then(|| (command.to_string(), extra))
+            (!command.is_empty()).then(|| LaunchSpec {
+                command: command.to_string(),
+                args: extra,
+                env_path,
+            })
         }
         serde_json::Value::Array(parts) => {
             let mut argv: Vec<String> = parts
@@ -395,7 +457,11 @@ fn command_and_args(entry: &serde_json::Value) -> Option<(String, Vec<String>)> 
             }
             argv.remove(0);
             argv.extend(extra);
-            Some((command, argv))
+            Some(LaunchSpec {
+                command,
+                args: argv,
+                env_path,
+            })
         }
         _ => None,
     }
@@ -413,7 +479,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 /// The `command` or `cmd` in the section the harness marker names.
-fn read_text_launch(path: &Path, marker: &str) -> Option<(String, Vec<String>)> {
+fn read_text_launch(path: &Path, marker: &str) -> Option<LaunchSpec> {
     let text = fs::read_to_string(path).ok()?;
     let idx = text.find(marker)?;
     let window: String = text[idx..].lines().take(24).collect::<Vec<_>>().join("\n");
@@ -421,7 +487,11 @@ fn read_text_launch(path: &Path, marker: &str) -> Option<(String, Vec<String>)> 
     if command.is_empty() {
         None
     } else {
-        Some((command, Vec::new()))
+        Some(LaunchSpec {
+            command,
+            args: Vec::new(),
+            env_path: keyed_value(&window, "PATH"),
+        })
     }
 }
 
@@ -465,9 +535,11 @@ fn parse_scalar(rest: &str) -> String {
 }
 
 /// `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}` and a leading `~/` are
-/// the home directory at launch. A client expands those; a literal check
-/// would call a path that exists here missing.
-fn expand_launch(command: &str) -> String {
+/// the home directory at launch when the client expands them.
+fn expand_launch(command: &str, expands_home: bool) -> String {
+    if !expands_home {
+        return command.to_string();
+    }
     let Ok(home) = crate::home() else {
         return command.to_string();
     };
@@ -487,33 +559,121 @@ fn expand_launch(command: &str) -> String {
     expanded
 }
 
-fn launch_missing(command: &str, args: &[String]) -> Option<String> {
-    let expanded = expand_launch(command);
-    if !launch_exists(&expanded) {
-        let pathy = expanded.contains('/') || Path::new(&expanded).is_absolute();
-        return Some(if pathy {
-            format!("{command} does not exist")
+fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
+    let command = expand_launch(&launch.command, file.expands_home);
+    let found_path = command_path(&command, launch.env_path.as_deref());
+    let search_path = launch.env_path.as_deref();
+    let shell_path = if search_path.is_none() {
+        shell_command_path(&command)
+    } else {
+        None
+    };
+    let pathy = command.contains('/') || Path::new(&command).is_absolute();
+    let chosen = found_path.clone().or_else(|| shell_path.clone());
+    let Some(chosen) = chosen else {
+        return LaunchCheck::Missing(if pathy {
+            format!("{} does not exist", launch.command)
+        } else if search_path.is_some() {
+            format!("{} is not on env.PATH", launch.command)
         } else {
-            format!("{command} is not on PATH")
+            format!("{} is not on PATH", launch.command)
         });
+    };
+    if found_path.is_none() {
+        return LaunchCheck::Warn(format!(
+            "{} is not on this process PATH, but $SHELL -lc finds {}",
+            launch.command,
+            chosen.display()
+        ));
     }
-    let name = Path::new(&expanded).file_name().and_then(|n| n.to_str());
-    if name == Some("ljos-plugin") {
-        if let Some(bin) = args.first() {
-            if !bin.contains('/') && !launch_exists(bin) && !home_bin_exists(bin) {
-                return Some(format!("{bin} is not installed"));
+    if !pathy {
+        let own = crate::server_path().ok();
+        if let Some(own) = own {
+            let name = Path::new(&command).file_name().and_then(|n| n.to_str());
+            if name == Some(crate::MCP_SERVER_COMMAND) && !same_binary(&chosen, &own) {
+                return LaunchCheck::Warn(format!(
+                    "{} resolves to {}, not {}",
+                    launch.command,
+                    chosen.display(),
+                    own.display()
+                ));
             }
+        }
+    }
+    let name = Path::new(&command).file_name().and_then(|n| n.to_str());
+    if name == Some("ljos-plugin") {
+        if let Some(bin) = launch.args.first() {
+            if !bin.contains('/')
+                && command_path(bin, search_path).is_none()
+                && !home_bin_exists(bin)
+            {
+                return LaunchCheck::Missing(format!("{bin} is not installed"));
+            }
+        }
+    }
+    LaunchCheck::Ready
+}
+
+fn command_path(command: &str, search_path: Option<&str>) -> Option<PathBuf> {
+    let path = Path::new(command);
+    if command.contains('/') || path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    match search_path {
+        Some(path) => path_lookup(command, path),
+        None => which::which(command).ok(),
+    }
+}
+
+fn path_lookup(command: &str, path: &str) -> Option<PathBuf> {
+    if command.contains('/') || command.is_empty() {
+        return None;
+    }
+    for dir in std::env::split_paths(path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     None
 }
 
-fn launch_exists(command: &str) -> bool {
-    let path = Path::new(command);
-    if command.contains('/') || path.is_absolute() {
-        return path.is_file();
+fn shell_command_path(command: &str) -> Option<PathBuf> {
+    if command.contains('/') || command.is_empty() {
+        return None;
     }
-    which::which(command).is_ok()
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let out = Command::new(shell)
+        .arg("-lc")
+        .arg("command -v -- \"$1\"")
+        .arg("_")
+        .arg(command)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let found = stdout.lines().next().unwrap_or("").trim();
+    if found.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(found))
+    }
+}
+
+fn same_binary(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn home_bin_exists(name: &str) -> bool {
@@ -912,32 +1072,74 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-fn ensure_profile(home: &Path) -> Result<String> {
-    let mut notes = Vec::new();
-    for name in [".profile", ".bashrc"] {
-        notes.push(ensure_path_file(&home.join(name))?);
-    }
+fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
+    let notes = [
+        ensure_path_file(&home.join(".profile"), bin_dir, false)?,
+        ensure_path_file(&home.join(".bashrc"), bin_dir, true)?,
+    ];
     Ok(notes.join("; "))
 }
 
-fn ensure_path_file(path: &Path) -> Result<String> {
+fn path_export_line(bin_dir: &Path) -> String {
+    format!("export PATH=\"{}:$PATH\"", bin_dir.display())
+}
+
+fn first_interactive_guard(text: &str) -> Option<usize> {
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let guard =
+            (trimmed.contains("$PS1") || trimmed.contains("$-")) && trimmed.contains("return");
+        if guard {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
+}
+
+fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool) -> Result<String> {
     let have = fs::read_to_string(path).unwrap_or_default();
-    if have.contains(".local/bin") {
+    let line = path_export_line(bin_dir);
+    if have.lines().any(|l| l.trim() == line) {
         return Ok(format!(
-            "path: {} already names ~/.local/bin",
-            path.display()
+            "path: {} already names {}",
+            path.display(),
+            bin_dir.display()
         ));
     }
     let mut out = have;
-    if !out.is_empty() && !out.ends_with('\n') {
+    if before_interactive_guard {
+        if let Some(at) = first_interactive_guard(&out) {
+            let mut next = String::with_capacity(out.len() + line.len() + 1);
+            next.push_str(&out[..at]);
+            next.push_str(&line);
+            next.push('\n');
+            next.push_str(&out[at..]);
+            out = next;
+        } else {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    } else {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&line);
         out.push('\n');
     }
-    out.push_str("export PATH=\"$HOME/.local/bin:$PATH\"\n");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
-    Ok(format!("path: {} adds ~/.local/bin", path.display()))
+    Ok(format!(
+        "path: {} adds {}",
+        path.display(),
+        bin_dir.display()
+    ))
 }
 
 /// Prepend `bin_dir` to this process's PATH when it is not already there.

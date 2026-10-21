@@ -1196,15 +1196,22 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 /// [`server_path`] instead would bake in the machine that wrote the file,
 /// and a config synced onto another home would name a directory that is
 /// not there.
-const MCP_SERVER_COMMAND: &str = "ljos-mcp";
+pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
+
+#[derive(Debug, Clone)]
+struct ServerCommandPlan {
+    command: String,
+    note: Option<String>,
+}
 
 /// Where `ljos-mcp` is, for this process to exec.
 ///
 /// The one installed beside `ljos`, else the one on PATH. A shell a runner
 /// or ssh opens may lack the install directory on PATH, and the pair is
-/// always installed together. Harness configs do not store this path; they
-/// name [`MCP_SERVER_COMMAND`].
-fn server_path() -> Result<PathBuf> {
+/// always installed together. Harness configs prefer
+/// [`MCP_SERVER_COMMAND`] and fall back to this absolute path when that name
+/// does not resolve to this install.
+pub(crate) fn server_path() -> Result<PathBuf> {
     let beside = std::env::current_exe()
         .ok()
         .map(|me| me.with_file_name("ljos-mcp"))
@@ -1212,6 +1219,47 @@ fn server_path() -> Result<PathBuf> {
     match beside {
         Some(p) => Ok(p),
         None => which::which("ljos-mcp").context("ljos-mcp not on PATH; install it beside ljos"),
+    }
+}
+
+fn same_binary(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn server_command_plan(server: &Path) -> ServerCommandPlan {
+    match which::which(MCP_SERVER_COMMAND) {
+        Ok(found) if same_binary(&found, server) => ServerCommandPlan {
+            command: MCP_SERVER_COMMAND.to_string(),
+            note: None,
+        },
+        Ok(found) => ServerCommandPlan {
+            command: server.display().to_string(),
+            note: Some(format!(
+                "PATH resolves {MCP_SERVER_COMMAND} to {}, so onboard wrote {}",
+                found.display(),
+                server.display()
+            )),
+        },
+        Err(_) => ServerCommandPlan {
+            command: server.display().to_string(),
+            note: Some(format!(
+                "PATH does not resolve {MCP_SERVER_COMMAND}, so onboard wrote {}",
+                server.display()
+            )),
+        },
+    }
+}
+
+fn with_server_note(detail: String, plan: &ServerCommandPlan) -> String {
+    match &plan.note {
+        Some(note) => format!("{detail}; {note}"),
+        None => detail,
     }
 }
 
@@ -1232,11 +1280,13 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
+    let server = server_path()?;
+    let plan = server_command_plan(&server);
     Ok(serde_json::json!({
         "mcpServers": {
             "ljos": {
                 "type": "stdio",
-                "command": MCP_SERVER_COMMAND,
+                "command": plan.command,
                 "args": [],
                 "env": {}
             }
@@ -3475,15 +3525,19 @@ fn is_absolute_ljos_mcp(value: &str) -> bool {
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
 }
 
-fn command_made_portable(command: &mut Value) -> bool {
+fn needs_portable_rewrite(value: &str) -> bool {
+    is_absolute_ljos_mcp(value) && !Path::new(value).is_file()
+}
+
+fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     match command {
-        Value::String(text) if is_absolute_ljos_mcp(text) => {
-            *text = MCP_SERVER_COMMAND.to_string();
+        Value::String(text) if needs_portable_rewrite(text) => {
+            *text = replacement.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
-            Some(Value::String(text)) if is_absolute_ljos_mcp(text) => {
-                *text = MCP_SERVER_COMMAND.to_string();
+            Some(Value::String(text)) if needs_portable_rewrite(text) => {
+                *text = replacement.to_string();
                 true
             }
             _ => false,
@@ -3495,7 +3549,12 @@ fn command_made_portable(command: &mut Value) -> bool {
 /// Point an existing JSON entry at [`MCP_SERVER_COMMAND`] when it still
 /// names an absolute `ljos-mcp`. A runner that was onboarded before keeps
 /// that path until the next onboard, and then syncs it again.
-fn heal_json_command(path: &Path, pointer: &str, dry: bool) -> Result<Option<String>> {
+fn heal_json_command(
+    path: &Path,
+    pointer: &str,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
     if pointer.is_empty() || !path.is_file() {
         return Ok(None);
     }
@@ -3510,16 +3569,13 @@ fn heal_json_command(path: &Path, pointer: &str, dry: bool) -> Result<Option<Str
     let Some(command) = entry.get_mut("command") else {
         return Ok(None);
     };
-    if !command_made_portable(command) {
+    if !command_made_portable(command, replacement) {
         return Ok(None);
     }
-    let note = format!(
-        "set the command in {} to {MCP_SERVER_COMMAND}",
-        path.display()
-    );
+    let note = format!("set the command in {} to {replacement}", path.display());
     if dry {
         return Ok(Some(format!(
-            "would set the command in {} to {MCP_SERVER_COMMAND}",
+            "would set the command in {} to {replacement}",
             path.display()
         )));
     }
@@ -3532,45 +3588,111 @@ fn heal_json_command(path: &Path, pointer: &str, dry: bool) -> Result<Option<Str
     Ok(Some(note))
 }
 
-/// Replace a quoted absolute `ljos-mcp` with the bare name. Other quotes
-/// in the file stay.
-fn rewrite_absolute_ljos_mcp(text: &str) -> (String, bool) {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut changed = false;
-    while let Some(start) = rest.find(['"', '\'']) {
-        let quote = rest[start..].chars().next().unwrap_or('"');
-        out.push_str(&rest[..start]);
-        let after = &rest[start + quote.len_utf8()..];
-        match after.find(quote) {
-            Some(end) => {
-                let inner = &after[..end];
-                out.push(quote);
-                if is_absolute_ljos_mcp(inner) {
-                    out.push_str(MCP_SERVER_COMMAND);
-                    changed = true;
-                } else {
-                    out.push_str(inner);
-                }
-                out.push(quote);
-                rest = &after[end + quote.len_utf8()..];
-            }
-            None => {
-                out.push_str(&rest[start..]);
-                rest = "";
-            }
+fn command_value_span(line: &str) -> Option<(usize, usize)> {
+    let trimmed = line.trim_start();
+    let mut offset = line.len().saturating_sub(trimmed.len());
+    for key in ["command", "cmd"] {
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        offset += key.len();
+        let ws = rest.len().saturating_sub(rest.trim_start().len());
+        offset += ws;
+        let tail = &line[offset..];
+        let Some(sep) = tail.chars().next() else {
+            continue;
+        };
+        if sep != '=' && sep != ':' {
+            continue;
         }
+        offset += sep.len_utf8();
+        let tail = &line[offset..];
+        let ws = tail.len().saturating_sub(tail.trim_start().len());
+        offset += ws;
+        let tail = &line[offset..];
+        let Some(first) = tail.chars().next() else {
+            continue;
+        };
+        if first == '"' || first == '\'' {
+            let start = offset + first.len_utf8();
+            let rest = &line[start..];
+            let end = rest.find(first)?;
+            return Some((start, start + end));
+        }
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == ',' || c == '#')
+            .unwrap_or(tail.len());
+        return Some((offset, offset + end));
     }
-    out.push_str(rest);
-    (out, changed)
+    None
 }
 
-fn heal_text_command(path: &Path, dry: bool) -> Result<Option<String>> {
+fn marker_section_end(text: &str, start: usize, marker: &str) -> usize {
+    let marker_toml = marker.trim_start().starts_with('[');
+    let mut lines = 0usize;
+    let mut end = start;
+    let mut first = true;
+    for line in text[start..].split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if marker_toml && !first && trimmed.starts_with('[') {
+            break;
+        }
+        end += line.len();
+        lines += 1;
+        first = false;
+        if !marker_toml && lines >= 24 {
+            break;
+        }
+    }
+    end
+}
+
+fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (String, bool) {
+    let Some(found) = text.find(marker) else {
+        return (text.to_string(), false);
+    };
+    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    let end = marker_section_end(text, start, marker);
+    let mut at = start;
+    while at < end {
+        let line_end = text[at..].find('\n').map_or(text.len(), |rel| at + rel + 1);
+        let line = &text[at..line_end];
+        if let Some((value_start, value_end)) = command_value_span(line) {
+            let value_start = at + value_start;
+            let value_end = at + value_end;
+            let value = &text[value_start..value_end];
+            if needs_portable_rewrite(value) {
+                let mut out = String::with_capacity(
+                    text.len()
+                        .saturating_sub(value.len())
+                        .saturating_add(replacement.len()),
+                );
+                out.push_str(&text[..value_start]);
+                out.push_str(replacement);
+                out.push_str(&text[value_end..]);
+                return (out, true);
+            }
+            return (text.to_string(), false);
+        }
+        at = line_end;
+    }
+    (text.to_string(), false)
+}
+
+fn heal_text_command(
+    path: &Path,
+    marker: &str,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
+    if marker.is_empty() {
+        return Ok(None);
+    }
     if !path.is_file() {
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let (rewritten, changed) = rewrite_absolute_ljos_mcp(&text);
+    let (rewritten, changed) = rewrite_marker_command(&text, marker, replacement);
     if !changed {
         return Ok(None);
     }
@@ -3579,24 +3701,30 @@ fn heal_text_command(path: &Path, dry: bool) -> Result<Option<String>> {
     }
     let verb = if dry { "would set" } else { "set" };
     Ok(Some(format!(
-        "{verb} the command in {} to {MCP_SERVER_COMMAND}",
+        "{verb} the command in {} to {replacement}",
         path.display()
     )))
 }
 
-fn heal_registered(h: &Harness, dry: bool) -> Result<Option<String>> {
+fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<String>> {
     let mut notes = Vec::new();
     if let Some(config) = &h.config_json {
         if let Some(note) = heal_json_command(
             &expand(config),
             h.json_pointer.as_deref().unwrap_or(""),
+            replacement,
             dry,
         )? {
             notes.push(note);
         }
     }
     if let Some(config) = &h.config {
-        if let Some(note) = heal_text_command(&expand(config), dry)? {
+        if let Some(note) = heal_text_command(
+            &expand(config),
+            h.marker.as_deref().unwrap_or(""),
+            replacement,
+            dry,
+        )? {
             notes.push(note);
         }
     }
@@ -3604,9 +3732,12 @@ fn heal_registered(h: &Harness, dry: bool) -> Result<Option<String>> {
     // table does not name.
     if h.name == "claude" {
         if let Ok(home) = home() {
-            if let Some(note) =
-                heal_json_command(&home.join(".claude.json"), "/mcpServers/ljos", dry)?
-            {
+            if let Some(note) = heal_json_command(
+                &home.join(".claude.json"),
+                "/mcpServers/ljos",
+                replacement,
+                dry,
+            )? {
                 notes.push(note);
             }
         }
@@ -3623,9 +3754,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
+    let plan = server_command_plan(server);
     match is_registered(h, server) {
         Some(true) => {
-            let healed = heal_registered(h, dry);
+            let healed = heal_registered(h, &plan.command, dry);
             let config = expand(h.config.as_deref().unwrap_or_default());
             match bump_ljos_mcp_generation(&config, env!("CARGO_PKG_VERSION"), dry) {
                 Ok(Some(v)) => Step {
@@ -3652,7 +3784,8 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         },
         Some(false) if !h.register.is_empty() => {
-            let argv = filled(&h.register, Path::new(MCP_SERVER_COMMAND), &h.name);
+            let server_word = PathBuf::from(&plan.command);
+            let argv = filled(&h.register, &server_word, &h.name);
             if !on_path(&argv[0]) {
                 return Step {
                     what,
@@ -3663,14 +3796,14 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if dry {
                 return Step {
                     what,
-                    detail: format!("would run {}", argv.join(" ")),
+                    detail: with_server_note(format!("would run {}", argv.join(" ")), &plan),
                     ok: true,
                 };
             }
             match run_captured(&argv[0], &argv[1..]) {
                 Ok(_) => Step {
                     what,
-                    detail: format!("ran {}", argv.join(" ")),
+                    detail: with_server_note(format!("ran {}", argv.join(" ")), &plan),
                     ok: true,
                 },
                 Err(e) => Step {
@@ -3687,7 +3820,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 .json_entry
                 .as_deref()
                 .unwrap_or_default()
-                .replace("{server}", MCP_SERVER_COMMAND)
+                .replace("{server}", &plan.command)
                 .replace("{name}", &h.name);
             let entry: Value = match serde_json::from_str(&entry_text) {
                 Ok(v) => v,
@@ -3702,14 +3835,20 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if dry {
                 return Step {
                     what,
-                    detail: format!("would set {pointer} in {}", config.display()),
+                    detail: with_server_note(
+                        format!("would set {pointer} in {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 };
             }
             match set_json_entry(&config, &pointer, &entry) {
                 Ok(()) => Step {
                     what,
-                    detail: format!("set {pointer} in {}", config.display()),
+                    detail: with_server_note(
+                        format!("set {pointer} in {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 },
                 Err(e) => Step {
@@ -3725,7 +3864,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 .snippet
                 .as_deref()
                 .unwrap_or_default()
-                .replace("{server}", MCP_SERVER_COMMAND)
+                .replace("{server}", &plan.command)
                 .replace("{name}", &h.name);
             if snippet.is_empty() {
                 return Step {
@@ -3737,7 +3876,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if dry {
                 return Step {
                     what,
-                    detail: format!("would append the entry to {}", config.display()),
+                    detail: with_server_note(
+                        format!("would append the entry to {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 };
             }
@@ -3753,7 +3895,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             match written {
                 Ok(()) => Step {
                     what,
-                    detail: format!("appended the entry to {}", config.display()),
+                    detail: with_server_note(
+                        format!("appended the entry to {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 },
                 Err(e) => Step {
@@ -3957,9 +4102,9 @@ pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec
 /// Frozen Grok hook file. Copied to `~/.grok/hooks/ljos.json`.
 const GROK_HOOKS_JSON: &str = include_str!("../assets/grok/ljos.json");
 
-/// The `ljos` a runner's hook runs: the one beside `ljos-mcp`, by absolute
-/// path, since a runner started outside a login shell has no `~/.local/bin`
-/// on its PATH.
+/// The `ljos` a runner hook or plugin runs: the one beside `ljos-mcp`, by
+/// absolute path when possible, since a runner started outside a login
+/// shell may not have the install directory on PATH.
 fn ljos_path() -> Result<PathBuf> {
     let beside = server_path()?.with_file_name("ljos");
     if beside.is_file() {
@@ -9331,18 +9476,58 @@ pub const TWIN_EVENTS: &[&str] = &[
 /// with the plugin and an earlier onboard, or a runner that also loads
 /// Claude's settings, runs the seat's hook twice for one event, and both
 /// copies get the same payload. A later event of the same kind carries a
-/// new generation, loop count or transcript, and is not a twin.
+/// new generation, loop count or transcript, and is not a twin. Claude's
+/// Stop often repeats the payload; the transcript file is what the next
+/// turn changes, so its length and tail are part of a Stop's key.
 pub fn hook_twin(call: &HookCall, input: &str) -> bool {
     if !TWIN_EVENTS.contains(&call.event.as_str()) {
         return false;
     }
+    let turn = if call.event == "Stop" {
+        stop_turn_mark(input)
+    } else {
+        String::new()
+    };
     let key = work_id(&format!(
-        "twin|{}|{}|{}",
+        "twin|{}|{}|{}|{turn}",
         call.event,
         call.session.as_deref().unwrap_or(""),
         input.trim()
     ));
     hook_marker_fresh(&key, std::time::Duration::from_secs(10))
+}
+
+/// Length and a hash of the last 4KiB of a Stop transcript. Two
+/// registrations of one stop share the file; the next turn appends to it.
+/// A missing or unreadable transcript leaves the key on the payload.
+fn stop_turn_mark(input: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
+        return String::new();
+    };
+    let Some(path) = v
+        .get("transcript_path")
+        .or_else(|| v.get("transcriptPath"))
+        .and_then(Value::as_str)
+    else {
+        return String::new();
+    };
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return String::new();
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return len.to_string();
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let start = len.saturating_sub(4096);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return len.to_string();
+    }
+    let mut buf = Vec::new();
+    if file.take(4096).read_to_end(&mut buf).is_err() {
+        return len.to_string();
+    }
+    let tail = String::from_utf8_lossy(&buf);
+    format!("{len}|{}", work_id(&tail))
 }
 
 /// Make the marker for `key`, or say whether one younger than `window`
@@ -17741,10 +17926,16 @@ fn push_facts(url: &str, tagged: bool) -> PushFacts {
 }
 
 fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
-    if let Some(d) = dir {
-        cmd.arg("-C").arg(d);
-    }
+    let mut cmd = match dir {
+        Some(d) => git_at(Path::new(d)),
+        None => {
+            let mut cmd = std::process::Command::new("git");
+            for key in git_hooks::HOOK_GIT_ENV {
+                cmd.env_remove(key);
+            }
+            cmd
+        }
+    };
     let out = cmd
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -20649,11 +20840,8 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(std::process::Stdio::null());
+    let mut cmd = git_at(dir);
+    cmd.args(args).stdin(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut cmd);
     cmd.output().ok()
 }
@@ -21171,6 +21359,9 @@ fn optional_bin(name: &str) -> bool {
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "tracker" && names_unpushed(&row.state) {
+        return "warn";
+    }
+    if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -25186,15 +25377,58 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
+/// `git` in `dir` that follows `-C`. An inherited `GIT_DIR` would ignore
+/// `-C` and land the command in another checkout. A directory under
+/// `target` cannot see the source checkout above that directory: tests
+/// keep scratch trackers there, and discovery would lock the crate.
+pub(crate) fn git_at(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for key in git_hooks::HOOK_GIT_ENV {
+        cmd.env_remove(key);
+    }
+    if let Some(ceiling) = checkout_ceiling(dir) {
+        cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
+    cmd.arg("-C").arg(dir);
+    cmd
+}
+
+/// The directory git must not walk up into. A scratch path under `target`
+/// with no `.git` of its own stops at that `target`, so the source
+/// checkout above it is not this path's repository. A checkout that
+/// already has `.git` is left to discovery.
+pub(crate) fn checkout_ceiling(dir: &Path) -> Option<PathBuf> {
+    let start = if let Ok(canon) = std::fs::canonicalize(dir) {
+        canon
+    } else if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    let mut cur = start.clone();
+    loop {
+        if cur.join(".git").exists() {
+            return None;
+        }
+        if cur.file_name().is_some_and(|name| name == "target") {
+            if cur == start {
+                return cur.parent().map(Path::to_path_buf);
+            }
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
 /// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
 /// `git status` by the repository's `info/exclude`. Not in `.git`, where a
 /// hand clearing `*.lock` after a crash would unlink it under a live holder
 /// and the next seat would lock a new file beside it. `None` outside a git
 /// checkout.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = git_at(dir)
         .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -25410,9 +25644,7 @@ pub fn tracker_log(seat: Option<&str>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let out = git_at(&root)
         .args(["log", "--format=%h %s"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -25456,9 +25688,7 @@ pub fn tracker_usage(since: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let out = git_at(&root)
         .args(["log", &format!("--since={since}"), "--format=%s"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -25509,9 +25739,7 @@ fn commit_seat_pin(start: &Path, seat: &str) {
     if !root.join(name).is_file() {
         return;
     }
-    let ignored = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let ignored = git_at(&root)
         .args(["check-ignore", "-q", "--", name])
         .stdin(std::process::Stdio::null())
         .status()
@@ -25543,10 +25771,8 @@ pub enum PathCommit {
 /// the add failed. An untracked file is added here, that file only.
 pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     let git = |head: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(dir)
-            .args(head)
+        let mut cmd = git_at(dir);
+        cmd.args(head)
             .arg("--")
             .args(paths)
             .stdin(std::process::Stdio::null());
@@ -25606,9 +25832,7 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = git_at(dir)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -25765,11 +25989,8 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         return format!("tracker git: {} has no directory\n", path.display());
     };
     let git = |args: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdin(std::process::Stdio::null());
+        let mut cmd = git_at(dir);
+        cmd.args(args).stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
@@ -29646,6 +29867,91 @@ mod tests {
         }
     }
 
+    /// A tracker created under `target` is still inside this checkout.
+    /// Discovery must not walk up into it: the commit lock and the exclude
+    /// line would land on the crate, and an inherited `GIT_DIR` does the
+    /// same to a scratch repo that has its own `.git`.
+    #[test]
+    fn a_scratch_tracker_under_target_does_not_lock_the_crate() {
+        let _g = env_guard();
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let exclude = crate_root.join(".git/info/exclude");
+        let config = crate_root.join(".git/config");
+        let before_exclude = std::fs::read_to_string(&exclude).unwrap_or_default();
+        let before_config = std::fs::read(&config).unwrap_or_default();
+        let crate_lock = crate_root.join(TRACKER_LOCK);
+        struct PutBack {
+            exclude: PathBuf,
+            exclude_text: String,
+            config: PathBuf,
+            config_bytes: Vec<u8>,
+            lock: PathBuf,
+            scratch: PathBuf,
+        }
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.exclude, &self.exclude_text);
+                let _ = std::fs::write(&self.config, &self.config_bytes);
+                let _ = std::fs::remove_file(&self.lock);
+                let _ = std::fs::remove_dir_all(&self.scratch);
+            }
+        }
+        let scratch = crate_root.join("target/zdnr-lock-test");
+        let _back = PutBack {
+            exclude: exclude.clone(),
+            exclude_text: before_exclude.clone(),
+            config: config.clone(),
+            config_bytes: before_config.clone(),
+            lock: crate_lock.clone(),
+            scratch: scratch.clone(),
+        };
+        let _ = std::fs::remove_dir_all(&scratch);
+        let bare = scratch.join("share/vissue/tracker");
+        std::fs::create_dir_all(&bare).unwrap();
+        let repo = scratch.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success(), "scratch repo init");
+        unsafe {
+            std::env::set_var("GIT_DIR", crate_root.join(".git"));
+            std::env::set_var("GIT_WORK_TREE", &crate_root);
+        }
+        assert!(
+            super::tracker_lock_path(&bare).is_none(),
+            "a directory under target with no git of its own is not this crate"
+        );
+        let locked = super::tracker_lock_path(&repo).expect("the scratch repo is a checkout");
+        assert_eq!(locked, repo.join(TRACKER_LOCK));
+        super::tracker_push::prepare_tracker(&bare, true, false).unwrap();
+        assert!(
+            bare.join(".git").exists(),
+            "the scratch tracker was not inited"
+        );
+        let held = super::tracker_lock_path(&bare).expect("the inited tracker locks itself");
+        assert_eq!(held, bare.join(TRACKER_LOCK));
+        assert!(!crate_lock.exists(), "the crate gained the commit lock");
+        assert_eq!(
+            std::fs::read_to_string(&exclude).unwrap_or_default(),
+            before_exclude,
+            "the crate exclude gained the lock"
+        );
+        assert_eq!(
+            std::fs::read(&config).unwrap_or_default(),
+            before_config,
+            "the crate git config was written"
+        );
+    }
+
     fn seeded_tracker(root: &Path) -> PathBuf {
         let run = |args: &[&str]| {
             let o = std::process::Command::new("git")
@@ -31827,6 +32133,46 @@ mod tests {
         assert!(
             !hook_twin(&call("PreToolUse"), gate),
             "a gate always answers"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// Claude's Stop payload is the same bytes on the next turn of a
+    /// session. The transcript is what grew, so that stop is a new turn
+    /// and its deeds and lessons are kept. Two registrations of one stop,
+    /// with the transcript unchanged, are still one.
+    #[test]
+    fn a_claude_stop_is_a_new_turn_when_the_transcript_grew() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"user\",\"message\":\"one\"}\n").unwrap();
+        let stop = serde_json::json!({
+            "session_id": "sess-1",
+            "transcript_path": transcript.to_str().unwrap(),
+            "cwd": "/work",
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+        })
+        .to_string();
+        let call = HookCall {
+            event: "Stop".into(),
+            cue: String::new(),
+            session: Some("sess-1".into()),
+            shape: HookShape::Asks,
+        };
+        assert!(!hook_twin(&call, &stop), "the first turn answers");
+        assert!(
+            hook_twin(&call, &stop),
+            "a second registration of it returns"
+        );
+        let mut grown = std::fs::read_to_string(&transcript).unwrap();
+        grown.push_str("{\"type\":\"assistant\",\"message\":\"two\"}\n");
+        std::fs::write(&transcript, grown).unwrap();
+        assert!(
+            !hook_twin(&call, &stop),
+            "the next turn answers even with the same payload"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
