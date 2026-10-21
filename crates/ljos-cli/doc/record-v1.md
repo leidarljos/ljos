@@ -74,10 +74,14 @@ Entry signatures are ed25519 over:
 3. canonical JSON of the unsigned payload (the entry without `signature`)
 
 `ljos record check` verifies schema rules, signature validity, ballot-id
-matching, and run-key pinning:
+matching, and key pinning:
 
-- when `voter` is `run/<run-id>`, the first key seen for `<run-id>` is pinned
-- a later ballot from the same run id under another key is rejected
+- every voter id is pinned to one key, including a question's `opened_by`
+  and a seat
+- a run is `<identity>/run-<id>`; `run/<id>` has no identity and is refused
+- the tracker pin file wins when it already names that voter; otherwise
+  the first key seen in the check is the pin
+- a later entry from the same voter under another key is rejected
 
 ## Tally rule
 

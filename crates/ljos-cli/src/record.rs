@@ -157,16 +157,16 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
     Ok(())
 }
 
-/// Run schema + signature checks over many entries, including run-key pinning.
+/// Run schema + signature checks over many entries, including voter-key pinning.
 ///
-/// A voter id of the form `run/<run-id>` pins `<run-id>` to the tracker pin
-/// file when that run is already there, otherwise to the first public key
-/// seen for it. A later ballot from the same run id under another key is a
-/// mismatch.
+/// Every voter id is pinned, including a question's `opened_by` and a
+/// seat. The tracker pin file wins when it already names that voter;
+/// otherwise the first key seen in this check is the pin. A later entry
+/// under another key is a mismatch. A run id is `<identity>/run-<id>`.
 ///
 /// # Errors
 ///
-/// Any entry fails validation or signature verification, run-key pinning
+/// Any entry fails validation or signature verification, voter-key pinning
 /// detects a mismatch, or two unreplaced ballots from one voter share an
 /// hour.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
@@ -179,12 +179,17 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
-            Entry::Question(_) => report.questions += 1,
+            Entry::Question(question) => {
+                report.questions += 1;
+                crate::ballot_sig::observe_pin(
+                    &mut pins,
+                    &question.opened_by,
+                    &entry.signature.key,
+                )?;
+            }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
-                if let Some(run_id) = run_id_of(&ballot.voter) {
-                    crate::ballot_sig::observe_pin(&mut pins, run_id, &entry.signature.key)?;
-                }
+                crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)?;
                 ballots.push(ballot.clone());
             }
         }
@@ -459,6 +464,10 @@ fn validate_voter_id(voter: &str) -> Result<()> {
             "voter id must be `<identity>/<seat-or-run>` using ascii letters, digits, '-', '_' or '.'"
         );
     }
+    // `run/<id>` names no identity. A run carries one: `<identity>/run-<id>`.
+    if identity == "run" {
+        bail!("voter id `{voter}` has no identity; a run is `<identity>/run-<id>`");
+    }
     Ok(())
 }
 
@@ -488,11 +497,6 @@ fn utc_hour_shape(text: &str) -> bool {
         && b[5..7].iter().all(u8::is_ascii_digit)
         && b[8..10].iter().all(u8::is_ascii_digit)
         && b[11..13].iter().all(u8::is_ascii_digit)
-}
-
-fn run_id_of(voter: &str) -> Option<&str> {
-    let (identity, seat_or_run) = split_voter(voter)?;
-    (identity == "run").then_some(seat_or_run)
 }
 
 fn split_voter(voter: &str) -> Option<(&str, &str)> {
@@ -728,15 +732,63 @@ mod tests {
     fn a_second_key_under_one_run_id_is_a_mismatch() {
         let _home = test_home();
         let first = sign_as(
-            ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
             1,
         );
         let second = sign_as(
-            ballot_entry("run/run-101", "reject", "2026-10-21T11:00:00Z"),
+            ballot_entry("alpha/run-101", "reject", "2026-10-21T11:00:00Z"),
             2,
         );
         let err = check_entries(&[first, second]).expect_err("must reject run key mismatch");
         assert!(err.to_string().contains("pinned"));
+    }
+
+    #[test]
+    fn a_seat_voter_is_pinned_to_one_key() {
+        let _home = test_home();
+        let first = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let second = sign_as(
+            ballot_entry("alpha/seat-a", "reject", "2026-10-21T11:00:00Z"),
+            2,
+        );
+        let err = check_entries(&[first, second]).expect_err("seat pin");
+        assert!(err.to_string().contains("pinned"), "{err}");
+    }
+
+    #[test]
+    fn a_question_opener_is_pinned_with_the_voter() {
+        let _home = test_home();
+        let question = sign_as(question_entry(), 1);
+        let ballot = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let err = check_entries(&[question, ballot]).expect_err("opener pin");
+        assert!(err.to_string().contains("pinned"), "{err}");
+    }
+
+    #[test]
+    fn a_run_keeps_its_identity_and_one_key() {
+        let _home = test_home();
+        let err = sign_entry(
+            ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
+            "seat-1",
+        )
+        .expect_err("bare run identity");
+        assert!(err_chain(&err).contains("identity"), "{}", err_chain(&err));
+        let first = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let second = sign_as(
+            ballot_entry("alpha/run-101", "reject", "2026-10-21T11:00:00Z"),
+            2,
+        );
+        let err = check_entries(&[first, second]).expect_err("run pin");
+        assert!(err.to_string().contains("pinned"), "{err}");
     }
 
     #[test]
@@ -961,14 +1013,14 @@ mod tests {
             unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
         });
         let entry = sign_as(
-            ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
             1,
         );
         let other = sign_as(
             ballot_entry("beta/seat-b", "reject", "2026-10-21T11:00:00Z"),
             2,
         );
-        let line = format!("run-101 {}\n", other.signature.key);
+        let line = format!("alpha/run-101 {}\n", other.signature.key);
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("pinned key");
         assert!(err.to_string().contains("pinned"), "{err}");
