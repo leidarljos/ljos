@@ -25229,27 +25229,118 @@ fn commit_seat_pin(start: &Path, seat: &str) {
     if !root.join(name).is_file() {
         return;
     }
-    let run = |args: &[&str]| {
+    let ignored = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["check-ignore", "-q", "--", name])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ignored {
+        return;
+    }
+    let _ = commit_paths(&root, &[name], &format!("chore(issues): pin {seat} key"));
+}
+
+/// How a commit of named paths ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathCommit {
+    Made,
+    /// HEAD already holds the paths as they stand: another seat's commit
+    /// carried them, or they did not change.
+    AlreadyIn,
+    /// What git said, never empty.
+    Refused(String),
+}
+
+/// Stage `paths` and commit them alone (`--only`) in the checkout at
+/// `dir`, so another seat's staged work is left out. The caller holds
+/// [`tracker_commit_lock`]. A git process outside ljos that holds the
+/// index is waited out with backoff.
+///
+/// The add runs first and its failure stands on its own: a commit named
+/// for a file git never took in reports a pathspec error that hides why
+/// the add failed. An untracked file is added here, that file only.
+pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
+    let git = |head: &[&str]| {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C")
-            .arg(&root)
-            .args(args)
+            .arg(dir)
+            .args(head)
+            .arg("--")
+            .args(paths)
             .stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
-    let Ok(status) = run(&["status", "--porcelain", "--", name]) else {
-        return;
+    // `Err` is a busy index, with what git said.
+    let attempt = || -> Result<PathCommit, String> {
+        let added = match git(&["add"]) {
+            Ok(out) => out,
+            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        };
+        if !added.status.success() {
+            return refused_or_busy(&added);
+        }
+        if git(&["diff", "--cached", "--quiet"]).is_ok_and(|o| o.status.success()) {
+            return Ok(PathCommit::AlreadyIn);
+        }
+        let made = match git(&["commit", "-q", "--only", "-m", message]) {
+            Ok(out) => out,
+            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        };
+        if made.status.success() {
+            return Ok(PathCommit::Made);
+        }
+        // git says "nothing to commit" on stdout under a branch line, and
+        // exits 1, when a commit made since the add carried the paths.
+        if !index_busy(&made)
+            && git(&["status", "--porcelain"])
+                .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
+        {
+            return Ok(PathCommit::AlreadyIn);
+        }
+        refused_or_busy(&made)
     };
-    if !status.status.success() || status.stdout.is_empty() {
-        return;
+    let mut result = attempt();
+    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        result = attempt();
     }
-    match run(&["add", "--", name]) {
-        Ok(out) if out.status.success() => {}
-        _ => return,
+    result.unwrap_or_else(PathCommit::Refused)
+}
+
+fn index_busy(out: &std::process::Output) -> bool {
+    let said = String::from_utf8_lossy(&out.stderr);
+    said.contains("index.lock") || said.contains(".lock': File exists")
+}
+
+fn refused_or_busy(out: &std::process::Output) -> Result<PathCommit, String> {
+    if index_busy(out) {
+        Err(git_refusal(out))
+    } else {
+        Ok(PathCommit::Refused(git_refusal(out)))
     }
-    let message = format!("chore(issues): pin {seat} key");
-    let _ = run(&["commit", "-q", "--only", "-m", &message, "--", name]);
+}
+
+/// What git said when it refused: the first line of stderr, else of
+/// stdout, else how it exited. A git killed by a signal says nothing.
+fn git_refusal(out: &std::process::Output) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    for stream in [&out.stderr, &out.stdout] {
+        let said = first_line(stream);
+        if !said.is_empty() {
+            return said;
+        }
+    }
+    match (out.status.code(), out.status.signal()) {
+        (_, Some(signal)) => format!("git was killed by signal {signal} before it said why"),
+        (Some(code), _) => format!("git exited {code} and said nothing"),
+        _ => "git said nothing".into(),
+    }
 }
 
 /// Commit the tracker file that holds `issue` and push it, when the tracker
@@ -25370,43 +25461,15 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let seat = tracker_seat();
     stamp_seat_logbook(path, issue, verb, &seat);
     let message = format!("chore(issues): {issue} {verb} by {seat}");
-    // The add runs first and its failure stands on its own: a commit named
-    // for a file git never took in reports a pathspec error that hides why
-    // the add failed. An untracked ticket is added here, that file only.
-    let stage_and_commit = || {
-        let added = git(&["add", "--", &file])?;
-        if !added.status.success() {
-            return Ok(added);
-        }
-        git(&["commit", "-q", "--only", "-m", &message, "--", &file])
-    };
-    let mut committed = stage_and_commit();
-    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
-        let busy = matches!(&committed, Ok(o) if !o.status.success()
-            && String::from_utf8_lossy(&o.stderr).contains("index.lock"));
-        if !busy {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-        committed = stage_and_commit();
-    }
-    if matches!(&committed, Ok(o) if o.status.success()) {
+    let committed = commit_paths(dir, &[file.as_str()], &message);
+    if !matches!(committed, PathCommit::Refused(_)) {
         commit_seat_pin(dir, &seat);
     }
     drop(held);
     match committed {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            return format!(
-                "tracker git: commit refused: {}\n",
-                first_line(if o.stderr.is_empty() {
-                    &o.stdout
-                } else {
-                    &o.stderr
-                })
-            );
-        }
-        Err(e) => return format!("tracker git: {e}\n"),
+        PathCommit::Made => {}
+        PathCommit::AlreadyIn => return "tracker git: nothing to commit\n".into(),
+        PathCommit::Refused(why) => return format!("tracker git: commit refused: {why}\n"),
     }
     if mode == "commit" {
         return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
@@ -29213,6 +29276,93 @@ mod tests {
         let status = run(&["status", "--porcelain", "--ignored=no"]);
         assert!(!status.contains(TRACKER_LOCK), "{status}");
         assert!(root.join(TRACKER_LOCK).is_file());
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    fn seeded_tracker(root: &Path) -> PathBuf {
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        std::fs::write(
+            &issues,
+            "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        issues
+    }
+
+    /// Paths HEAD already holds, as another seat's commit leaves them, are
+    /// not a refusal: git's "nothing to commit" came back as `On branch
+    /// master`.
+    #[test]
+    fn paths_head_already_holds_are_committed_already() {
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let probe = dir.path().join("Software/probe");
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "again"),
+            PathCommit::AlreadyIn
+        );
+        std::fs::write(probe.join("issues.org"), "* DONE [#C] Probe\n").unwrap();
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "done"),
+            PathCommit::Made
+        );
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "done"),
+            PathCommit::AlreadyIn
+        );
+    }
+
+    /// A git killed before it printed anything is named, not an empty
+    /// `commit refused: `.
+    #[test]
+    fn a_commit_killed_by_a_signal_says_so() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["config", "core.hooksPath"])
+            .arg(&hooks)
+            .status()
+            .unwrap();
+        assert!(set.success());
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("commit refused: git was killed by signal 9"),
+            "{said}"
+        );
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }

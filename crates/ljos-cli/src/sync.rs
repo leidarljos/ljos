@@ -668,42 +668,22 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     ];
     // The same lock the tracker commits take: one checkout, many seats.
     let held = crate::tracker_commit_lock(root);
-    let mut add = vec!["add", "--"];
-    add.extend(files.iter().map(String::as_str));
-    if git(root, &add).map_or(true, |o| !o.status.success()) {
-        return "sync: could not stage the log\n".into();
-    }
-    let staged = git(
-        root,
-        &["diff", "--cached", "--quiet", "--", &files[0], &files[1]],
-    );
-    if staged.is_ok_and(|o| o.status.success()) {
-        // Atoms did not change. A commit already made in this checkout,
-        // such as the tracker's merge attributes, still has to leave,
-        // unless pushes are off. Commit-only mode names that, the same
-        // way the ticket commit does, instead of returning nothing.
-        drop(held);
-        return if push {
-            push_pending(root)
-        } else {
-            kept_local(root)
-        };
-    }
     let message = format!("chore(sync): {host} {scope} atoms");
-    let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
-    commit.extend(files.iter().map(String::as_str));
-    match git(root, &commit) {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            return format!(
-                "sync: commit refused: {}\n",
-                String::from_utf8_lossy(&o.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-            )
+    match crate::commit_paths(root, &[&files[0], &files[1]], &message) {
+        crate::PathCommit::Made => {}
+        crate::PathCommit::AlreadyIn => {
+            // Atoms did not change. A commit already made in this checkout,
+            // such as the tracker's merge attributes, still has to leave,
+            // unless pushes are off. Commit-only mode names that, the same
+            // way the ticket commit does, instead of returning nothing.
+            drop(held);
+            return if push {
+                push_pending(root)
+            } else {
+                kept_local(root)
+            };
         }
-        Err(e) => return format!("sync: git: {e}\n"),
+        crate::PathCommit::Refused(why) => return format!("sync: commit refused: {why}\n"),
     }
     drop(held);
     if !push {
