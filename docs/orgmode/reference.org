@@ -183,6 +183,7 @@ Booking never fails the hook. A line it prints goes to stderr, and a habitat tha
 =post-rewrite= reads the old and new shas and moves the citation onto the new commit. A dropped commit, an all-zero new sha, loses its citation.
 =--git-hook= is =post-commit= or =post-rewrite=.
 An amend or a rebase moves the deed onto the new sha and does not leave the replaced sha cited.
+The sitting's lesson is written again for the new sha and closes the one that named the replaced sha.
 A =post-commit= in the middle of a rebase or a merge does not book. =post-rewrite= does.
 A commit already cited on an open sitting in that checkout is not opened as a second book.
 
