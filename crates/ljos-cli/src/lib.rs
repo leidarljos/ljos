@@ -2722,36 +2722,32 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     })
 }
 
-/// The one seat in `known` that belongs to `harness`: an id of the
-/// harness ([`harness_ids`]) itself, or joined to a word by a hyphen
-/// (`codex-laptop`, `free-codex`, `free-agy` for `antigravity`). `None`
-/// when no seat or more than one does.
-fn harness_seat(harness: &str, known: &std::collections::BTreeSet<String>) -> Option<String> {
-    let ids = harness_ids(harness);
-    let mut mine = known.iter().filter(|s| {
-        ids.iter().any(|id| {
-            *s == id || s.starts_with(&format!("{id}-")) || s.ends_with(&format!("-{id}"))
-        })
-    });
-    let first = mine.next()?;
-    mine.next().is_none().then(|| first.clone())
-}
+/// The seat each of [`HARNESS_NAMES`] sits as on a tracker that names a
+/// harness's seat after its runner's command, `free-<command>`:
+/// Antigravity's command is `agy`, Claude Code's is `claude`.
+const HARNESS_SEATS: &[(&str, &str)] = &[
+    ("claude", "free-claude"),
+    ("claude-code", "free-claude"),
+    ("codex", "free-codex"),
+    ("cursor-agent", "free-cursor-agent"),
+    ("opencode", "free-opencode"),
+    ("opencode-ai", "free-opencode"),
+    ("agy", "free-agy"),
+    ("antigravity", "free-agy"),
+    ("grok", "free-grok"),
+    ("gemini", "free-gemini"),
+];
 
-/// `harness` and the other harness ids its runner goes by: Antigravity's
-/// command is `agy` ([`RUNNER_COMMANDS`]), and a seat is named after either.
-fn harness_ids(harness: &str) -> Vec<&str> {
-    let mut ids = vec![harness];
-    if let Some((name, commands)) = RUNNER_COMMANDS
+/// The seat in `known` that belongs to `harness`, from [`HARNESS_SEATS`]
+/// alone. A seat a person named after a harness (`claude-reviewer`,
+/// `codex-laptop`) is theirs: a harness id never sits as it, and never
+/// finishes its claims.
+fn harness_seat(harness: &str, known: &std::collections::BTreeSet<String>) -> Option<String> {
+    HARNESS_SEATS
         .iter()
-        .find(|(name, commands)| *name == harness || commands.contains(&harness))
-    {
-        ids.extend(
-            std::iter::once(*name)
-                .chain(commands.iter().copied())
-                .filter(|id| *id != harness && HARNESS_NAMES.contains(id)),
-        );
-    }
-    ids
+        .find(|(id, _)| *id == harness)
+        .map(|(_, seat)| (*seat).to_string())
+        .filter(|seat| known.contains(seat))
 }
 
 /// The roster's seat for a harness id the roster does not list itself, so
@@ -31495,10 +31491,33 @@ mod tests {
             Some("free-codex")
         );
         let two = known(&["free-agy", "antigravity-laptop"]);
-        assert_eq!(harness_seat("antigravity", &two), None);
+        // A seat a person named after the harness is theirs: it neither
+        // takes the harness id nor stands in the way of the harness's seat.
+        assert_eq!(
+            harness_seat("antigravity", &two).as_deref(),
+            Some("free-agy")
+        );
+        assert_eq!(
+            harness_seat("antigravity", &known(&["antigravity-laptop"])),
+            None
+        );
+        assert_eq!(harness_seat("claude", &known(&["claude-reviewer"])), None);
+        assert_eq!(harness_seat("codex", &known(&["codex-laptop"])), None);
+        assert_eq!(
+            harness_seat("claude", &known(&["free-claude-sandbox"])),
+            None
+        );
+        assert_eq!(harness_seat("antigravity", &known(&["agy"])), None);
         // A command that is no harness id names no seat: `code` is not
         // `claude-code`'s.
         assert_eq!(harness_seat("vscode", &known(&["claude-code"])), None);
+        for harness in HARNESS_NAMES {
+            let seat = HARNESS_SEATS.iter().find(|(id, _)| id == harness);
+            assert!(
+                seat.is_some_and(|(_, s)| s.starts_with("free-")),
+                "{harness}"
+            );
+        }
     }
 
     #[test]
