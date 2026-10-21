@@ -503,8 +503,9 @@ pub fn hook_agent(agent: Option<String>) {
 }
 
 /// The subagent this process or MCP call runs for under `parent`, when the
-/// harness named one: the agent a hook saw make this call. The command
-/// line takes no agent, so a parent cannot cast as its subagent.
+/// harness named one: the agent a hook saw make this call, else a Codex
+/// thread under its root session. The command line takes no agent, so a
+/// parent cannot cast as its subagent.
 fn subagent(parent: &str) -> Option<String> {
     if let Ok(agent) = CALL_AGENT.try_with(Clone::clone) {
         return (!agent.is_empty()).then_some(agent);
@@ -514,8 +515,17 @@ fn subagent(parent: &str) -> Option<String> {
             crate::subagent::claim_command(parent)
                 .filter(|a| !a.is_empty())
                 .map(|a| field(&a))
+                .or_else(|| codex_thread(parent))
         })
         .clone()
+}
+
+/// The thread Codex runs a subagent in, under the root session:
+/// `CODEX_THREAD_ID` when it is not `CODEX_SESSION_ID`, the root's.
+fn codex_thread(parent: &str) -> Option<String> {
+    let root = env_token("CODEX_SESSION_ID")?;
+    let thread = env_token("CODEX_THREAD_ID")?;
+    (root == parent && thread != root).then_some(thread)
 }
 
 /// Remember the hook payload's session for this process, and export it for
@@ -592,8 +602,10 @@ pub fn harness_session() -> String {
     const PREFER: &[&str] = &[
         "CURSOR_SESSION_ID",
         "CLAUDE_SESSION_ID",
-        "CODEX_THREAD_ID",
+        // A Codex subagent's thread is not its session: [`codex_thread`]
+        // names it under the root.
         "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
         "GROK_SESSION_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",

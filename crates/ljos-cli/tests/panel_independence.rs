@@ -1097,6 +1097,52 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
 }
 
 #[test]
+fn codex_subagent_threads_each_count_under_their_root_session() {
+    // Codex gives a subagent's shell its own thread id and the root's
+    // session id. The root thread's id is the session's.
+    let world = World::new();
+    let issue = "demo-codex-threads";
+    let root = "019a7c3e-root-0001";
+    let runs = [
+        (
+            "reviewer-a",
+            "019a7c3e-thread-a",
+            format!("{root}:019a7c3e-thread-a"),
+        ),
+        (
+            "reviewer-b",
+            "019a7c3e-thread-b",
+            format!("{root}:019a7c3e-thread-b"),
+        ),
+        ("coordinator", root, root.to_string()),
+    ];
+    let cast = |name: &str, thread: &str, choice: &str| {
+        world.ljos_env(
+            "ljosbot",
+            &[("CODEX_SESSION_ID", root), ("CODEX_THREAD_ID", thread)],
+            &[
+                "vote", issue, "--for", choice, "--used", "none", "--as", name,
+            ],
+        )
+    };
+    for (name, thread, session) in &runs {
+        let out = cast(name, thread, "ship");
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains(&format!("session {session}\n")), "{said}");
+    }
+    let again = cast("reviewer-c", "019a7c3e-thread-a", "hold");
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(said.contains("already cast"), "{said}");
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("3 ballots count"), "{said}");
+    assert!(!stdout.contains("reviewer-c"), "{said}");
+}
+
+#[test]
 fn a_seat_no_harness_names_is_an_unverified_session() {
     // Two reviewers recorded from one coordinator that no harness id and
     // no run id names: the seat is the session, and every output says so.
