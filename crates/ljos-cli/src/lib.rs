@@ -34,6 +34,7 @@ pub mod persona_session;
 pub mod plugin;
 pub mod proc_tree;
 pub mod reap;
+pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;

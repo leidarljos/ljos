@@ -223,6 +223,15 @@ enum CloudCmd {
 }
 
 #[derive(Subcommand)]
+enum RecordCmd {
+    /// Validate a directory of schema-v1 record entries.
+    Check {
+        /// Directory containing question and ballot JSON entries.
+        dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
     Remember {
@@ -392,6 +401,11 @@ enum Cmd {
         /// A deed accession, or `record` followed by the test command.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
         args: Vec<String>,
+    },
+    /// Record entry helpers.
+    Record {
+        #[command(subcommand)]
+        cmd: RecordCmd,
     },
     /// Whether a deed is still the tip, or a later take superseded it.
     Current { accession: String },
@@ -1546,6 +1560,12 @@ fn run_command() -> Result<()> {
                 );
             }
         }
+        Cmd::Record { cmd } => match cmd {
+            RecordCmd::Check { dir } => {
+                let report = ljos_cli::record::check_dir(&dir)?;
+                print!("{}", ljos_cli::record::format_check_report(&report));
+            }
+        },
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
             issue,
