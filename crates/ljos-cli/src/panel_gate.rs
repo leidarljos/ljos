@@ -362,7 +362,7 @@ pub fn session_cast_refusal(
         }
         if mine {
             return Some(format!(
-                "this session already cast {}'s ballot on {issue} ({session}) for {}. Nothing was cast. {} {OWN_BALLOT}",
+                "this session already cast a ballot on {issue} ({session}): {}'s, for {}. Nothing was cast. {} {OWN_BALLOT}",
                 sig.voter,
                 sig.choice,
                 replace_hint(issue, voter)
@@ -1503,8 +1503,7 @@ mod tests {
         // A third cast with no withdrawal says how to replace the ballot.
         let again = session_cast_refusal("demo-w", "sess-r", "reviewer", &notes, &[]).unwrap();
         assert!(
-            again.contains("already cast reviewer's ballot on demo-w")
-                && again.contains("for hold")
+            again.contains("already cast a ballot on demo-w (sess-r): reviewer's, for hold.")
                 && again.contains("`ljos vote demo-w --withdraw --as reviewer`")
                 && again.contains("Nothing was cast"),
             "{again}"
