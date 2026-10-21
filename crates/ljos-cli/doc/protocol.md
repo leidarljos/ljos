@@ -10,7 +10,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
@@ -250,6 +250,8 @@ Every piece of work has an issue before it has a claim.
   names another parent and `--top` none. A bug in a tool found
   mid-sitting goes to the tool's project: `-p PROJECT` naming another
   project than the held issue's files at its top level, and says so.
+  `ljos file "TITLE" --options A,B` writes `Options: A, B` as the first body
+  line. `ljos options ISSUE A,B` appends that line and refuses fewer than two.
   A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.

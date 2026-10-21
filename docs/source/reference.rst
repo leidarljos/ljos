@@ -188,6 +188,8 @@ Command line
 |                                                                                                                                 |                           | a shell runner (``shell = true``, ``grokbot``, or ``shell``) writes the skill and an env file and registers no server and no hook                                                                                                              |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
+``ljos file "TITLE" --options A,B`` writes ``Options: A, B`` as the first body line.
+``ljos options ISSUE A,B`` appends that line and refuses fewer than two.
 Withdrawing a ballot writes ``ballot-withdrawn: VOTER HARNESS NONCE``.
 The tally leaves that ballot out, and so does the push gate.
 A later cast from that session says the ballot was withdrawn.

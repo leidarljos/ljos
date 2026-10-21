@@ -79,6 +79,8 @@
 | =protocol= | none | print the sitting protocol |
 | =onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory; a shell runner (=shell = true=, =grokbot=, or =shell=) writes the skill and an env file and registers no server and no hook |
 
+=ljos file "TITLE" --options A,B= writes =Options: A, B= as the first body line.
+=ljos options ISSUE A,B= appends that line and refuses fewer than two.
 Withdrawing a ballot writes =ballot-withdrawn: VOTER HARNESS NONCE=.
 The tally leaves that ballot out, and so does the push gate.
 A later cast from that session says the ballot was withdrawn.
