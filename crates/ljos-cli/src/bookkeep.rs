@@ -150,6 +150,9 @@ struct RepoBook {
     /// The sitting's lesson was written. Stop and SessionEnd share one.
     #[serde(default)]
     lesson: bool,
+    /// The pack's id for that lesson. A rewrite supersedes it.
+    #[serde(default)]
+    lesson_id: Option<String>,
     #[serde(default)]
     finished: bool,
     /// `vissue` failed once. Later edits stay on the warm path instead of
@@ -2109,6 +2112,7 @@ struct LessonRewrite {
     deeds: Vec<String>,
     failures: Vec<String>,
     asks: Vec<String>,
+    replaces: Option<String>,
 }
 
 /// Move citations off commits that an amend or a rebase replaced.
@@ -2152,14 +2156,16 @@ pub(crate) fn repoint_commits(repo: &str, pairs: &[(String, String)]) {
                 &rewrite.deeds,
                 &rewrite.failures,
                 &rewrite.asks,
+                rewrite.replaces.as_deref(),
             ) {
-                Ok(()) => {
+                Ok(id) => {
                     if let Some(row) = book
                         .repos
                         .values_mut()
                         .find(|row| row.issue.as_deref() == Some(rewrite.issue.as_str()))
                     {
                         row.lesson = true;
+                        row.lesson_id = id;
                     }
                     store_book(&path, &book);
                 }
@@ -2210,6 +2216,7 @@ fn repoint_row(
                 deeds: deeds.clone(),
                 failures: row.failures.clone(),
                 asks: row.asks.clone(),
+                replaces: row.lesson_id.clone(),
             })
         } else {
             None
@@ -2338,10 +2345,19 @@ fn refresh_landed_deeds(deadline: std::time::Instant) {
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
-            match write_lesson(&issue, &title, &deeds, &failures, &asks) {
-                Ok(()) => {
+            let replaces = row.lesson_id.clone();
+            match write_lesson(
+                &issue,
+                &title,
+                &deeds,
+                &failures,
+                &asks,
+                replaces.as_deref(),
+            ) {
+                Ok(id) => {
                     if let Some(row) = book.repos.get_mut(&repo) {
                         row.lesson = true;
+                        row.lesson_id = id;
                     }
                 }
                 Err(e) => log_line(&format!("lesson: {e}")),
@@ -2583,11 +2599,20 @@ fn finish_rows(book: &mut Book, repos: &[String]) {
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
+            let replaces = row.lesson_id.clone();
             let label = issue.clone().unwrap_or_default();
-            match write_lesson(&label, &title, &deeds, &failures, &asks) {
-                Ok(()) => {
+            match write_lesson(
+                &label,
+                &title,
+                &deeds,
+                &failures,
+                &asks,
+                replaces.as_deref(),
+            ) {
+                Ok(id) => {
                     if let Some(row) = book.repos.get_mut(repo) {
                         row.lesson = true;
+                        row.lesson_id = id;
                     }
                 }
                 Err(e) => log_line(&format!("lesson: {e}")),
@@ -2955,14 +2980,18 @@ fn failure_text(raw: &Value, cue: &str) -> String {
 /// rule and command also ride in `source`, which the prose gate does not
 /// read. The issue id rides in the `issue` field, so a later lesson for
 /// another issue does not close this one. A pack that is off is an error
-/// here; the caller logs it and still closes the ticket.
+/// here; the caller logs it and still closes the ticket. `replaces` is the
+/// id of the lesson this sitting wrote before, which the pack closes: its
+/// title can differ, so the pack would not take it for a near copy. The
+/// new lesson's id comes back for the next rewrite.
 fn write_lesson(
     issue: &str,
     title: &str,
     shas: &[String],
     failures: &[String],
     asks: &[String],
-) -> Result<(), String> {
+    replaces: Option<&str>,
+) -> Result<Option<String>, String> {
     let text = lesson_text(title, issue, shas, failures, asks);
     super::packset_write_agent_sourced(
         "Remember",
@@ -2972,8 +3001,9 @@ fn write_lesson(
         &join_notes(asks),
         &join_notes(failures),
         issue,
+        replaces,
     )
-    .map(|_| ())
+    .map(|posted| posted["id"].as_str().map(str::to_string))
     .map_err(|e| noted_err(&e))
 }
 
