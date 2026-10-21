@@ -38357,6 +38357,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_push_is_free_cited_or_the_persons_by_where_it_goes() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         let p = push_call("cd ~/Git/x && LJOS_CITE=surf-ab12 git -C sub push origin main").unwrap();
         assert_eq!(p.dir.as_deref(), Some("sub"));
         assert_eq!(p.args, ["origin", "main"]);
@@ -38636,6 +38639,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_file_tool_is_judged_by_the_path_it_writes() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         let edit = hook_call(
             r##"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/home/u/.local/bin/ljos","content":"#!/bin/sh"}}"##,
         );
@@ -38902,6 +38908,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn the_seat_guards_its_own_law() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         assert!(seat_guard("cp /tmp/shim ~/.local/bin/ljos").is_some());
         assert!(seat_guard("printf x > /home/u/.local/bin/ljos").is_some());
         assert!(seat_guard("cat /tmp/x > ~/.gemini/config/hooks.json").is_some());
@@ -40636,6 +40645,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn a_sentence_naming_a_seat_path_is_data() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         assert!(
             seat_guard(r#"vissue create -p surf "plugins" --body "named in ~/.config/ljos/plugins.toml with a digest""#)
                 .is_none()
@@ -40652,6 +40664,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn the_guard_judges_an_ssh_remote_command_as_a_command() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         assert!(
             seat_guard("ssh h 'tar -xzf a.tgz; ~/.local/bin/ljos --version'").is_none(),
             "running is not writing"
@@ -41228,6 +41243,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// rules and by the seat guard, so depth is not a way past either.
     #[test]
     fn a_line_nested_too_deep_is_refused() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         let rules = vec![Rule {
             pattern: "git push*".into(),
             verdict: "deny".into(),
@@ -41261,6 +41279,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// the same line was allowed there and refused in a real home.
     #[test]
     fn a_path_assignment_does_not_make_a_shallow_command_too_deep() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         let line = "export PATH=\"$HOME/.local/bin:$PATH\" && cd /work/proj && python3 -m pytest test_kebab.py -v";
         assert!(
             !nested_too_deep(line),
@@ -41302,6 +41323,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// that types into a pane, as the rules do.
     #[test]
     fn the_seat_guard_sees_through_every_wrapper() {
+        // The guard stands down when HOME is a temporary directory. Other tests
+        // point it there, so this one waits for that lock.
+        let _g = env_guard();
         for line in [
             "tmux send-keys -t x approve Enter",
             "nice tmux send-keys -t x approve Enter",
