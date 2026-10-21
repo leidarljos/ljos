@@ -33,6 +33,7 @@ pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
 pub mod reap;
+pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
 pub mod subagent;
@@ -3885,7 +3886,7 @@ fn keep_seat_assignment(name: &str) -> String {
 /// `LJOS_SESSION_ID=NAME-shell`: without it each shell hashed its own
 /// process into a new holder, and `ljos finish` in a second shell was
 /// refused as not the assignee.
-fn seat_env_text(name: &str) -> String {
+pub(crate) fn seat_env_text(name: &str) -> String {
     format!(
         "# Source this in the shell that runs the agent's commands.\n\
          # This runner has no MCP client, so the process tree is not its seat.\n\
@@ -4306,41 +4307,6 @@ pub fn shared_holder_note(node: &str, holder: &str, hold: &Hold) -> String {
     )
 }
 
-fn env_step(path: &Path, name: &str, dry: bool) -> Step {
-    let text = seat_env_text(name);
-    let source = format!("source {}", path.display());
-    if std::fs::read_to_string(path).is_ok_and(|have| have == text) {
-        return Step {
-            what: "env".into(),
-            detail: format!("{} is current; {source}", path.display()),
-            ok: true,
-        };
-    }
-    if dry {
-        return Step {
-            what: "env".into(),
-            detail: format!("would write {}; {source}", path.display()),
-            ok: true,
-        };
-    }
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, text));
-    match written {
-        Ok(()) => Step {
-            what: "env".into(),
-            detail: format!("wrote {}; {source}", path.display()),
-            ok: true,
-        },
-        Err(e) => Step {
-            what: "env".into(),
-            detail: format!("{}: {e}", path.display()),
-            ok: false,
-        },
-    }
-}
-
 fn shell_steps(
     file: &Path,
     h: &Harness,
@@ -4356,7 +4322,7 @@ fn shell_steps(
     };
     let mut steps: Vec<Step> = shipped.into_iter().collect();
     steps.push(write_skill(&expand(dir), dry));
-    steps.push(env_step(&env_path_for(file, h), &h.name, dry));
+    steps.push(runner_env::install(&env_path_for(file, h), &h.name, dry));
     steps.push(guard_step(dry, place.map(|place| place.guard_dir)));
     if h.name == "grokbot" {
         steps.push(git_hooks_step(dry, place));
@@ -9952,20 +9918,6 @@ pub fn format_steps(steps: &[Step]) -> String {
         .collect()
 }
 
-/// The doctor's `runner env` row. A file an older ljos wrote is stale,
-/// not missing: the text this ljos writes changed, and `ljos onboard`
-/// rewrites it.
-fn runner_env_state(name: &str, env_path: &Path, ready: bool, exists: bool) -> String {
-    match (ready, exists) {
-        (true, _) => format!("{name}: source {}", env_path.display()),
-        (false, true) => format!(
-            "{name}: {} is stale, an older ljos wrote it; ljos onboard --harness {name}",
-            env_path.display()
-        ),
-        (false, false) => format!("{name}: no ljos env file; ljos onboard --harness {name}"),
-    }
-}
-
 /// The runner rows for `doctor`, one pair per runner the file names.
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
@@ -10015,7 +9967,7 @@ fn harness_rows() -> Vec<Habitat> {
             let ready = written.as_deref() == Some(seat_env_text(&h.name).as_str());
             rows.push(Habitat {
                 name: "runner env",
-                state: runner_env_state(&h.name, &env_path, ready, written.is_some()),
+                state: runner_env::state(&h.name, &env_path, ready, written.is_some()),
                 ok: ready,
             });
         } else {
@@ -35489,6 +35441,7 @@ mod tests {
             .iter()
             .all(|s| s.what != "hook" && !s.what.contains("mcp")));
         assert!(!skills.exists(), "a dry run wrote the skill");
+        assert!(!dir.join("grokbot.env").exists(), "a dry run wrote the env");
 
         let steps =
             super::onboard_in_at(&file, "grokbot", false, Some(&skills), Some(place)).unwrap();
@@ -36891,17 +36844,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ok: false,
         };
         assert_eq!(super::doctor_word(&absent), "no");
-    }
-
-    #[test]
-    fn a_stale_runner_env_is_not_called_missing() {
-        let path = std::path::Path::new("/h/.config/ljos/grokbot.env");
-        assert!(super::runner_env_state("grokbot", path, true, true).contains("source /h/"));
-        let stale = super::runner_env_state("grokbot", path, false, true);
-        assert!(stale.contains("is stale"), "{stale}");
-        assert!(stale.contains("ljos onboard --harness grokbot"), "{stale}");
-        let none = super::runner_env_state("grokbot", path, false, false);
-        assert!(none.contains("no ljos env file"), "{none}");
     }
 
     #[test]
