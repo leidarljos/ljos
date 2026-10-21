@@ -6,7 +6,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The only accepted schema value for record entries.
@@ -155,8 +155,9 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Any entry fails validation or signature verification, or run-key pinning
-/// detects a mismatch.
+/// Any entry fails validation or signature verification, run-key pinning
+/// detects a mismatch, or two unreplaced ballots from one voter share an
+/// hour.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     let mut report = CheckReport {
         entries: entries.len(),
@@ -187,7 +188,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
             }
         }
     }
-    report.questions_with_live_ballots = tally(&ballots).len();
+    report.questions_with_live_ballots = tally(&ballots)?.len();
     Ok(report)
 }
 
@@ -253,34 +254,57 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
     Ok(hex[..16].to_string())
 }
 
-/// Latest ballot per voter and question. A latest `withdrawn` ballot does not
-/// count.
-#[must_use]
-pub fn tally(ballots: &[BallotEntry]) -> BTreeMap<String, BTreeMap<String, usize>> {
-    let mut latest: BTreeMap<(String, String), (i64, usize)> = BTreeMap::new();
-    for (i, ballot) in ballots.iter().enumerate() {
-        let key = (ballot.question.clone(), ballot.voter.clone());
-        let stamp = parse_hour_timestamp(&ballot.cast_at)
-            .map(|t| t.timestamp())
-            .unwrap_or(i64::MIN);
-        let candidate = (stamp, i);
-        match latest.get(&key) {
-            Some(current) if *current >= candidate => {}
-            _ => {
-                latest.insert(key, candidate);
-            }
+/// Latest unreplaced ballot per voter and question.
+///
+/// A ballot named by another entry's `replaces` never counts, whatever
+/// hour it was cast. Of what remains, the latest `cast_at` wins, and a
+/// `withdrawn` stance contributes no vote. Two unreplaced ballots from
+/// one voter in one hour are an error: file order is not a tie break.
+///
+/// # Errors
+///
+/// A `cast_at` is not an hour timestamp, or two unreplaced ballots from
+/// one voter share an hour.
+pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
+    let replaced: BTreeSet<&str> = ballots
+        .iter()
+        .filter_map(|ballot| ballot.replaces.as_deref())
+        .collect();
+    let mut grouped: BTreeMap<(String, String), Vec<(i64, &BallotEntry)>> = BTreeMap::new();
+    for ballot in ballots {
+        if ballot.id.as_deref().is_some_and(|id| replaced.contains(id)) {
+            continue;
         }
+        let stamp = parse_hour_timestamp(&ballot.cast_at)
+            .with_context(|| format!("ballot cast_at `{}`", ballot.cast_at))?
+            .timestamp();
+        grouped
+            .entry((ballot.question.clone(), ballot.voter.clone()))
+            .or_default()
+            .push((stamp, ballot));
     }
     let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for ((question, _), (_, idx)) in latest {
-        let ballot = &ballots[idx];
+    for ((question, voter), group) in grouped {
+        let mut hours: BTreeMap<i64, usize> = BTreeMap::new();
+        for (stamp, _) in &group {
+            *hours.entry(*stamp).or_default() += 1;
+        }
+        if hours.values().any(|count| *count > 1) {
+            bail!("two unreplaced ballots from {voter} on {question} in the same hour");
+        }
+        let Some((_, ballot)) = group.iter().max_by_key(|(stamp, _)| *stamp) else {
+            continue;
+        };
         if ballot.stance.eq_ignore_ascii_case("withdrawn") {
             continue;
         }
-        let by_stance = counts.entry(question).or_default();
-        *by_stance.entry(ballot.stance.clone()).or_default() += 1;
+        *counts
+            .entry(question)
+            .or_default()
+            .entry(ballot.stance.clone())
+            .or_default() += 1;
     }
-    counts
+    Ok(counts)
 }
 
 fn validate_unsigned(unsigned: &UnsignedEntry) -> Result<()> {
@@ -722,10 +746,89 @@ mod tests {
             )
             .expect("signed"),
         );
-        let read = tally(&[a1, a2, b1]);
+        let read = tally(&[a1, a2, b1]).expect("tally");
         let by_stance = read.get("correct-3f9a1c2e").expect("question tally");
         assert_eq!(by_stance.get("accept"), Some(&1));
         assert_eq!(by_stance.get("withdrawn"), None);
+    }
+
+    #[test]
+    fn two_unreplaced_ballots_in_one_hour_are_flagged() {
+        let accept = sign_entry(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            &key(3),
+        )
+        .expect("accept");
+        let reject = sign_entry(
+            ballot_entry("alpha/seat-a", "reject", "2026-10-21T10:00:00Z"),
+            &key(3),
+        )
+        .expect("reject");
+        let err = tally(&[as_ballot(accept), as_ballot(reject)]).expect_err("same hour");
+        assert!(err.to_string().contains("same hour"), "{err}");
+    }
+
+    fn with_replaces(mut entry: UnsignedEntry, id: &str) -> UnsignedEntry {
+        let Entry::Ballot(ballot) = &mut entry.entry else {
+            panic!("ballot");
+        };
+        ballot.replaces = Some(id.to_string());
+        entry
+    }
+
+    #[test]
+    fn a_same_hour_withdrawal_does_not_count_in_either_order() {
+        let cast = sign_entry(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            &key(3),
+        )
+        .expect("cast");
+        let cast_id = as_ballot(cast.clone()).id.clone().expect("id");
+        let withdrawal = sign_entry(
+            with_replaces(
+                ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T10:00:00Z"),
+                &cast_id,
+            ),
+            &key(3),
+        )
+        .expect("withdrawal");
+        let cast_ballot = as_ballot(cast.clone());
+        let withdrawal_ballot = as_ballot(withdrawal.clone());
+        for (name, order) in [
+            (
+                "cast then withdrawal",
+                vec![cast_ballot.clone(), withdrawal_ballot.clone()],
+            ),
+            (
+                "withdrawal then cast",
+                vec![withdrawal_ballot.clone(), cast_ballot.clone()],
+            ),
+        ] {
+            let read = tally(&order).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            let accepts = read
+                .get("correct-3f9a1c2e")
+                .and_then(|stances| stances.get("accept"))
+                .copied();
+            assert_eq!(accepts, None, "{name}: {read:?}");
+        }
+        for (cast_name, withdraw_name) in [("a.json", "b.json"), ("b.json", "a.json")] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(
+                dir.path().join(cast_name),
+                serde_json::to_vec(&cast).expect("json"),
+            )
+            .expect("write cast");
+            std::fs::write(
+                dir.path().join(withdraw_name),
+                serde_json::to_vec(&withdrawal).expect("json"),
+            )
+            .expect("write withdrawal");
+            let report = check_dir(dir.path()).unwrap_or_else(|err| panic!("{cast_name}: {err:#}"));
+            assert_eq!(
+                report.questions_with_live_ballots, 0,
+                "{cast_name} before {withdraw_name}"
+            );
+        }
     }
 
     #[test]
