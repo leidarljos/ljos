@@ -10,7 +10,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
@@ -214,11 +214,19 @@ Every piece of work has an issue before it has a claim.
   member's own lesson goes in with `ljos remember --as NAME "..."` and
   comes back to it first in its next brief; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
-  session, the MCP call's session, or a `*_SESSION_ID` in the environment) and
+  session, the MCP call's session, a `*_SESSION_ID` in the environment, else
+  the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and
   a nonce of that process, and the signature covers both. `ljos consensus`
   refuses to settle when one session authored more than one ballot, when a
   session authored a candidate and also voted, or when every ballot traces to
-  one session: a seat minted inside a session does not multiply its vote. A
+  one session: a seat minted inside a session does not multiply its vote.
+  Each reviewer casts its own ballot from its own run, `ljos vote ISSUE --for X
+  --confidence C --used DEED`, with ljos installed on its machine (`ljos cloud
+  up`) and the tracker synced through the shared tracker repository
+  (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing names the run
+  but the seat, every run of that seat is one session, and `ljos vote` and the
+  tally call it unverified. Persona ballots and Jev ballots are advisory. The
+  push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
   session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a
@@ -250,6 +258,8 @@ Every piece of work has an issue before it has a claim.
   names another parent and `--top` none. A bug in a tool found
   mid-sitting goes to the tool's project: `-p PROJECT` naming another
   project than the held issue's files at its top level, and says so.
+  `ljos file "TITLE" --options A,B` writes `Options: A, B` as the first body
+  line. `ljos options ISSUE A,B` appends that line and refuses fewer than two.
   A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.

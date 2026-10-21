@@ -67,6 +67,17 @@ if cmd == "vote":
     if "--json" in rest:
         print(json.dumps(ballots.get(ident, [])))
         sys.exit(0)
+    if "--withdraw" in rest:
+        agent = os.environ.get("VISSUE_AGENT") or "seat"
+        rows = ballots.get(ident, [])
+        kept = [r for r in rows if r.get("agent") != agent]
+        if len(kept) == len(rows):
+            sys.stderr.write(ident + ": " + agent + " holds no ballot\n")
+            sys.exit(1)
+        ballots[ident] = kept
+        save("ballots.json", ballots)
+        print("withdrawn")
+        sys.exit(0)
     choice = ""
     i = 0
     while i < len(rest):
@@ -102,9 +113,12 @@ elif cmd == "children":
     print(json.dumps(load("children.json", {{}}).get(ident, [])))
 elif cmd == "create":
     parent = None
+    body = ""
     title = args[-1] if args else ""
     if "--parent" in args:
         parent = args[args.index("--parent") + 1]
+    if "--body" in args:
+        body = args[args.index("--body") + 1]
     if title.startswith("design: mine"):
         ident = "demo-a"
     elif title.startswith("design:"):
@@ -112,13 +126,32 @@ elif cmd == "create":
     else:
         ident = "demo-x001"
     issues = load("issues.json", {{}})
-    issues[ident] = {{"id": ident, "title": title, "body": ""}}
+    row = {{"id": ident, "title": title, "body": body}}
+    if parent:
+        row["parent"] = parent
+    issues[ident] = row
     save("issues.json", issues)
     if parent:
         kids = load("children.json", {{}})
         kids.setdefault(parent, []).append({{"id": ident}})
         save("children.json", kids)
     print(ident)
+elif cmd == "append":
+    ident = args[1]
+    text = " ".join(args[2:])
+    issues = load("issues.json", {{}})
+    meta = dict(issues.get(ident, {{"id": ident, "title": ident, "body": ""}}))
+    body = meta.get("body") or ""
+    if body and not body.endswith("\n"):
+        body += "\n"
+    body += text
+    if text and not body.endswith("\n"):
+        body += "\n"
+    meta["body"] = body
+    meta.setdefault("id", ident)
+    issues[ident] = meta
+    save("issues.json", issues)
+    print(ident + ": appended")
 elif cmd == "recall":
     sys.exit(0)
 elif cmd == "consensus":
@@ -164,6 +197,15 @@ printf '%s' "$2" > "$d/$id.prompt"
     }
 
     fn ljos(&self, seat: &str, session: &str, args: &[&str]) -> Output {
+        if session.is_empty() {
+            self.ljos_env(seat, &[], args)
+        } else {
+            self.ljos_env(seat, &[("SEAT_SESSION_ID", session)], args)
+        }
+    }
+
+    /// `ljos` as `seat`, with only the harness variables in `env`.
+    fn ljos_env(&self, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
         let path = format!(
             "{}:{}",
             self.bin.display(),
@@ -185,10 +227,8 @@ printf '%s' "$2" > "$d/$id.prompt"
             .env("PACKSET_URL", "off")
             .env("LJOS_TRACKER_GIT", "off")
             .env("LJOS_SEAT", seat)
-            .env("VISSUE_AGENT", seat);
-        if !session.is_empty() {
-            cmd.env("SEAT_SESSION_ID", session);
-        }
+            .env("VISSUE_AGENT", seat)
+            .envs(env.iter().copied());
         cmd.output().unwrap()
     }
 }
@@ -298,12 +338,29 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
     let issue = "travel-rx1d";
     // The drawer as the live tracker held it: five personas, then the same
     // five again, one session on every ballot-sig. Newest note first.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
     let mut notes = Vec::new();
     for persona in personas.iter().rev() {
-        notes.push(serde_json::json!({"note": format!("ballot-sig: {persona} bus ab cd {session} n-{persona}-2")}));
+        let note = ljos_cli::ballot_sig::sign_bound(
+            &key,
+            issue,
+            persona,
+            "bus",
+            session,
+            &format!("n-{persona}-2"),
+        );
+        notes.push(serde_json::json!({ "note": note }));
     }
     for persona in personas.iter().rev() {
-        notes.push(serde_json::json!({"note": format!("ballot-sig: {persona} rail ab cd {session} n-{persona}-1")}));
+        let note = ljos_cli::ballot_sig::sign_bound(
+            &key,
+            issue,
+            persona,
+            "rail",
+            session,
+            &format!("n-{persona}-1"),
+        );
+        notes.push(serde_json::json!({ "note": note }));
     }
     let mut ballots = serde_json::Map::new();
     ballots.insert(
@@ -674,4 +731,360 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         prompts.push(id);
     }
     assert_eq!(prompts.len(), 3, "{said}");
+}
+
+#[test]
+fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
+    let world = World::new();
+    std::fs::write(
+        world.state.join("issues.json"),
+        r#"{"parent-1":{"id":"parent-1","title":"parent","body":""},"child-a":{"id":"child-a","title":"child a","body":"","parent":"parent-1"},"child-b":{"id":"child-b","title":"child b","body":"","parent":"parent-1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("children.json"),
+        r#"{"parent-1":[{"id":"child-a"},{"id":"child-b"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("notes.json"),
+        r#"{"child-a":[{"note":"candidate-sig: child-a alice sess-author-0001 n-author - ab cd"}]}"#,
+    )
+    .unwrap();
+    let author = world.ljos(
+        "alice",
+        "sess-author-0001",
+        &["vote", "child-b", "--for", "ship", "--used", "none"],
+    );
+    let said = text(&author);
+    assert!(!author.status.success(), "{said}");
+    assert!(
+        said.contains("authored candidate") && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    let first = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "ship", "--used", "none"],
+    );
+    assert!(first.status.success(), "{}", text(&first));
+    let second = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-b", "--for", "hold", "--used", "none"],
+    );
+    assert!(second.status.success(), "{}", text(&second));
+    let tally = world.ljos("saddle", "sess-reader-0001", &["vote", "child-b"]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("saddle  hold"), "{said}");
+}
+
+#[test]
+fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
+    let world = World::new();
+    let issue = "demo-wd";
+    let session = "sess-review-1";
+    let cast = world.ljos(
+        "clerk",
+        session,
+        &[
+            "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
+        ],
+    );
+    assert!(cast.status.success(), "{}", text(&cast));
+    let before = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&before);
+    assert!(before.status.success(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("1 ballot counts"),
+        "{said}"
+    );
+    let withdrawn = world.ljos(
+        "clerk",
+        session,
+        &["vote", issue, "--withdraw", "--as", "reviewer"],
+    );
+    let said = text(&withdrawn);
+    assert!(
+        withdrawn.status.success() || said.contains("forecast"),
+        "{said}"
+    );
+    assert!(!said.contains("unexpected vissue"), "{said}");
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
+    assert!(notes.contains("ballot-withdrawn: reviewer"), "{notes}");
+    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("0 ballots count"), "{said}");
+    assert!(!stdout.contains("ship"), "{said}");
+    let again = world.ljos(
+        "clerk",
+        session,
+        &[
+            "vote", issue, "--for", "hold", "--used", "none", "--as", "reviewer",
+        ],
+    );
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("withdrawn")
+            && said.contains("first ballot stands")
+            && said.contains("Nothing was cast"),
+        "{said}"
+    );
+}
+
+#[test]
+fn file_options_let_a_jev_ballot_read_them() {
+    let world = World::new();
+    let filed = world.ljos(
+        "clerk",
+        "sess-file-0001",
+        &[
+            "file",
+            "Which cipher",
+            "-p",
+            "demo",
+            "-t",
+            "decision",
+            "--options",
+            "age,gpg",
+        ],
+    );
+    let said = text(&filed);
+    assert!(filed.status.success(), "{said}");
+    let id = String::from_utf8_lossy(&filed.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(id, "demo-x001", "{said}");
+    let issues: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("issues.json")).unwrap())
+            .unwrap();
+    let body = issues[&id]["body"].as_str().unwrap_or("");
+    assert!(body.starts_with("Options: age, gpg"), "{body}");
+    let jev = world.ljos(
+        "clerk",
+        "sess-jev-0001",
+        &["vote", &id, "--as", "reviewer", "--jev"],
+    );
+    let said = text(&jev);
+    assert!(!said.contains("has no `Options:"), "{said}");
+}
+
+#[test]
+fn options_appends_a_line_an_existing_issue_can_vote() {
+    let world = World::new();
+    let filed = world.ljos(
+        "clerk",
+        "sess-file-0001",
+        &["file", "Which cipher", "-p", "demo", "-t", "decision"],
+    );
+    let said = text(&filed);
+    assert!(filed.status.success(), "{said}");
+    let id = String::from_utf8_lossy(&filed.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let missing = world.ljos(
+        "clerk",
+        "sess-jev-0001",
+        &["vote", &id, "--as", "reviewer", "--jev"],
+    );
+    assert!(
+        text(&missing).contains("has no `Options:"),
+        "{}",
+        text(&missing)
+    );
+    let one = world.ljos("clerk", "sess-file-0001", &["options", &id, "age"]);
+    let said = text(&one);
+    assert!(!one.status.success(), "{said}");
+    assert!(said.contains("two or more"), "{said}");
+    let many = world.ljos("clerk", "sess-file-0001", &["options", &id, "age,gpg"]);
+    assert!(many.status.success(), "{}", text(&many));
+    let issues: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("issues.json")).unwrap())
+            .unwrap();
+    let body = issues[&id]["body"].as_str().unwrap_or("");
+    assert!(body.contains("Options: age, gpg"), "{body}");
+    let jev = world.ljos(
+        "clerk",
+        "sess-jev-0002",
+        &["vote", &id, "--as", "reviewer", "--jev"],
+    );
+    assert!(!text(&jev).contains("has no `Options:"), "{}", text(&jev));
+}
+
+#[test]
+fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
+    // One seat on every run, as a coordinator's seat is: only the harness
+    // id tells the runs apart.
+    type Env = &'static [(&'static str, &'static str)];
+    let world = World::new();
+    let issue = "demo-runs";
+    let cloud: Env = &[("CURSOR_AGENT_ID", "bc-0a1b2c3d-run-a")];
+    let runs: [(&str, Env, &str); 4] = [
+        ("reviewer-a", cloud, "bc-0a1b2c3d-run-a"),
+        (
+            "reviewer-b",
+            &[
+                ("CLAUDE_CODE_SESSION_ID", "5f0c8e2a-run-b"),
+                ("CLAUDE_CODE_BRIDGE_SESSION_ID", "session_bridge-b"),
+            ],
+            "5f0c8e2a-run-b",
+        ),
+        (
+            "reviewer-c",
+            &[
+                ("OPENCODE_SESSION_ID", "ses_opencode-run-c"),
+                ("CURSOR_CONVERSATION_ID", "conv-outer-0001"),
+            ],
+            "ses_opencode-run-c",
+        ),
+        (
+            "reviewer-d",
+            &[
+                ("GITHUB_ACTIONS", "true"),
+                ("GITHUB_RUN_ID", "18123456789"),
+                ("CURSOR_AGENT_ID", "bc-not-the-run"),
+            ],
+            "18123456789",
+        ),
+    ];
+    for (name, env, session) in runs {
+        let cast = world.ljos_env(
+            "ljosbot",
+            env,
+            &[
+                "vote", issue, "--for", "ship", "--used", "none", "--as", name,
+            ],
+        );
+        let said = text(&cast);
+        assert!(cast.status.success(), "{said}");
+        assert!(said.contains(&format!("session {session}")), "{said}");
+        assert!(!said.contains("unverified"), "{said}");
+    }
+    for (name, choice) in [("reviewer-e", "ship"), ("reviewer-a", "hold")] {
+        let again = world.ljos_env(
+            "ljosbot",
+            cloud,
+            &[
+                "vote", issue, "--for", choice, "--used", "none", "--as", name,
+            ],
+        );
+        let said = text(&again);
+        assert!(!again.status.success(), "{said}");
+        assert!(
+            said.contains("already cast") && said.contains("Nothing was cast"),
+            "{said}"
+        );
+    }
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("4 ballots count"), "{said}");
+    for name in ["reviewer-a", "reviewer-b", "reviewer-c", "reviewer-d"] {
+        assert!(stdout.contains(&format!("{name}  ship")), "{said}");
+    }
+    assert!(!stdout.contains("reviewer-e"), "{said}");
+    assert!(!stdout.contains("ignored"), "{said}");
+}
+
+#[test]
+fn a_seat_no_harness_names_is_an_unverified_session() {
+    // Two reviewers recorded from one coordinator that no harness id and
+    // no run id names: the seat is the session, and every output says so.
+    let world = World::new();
+    let issue = "demo-seat";
+    let unverified = ljos_cli::ballot_sig::unverified_sentence("ljosbot");
+    let first = world.ljos_env(
+        "ljosbot",
+        &[],
+        &[
+            "vote",
+            issue,
+            "--for",
+            "ship",
+            "--used",
+            "none",
+            "--as",
+            "reviewer-a",
+        ],
+    );
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    assert!(
+        said.contains("session ljosbot") && said.contains(&unverified),
+        "{said}"
+    );
+    let second = world.ljos_env(
+        "ljosbot",
+        &[],
+        &[
+            "vote",
+            issue,
+            "--for",
+            "hold",
+            "--used",
+            "none",
+            "--as",
+            "reviewer-b",
+        ],
+    );
+    let said = text(&second);
+    assert!(!second.status.success(), "{said}");
+    assert!(
+        said.contains("already cast")
+            && said.contains(&unverified)
+            && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    // A ballot that went around the cast gate, as `vissue vote` and a later
+    // signature on the same seat leave it.
+    let ballots_path = world.state.join("ballots.json");
+    let mut ballots: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ballots_path).unwrap()).unwrap();
+    ballots[issue]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"agent": "reviewer-b", "choice": "hold"}));
+    std::fs::write(&ballots_path, ballots.to_string()).unwrap();
+    let notes_path = world.state.join("notes.json");
+    let mut notes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&notes_path).unwrap()).unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+    let sig = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        issue,
+        "reviewer-b",
+        "hold",
+        "ljosbot",
+        ljos_cli::ballot_sig::SEAT_NONCE,
+    );
+    notes[issue]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!({ "note": sig }));
+    std::fs::write(&notes_path, notes.to_string()).unwrap();
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(
+        stdout.contains("reviewer-a  ship  (unverified session)"),
+        "{said}"
+    );
+    assert!(
+        stdout.contains("reviewer-b  ljosbot  (same session, unverified)"),
+        "{said}"
+    );
+    assert!(stdout.contains(&unverified), "{said}");
 }

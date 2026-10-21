@@ -55,6 +55,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "ljos_start",
     "ljos_guard_check",
     "ljos_file",
+    "ljos_options",
     "ljos_note",
     "ljos_recall",
     "ljos_sitting",
@@ -548,6 +549,9 @@ pub struct FileArgs {
     pub priority: Option<String>,
     /// Body prose. A decision's body names `Options: A, B`.
     pub body: Option<String>,
+    /// Two or more options. Written as the first body line `Options: A, B`.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// A dated progress note on an issue.
@@ -558,6 +562,15 @@ pub struct NoteArgs {
     pub issue: String,
     /// The note.
     pub text: String,
+}
+
+/// Options appended to an issue's body.
+#[derive(Deserialize, JsonSchema)]
+pub struct OptionsArgs {
+    /// The issue id.
+    pub issue: String,
+    /// Two or more options. A comma inside one string splits it.
+    pub options: Vec<String>,
 }
 
 /// A tracker node.
@@ -687,7 +700,7 @@ pub struct VoteArgs {
     #[serde(default)]
     pub jev: bool,
     /// Take back the ballot and its forecast, as the seat or `as` a persona.
-    /// The issue's logbook keeps what the ballot was.
+    /// The logbook gains a ballot-withdrawn note, and the tally leaves it out.
     #[serde(default)]
     pub withdraw: bool,
 }
@@ -784,6 +797,9 @@ pub struct StartArgs {
     pub repo: Option<String>,
     /// What this sitting does, in one sentence.
     pub task: String,
+    /// Two or more options, written on the filed or claimed issue as `Options: A, B`.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// A shell command to judge before it runs.
@@ -1627,8 +1643,32 @@ impl LjosServer {
                 argv.push(v);
             }
         }
+        if !args.options.is_empty() {
+            ljos_cli::options_line(&args.options).map_err(refused)?;
+            argv.push("--options".into());
+            argv.push(args.options.join(","));
+        }
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         habitat("ljos", &refs)
+    }
+
+    #[tool(
+        description = "Append an Options line to an issue. Pass two or more options; they are written as `Options: A, B` on the body. Fewer than two is refused. A Jev ballot reads that line.",
+        annotations(
+            title = "Set options",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_options(
+        &self,
+        Parameters(args): Parameters<OptionsArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        ljos_cli::options_line(&args.options).map_err(refused)?;
+        let joined = args.options.join(",");
+        habitat("ljos", &["options", &args.issue, &joined])
     }
 
     #[tool(
@@ -1768,6 +1808,10 @@ impl LjosServer {
                 )?;
                 let who = identity_or_seat(args.as_persona.as_deref())
                     .unwrap_or_else(|| "seat".to_string());
+                match ljos_cli::ballot_sig::note_withdrawn(&args.issue, &who) {
+                    Ok(_) => {}
+                    Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
+                }
                 let n = ljos_cli::withdraw_prediction(&args.issue, &who).map_err(refused)?;
                 said.0
                     .text
@@ -1828,9 +1872,26 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<StartArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text =
+        if !args.options.is_empty() {
+            ljos_cli::options_line(&args.options).map_err(refused)?;
+        }
+        let mut text =
             ljos_cli::bookkeep::start_work(args.issue.as_deref(), args.repo.as_deref(), &args.task)
                 .map_err(|e| refused(anyhow::anyhow!(e)))?;
+        if !args.options.is_empty() {
+            if let Some(id) = text
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("claimed "))
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                let id = id.to_string();
+                let extra = ljos_cli::append_issue_options(&id, &args.options)
+                    .map_err(|e| refused(anyhow::anyhow!("options on {id}: {e:#}")))?;
+                text.push_str(&extra);
+            }
+        }
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -4002,7 +4063,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            49,
+            50,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -4050,6 +4111,7 @@ mod tests {
                 "ljos_island",
                 "ljos_learn",
                 "ljos_note",
+                "ljos_options",
                 "ljos_persona",
                 "ljos_playbook",
                 "ljos_predict",

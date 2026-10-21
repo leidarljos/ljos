@@ -79,6 +79,12 @@
 | =protocol= | none | print the sitting protocol |
 | =onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory; a shell runner (=shell = true=, =grokbot=, or =shell=) writes the skill and an env file and registers no server and no hook |
 
+=ljos file "TITLE" --options A,B= writes =Options: A, B= as the first body line.
+=ljos options ISSUE A,B= appends that line and refuses fewer than two.
+Withdrawing a ballot writes =ballot-withdrawn: VOTER HARNESS NONCE=.
+The tally leaves that ballot out, and so does the push gate.
+A later cast from that session says the ballot was withdrawn.
+
 =send SEAT TEXT= writes to one seat. A seat the pack has never heard
 from is refused, with the seats it knows, since mail waits under the name
 it was sent to; =--new-seat= writes to one that has not started yet.
@@ -216,7 +222,7 @@ when to call it.
 
 By default the server lists the core set, in this order: =ljos_rule=,
 =ljos_request_approval=, =ljos_prefer=, =ljos_remember=, =ljos_search=,
-=ljos_start=, =ljos_guard_check=, =ljos_file=, =ljos_note=, =ljos_recall=,
+=ljos_start=, =ljos_guard_check=, =ljos_file=, =ljos_options=, =ljos_note=, =ljos_recall=,
 =ljos_sitting=, =ljos_finish=, =ljos_claim=, =ljos_release=, =ljos_send=,
 =ljos_inbox=, =ljos_reply=, =ljos_vote=, =ljos_consensus= and =ljos_doctor=.
 =LJOS_MCP_TOOLS=all= lists every tool above: the core set first, then the rest

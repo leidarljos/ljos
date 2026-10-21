@@ -23,6 +23,8 @@ use std::path::PathBuf;
 
 /// The note prefix a signature rides under.
 pub const SIG_NOTE: &str = "ballot-sig: ";
+/// The note prefix a withdrawn ballot rides under.
+pub const WITHDRAWN_NOTE: &str = "ballot-withdrawn: ";
 /// The pin file at the tracker root.
 pub const PIN_FILE: &str = ".ljos-seat-keys";
 
@@ -66,6 +68,14 @@ pub struct SigNote {
     pub nonce: Option<String>,
 }
 
+impl SigNote {
+    /// Whether only the seat named the session this ballot is bound to.
+    #[must_use]
+    pub fn seat_only(&self) -> bool {
+        self.nonce.as_deref() == Some(SEAT_NONCE)
+    }
+}
+
 /// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
 /// `HARNESS NONCE` when the ballot is bound to a session. The choice may
 /// hold spaces (`beside binary`): the key and signature are found by their
@@ -107,8 +117,9 @@ pub fn parse_note(note: &str) -> Option<SigNote> {
 
 /// The session a ballot note binds, as [`crate::panel_gate::session_key`]
 /// reads it. A note that does not parse but has six or more fields still
-/// names its session in the last two, so the cast gate holds whatever the
-/// choice text is. `None` when the note is not a ballot signature.
+/// names its session in the last two. The cast gate does not use that
+/// fallback: it requires [`parse_note`] and [`verifies`] on the issue's own
+/// logbook. `None` when the note is not a ballot signature.
 #[must_use]
 pub fn note_session(note: &str) -> Option<(String, String)> {
     if let Some(sig) = parse_note(note) {
@@ -125,6 +136,41 @@ pub fn note_session(note: &str) -> Option<(String, String)> {
     }
     let tok = |i: usize| rest[at[i].0..at[i].1].to_string();
     Some((tok(n - 2), tok(n - 1)))
+}
+
+/// A withdrawn ballot: `ballot-withdrawn: VOTER HARNESS NONCE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawnNote {
+    pub voter: String,
+    pub harness: String,
+    pub nonce: String,
+}
+
+/// One token per field, so the note stays three words.
+#[must_use]
+pub fn withdrawn_line(voter: &str, harness: &str, nonce: &str) -> String {
+    format!(
+        "{WITHDRAWN_NOTE}{} {} {}",
+        field(voter),
+        field(harness),
+        field(nonce)
+    )
+}
+
+/// `ballot-withdrawn: VOTER HARNESS NONCE`, or `None` when the note is not
+/// that shape.
+#[must_use]
+pub fn parse_withdrawn(note: &str) -> Option<WithdrawnNote> {
+    let rest = note.trim().strip_prefix(WITHDRAWN_NOTE)?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [voter, harness, nonce] = parts.as_slice() else {
+        return None;
+    };
+    Some(WithdrawnNote {
+        voter: (*voter).to_string(),
+        harness: (*harness).to_string(),
+        nonce: (*nonce).to_string(),
+    })
 }
 
 /// Byte ranges of the whitespace-separated fields of `text`.
@@ -389,12 +435,35 @@ pub fn field(raw: &str) -> String {
 
 /// The harness session, and a nonce that is not a process id. The session
 /// comes from the MCP connection, the hook, or the environment, then from
-/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce stays `-`: one holder is one
-/// session across processes.
+/// `VISSUE_AGENT` or `LJOS_SEAT`. The nonce is `-`, or [`SEAT_NONCE`] when
+/// the seat stands in for the session: one holder is one session across
+/// processes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {
     pub harness: String,
     pub nonce: String,
+}
+
+/// The nonce of a session only the seat names: no harness session and no
+/// run id was found. [`crate::panel_gate::session_key`] reads the harness
+/// alone when one is set, so the key is still the seat.
+pub const SEAT_NONCE: &str = "seat";
+
+impl SessionIdentity {
+    /// Whether only the seat names this session.
+    #[must_use]
+    pub fn seat_only(&self) -> bool {
+        self.nonce == SEAT_NONCE
+    }
+}
+
+/// What a session only the seat names means, where a ballot is cast or
+/// counted.
+#[must_use]
+pub fn unverified_sentence(seat: &str) -> String {
+    format!(
+        "unverified session: nothing named the run but seat {seat}, so every run of that seat is one session"
+    )
 }
 
 tokio::task_local! {
@@ -476,7 +545,8 @@ pub fn connection_session() -> Option<String> {
 }
 
 /// The harness session id: the MCP connection, then the MCP call, then the
-/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread id.
+/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread
+/// id, then the run ([`run_session`]).
 /// The connection pin is the process, not the `seat` argument.
 #[must_use]
 pub fn harness_session() -> String {
@@ -500,6 +570,11 @@ pub fn harness_session() -> String {
         "GROK_SESSION_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",
+        // Claude Code also stamps a remote-control id that comes and goes,
+        // and opencode may run under another runner's id. Each names its
+        // own session here, so the ballot binds the id its hook reports.
+        "CLAUDE_CODE_SESSION_ID",
+        "OPENCODE_SESSION_ID",
     ];
     for key in PREFER {
         if let Some(s) = env_token(key) {
@@ -510,7 +585,23 @@ pub fn harness_session() -> String {
     }
     crate::runner_session_id()
         .map(|s| field(&s))
+        .or_else(run_session)
         .unwrap_or_default()
+}
+
+/// The run this process belongs to, when no conversation id was stamped:
+/// a GitHub Actions run, else a cloud agent. Every process of one run is
+/// one session, as `ljos cloud up` gives the run one seat.
+fn run_session() -> Option<String> {
+    let actions = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && !matches!(v, "0" | "false")
+    });
+    let ci: &[&str] = if actions { &["GITHUB_RUN_ID"] } else { &[] };
+    ci.iter()
+        .chain(&["CURSOR_AGENT_ID", "CLOUD_AGENT_ID"])
+        .filter_map(|key| env_token(key))
+        .find(|s| s.len() >= 8)
 }
 
 fn random_hex(n: usize) -> String {
@@ -552,16 +643,21 @@ fn named_session_actor(key: &str) -> Option<String> {
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
-    let harness = if !harness.is_empty() {
-        harness
-    } else {
-        named_session_actor("VISSUE_AGENT")
-            .or_else(|| named_session_actor("LJOS_SEAT"))
-            .unwrap_or_else(|| "-".into())
-    };
-    SessionIdentity {
-        harness,
-        nonce: "-".into(),
+    if !harness.is_empty() {
+        return SessionIdentity {
+            harness,
+            nonce: "-".into(),
+        };
+    }
+    match named_session_actor("VISSUE_AGENT").or_else(|| named_session_actor("LJOS_SEAT")) {
+        Some(seat) => SessionIdentity {
+            harness: seat,
+            nonce: SEAT_NONCE.into(),
+        },
+        None => SessionIdentity {
+            harness: "-".into(),
+            nonce: "-".into(),
+        },
     }
 }
 
@@ -631,10 +727,14 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
     } else {
         id.harness.clone()
     };
-    Ok(format!(
+    let mut said = format!(
         "ballot signed by {voter} with key {}… session {session}\n",
         &mine[..12.min(mine.len())]
-    ))
+    );
+    if id.seat_only() {
+        said.push_str(&format!("{}\n", unverified_sentence(&id.harness)));
+    }
+    Ok(said)
 }
 
 enum Resign {
@@ -709,6 +809,19 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
         return Ok(String::new());
     };
     sign_ballot(issue, &voter, &choice)
+}
+
+/// Leave `ballot-withdrawn: VOTER HARNESS NONCE` on `issue` for this session.
+///
+/// # Errors
+///
+/// The tracker did not take the note.
+pub fn note_withdrawn(issue: &str, voter: &str) -> Result<String> {
+    let id = identity();
+    let note = withdrawn_line(voter, &id.harness, &id.nonce);
+    crate::run_captured("vissue", &["note", issue, &note])
+        .with_context(|| format!("ballot withdrawn; the note on {issue} was not written"))?;
+    Ok(note)
 }
 
 /// The note prefix a design candidate's signature rides under.
@@ -1055,6 +1168,18 @@ mod tests {
         );
         assert_eq!(note_session("ballot-sig: seat-a ship ab"), None);
         assert_eq!(note_session("finding: seat-a: nit: name the unit"), None);
+    }
+
+    #[test]
+    fn a_withdrawn_note_is_three_fields() {
+        let line = withdrawn_line("seat a", "sess-1", "-");
+        assert_eq!(line, "ballot-withdrawn: seat_a sess-1 -");
+        let parsed = parse_withdrawn(&line).unwrap();
+        assert_eq!(parsed.voter, "seat_a");
+        assert_eq!(parsed.harness, "sess-1");
+        assert_eq!(parsed.nonce, "-");
+        assert!(parse_withdrawn("ballot-withdrawn: only-one").is_none());
+        assert!(parse_withdrawn("ballot-sig: seat-a ship").is_none());
     }
 
     #[test]
