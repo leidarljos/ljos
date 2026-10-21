@@ -1117,6 +1117,10 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
         said.contains("already cast") && said.contains(&format!("({parent}:agent-a1)")),
         "{said}"
     );
+    assert!(
+        said.contains("Each reviewer votes from its own subagent or run"),
+        "{said}"
+    );
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");

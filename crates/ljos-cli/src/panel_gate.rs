@@ -21,6 +21,10 @@ use crate::ballot_sig;
 /// `TIME HARNESS NONCE ISSUE` per recall.
 pub const READS_FILE: &str = ".ljos-reads";
 
+/// What a refused ballot or settle tells the agent to do instead, so a
+/// coordinator does not fall back to reading its reviewers' verdicts.
+pub const OWN_BALLOT: &str = "Each reviewer votes from its own subagent or run: start one per reviewer and have each cast its own ballot, rather than reporting a verdict in prose";
+
 /// How a ballot traces to a session. An empty harness and nonce is a
 /// legacy ballot from before binding, and the gate leaves those alone
 /// when every ballot is unbound.
@@ -115,7 +119,7 @@ pub fn refusal(
         return None;
     }
     Some(format!(
-        "refuses to settle {issue}: {}. Seats minted inside a session do not multiply its vote",
+        "refuses to settle {issue}: {}. Seats minted inside a session do not multiply its vote. {OWN_BALLOT}",
         reasons.join("; ")
     ))
 }
@@ -332,11 +336,11 @@ pub fn session_cast_refusal(
         };
         if cast_was_withdrawn(own, &sig.voter, key) {
             return Some(format!(
-                "this session already cast a ballot on {issue} ({session}), and that ballot was withdrawn. The first ballot stands. A seat argument does not make another voice. Nothing was cast"
+                "this session already cast a ballot on {issue} ({session}), and that ballot was withdrawn. The first ballot stands. A seat argument does not make another voice. Nothing was cast. {OWN_BALLOT}"
             ));
         }
         return Some(format!(
-            "this session already cast a ballot on {issue} ({session}). A seat argument does not make another voice. Nothing was cast"
+            "this session already cast a ballot on {issue} ({session}). A seat argument does not make another voice. Nothing was cast. {OWN_BALLOT}"
         ));
     }
     for note in own.iter().chain(family) {
@@ -346,7 +350,7 @@ pub fn session_cast_refusal(
         let other = session_key(&candidate.harness, &candidate.nonce);
         if other == key {
             return Some(format!(
-                "this session authored candidate {} and its vote on {issue} is refused. A seat argument does not make another voice. Nothing was cast",
+                "this session authored candidate {} and its vote on {issue} is refused. A seat argument does not make another voice. Nothing was cast. {OWN_BALLOT}",
                 candidate.issue
             ));
         }
@@ -409,7 +413,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         bail!(
-            "this session already cast a ballot on {issue} ({key}). A seat argument does not make another voice. Nothing was cast"
+            "this session already cast a ballot on {issue} ({key}). A seat argument does not make another voice. Nothing was cast. {OWN_BALLOT}"
         );
     }
     drop(held);
@@ -1217,9 +1221,12 @@ mod tests {
         let msg = refusal("demo-ind1", &ballots, &[]).unwrap();
         assert_eq!(
             msg,
-            "refuses to settle demo-ind1: one session authored more than one ballot: \
-             sess-shared-0001 cast 3 (alice, bob, carol); all ballots trace to one session \
-             (sess-shared-0001). Seats minted inside a session do not multiply its vote"
+            format!(
+                "refuses to settle demo-ind1: one session authored more than one ballot: \
+                 sess-shared-0001 cast 3 (alice, bob, carol); all ballots trace to one session \
+                 (sess-shared-0001). Seats minted inside a session do not multiply its vote. \
+                 {OWN_BALLOT}"
+            )
         );
     }
 
@@ -1248,8 +1255,11 @@ mod tests {
         let msg = refusal("demo-vote", &ballots, &candidates).unwrap();
         assert_eq!(
             msg,
-            "refuses to settle demo-vote: session sess-alice-0001 authored candidate demo-d001 \
-             and voted on demo-vote. Seats minted inside a session do not multiply its vote"
+            format!(
+                "refuses to settle demo-vote: session sess-alice-0001 authored candidate demo-d001 \
+                 and voted on demo-vote. Seats minted inside a session do not multiply its vote. \
+                 {OWN_BALLOT}"
+            )
         );
     }
 
