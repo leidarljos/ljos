@@ -4,6 +4,7 @@
 //! write on the announced connection keeps that seat. A name the call
 //! made up is still refused on a writer, in one short line.
 
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
@@ -22,20 +23,29 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
     .unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let server = root.path().join("server");
-    std::fs::write(
-        &server,
-        format!(
-            "#!/bin/sh\nexec env -i PATH=/usr/bin:/bin HOME={home} \
-             XDG_CONFIG_HOME={home}/config XDG_RUNTIME_DIR={home} \
-             XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
-             VISSUE_ROOT={tracker} ISSUE_ROOT={tracker} VISSUE_NO_ROUTE=1 \
-             PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all {binary}\n",
-            home = quote(root.path().to_str().unwrap()),
-            tracker = quote(tracker.to_str().unwrap()),
-            binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),
-        ),
+    let mut server_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&server)
+        .unwrap();
+    write!(
+        server_file,
+        "#!/bin/sh\nexec env -i PATH=/usr/bin:/bin HOME={home} \
+         XDG_CONFIG_HOME={home}/config XDG_RUNTIME_DIR={home} \
+         XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
+         VISSUE_ROOT={tracker} ISSUE_ROOT={tracker} VISSUE_NO_ROUTE=1 \
+         PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all {binary}\n",
+        home = quote(root.path().to_str().unwrap()),
+        tracker = quote(tracker.to_str().unwrap()),
+        binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),
     )
     .unwrap();
+    server_file.sync_all().unwrap();
+    drop(server_file);
+    if let Ok(dir) = std::fs::File::open(root.path()) {
+        let _ = dir.sync_all();
+    }
     std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
     let call = |name: &str, arguments: serde_json::Value| {
         ljos_cli::mcp_forward(
