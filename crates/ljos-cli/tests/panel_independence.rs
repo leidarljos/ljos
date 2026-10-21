@@ -197,6 +197,15 @@ printf '%s' "$2" > "$d/$id.prompt"
     }
 
     fn ljos(&self, seat: &str, session: &str, args: &[&str]) -> Output {
+        if session.is_empty() {
+            self.ljos_env(seat, &[], args)
+        } else {
+            self.ljos_env(seat, &[("SEAT_SESSION_ID", session)], args)
+        }
+    }
+
+    /// `ljos` as `seat`, with only the harness variables in `env`.
+    fn ljos_env(&self, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
         let path = format!(
             "{}:{}",
             self.bin.display(),
@@ -218,10 +227,8 @@ printf '%s' "$2" > "$d/$id.prompt"
             .env("PACKSET_URL", "off")
             .env("LJOS_TRACKER_GIT", "off")
             .env("LJOS_SEAT", seat)
-            .env("VISSUE_AGENT", seat);
-        if !session.is_empty() {
-            cmd.env("SEAT_SESSION_ID", session);
-        }
+            .env("VISSUE_AGENT", seat)
+            .envs(env.iter().copied());
         cmd.output().unwrap()
     }
 }
@@ -912,4 +919,80 @@ fn options_appends_a_line_an_existing_issue_can_vote() {
         &["vote", &id, "--as", "reviewer", "--jev"],
     );
     assert!(!text(&jev).contains("has no `Options:"), "{}", text(&jev));
+}
+
+#[test]
+fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
+    // One seat on every run, as a coordinator's seat is: only the harness
+    // id tells the runs apart.
+    type Env = &'static [(&'static str, &'static str)];
+    let world = World::new();
+    let issue = "demo-runs";
+    let cloud: Env = &[("CURSOR_AGENT_ID", "bc-0a1b2c3d-run-a")];
+    let runs: [(&str, Env, &str); 4] = [
+        ("reviewer-a", cloud, "bc-0a1b2c3d-run-a"),
+        (
+            "reviewer-b",
+            &[
+                ("CLAUDE_CODE_SESSION_ID", "5f0c8e2a-run-b"),
+                ("CLAUDE_CODE_BRIDGE_SESSION_ID", "session_bridge-b"),
+            ],
+            "5f0c8e2a-run-b",
+        ),
+        (
+            "reviewer-c",
+            &[
+                ("OPENCODE_SESSION_ID", "ses_opencode-run-c"),
+                ("CURSOR_CONVERSATION_ID", "conv-outer-0001"),
+            ],
+            "ses_opencode-run-c",
+        ),
+        (
+            "reviewer-d",
+            &[
+                ("GITHUB_ACTIONS", "true"),
+                ("GITHUB_RUN_ID", "18123456789"),
+                ("CURSOR_AGENT_ID", "bc-not-the-run"),
+            ],
+            "18123456789",
+        ),
+    ];
+    for (name, env, session) in runs {
+        let cast = world.ljos_env(
+            "ljosbot",
+            env,
+            &[
+                "vote", issue, "--for", "ship", "--used", "none", "--as", name,
+            ],
+        );
+        let said = text(&cast);
+        assert!(cast.status.success(), "{said}");
+        assert!(said.contains(&format!("session {session}")), "{said}");
+        assert!(!said.contains("unverified"), "{said}");
+    }
+    for (name, choice) in [("reviewer-e", "ship"), ("reviewer-a", "hold")] {
+        let again = world.ljos_env(
+            "ljosbot",
+            cloud,
+            &[
+                "vote", issue, "--for", choice, "--used", "none", "--as", name,
+            ],
+        );
+        let said = text(&again);
+        assert!(!again.status.success(), "{said}");
+        assert!(
+            said.contains("already cast") && said.contains("Nothing was cast"),
+            "{said}"
+        );
+    }
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("4 ballots count"), "{said}");
+    for name in ["reviewer-a", "reviewer-b", "reviewer-c", "reviewer-d"] {
+        assert!(stdout.contains(&format!("{name}  ship")), "{said}");
+    }
+    assert!(!stdout.contains("reviewer-e"), "{said}");
+    assert!(!stdout.contains("ignored"), "{said}");
 }

@@ -514,7 +514,8 @@ pub fn connection_session() -> Option<String> {
 }
 
 /// The harness session id: the MCP connection, then the MCP call, then the
-/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread id.
+/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread
+/// id, then the run ([`run_session`]).
 /// The connection pin is the process, not the `seat` argument.
 #[must_use]
 pub fn harness_session() -> String {
@@ -538,6 +539,11 @@ pub fn harness_session() -> String {
         "GROK_SESSION_ID",
         "SEAT_SESSION_ID",
         "LJOS_SESSION_ID",
+        // Claude Code also stamps a remote-control id that comes and goes,
+        // and opencode may run under another runner's id. Each names its
+        // own session here, so the ballot binds the id its hook reports.
+        "CLAUDE_CODE_SESSION_ID",
+        "OPENCODE_SESSION_ID",
     ];
     for key in PREFER {
         if let Some(s) = env_token(key) {
@@ -548,7 +554,23 @@ pub fn harness_session() -> String {
     }
     crate::runner_session_id()
         .map(|s| field(&s))
+        .or_else(run_session)
         .unwrap_or_default()
+}
+
+/// The run this process belongs to, when no conversation id was stamped:
+/// a GitHub Actions run, else a cloud agent. Every process of one run is
+/// one session, as `ljos cloud up` gives the run one seat.
+fn run_session() -> Option<String> {
+    let actions = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && !matches!(v, "0" | "false")
+    });
+    let ci: &[&str] = if actions { &["GITHUB_RUN_ID"] } else { &[] };
+    ci.iter()
+        .chain(&["CURSOR_AGENT_ID", "CLOUD_AGENT_ID"])
+        .filter_map(|key| env_token(key))
+        .find(|s| s.len() >= 8)
 }
 
 fn random_hex(n: usize) -> String {
