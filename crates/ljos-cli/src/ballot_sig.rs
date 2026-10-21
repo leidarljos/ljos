@@ -193,8 +193,58 @@ fn spans(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
-fn is_hex_len(text: &str, len: usize) -> bool {
+pub(crate) fn is_hex_len(text: &str, len: usize) -> bool {
     text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether `sig_hex` is an ed25519 signature by `key_hex` over `message`.
+#[must_use]
+pub fn signature_ok(key_hex: &str, sig_hex: &str, message: &[u8]) -> bool {
+    let (Ok(key), Ok(sig)) = (hex::decode(key_hex), hex::decode(sig_hex)) else {
+        return false;
+    };
+    let (Ok(key), Ok(sig)) = (<[u8; 32]>::try_from(key), <[u8; 64]>::try_from(sig)) else {
+        return false;
+    };
+    let Ok(verifying) = VerifyingKey::from_bytes(&key) else {
+        return false;
+    };
+    verifying
+        .verify(message, &Signature::from_bytes(&sig))
+        .is_ok()
+}
+
+/// Public key and signature, both lower-case hex, for `message` under `key`.
+#[must_use]
+pub fn signed_hex(key: &SigningKey, message: &[u8]) -> (String, String) {
+    (
+        hex::encode(key.verifying_key().to_bytes()),
+        hex::encode(key.sign(message).to_bytes()),
+    )
+}
+
+/// Remember `key` as `voter`'s pin, or refuse a different key.
+///
+/// # Errors
+///
+/// `voter` is already pinned to another key.
+pub fn observe_pin(pins: &mut BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
+    match pins.get(voter) {
+        Some(pinned) if pinned != key => bail!(
+            "{voter} is pinned to key {}…, got {}…",
+            key_prefix(pinned),
+            key_prefix(key)
+        ),
+        Some(_) => Ok(()),
+        None => {
+            pins.insert(voter.to_string(), key.to_string());
+            Ok(())
+        }
+    }
+}
+
+fn key_prefix(key: &str) -> &str {
+    &key[..12.min(key.len())]
 }
 
 fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
@@ -330,13 +380,13 @@ pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
 /// The note text for a ballot signed by `key` (v1, choice only).
 #[must_use]
 pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> String {
-    let sig = key.sign(&message(issue, voter, choice));
+    let (public, sig) = signed_hex(key, &message(issue, voter, choice));
     format!(
         "{SIG_NOTE}{} {} {} {}",
         voter.trim(),
         choice.trim(),
-        hex::encode(key.verifying_key().to_bytes()),
-        hex::encode(sig.to_bytes())
+        public,
+        sig
     )
 }
 
@@ -352,13 +402,13 @@ pub fn sign_bound(
 ) -> String {
     let harness = field(harness);
     let nonce = field(nonce);
-    let sig = key.sign(&message_v2(issue, voter, choice, &harness, &nonce));
+    let (public, sig) = signed_hex(key, &message_v2(issue, voter, choice, &harness, &nonce));
     format!(
         "{SIG_NOTE}{} {} {} {} {} {}",
         voter.trim(),
         choice.trim(),
-        hex::encode(key.verifying_key().to_bytes()),
-        hex::encode(sig.to_bytes()),
+        public,
+        sig,
         harness,
         nonce
     )
@@ -374,17 +424,7 @@ fn covered(issue: &str, note: &SigNote) -> Vec<u8> {
 /// Whether `note` is a valid signature over this issue's ballot.
 #[must_use]
 pub fn verifies(issue: &str, note: &SigNote) -> bool {
-    let (Ok(k), Ok(s)) = (hex::decode(&note.key), hex::decode(&note.sig)) else {
-        return false;
-    };
-    let (Ok(k), Ok(s)) = (<[u8; 32]>::try_from(k), <[u8; 64]>::try_from(s)) else {
-        return false;
-    };
-    let Ok(vk) = VerifyingKey::from_bytes(&k) else {
-        return false;
-    };
-    vk.verify(&covered(issue, note), &Signature::from_bytes(&s))
-        .is_ok()
+    signature_ok(&note.key, &note.sig, &covered(issue, note))
 }
 
 /// The tracker root the pins live at.
@@ -1024,16 +1064,9 @@ pub fn parse_candidate(note: &str) -> Option<CandidateNote> {
 /// Whether `note` is a valid signature over that candidate binding.
 #[must_use]
 pub fn candidate_verifies(note: &CandidateNote) -> bool {
-    let (Ok(k), Ok(s)) = (hex::decode(&note.key), hex::decode(&note.sig)) else {
-        return false;
-    };
-    let (Ok(k), Ok(s)) = (<[u8; 32]>::try_from(k), <[u8; 64]>::try_from(s)) else {
-        return false;
-    };
-    let Ok(vk) = VerifyingKey::from_bytes(&k) else {
-        return false;
-    };
-    vk.verify(
+    signature_ok(
+        &note.key,
+        &note.sig,
         &candidate_message(
             &note.issue,
             &note.seat,
@@ -1041,9 +1074,7 @@ pub fn candidate_verifies(note: &CandidateNote) -> bool {
             &note.nonce,
             &saw_token(&note.saw),
         ),
-        &Signature::from_bytes(&s),
     )
-    .is_ok()
 }
 
 /// Sign `issue` as a design candidate of `seat` and return the note.
@@ -1061,7 +1092,10 @@ pub fn sign_candidate(
     let harness = field(&id.harness);
     let nonce = field(&id.nonce);
     let saw_tok = saw_token(saw);
-    let sig = key.sign(&candidate_message(issue, seat, &harness, &nonce, &saw_tok));
+    let (public, sig) = signed_hex(
+        &key,
+        &candidate_message(issue, seat, &harness, &nonce, &saw_tok),
+    );
     Ok(format!(
         "{CANDIDATE_NOTE}{} {} {} {} {} {} {}",
         field(issue),
@@ -1069,8 +1103,8 @@ pub fn sign_candidate(
         harness,
         nonce,
         saw_tok,
-        hex::encode(key.verifying_key().to_bytes()),
-        hex::encode(sig.to_bytes())
+        public,
+        sig
     ))
 }
 
