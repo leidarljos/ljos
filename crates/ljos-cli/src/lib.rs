@@ -22974,11 +22974,15 @@ fn taken_first(text: &str) -> bool {
 }
 
 /// Hand a session node back before it is terminal: ready again, assignee
-/// cleared, generation moved.
+/// cleared, generation moved. A node the claim graph no longer holds (a
+/// lease reclaim freed it, a completion ended it, the graph never had it)
+/// still hands back a tracker heading left STARTED under this holder or
+/// under nobody.
 ///
 /// # Errors
 ///
-/// The claim graph's refusal: not held, or held by somebody else.
+/// The claim graph's refusal: held by somebody else, or not held and the
+/// tracker has nothing of this holder's to hand back.
 pub fn release(node: &str, assignee: &str) -> Result<String> {
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
@@ -23029,11 +23033,35 @@ pub fn release(node: &str, assignee: &str) -> Result<String> {
             let stamped = tracker.as_deref().unwrap_or(assignee);
             return Ok(with_unstamp(said.stdout, node, &id, stamped, true));
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            let text = e.to_string();
+            let Some(why) = unheld_refusal(&text) else {
+                return Err(e);
+            };
+            return match unstamp_tracker(node, assignee, true) {
+                Ok(Some(line)) if !line.contains(" stays claimed by ") => {
+                    drop_hold(&actor);
+                    drop_playbook(node);
+                    Ok(format!(
+                        "claim graph: {node} held by nobody ({why})\n{line}\n"
+                    ))
+                }
+                _ => Err(e),
+            };
+        }
     };
     drop_hold(&actor);
     drop_playbook(node);
     Ok(with_unstamp(said.stdout, node, &id, assignee, true))
+}
+
+/// What the claim graph said when a release found no claim to hand back:
+/// the node is not claimed or running (`status ready`, `status done`), or
+/// the graph has no node for the id (`not found`).
+fn unheld_refusal(text: &str) -> Option<&str> {
+    let (_, said) = text.rsplit_once("release: ")?;
+    let said = said.trim();
+    (said.starts_with("status ") || said == "not found").then_some(said)
 }
 
 /// Drop the tracker's claim on `issue` when `holder` holds it. The claim
