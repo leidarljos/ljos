@@ -24912,6 +24912,65 @@ impl Drop for CommitLock {
     }
 }
 
+/// The file ljos locks around every write to a tracker checkout's index.
+pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
+
+/// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
+/// `git status` by the repository's `info/exclude`. Not in `.git`, where a
+/// hand clearing `*.lock` after a crash would unlink it under a live holder
+/// and the next seat would lock a new file beside it. `None` outside a git
+/// checkout.
+fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
+    if let Some(common) = lines.next().filter(|l| !l.is_empty()) {
+        exclude_tracker_lock(&dir.join(common));
+    }
+    Some(top.join(TRACKER_LOCK))
+}
+
+fn exclude_tracker_lock(common: &Path) {
+    use std::io::Write as _;
+    let exclude = common.join("info").join("exclude");
+    let line = format!("/{TRACKER_LOCK}");
+    let text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == line) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(common.join("info"));
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)
+    else {
+        return;
+    };
+    let gap = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = writeln!(file, "{gap}{line}");
+}
+
+/// Hold the tracker checkout that holds `dir` for one write to its index:
+/// a status read, a file write, an add and a commit, or a rebase. Every
+/// ljos writer on the host takes it, so seats queue instead of meeting on
+/// `index.lock`. Taking it twice in one thread waits forever.
+pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
+    tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
+}
+
 /// The seat a tracker commit and its logbook line name. One token, so
 /// `ljos log --seat` can read it back out of the subject.
 #[must_use]
@@ -25163,7 +25222,7 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
 
 /// Commit `.ljos-seat-keys` when a ballot pin is still unpushed. The issue
 /// commit names one file; the pin is the seat's public key and has to travel
-/// with it.
+/// with it. The caller holds [`tracker_commit_lock`].
 fn commit_seat_pin(start: &Path, seat: &str) {
     let root = tracker_push::repo_root(start);
     let name = ballot_sig::PIN_FILE;
@@ -25281,6 +25340,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
     }
+    // Every seat on the host commits this one checkout. From the status
+    // read to the seat pin, one lock outside .git is held, so ljos writers
+    // queue instead of meeting on index.lock, and no seat reads a status
+    // that another seat's commit is about to make stale. A git process
+    // outside ljos that holds the index is waited out a few times before
+    // the line says so.
+    let held = tracker_commit_lock(dir);
     match git(&["status", "--porcelain", "--", &file]) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
@@ -25304,16 +25370,6 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let seat = tracker_seat();
     stamp_seat_logbook(path, issue, verb, &seat);
     let message = format!("chore(issues): {issue} {verb} by {seat}");
-    // Every seat on the host commits this one checkout. The add and the
-    // commit run under one lock in the git directory, so ljos writers queue
-    // instead of meeting on index.lock; a git process outside ljos that
-    // holds the index is waited out a few times before the line says so.
-    let common = git(&["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| dir.join(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_else(|| dir.join(".git"));
-    let _held = CommitLock::acquire(&common.join("ljos-commit.lock"));
     // The add runs first and its failure stands on its own: a commit named
     // for a file git never took in reports a pathspec error that hides why
     // the add failed. An untracked ticket is added here, that file only.
@@ -25334,11 +25390,12 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
         committed = stage_and_commit();
     }
-    drop(_held);
+    if matches!(&committed, Ok(o) if o.status.success()) {
+        commit_seat_pin(dir, &seat);
+    }
+    drop(held);
     match committed {
-        Ok(o) if o.status.success() => {
-            commit_seat_pin(dir, &seat);
-        }
+        Ok(o) if o.status.success() => {}
         Ok(o) => {
             return format!(
                 "tracker git: commit refused: {}\n",
@@ -29094,6 +29151,69 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
         ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A seat's tracker commit waits for the checkout's lock before it
+    /// reads the status or stamps the file, and the lock file lives at the
+    /// top of the worktree, out of `git status`.
+    #[test]
+    fn a_tracker_commit_waits_for_the_checkout_lock_before_it_reads_or_stamps() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+
+        let held = CommitLock::acquire(&root.join(TRACKER_LOCK));
+        assert!(held.0.is_some(), "the checkout lock opens");
+        let path = issues.clone();
+        let writer =
+            std::thread::spawn(move || persist_tracker_file(&path, "probe-a1b2", "claimed"));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            !std::fs::read_to_string(&issues)
+                .unwrap()
+                .contains("by saddle"),
+            "the stamp waits for the seat that holds the checkout"
+        );
+        assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
+        drop(held);
+        let said = writer.join().unwrap();
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 claimed by saddle"),
+            "{said}"
+        );
+        let status = run(&["status", "--porcelain", "--ignored=no"]);
+        assert!(!status.contains(TRACKER_LOCK), "{status}");
+        assert!(root.join(TRACKER_LOCK).is_file());
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
     }

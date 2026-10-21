@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The note prefix a signature rides under.
 pub const SIG_NOTE: &str = "ballot-sig: ";
@@ -752,30 +752,36 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
         .ok_or_else(|| anyhow::anyhow!("no place for a seat key: HOME and XDG_DATA_HOME are unset; the ballot is unsigned and no gate counts it"))?;
     let key = load_or_create(&path)?;
     let mine = hex::encode(key.verifying_key().to_bytes());
-    let mut pinned = pins();
-    match pinned.get(voter.trim()) {
-        Some(k) if *k != mine => bail!(
+    let pinned = match pin_path() {
+        Some(p) if !pins().contains_key(voter.trim()) => pin_first(&p, voter.trim(), &mine)?,
+        _ => pins(),
+    };
+    if let Some(k) = pinned.get(voter.trim()).filter(|k| **k != mine) {
+        bail!(
             "seat {voter} is pinned to key {}…, and this key is {}…; the ballot is unsigned and no gate counts it",
             &k[..12.min(k.len())],
             &mine[..12]
-        ),
-        Some(_) => {}
-        None => {
-            if let Some(p) = pin_path() {
-                pinned.insert(voter.trim().to_string(), mine.clone());
-                let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
-                std::fs::write(&p, text)?;
-                if let Some(root) = p.parent() {
-                    let _ = std::process::Command::new("git")
-                        .arg("-C")
-                        .arg(root)
-                        .args(["add", PIN_FILE])
-                        .output();
-                }
-            }
-        }
+        );
     }
     Ok((key, mine))
+}
+
+/// Pin `mine` for `voter` unless another pin for it landed first, and
+/// return the pins. Seats pin on their first ballot, often at once: the
+/// read and the write hold the tracker's commit lock, so no seat's pin is
+/// lost, and the file is replaced whole, so a `git add` never hashes half
+/// of it. The seat's tracker commit carries the pin.
+fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, String>> {
+    let _held = crate::tracker_commit_lock(path.parent().unwrap_or_else(|| Path::new(".")));
+    let mut pinned = std::fs::read_to_string(path)
+        .map(|t| parse_pins(&t))
+        .unwrap_or_default();
+    if !pinned.contains_key(voter) {
+        pinned.insert(voter.to_string(), mine.to_string());
+        let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
+        vissue_core::store::replace_file_atomically(path, &text)?;
+    }
+    Ok(pinned)
 }
 
 /// Sign this seat's ballot, bound to the harness session, and leave the

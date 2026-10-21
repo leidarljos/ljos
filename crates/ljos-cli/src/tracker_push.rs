@@ -83,6 +83,7 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
             if last.starts_with("fetch failed") {
                 continue;
             }
+            let _held = crate::tracker_commit_lock(dir);
             let _ = abort_rebase(dir);
             let _ = git(dir, &["merge", "--abort"]);
             return Err(last);
@@ -353,6 +354,10 @@ fn push_mirrors(dir: &Path) -> Result<(), String> {
 
 fn integrate(dir: &Path) -> Result<(), String> {
     let fetched = git(dir, &["fetch", "-q", "origin"]);
+    // The replay rewrites the index and the working tree, so it waits for
+    // a seat's commit in flight and no commit starts until it is done. The
+    // fetch, which may wait on the network, is outside.
+    let _held = crate::tracker_commit_lock(dir);
     if !fetched.status.success() {
         let _ = abort_rebase(dir);
         return Err(format!(
@@ -715,6 +720,7 @@ pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(
         }
         init_repo(root)?;
     }
+    let _held = crate::tracker_commit_lock(root);
     write_attributes(root)?;
     register_driver(root)?;
     if commit {

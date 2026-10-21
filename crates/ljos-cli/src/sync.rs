@@ -667,12 +667,7 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
         format!(".ljos/atoms/{host}.digest"),
     ];
     // The same lock the tracker commits take: one checkout, many seats.
-    let common = git(root, &["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| root.join(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_else(|| root.join(".git"));
-    let held = crate::CommitLock::acquire(&common.join("ljos-commit.lock"));
+    let held = crate::tracker_commit_lock(root);
     let mut add = vec!["add", "--"];
     add.extend(files.iter().map(String::as_str));
     if git(root, &add).map_or(true, |o| !o.status.success()) {
@@ -755,6 +750,7 @@ fn catch_up(root: &Path) -> String {
             .map(|(r, b)| format!("{r}/{b}")),
     );
     let mut stuck = Vec::new();
+    let _held = crate::tracker_commit_lock(root);
     for r in refs {
         let forward = git(root, &["merge", "-q", "--ff-only", &r]);
         if forward.is_ok_and(|o| o.status.success()) {
@@ -1132,20 +1128,7 @@ fn commit_host(
     host: &str,
     deadline: std::time::Instant,
 ) -> Result<bool> {
-    let common = git(root, &["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| {
-            let rel_git = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let path = PathBuf::from(&rel_git);
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join(".git"));
-    let held = crate::CommitLock::acquire(&common.join("ljos-commit.lock"));
+    let held = crate::tracker_commit_lock(root);
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
     add.extend(&paths);
