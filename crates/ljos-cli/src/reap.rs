@@ -49,9 +49,21 @@ pub fn org_ts(s: &str) -> Option<i64> {
         .map(|d| d.timestamp())
 }
 
-/// The seat a holder names: `eessi@main` is the seat `eessi`.
-pub fn seat_of(holder: &str) -> &str {
-    holder.split('@').next().unwrap_or(holder)
+/// The seat a holder names: `eessi@main` is the seat `eessi`, and a legacy
+/// holder is the seat it names (`inky-n9o` is `inky`).
+#[must_use]
+pub fn seat_of(holder: &str) -> String {
+    let seat = crate::canonical_seat_name(holder);
+    if seat.is_empty() {
+        holder
+            .split('@')
+            .next()
+            .unwrap_or(holder)
+            .trim()
+            .to_string()
+    } else {
+        seat
+    }
 }
 
 /// Claims from `vissue claims --json`, `last` set from the claim time.
@@ -139,7 +151,7 @@ pub fn reap(idle: Duration, apply: bool) -> Result<String> {
             }
         }
         let mail = crate::mail::send(&crate::mail::Send {
-            seat: Some(seat),
+            seat: Some(&seat),
             group: None,
             text: &note,
             interrupt: false,
@@ -333,6 +345,8 @@ mod tests {
     fn holder_names_its_seat() {
         assert_eq!(seat_of("eessi@main"), "eessi");
         assert_eq!(seat_of("inky"), "inky");
+        assert_eq!(seat_of("inky-n9o"), "inky");
+        assert_eq!(seat_of("ljos-bot@q4s23e2cxd"), "ljosbot");
     }
 
     #[test]

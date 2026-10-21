@@ -1726,6 +1726,7 @@ pub async fn with_call_seat<F: std::future::Future>(seat: Seat, f: F) -> F::Outp
 pub fn seat_for_thread(thread: &str) -> Seat {
     let thread = thread.trim();
     let seat = named_var("LJOS_SEAT")
+        .and_then(|raw| seated_name(&raw))
         .or_else(|| ANNOUNCED.get().map(|s| s.seat.clone()))
         .unwrap_or_else(login_user);
     let path = session_record_path(thread);
@@ -1772,11 +1773,11 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
     load_seat_env();
     // The hooks sit `LJOS_SEAT` (the process, else `~/.config/ljos/env`).
     // The client's harness name is the seat only when nobody named one.
+    // A subagent name is kept, so it is not replaced by that harness.
     let harness = seat_for_client(client);
     let name = named_var("LJOS_SEAT")
         .or_else(|| named_var("VISSUE_AGENT"))
-        .map(|raw| seat_slug(&raw))
-        .filter(|slug| slug != "runner" && !omitted_actor_name(slug))
+        .and_then(|raw| seated_name(&raw))
         .unwrap_or(harness);
     if let Some(parent) = inherited_record(&name) {
         let seat = Seat::tagged(
@@ -2232,9 +2233,12 @@ pub fn whoami() -> Seat {
     }
     // Both variables are a person naming the seat: the seat's own, and the
     // tracker's name for the same thing. Either beats what the tree says.
+    // A legacy holder is the seat it names (`inky-n9o` is `inky`). A
+    // subagent name is left as written so a claim under it is refused
+    // rather than given the client's harness.
     let named = named_var("LJOS_SEAT")
-        .map(|n| (n, "LJOS_SEAT"))
-        .or_else(|| named_var("VISSUE_AGENT").map(|n| (n, "VISSUE_AGENT")));
+        .map(|n| (seat_for_env(&n), "LJOS_SEAT"))
+        .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")));
     // The record filed under a conversation id this shell carries, unless
     // the nearest runner above left one for another seat: a runner started
     // from another runner's shell inherits the other's ids, and its own
@@ -2257,11 +2261,13 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
-    // A holder a person named wins outright.
+    // A holder a person named wins outright. A legacy holder is stored as
+    // the seat it names, so the claim is not taken under the raw name.
     if let Some(hold) = named_var("LJOS_HOLD") {
+        let holder = claim_holder(&hold).unwrap_or(hold);
         return Seat {
             seat: seat_name,
-            holder: hold,
+            holder,
             source: "LJOS_HOLD".into(),
         };
     }
@@ -2321,7 +2327,7 @@ pub fn whoami() -> Seat {
         (None, Some(p)) => p.clone(),
         (None, None) => {
             if let Some(name) = agent {
-                Seat::whole(&name, "VISSUE_AGENT")
+                Seat::whole(&seat_for_env(&name), "VISSUE_AGENT")
             } else {
                 Seat::whole(&login_user(), "the login user")
             }
@@ -2411,12 +2417,14 @@ fn insert_claimed_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str
 }
 
 fn insert_known_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) {
-    let name = raw.split('@').next().unwrap_or(raw).trim();
-    if name.is_empty() || omitted_actor_name(name) {
+    // The roster authorises a seat to hold a claim. A raw holder
+    // (`inky-n9o`, `ljos-bot`) is that seat, not a second one, and a
+    // subagent name is not a seat. The tracker file is left as it was.
+    if is_raw_subagent_name(raw) {
         return;
     }
-    let slug = seat_slug(name);
-    if slug == "runner" || omitted_actor_name(&slug) {
+    let slug = canonical_seat_name(raw);
+    if slug.is_empty() || slug == "runner" || omitted_actor_name(&slug) {
         return;
     }
     seats.insert(slug);
@@ -2511,24 +2519,29 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     load_seat_env();
     let from_call = arg.map(str::trim).filter(|name| !name.is_empty());
     let named = named_var("LJOS_SEAT").or_else(|| named_var("VISSUE_AGENT"));
-    let (raw, from_env) = match (from_call, named) {
+    let (raw, from_env) = match (from_call, named.as_deref()) {
         (Some(name), Some(seat))
-            if is_harness_name(name) || seat_slug(name) == seat_slug(&seat) =>
+            if is_harness_name(name)
+                || seat_slug(name) == seat_slug(seat)
+                || canonical_seat_name(name) == canonical_seat_name(seat) =>
         {
-            (seat, true)
+            (seat.to_string(), true)
         }
         (Some(name), _) => (name.to_string(), false),
-        (None, Some(seat)) => (seat, true),
+        (None, Some(seat)) => (seat.to_string(), true),
         (None, None) => {
             bail!("pass seat, your own bot name, on every call: this server has no LJOS_SEAT")
         }
     };
+    if is_raw_subagent_name(&raw) {
+        bail!(SUBAGENT_NO_SEAT);
+    }
     let slug_source = raw.split('@').next().unwrap_or(raw.as_str()).trim();
     if slug_source.is_empty() || omitted_actor_name(slug_source) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
-    let named_slug = seat_slug(slug_source);
-    if named_slug == "runner" || omitted_actor_name(&named_slug) {
+    let named_slug = canonical_seat_name(&raw);
+    if named_slug.is_empty() || named_slug == "runner" || omitted_actor_name(&named_slug) {
         bail!("pass seat, your own bot name, not {raw:?}");
     }
     let known = seat_roster(&named_slug);
@@ -2714,7 +2727,9 @@ pub fn holder_name() -> String {
 #[must_use]
 pub fn resolve_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) if !omitted_actor_name(n) && !own_seat(n) => n.to_string(),
+        Some(n) if !omitted_actor_name(n) && !own_seat(n) => {
+            claim_holder(n).unwrap_or_else(|_| n.to_string())
+        }
         _ => holder_name(),
     }
 }
@@ -2728,7 +2743,7 @@ pub fn resolve_assignee(passed: Option<&str>) -> String {
 #[must_use]
 pub fn cli_assignee(passed: Option<&str>) -> String {
     match passed.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(n) if !omitted_actor_name(n) => n.to_string(),
+        Some(n) if !omitted_actor_name(n) => claim_holder(n).unwrap_or_else(|_| n.to_string()),
         _ => holder_name(),
     }
 }
@@ -2933,35 +2948,161 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 
 /// A holder as its seat and its conversation tag. `SEAT@TAG` is the form
 /// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
-/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`); a last part of three
-/// or four lowercase letters and digits with at least one digit is read
-/// as that tag, so `eessi-bot` and `disk-saver` stay whole seats. An old
-/// tag comes back as `None`: the server that wrote it is gone and no
-/// conversation holds under it again, so the seat is its holder now and
-/// any conversation of that seat may finish or release the claim.
+/// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
+/// `free-opencode-1vmow`); a last part of one to six lowercase letters and
+/// digits with at least one digit is read as that tag, so `eessi-bot` and
+/// `disk-saver` stay whole seats. The same suffix on the seat side of
+/// `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old tag comes back
+/// as `None`: the server that wrote it is gone and no conversation holds
+/// under it again, so the seat is its holder now and any conversation of
+/// that seat may finish or release the claim.
 #[must_use]
 pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     let holder = holder.trim();
     let (seat, tag) = match holder.split_once('@') {
-        Some((seat, tag)) if !tag.is_empty() => (seat, Some(tag)),
-        _ => match holder.rsplit_once('-') {
-            Some((seat, tag)) if !seat.is_empty() && legacy_tag(tag) => (seat, None),
-            _ => (holder, None),
-        },
+        Some((seat, tag)) if !tag.is_empty() => (without_legacy_tag(seat), Some(tag.to_string())),
+        _ => (without_legacy_tag(holder), None),
     };
     let seat = LEGACY_SEATS
         .iter()
-        .find(|(old, _)| *old == seat)
-        .map_or(seat, |(_, now)| *now);
-    (seat.to_string(), tag.map(str::to_string))
+        .find(|(old, _)| *old == seat.to_ascii_lowercase())
+        .map_or(seat, |(_, now)| (*now).to_string());
+    (seat, tag)
 }
 
 fn legacy_tag(tag: &str) -> bool {
-    (3..=4).contains(&tag.len())
+    (1..=6).contains(&tag.len())
         && tag
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && tag.bytes().any(|b| b.is_ascii_digit())
+}
+
+/// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
+/// none is returned unchanged, so `Disk Saver` keeps its case.
+fn without_legacy_tag(seat: &str) -> String {
+    let mut lower = seat.to_ascii_lowercase();
+    let mut stripped = false;
+    while let Some((head, tag)) = lower.rsplit_once('-') {
+        if head.is_empty() || !legacy_tag(tag) {
+            break;
+        }
+        lower = head.to_string();
+        stripped = true;
+    }
+    if stripped {
+        lower
+    } else {
+        seat.to_string()
+    }
+}
+
+/// `name` without a `:issue` scope. `saddle:proj-aaaa` is the holder
+/// `saddle` scoped to that issue; a colon inside the scope stays there.
+fn split_claim_scope(raw: &str) -> (&str, Option<&str>) {
+    match raw.split_once(':') {
+        Some((body, scope)) if !body.is_empty() && !scope.is_empty() => (body, Some(scope)),
+        _ => (raw, None),
+    }
+}
+
+/// The seat `name` holds for, slugged. An empty name stays empty: slugging
+/// it would call it `runner`. A legacy holder is its seat (`inky-n9o` is
+/// `inky`, `ljos-bot` is `ljosbot`).
+#[must_use]
+pub(crate) fn canonical_seat_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    let (body, _) = split_claim_scope(name);
+    let (seat, _) = holder_parts(body);
+    if seat.is_empty() {
+        return String::new();
+    }
+    seat_slug(&seat)
+}
+
+/// Whether `name` is a subagent standing in as a seat. Every subagent id
+/// starts `sand-sub`, and the old fallback of that prefix is the one name
+/// `grokbot-sand-sub`.
+#[must_use]
+pub(crate) fn is_raw_subagent_name(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let (body, _) = split_claim_scope(name);
+    let head = body.split('@').next().unwrap_or(body).trim();
+    head.starts_with("sand-sub") || canonical_seat_name(name) == "grokbot-sand-sub"
+}
+
+/// The seat to put in the environment for `name`. A display name whose
+/// slug is already the seat (`Disk Saver`, `INKY`) is kept. A legacy
+/// holder becomes the seat. A subagent name is kept, so the refusal can
+/// see it.
+#[must_use]
+pub(crate) fn seat_for_env(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() || is_raw_subagent_name(name) {
+        return name.to_string();
+    }
+    let mapped = canonical_seat_name(name);
+    let head = name.split(['@', ':']).next().unwrap_or(name);
+    if mapped == seat_slug(head) {
+        name.to_string()
+    } else {
+        mapped
+    }
+}
+
+/// A name a person set, as the seat that holds. A subagent name is refused.
+/// A legacy holder is the seat. A name whose slug is already that seat is
+/// returned as written, scope and conversation tag included.
+///
+/// # Errors
+///
+/// `name` is a subagent, empty, or a pronoun.
+pub(crate) fn claim_holder(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        bail!("pass a seat name");
+    }
+    if is_raw_subagent_name(raw) {
+        bail!(SUBAGENT_NO_SEAT);
+    }
+    let (body, scope) = split_claim_scope(raw);
+    let (seat, tag) = holder_parts(body);
+    if seat.is_empty() || omitted_actor_name(&seat) {
+        bail!("pass a seat name, not {raw:?}");
+    }
+    let mapped = seat_slug(&seat);
+    if omitted_actor_name(&mapped) {
+        bail!("pass a seat name, not {raw:?}");
+    }
+    let head = body.split('@').next().unwrap_or(body);
+    if seat_slug(head) == mapped {
+        return Ok(raw.to_string());
+    }
+    let mut out = match tag {
+        Some(tag) => format!("{mapped}@{tag}"),
+        None => mapped,
+    };
+    if let Some(scope) = scope {
+        out = format!("{out}:{scope}");
+    }
+    Ok(out)
+}
+
+/// The slug [`announce_seat`] and [`seat_for_thread`] sit as. A subagent
+/// name is kept so the harness does not take its place.
+fn seated_name(raw: &str) -> Option<String> {
+    let slug = if is_raw_subagent_name(raw) {
+        seat_slug(raw)
+    } else {
+        seat_slug(&seat_for_env(raw))
+    };
+    (slug != "runner" && !omitted_actor_name(&slug)).then_some(slug)
 }
 
 /// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
@@ -2971,12 +3112,19 @@ fn legacy_tag(tag: &str) -> bool {
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
-        let slug = seat_slug(&name);
+        if is_raw_subagent_name(&name) {
+            return None;
+        }
+        let seat = seat_for_env(&name);
+        let slug = seat_slug(&seat);
         if slug != "runner" && !omitted_actor_name(&slug) {
-            return Some(name);
+            return Some(seat);
         }
     }
     grokbot_seat_name().filter(|name| {
+        if is_raw_subagent_name(name) {
+            return false;
+        }
         let slug = seat_slug(name);
         slug != "runner" && !omitted_actor_name(&slug)
     })
@@ -3000,11 +3148,16 @@ pub fn grokbot_seat_name() -> Option<String> {
 /// say so instead of booking under `grokbot-sand-sub`.
 #[must_use]
 pub fn unseated_subagent() -> bool {
-    if named_var("LJOS_SEAT").is_some()
-        || named_var("VISSUE_AGENT").is_some()
-        || named_var("LJOS_HOLD").is_some()
-    {
-        return false;
+    let named = [
+        named_var("LJOS_SEAT"),
+        named_var("VISSUE_AGENT"),
+        named_var("LJOS_HOLD"),
+    ];
+    let set: Vec<String> = named.into_iter().flatten().collect();
+    if !set.is_empty() {
+        // A real seat keeps the conversation, including one whose id is a
+        // subagent. The name `grokbot-sand-sub` is not a seat.
+        return set.iter().any(|name| is_raw_subagent_name(name));
     }
     std::env::var("CURSOR_CONVERSATION_ID")
         .ok()
@@ -21642,6 +21795,8 @@ fn with_tracker(said: String, node: &str, assignee: &str) -> Result<String> {
 ///
 /// The refusal, explained, or any other failure of the claim graph.
 pub fn claim(node: &str, assignee: &str) -> Result<String> {
+    let assignee = claim_holder(assignee)?;
+    let assignee = assignee.as_str();
     let id = node_for(node)?;
     let actor = work_id(&occupancy_scope(assignee, node));
     match run_captured("claimdag", &["claim", &id, "--assignee", &actor]) {
@@ -21783,6 +21938,8 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
 /// Nothing is ready, every ready node was taken first, or the claim graph
 /// refused for some other reason.
 pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
+    let assignee = claim_holder(assignee)?;
+    let assignee = assignee.as_str();
     let asker = work_id(assignee);
     let slack = slack.map(|s| s.to_string());
     let mut args = vec![
@@ -23135,25 +23292,22 @@ pub fn adopts_holder<'a>(
     assignee: &str,
     named: impl IntoIterator<Item = &'a str>,
 ) -> bool {
-    let mine = bare_seat(assignee, node);
-    // A shell holder is `SEAT-TAG`, TAG the base-36 pid
-    // `conversation_tag` makes: short, and with a digit, so a hyphenated
-    // seat name such as `disk-saver` never reads as `disk` plus a tag.
-    let tagged = |n: &str| {
-        n.strip_prefix(mine.as_str())
-            .and_then(|r| r.strip_prefix('-'))
-            .is_some_and(|t| {
-                (1..=4).contains(&t.len())
-                    && t.bytes()
-                        .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
-                    && t.bytes().any(|b| b.is_ascii_digit())
-            })
-    };
-    !mine.is_empty()
-        && named.into_iter().any(|n| {
-            let n = bare_seat(n, node);
-            n == mine || tagged(&n)
-        })
+    let mine = seat_key(assignee, node);
+    !mine.is_empty() && named.into_iter().any(|n| seat_key(n, node) == mine)
+}
+
+/// The seat a holder stands for, for [`adopts_holder`]. An empty name stays
+/// empty. A legacy holder and a `SEAT-TAG` pid are the seat.
+fn seat_key(name: &str, node: &str) -> String {
+    let bare = bare_seat(name, node);
+    if bare.is_empty() {
+        return String::new();
+    }
+    let (seat, _) = holder_parts(&bare);
+    if seat.is_empty() {
+        return String::new();
+    }
+    seat_slug(&seat)
 }
 
 /// Refusal when this shell's holder is not the name that holds the node:
@@ -30414,6 +30568,59 @@ mod tests {
             holder_parts("inky@14ao"),
             ("inky".to_string(), Some("14ao".to_string()))
         );
+        assert_eq!(
+            holder_parts("free-opencode-1vmow"),
+            ("free-opencode".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("free-claude-8h"),
+            ("free-claude".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("inky-n9o@deadbeef"),
+            ("inky".to_string(), Some("deadbeef".to_string()))
+        );
+        assert_eq!(
+            holder_parts("ljos-bot@q4s23e2cxd"),
+            ("ljosbot".to_string(), Some("q4s23e2cxd".to_string()))
+        );
+        assert_eq!(holder_parts("eessi-bot"), ("eessi-bot".to_string(), None));
+        assert_eq!(
+            holder_parts("grokbot-sand-sub"),
+            ("grokbot-sand-sub".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("grokbot-ea713788"),
+            ("grokbot-ea713788".to_string(), None)
+        );
+        assert_eq!(
+            holder_parts("saddle-review"),
+            ("saddle-review".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn a_claim_under_a_legacy_holder_is_held_as_the_seat() {
+        assert_eq!(claim_holder("inky-n9o").unwrap(), "inky");
+        assert_eq!(claim_holder("disk-saver-t4t").unwrap(), "disk-saver");
+        assert_eq!(claim_holder("ljos-bot").unwrap(), "ljosbot");
+        assert_eq!(claim_holder("saddle").unwrap(), "saddle");
+        assert_eq!(claim_holder("Disk Saver").unwrap(), "Disk Saver");
+        assert_eq!(claim_holder("inky@deadbeef").unwrap(), "inky@deadbeef");
+        assert_eq!(claim_holder("inky-n9o@deadbeef").unwrap(), "inky@deadbeef");
+        assert_eq!(
+            claim_holder("saddle:proj-aaaa").unwrap(),
+            "saddle:proj-aaaa"
+        );
+        assert_eq!(
+            claim_holder("disk-saver-t4t:proj-aaaa").unwrap(),
+            "disk-saver:proj-aaaa"
+        );
+        assert_eq!(claim_holder("runner").unwrap(), "runner");
+        let err = claim_holder("grokbot-sand-sub").unwrap_err().to_string();
+        assert!(err.contains("no seat of its own"), "{err}");
+        let err = claim_holder("sand-subagent-001").unwrap_err().to_string();
+        assert!(err.contains("no seat of its own"), "{err}");
     }
 
     #[test]
@@ -41648,6 +41855,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(adopts_holder("n1", "inky", ["inky@uhpdsahugi:n1"]));
         assert!(adopts_holder("n1", "inky@box", [" Inky "]));
         assert!(adopts_holder("n1", "inky", ["inky-p6a"]));
+        assert!(adopts_holder("n1", "ljosbot", ["ljos-bot"]));
+        assert!(adopts_holder("n1", "disk-saver", ["disk-saver-t4t"]));
         assert!(!adopts_holder("n1", "disk", ["disk-saver"]));
         assert!(!adopts_holder("n1", "inky", ["saddle"]));
         assert!(!adopts_holder("n1", "", ["inky"]));

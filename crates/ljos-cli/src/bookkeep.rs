@@ -1013,7 +1013,8 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
 }
 
 fn claim_existing(issue: &str) -> Result<(), String> {
-    let assignee = super::resolve_assignee(None);
+    let assignee =
+        super::claim_holder(&super::resolve_assignee(None)).map_err(|e| e.to_string())?;
     if which::which("claimdag").is_ok() && super::claim(issue, &assignee).is_ok() {
         return Ok(());
     }
@@ -1070,9 +1071,11 @@ fn sitting_key() -> String {
             .filter(|raw| !raw.is_empty())
     });
     if let Some(name) = named {
-        let slug = super::seat_slug(&name);
-        if slug != "runner" && !super::omitted_actor_name(&slug) {
-            return format!("seat:{slug}");
+        if !super::is_raw_subagent_name(&name) {
+            let slug = super::canonical_seat_name(&name);
+            if !slug.is_empty() && slug != "runner" && !super::omitted_actor_name(&slug) {
+                return format!("seat:{slug}");
+            }
         }
     }
     mcp_session()
@@ -1529,7 +1532,8 @@ fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
 }
 
 fn file_and_claim(project: &str, title: &str) -> Result<String, String> {
-    let assignee = super::resolve_assignee(None);
+    let assignee =
+        super::claim_holder(&super::resolve_assignee(None)).map_err(|e| e.to_string())?;
     let said = run_timed(
         "vissue",
         &["create", "-p", project, title, "-q"],
@@ -5632,6 +5636,129 @@ print(f"id={ident}")
         assert!(err.contains("LJOS_SEAT"), "{err}");
         assert!(!err.contains("01a0dab3"), "{err}");
         assert!(!err.contains("codex-vax0"), "{err}");
+    }
+
+    /// A roster that still lists a raw holder, and a `CLAIMED_BY` of one,
+    /// names the seat. The subagent name is not a seat. Neither file is
+    /// rewritten.
+    #[test]
+    fn a_raw_holder_on_the_roster_is_the_seat_and_the_file_stays() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "VISSUE_ROOT",
+            "ISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let toml = "seats = [\"ljos-bot\", \"inky-n9o\", \"grokbot-sand-sub\", \"disk-saver\"]\n";
+        let org = "* STARTED [#C] one\n:PROPERTIES:\n:ID:         probe-abcd\n:CLAIMED_BY: disk-saver-t4t\n:END:\n\
+             * STARTED [#C] two\n:PROPERTIES:\n:ID:         probe-efgh\n:CLAIMED_BY: grokbot-sand-sub\n:END:\n";
+        let toml_path = dir.path().join("vissue.toml");
+        let org_path = dir.path().join("issues.org");
+        std::fs::write(&toml_path, toml).unwrap();
+        std::fs::write(&org_path, org).unwrap();
+        let before_toml = std::fs::read(&toml_path).unwrap();
+        let before_org = std::fs::read(&org_path).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("VISSUE_ROOT", dir.path());
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::remove_var("LJOS_HOLD");
+        }
+        let known = crate::tracker_known_seats();
+        assert!(known.contains("ljosbot"), "{known:?}");
+        assert!(known.contains("inky"), "{known:?}");
+        assert!(known.contains("disk-saver"), "{known:?}");
+        assert!(!known.contains("ljos-bot"), "{known:?}");
+        assert!(!known.contains("inky-n9o"), "{known:?}");
+        assert!(!known.contains("disk-saver-t4t"), "{known:?}");
+        assert!(!known.contains("grokbot-sand-sub"), "{known:?}");
+        assert_eq!(
+            crate::resolve_call_seat(Some("ljos-bot")).unwrap().seat,
+            "ljosbot"
+        );
+        assert_eq!(
+            crate::resolve_call_seat(Some("inky-n9o")).unwrap().seat,
+            "inky"
+        );
+        let err = crate::resolve_call_seat(Some("grokbot-sand-sub"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no seat of its own"), "{err}");
+        assert_eq!(std::fs::read(&toml_path).unwrap(), before_toml);
+        assert_eq!(std::fs::read(&org_path).unwrap(), before_org);
+    }
+
+    /// Filing goes through `vissue` when the claim graph is absent. A
+    /// subagent name writes nothing. `ljos-bot` is filed as `ljosbot`.
+    #[test]
+    fn filing_a_claim_refuses_a_subagent_name_and_uses_the_seat() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("vissue.log");
+        let log_s = log.display();
+        let body = format!(
+            "#!/bin/sh\necho \"$* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1\" in\n  create) echo proj-abcd ;;\n  claim) echo claimed ;;\nesac\nexit 0\n"
+        );
+        let bin = dir.path().join("vissue");
+        std::fs::write(&bin, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.path().join("home")).unwrap();
+        std::fs::create_dir_all(dir.path().join("run")).unwrap();
+        unsafe {
+            std::env::set_var("PATH", dir.path());
+            std::env::set_var("HOME", dir.path().join("home"));
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::remove_var("LJOS_HOLD");
+            std::env::set_var("LJOS_SEAT", "grokbot-sand-sub");
+        }
+        let err = file_and_claim("proj", "a title").unwrap_err();
+        assert!(err.contains("no seat of its own"), "{err}");
+        let wrote = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(wrote.is_empty(), "{wrote}");
+
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "ljos-bot");
+        }
+        let issue = file_and_claim("proj", "a title").unwrap();
+        assert_eq!(issue, "proj-abcd");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(calls.contains("create"), "{calls}");
+        assert!(calls.contains("claim proj-abcd"), "{calls}");
+        for line in calls.lines() {
+            let Some(agent) = line.split("VISSUE_AGENT=").nth(1) else {
+                continue;
+            };
+            let agent = agent.trim();
+            assert!(
+                agent == "ljosbot" || agent.starts_with("ljosbot@"),
+                "{calls}"
+            );
+            assert!(!agent.contains("ljos-bot"), "{calls}");
+        }
     }
 
     #[test]
