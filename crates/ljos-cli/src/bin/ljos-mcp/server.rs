@@ -4202,6 +4202,13 @@ mod tests {
     /// error, the same way every other refusal is.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_refuses_a_bad_commit() {
+        // A parallel test points HOME at a temporary directory, which
+        // suspends the guard. This check is about the command, so keep it on.
+        let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);
+        unsafe {
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+        }
         let server = LjosServer::at(std::env::temp_dir());
         let allow = server
             .ljos_guard_check(Parameters(GuardArgs {
