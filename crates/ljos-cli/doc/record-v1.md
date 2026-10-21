@@ -7,8 +7,9 @@ Every entry is one JSON file.
 - `kind` is `question` or `ballot`.
 - `host`, `session`, and `agent` fields are refused anywhere in the plain
   payload.
-- `opened_at` and `cast_at` are RFC 3339 timestamps at hour precision
-  (minutes, seconds, and subseconds are zero).
+- `opened_at` and `cast_at` are UTC hours written
+  `YYYY-MM-DDTHH:00:00Z`. Offsets, subseconds and other separators are
+  refused, so one hour has one spelling and one ballot id.
 - voter ids are `<identity>/<seat-or-run>`.
 
 ## Question entry
