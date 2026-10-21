@@ -291,6 +291,7 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     std::env::remove_var("LJOS_BIN_DIR");
     std::env::remove_var("LJOS_TRACKER_DIR");
     std::env::set_var("LJOS_TRACKER_REMOTE", &origin);
+    clear_agent_ids();
     std::env::set_var("LJOS_SEAT", "baked-seat");
     std::env::set_var("CURSOR_AGENT_ID", "abcdef012345");
     let host_key = home.join(".config/deedar/host.key");
