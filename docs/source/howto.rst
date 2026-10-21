@@ -82,7 +82,7 @@ machine into ``harnesses.toml``, then one verb each:
 .. code:: console
 
    $ for h in opencode hermes omp grok; do ljos onboard --harness $h; done
-   $ ljos doctor | grep runner
+   $ ljos doctor --all | grep runner
    ok  runner mcp  opencode: ljos registered
    ok  runner skill    opencode: /home/you/.config/opencode/skills/ljos/SKILL.md
    ok  runner mcp  hermes: ljos registered
@@ -211,7 +211,7 @@ Computing Base (TCB)
 .. code:: console
 
    $ echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook
-   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `ljos-policyd`)"}}
+   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
 
 An ``ask`` rule uses the caller's approval UI when that UI is supported.
 Otherwise the hook stops the command and prints a request id. Calling
@@ -335,8 +335,8 @@ Keep the key in ``pass`` and write the setting:
    enabled = true
    key_cmd = ["pass", "show", "api/typesafe/jev"]
    TOML
-   $ ljos doctor | grep jev
-   ok  jev on  jev-1.13.0  0 calls  $0.0000 of $4.00 this month
+   $ ljos doctor --all | grep jev
+   ok  jev on  jev jev-1.13.0  0 calls, 0 cached  $0.0000 of $4.00 this month
 
 The hook runs the key command once per login, with no terminal and
 three seconds to answer, and keeps the key in
@@ -462,7 +462,7 @@ Open persona panes in another tool
 
 .. code:: console
 
-   $ ljos doctor | grep panes
+   $ ljos doctor --all | grep panes
    ok  panes   herdr opens persona panes; tmux also here
 
 herdr opens one workspace a persona, in the persona's home and as its
@@ -737,6 +737,8 @@ Start a sitting, and end one
    1 due; 4 scheduled, next at 2026-09-13T09:12:00Z
    == island: Ship the fuse change?
    1.000   seed    ab8c... 3 weeks ago CombMNZ over RRF for fusing two ballots.
+   == blockers
+   none open; the issue is workable
    == playbook
    sit
    A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
@@ -765,11 +767,11 @@ and ``ljos release`` hands it back.
 .. code:: console
 
    $ ljos finish proj-1a2b --lesson "CombMNZ held on turns. RRF lost two points." --outcome ship
-   proposed 51778929d855529fcb8df3f4d1c4d692 as agent-derived; `ljos accept 51778929d855529fcb8df3f4d1c4d692` writes it
-   fired the island for "Ship the fuse change?": 8 memories
    completed the session node for proj-1a2b as done
-   learned from outcome "ship": 6 trust rows rewritten
-   the ticket stays proj-1a2b's state; `vissue update proj-1a2b -s DONE` closes it
+   remembered the lesson (id 51778929) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it
+   fired the island for "Ship the fuse change?": 8 memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.
+   Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 5 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
+   the ticket proj-1a2b stays open and nobody holds it; `ljos finish proj-1a2b --close` or `vissue update proj-1a2b -s DONE` closes it when the work is accepted
 
 Vote with personas
 ==================
@@ -906,7 +908,7 @@ Sign what you hand over
 
    $ head -c 32 /dev/urandom > ~/.config/deedar/host.key && chmod 600 ~/.config/deedar/host.key
    $ export DEEDAR_HOST_SIGNING_KEY=~/.config/deedar/host.key
-   $ ljos doctor | grep 'host key'
+   $ ljos doctor --all | grep 'host key'
    ok  host key    /home/you/.config/deedar/host.key (32-byte seed)
 
 ``handover`` then signs the manifest and the log head. A receiver adds
@@ -992,18 +994,18 @@ Check the seat
 
 ``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer.
 ``ljos doctor --all`` prints every row.
-The block is an example of that listing.
-On this tree ``ljos doctor`` read these versions from crates.io: ljos 0.31.0, vissue-cli 0.21.0, packset 0.15.3.
-``ljos --version`` printed ``ljos 0.31.0``.
-The rows are the shape when the binary on ``PATH`` is that version: no ``behind`` and no ``ahead of`` in front of ``crates.io``.
-Paths stand in for those binaries.
+The block is the ``ljos`` row that command printed, taken from ljos 0.32.1.
+``ljos --version`` printed ``ljos 0.32.1``.
+The row is the shape when the binary on ``PATH`` is that version: no ``behind`` and no ``ahead of`` in front of ``crates.io``.
+A day cache that already holds the crates.io answer prints ``crates.io (cached)`` in that place.
+The path stands in for the binary.
+On this tree the same run also read vissue-cli 0.21.0 and packset 0.15.3 from crates.io.
+Those binaries were not on ``PATH``, so the sample does not show them as ``ok``.
 
 .. code:: text
 
    $ ljos doctor --all
-   ok  ljos    /path/to/ljos  0.31.0  crates.io 0.31.0
-   ok  vissue  /path/to/vissue  0.21.0  crates.io (cached) 0.21.0; evidence ballots supported
-   ok  packsetd    /path/to/packsetd  0.15.3  crates.io (cached) 0.15.3
+   ok  ljos    /path/to/ljos  0.32.1  crates.io 0.32.1
 
 Exit 1 when the tracker, the deed store, or the pack does not answer. The
 tracker row names how many commits origin lacks, and fails when that count

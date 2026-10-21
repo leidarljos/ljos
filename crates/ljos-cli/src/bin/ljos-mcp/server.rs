@@ -18,10 +18,11 @@ use ljos_cli::{
     island_entities, learn_and_write, learn_reading, now_utc, on_path, other_seat, pack,
     packset_consolidate, packset_forget, packset_island_as, packset_search_as_of, panel_steps,
     parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, predictions_of,
-    read_campaign, receive, release, remember_findings, resolve_assignee, rows_about, run_captured,
-    runner_pid, search_reading, seat_name, settle_discount, sitting_gated, timeline, topic_words,
-    tracker_show_json, trust_from_pack, with_discount, write_persona, write_prediction, write_rule,
-    write_trust, Persona, Rule, Trust, CARD_NAMES, LEARN_BETA, POLICY_TCB, PROTOCOL,
+    protocol_text, read_campaign, receive, release, remember_findings, resolve_assignee,
+    rows_about, run_captured, runner_pid, search_reading, seat_name, settle_discount,
+    sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack, with_discount,
+    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES,
+    LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1873,7 +1874,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the playbook copied before recall, the working set, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the five before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
+        description = "The seat already claims on the first edit, cites a deed on commit, and finishes at stop or session end; this server claims on the first write and finishes at shutdown. Call this only to name the issue, the accession or the lesson yourself. Call this to begin work on an issue; it is the whole opening of a sitting in the protocol's order and stops at the first store that does not answer: doctor, cards, the review clock, the island the issue's title activates, the blockers, the playbook copied before recall, the working set, reclaim, and the claim. Pass playbook to name the recipe (sit, arena, land, company-panel, overnight); absent, a closed-set token in the title else sit. Sitting always binds one of the closed set before claim. The name is a tracker playbook: note until finish or release. Occupancy is the runner session (`*_SESSION_ID`) then `{name}:{issue}`: two conversations hold two tickets. Omit assignee.",
         annotations(
             title = "Open a sitting",
             read_only_hint = false,
@@ -2822,6 +2823,9 @@ impl LjosServer {
                 copies the full body before recall; a panel is refused until one is bound.\n\
              6. `ljos_recall` on the node. What it stands on and what it cited.\n\
              7. `ljos_timeline` the last twelve dated events across the stores.\n\
+                The sitting then prints `== reclaim`, before `== claim`: claims\n\
+                quiet longer than the lease go back to ready when their\n\
+                conversation is gone.\n\
              8. `ljos_claim` a session node for it. A harness seat occupies per\n\
                 issue; a named worker occupies one slot.\n\
              \n\
@@ -3522,7 +3526,7 @@ impl ServerHandler for LjosServer {
         let uri = request.uri.clone();
         if uri == PROTOCOL_URI {
             return Ok(
-                ReadResourceResult::new(vec![ResourceContents::text(PROTOCOL, uri)])
+                ReadResourceResult::new(vec![ResourceContents::text(protocol_text(), uri)])
                     .with_ttl_ms(RESOURCE_TTL_MS)
                     .with_cache_scope(CacheScope::Private)
                     .into(),
@@ -4238,6 +4242,7 @@ mod tests {
     #[test]
     fn the_protocol_is_served_and_orders_the_sitting() {
         assert_eq!(card_named(PROTOCOL_URI), None, "the protocol is not a card");
+        let protocol = protocol_text();
         for verb in [
             "ljos doctor",
             "ljos cards",
@@ -4247,7 +4252,7 @@ mod tests {
             "ljos recall",
             "ljos claim",
         ] {
-            assert!(PROTOCOL.contains(verb), "{verb} missing from the protocol");
+            assert!(protocol.contains(verb), "{verb} missing from the protocol");
         }
         let order: Vec<usize> = [
             "## Before the work",
@@ -4255,16 +4260,19 @@ mod tests {
             "## After the work",
         ]
         .iter()
-        .map(|h| PROTOCOL.find(h).unwrap_or_else(|| panic!("{h} missing")))
+        .map(|h| protocol.find(h).unwrap_or_else(|| panic!("{h} missing")))
         .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]));
+        let reclaim = protocol.find("`== reclaim`").expect("reclaim");
+        let claim = protocol.find("`== claim`").expect("claim");
+        assert!(reclaim < claim, "reclaim is printed before claim");
         // Every tool the server declares is named in the protocol, so a reader
         // of the protocol has heard of everything the server can do.
         for tool in LjosServer::tool_router().list_all() {
             let verb = tool.name.trim_start_matches("ljos_").to_string();
             assert!(
-                PROTOCOL.contains(&format!("`{verb}`"))
-                    || PROTOCOL.contains(&format!("ljos {verb}")),
+                protocol.contains(&format!("`{verb}`"))
+                    || protocol.contains(&format!("ljos {verb}")),
                 "tool {verb} is not in the protocol"
             );
         }
