@@ -305,3 +305,29 @@ fn onboard_writes_an_absolute_command_when_path_points_to_another_install() {
         "{said}"
     );
 }
+
+#[test]
+fn onboard_rewrites_only_the_ljos_entry_in_toml() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"/home/box/.cargo/bin/ljos-mcp\"\nargs = []\n\n[mcp_servers.ljos-dev]\ncommand = \"/opt/pinned/ljos-mcp\"\nargs = []\n# keep /home/box/.cargo/bin/ljos-mcp in this comment\n",
+    )
+    .unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "codex"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(text.contains("[mcp_servers.ljos]\ncommand = \"ljos-mcp\""), "{text}");
+    assert!(
+        text.contains("[mcp_servers.ljos-dev]\ncommand = \"/opt/pinned/ljos-mcp\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("# keep /home/box/.cargo/bin/ljos-mcp in this comment"),
+        "{text}"
+    );
+}
