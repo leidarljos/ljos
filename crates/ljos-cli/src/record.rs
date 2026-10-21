@@ -497,8 +497,12 @@ fn validate_question_id(id: &str, expected_type: Option<&str>) -> Result<()> {
         .split_once('-')
         .context("question id must be `<type>-<8 hex>`")?;
     validate_question_type(kind)?;
-    if !is_hex_len(suffix, 8) {
-        bail!("question id suffix must be 8 hex chars");
+    if suffix.len() != 8
+        || !suffix
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        bail!("question id suffix must be 8 lowercase hex chars");
     }
     if let Some(expected_type) = expected_type {
         if expected_type != kind {
@@ -832,6 +836,22 @@ mod tests {
         sign_entry(unsigned, &seat).unwrap_or_else(|err| panic!("seat-{seed}: {err:#}"))
     }
 
+    /// Sign under the `[seed; 32]` key without the schema checks
+    /// [`sign_entry`] runs first.
+    fn sign_unchecked(mut unsigned: UnsignedEntry, seed: u8) -> SignedEntry {
+        if let Entry::Ballot(ballot) = &mut unsigned.entry {
+            ballot.id = Some(ballot_id(ballot).expect("id"));
+        }
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let payload = signing_payload(&unsigned).expect("payload");
+        let (key, sig) = crate::ballot_sig::signed_hex(&key, &payload);
+        SignedEntry {
+            schema: unsigned.schema,
+            entry: unsigned.entry,
+            signature: EntrySignature { key, sig },
+        }
+    }
+
     fn signer_on_entry(unsigned: &UnsignedEntry) -> &str {
         match &unsigned.entry {
             Entry::Question(question) => &question.opened_by,
@@ -1133,6 +1153,24 @@ mod tests {
         let by_stance = read.get("correct-3f9a1c2e").expect("question tally");
         assert_eq!(by_stance.get("accept"), Some(&1));
         assert_eq!(by_stance.get("withdrawn"), None);
+    }
+
+    #[test]
+    fn a_question_id_in_capitals_is_refused() {
+        let _home = test_home();
+        let at = "2026-10-21T10:00:00Z";
+        let lower = sign_as(ballot_entry("alpha/seat-a", "accept", at), 3);
+        let mut upper = ballot_entry("alpha/seat-a", "accept", at);
+        let Entry::Ballot(ballot) = &mut upper.entry else {
+            panic!("ballot");
+        };
+        ballot.question = "correct-3F9A1C2E".to_string();
+        let upper = sign_unchecked(upper, 3);
+        let ballots = [as_ballot(lower.clone()), as_ballot(upper.clone())];
+        let Err(err) = check_entries(&[lower, upper]) else {
+            panic!("one voter counted twice: {:?}", tally(&ballots));
+        };
+        assert!(err_chain(&err).contains("lowercase"), "{}", err_chain(&err));
     }
 
     #[test]
