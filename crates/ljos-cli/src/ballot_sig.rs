@@ -484,7 +484,8 @@ fn parse_pins_strict(text: &str) -> Result<BTreeMap<String, String>> {
 /// The pinned keys for record checking, and where they came from.
 ///
 /// When there is no pin file, checking starts with no pins and the source is
-/// `none: first-seen in this check`.
+/// `none: first-seen in this check`. A link to a missing file is a pin file
+/// that cannot be read, not an absent one.
 pub fn pins_for_check() -> Result<(BTreeMap<String, String>, String)> {
     let none = "none: first-seen in this check".to_string();
     let Some(path) = pin_path() else {
@@ -493,6 +494,9 @@ pub fn pins_for_check() -> Result<(BTreeMap<String, String>, String)> {
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(&path).is_ok() {
+                bail!("pin file {} is a link to a missing file", path.display());
+            }
             return Ok((BTreeMap::new(), none));
         }
         Err(err) => return Err(err).with_context(|| format!("pin file {}", path.display())),

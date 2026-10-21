@@ -1506,6 +1506,29 @@ mod tests {
     }
 
     #[test]
+    fn a_dangling_pin_file_link_is_refused() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        std::os::unix::fs::symlink(root.path().join("gone"), &pin_path).expect("symlink");
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let err = check_entries(std::slice::from_ref(&entry))
+            .expect_err("a dangling pin file link read as no pin file");
+        assert!(
+            err_chain(&err).contains(pin_path.to_string_lossy().as_ref()),
+            "{}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
     fn duplicate_pin_voter_lines_are_refused() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
