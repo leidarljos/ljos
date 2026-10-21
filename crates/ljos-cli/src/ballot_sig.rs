@@ -23,6 +23,8 @@ use std::path::PathBuf;
 
 /// The note prefix a signature rides under.
 pub const SIG_NOTE: &str = "ballot-sig: ";
+/// The note prefix a withdrawn ballot rides under.
+pub const WITHDRAWN_NOTE: &str = "ballot-withdrawn: ";
 /// The pin file at the tracker root.
 pub const PIN_FILE: &str = ".ljos-seat-keys";
 
@@ -126,6 +128,41 @@ pub fn note_session(note: &str) -> Option<(String, String)> {
     }
     let tok = |i: usize| rest[at[i].0..at[i].1].to_string();
     Some((tok(n - 2), tok(n - 1)))
+}
+
+/// A withdrawn ballot: `ballot-withdrawn: VOTER HARNESS NONCE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawnNote {
+    pub voter: String,
+    pub harness: String,
+    pub nonce: String,
+}
+
+/// One token per field, so the note stays three words.
+#[must_use]
+pub fn withdrawn_line(voter: &str, harness: &str, nonce: &str) -> String {
+    format!(
+        "{WITHDRAWN_NOTE}{} {} {}",
+        field(voter),
+        field(harness),
+        field(nonce)
+    )
+}
+
+/// `ballot-withdrawn: VOTER HARNESS NONCE`, or `None` when the note is not
+/// that shape.
+#[must_use]
+pub fn parse_withdrawn(note: &str) -> Option<WithdrawnNote> {
+    let rest = note.trim().strip_prefix(WITHDRAWN_NOTE)?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [voter, harness, nonce] = parts.as_slice() else {
+        return None;
+    };
+    Some(WithdrawnNote {
+        voter: (*voter).to_string(),
+        harness: (*harness).to_string(),
+        nonce: (*nonce).to_string(),
+    })
 }
 
 /// Byte ranges of the whitespace-separated fields of `text`.
@@ -712,6 +749,19 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
     sign_ballot(issue, &voter, &choice)
 }
 
+/// Leave `ballot-withdrawn: VOTER HARNESS NONCE` on `issue` for this session.
+///
+/// # Errors
+///
+/// The tracker did not take the note.
+pub fn note_withdrawn(issue: &str, voter: &str) -> Result<String> {
+    let id = identity();
+    let note = withdrawn_line(voter, &id.harness, &id.nonce);
+    crate::run_captured("vissue", &["note", issue, &note])
+        .with_context(|| format!("ballot withdrawn; the note on {issue} was not written"))?;
+    Ok(note)
+}
+
 /// The note prefix a design candidate's signature rides under.
 pub const CANDIDATE_NOTE: &str = "candidate-sig: ";
 
@@ -1056,6 +1106,18 @@ mod tests {
         );
         assert_eq!(note_session("ballot-sig: seat-a ship ab"), None);
         assert_eq!(note_session("finding: seat-a: nit: name the unit"), None);
+    }
+
+    #[test]
+    fn a_withdrawn_note_is_three_fields() {
+        let line = withdrawn_line("seat a", "sess-1", "-");
+        assert_eq!(line, "ballot-withdrawn: seat_a sess-1 -");
+        let parsed = parse_withdrawn(&line).unwrap();
+        assert_eq!(parsed.voter, "seat_a");
+        assert_eq!(parsed.harness, "sess-1");
+        assert_eq!(parsed.nonce, "-");
+        assert!(parse_withdrawn("ballot-withdrawn: only-one").is_none());
+        assert!(parse_withdrawn("ballot-sig: seat-a ship").is_none());
     }
 
     #[test]

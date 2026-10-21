@@ -1822,7 +1822,12 @@ fn run_command() -> Result<()> {
                     &["vote", &issue, "--withdraw"],
                     Some(&who),
                 ) {
-                    Ok(said) => print!("{}", said.stdout),
+                    Ok(said) => {
+                        print!("{}", said.stdout);
+                        if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&issue, &who) {
+                            eprintln!("ljos vote: {e:#}");
+                        }
+                    }
                     Err(e) if format!("{e:#}").contains("holds no ballot") => {
                         println!("{issue}: {who} holds no ballot; withdrawing the forecast");
                     }

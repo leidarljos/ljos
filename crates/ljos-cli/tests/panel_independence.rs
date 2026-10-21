@@ -67,6 +67,17 @@ if cmd == "vote":
     if "--json" in rest:
         print(json.dumps(ballots.get(ident, [])))
         sys.exit(0)
+    if "--withdraw" in rest:
+        agent = os.environ.get("VISSUE_AGENT") or "seat"
+        rows = ballots.get(ident, [])
+        kept = [r for r in rows if r.get("agent") != agent]
+        if len(kept) == len(rows):
+            sys.stderr.write(ident + ": " + agent + " holds no ballot\n")
+            sys.exit(1)
+        ballots[ident] = kept
+        save("ballots.json", ballots)
+        print("withdrawn")
+        sys.exit(0)
     choice = ""
     i = 0
     while i < len(rest):
@@ -740,4 +751,60 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
     assert!(stdout.contains("saddle  hold"), "{said}");
+}
+
+#[test]
+fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
+    let world = World::new();
+    let issue = "demo-wd";
+    let session = "sess-review-1";
+    let cast = world.ljos(
+        "clerk",
+        session,
+        &[
+            "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
+        ],
+    );
+    assert!(cast.status.success(), "{}", text(&cast));
+    let before = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&before);
+    assert!(before.status.success(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("1 ballot counts"),
+        "{said}"
+    );
+    let withdrawn = world.ljos(
+        "clerk",
+        session,
+        &["vote", issue, "--withdraw", "--as", "reviewer"],
+    );
+    let said = text(&withdrawn);
+    assert!(
+        withdrawn.status.success() || said.contains("forecast"),
+        "{said}"
+    );
+    assert!(!said.contains("unexpected vissue"), "{said}");
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
+    assert!(notes.contains("ballot-withdrawn: reviewer"), "{notes}");
+    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("0 ballots count"), "{said}");
+    assert!(!stdout.contains("ship"), "{said}");
+    let again = world.ljos(
+        "clerk",
+        session,
+        &[
+            "vote", issue, "--for", "hold", "--used", "none", "--as", "reviewer",
+        ],
+    );
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("withdrawn")
+            && said.contains("first ballot stands")
+            && said.contains("Nothing was cast"),
+        "{said}"
+    );
 }

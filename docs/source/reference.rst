@@ -188,6 +188,10 @@ Command line
 |                                                                                                                                 |                           | a shell runner (``shell = true``, ``grokbot``, or ``shell``) writes the skill and an env file and registers no server and no hook                                                                                                              |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
+Withdrawing a ballot writes ``ballot-withdrawn: VOTER HARNESS NONCE``.
+The tally leaves that ballot out, and so does the push gate.
+A later cast from that session says the ballot was withdrawn.
+
 ``send SEAT TEXT`` writes to one seat. A seat the pack has never heard
 from is refused, with the seats it knows, since mail waits under the name
 it was sent to; ``--new-seat`` writes to one that has not started yet.

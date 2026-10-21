@@ -687,7 +687,7 @@ pub struct VoteArgs {
     #[serde(default)]
     pub jev: bool,
     /// Take back the ballot and its forecast, as the seat or `as` a persona.
-    /// The issue's logbook keeps what the ballot was.
+    /// The logbook gains a ballot-withdrawn note, and the tally leaves it out.
     #[serde(default)]
     pub withdraw: bool,
 }
@@ -1768,6 +1768,10 @@ impl LjosServer {
                 )?;
                 let who = identity_or_seat(args.as_persona.as_deref())
                     .unwrap_or_else(|| "seat".to_string());
+                match ljos_cli::ballot_sig::note_withdrawn(&args.issue, &who) {
+                    Ok(_) => {}
+                    Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
+                }
                 let n = ljos_cli::withdraw_prediction(&args.issue, &who).map_err(refused)?;
                 said.0
                     .text

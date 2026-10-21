@@ -270,6 +270,25 @@ fn candidate_notes(issue: &str) -> Vec<String> {
     notes
 }
 
+/// Whether a `ballot-withdrawn:` note names `voter`.
+fn voter_withdrawn(notes: &[String], voter: &str) -> bool {
+    let named = ballot_sig::field(voter);
+    notes.iter().any(|note| {
+        ballot_sig::parse_withdrawn(note).is_some_and(|w| w.voter == voter || w.voter == named)
+    })
+}
+
+/// Whether a withdrawn note matches this session or this voter.
+fn cast_was_withdrawn(notes: &[String], voter: &str, key: &str) -> bool {
+    let named = ballot_sig::field(voter);
+    notes.iter().any(|note| {
+        let Some(w) = ballot_sig::parse_withdrawn(note) else {
+            return false;
+        };
+        w.voter == voter || w.voter == named || session_key(&w.harness, &w.nonce) == key
+    })
+}
+
 /// Why this connection must not cast on `issue`. `own` is that issue's
 /// logbook. `family` is the parent and the design children. A signature
 /// counts only from `own`, and only when it verifies for `issue`. A
@@ -305,6 +324,11 @@ pub fn session_cast_refusal(
         // is a second voice. The voter name is not the session.
         if other != key {
             continue;
+        }
+        if cast_was_withdrawn(own, &sig.voter, key) {
+            return Some(format!(
+                "this session already cast a ballot on {issue} ({key}), and that ballot was withdrawn. The first ballot stands. A seat argument does not make another voice. Nothing was cast"
+            ));
         }
         return Some(format!(
             "this session already cast a ballot on {issue} ({key}). A seat argument does not make another voice. Nothing was cast"
@@ -439,8 +463,11 @@ pub struct IgnoredBallot {
 
 /// The ballots that count, and the ones a shared session or an author
 /// session pushed out. `notes` are newest first, as the logbook stores
-/// them. The oldest bound note for a session is the ballot that counts.
-/// A voter with no session binding is kept: a tracker from before binding.
+/// them. The oldest bound note for a session is the ballot that counts,
+/// and only when that voter still has a drawer row whose choice matches
+/// one of that voter's signatures. A `ballot-withdrawn:` note drops the
+/// voter. A voter with no session binding is kept: a tracker from before
+/// binding.
 #[must_use]
 pub fn tally_of(
     rows: &[Value],
@@ -483,11 +510,23 @@ pub fn tally_of(
         if !seen.insert(voter.clone()) {
             continue;
         }
-        let mut row = rows
+        if voter_withdrawn(notes, voter) {
+            continue;
+        }
+        let Some(mut row) = rows
             .iter()
             .find(|r| r["agent"].as_str().map(str::trim) == Some(voter.as_str()))
             .cloned()
-            .unwrap_or_else(|| serde_json::json!({ "agent": voter }));
+        else {
+            continue;
+        };
+        let drawer = row["choice"].as_str().unwrap_or("").trim();
+        let signed = sigs
+            .iter()
+            .any(|sig| sig.voter == voter.as_str() && sig.choice == drawer);
+        if !signed {
+            continue;
+        }
         if let Some(obj) = row.as_object_mut() {
             obj.insert("choice".into(), Value::String(choice.clone()));
         }
@@ -497,6 +536,10 @@ pub fn tally_of(
     for row in rows {
         let voter = row["agent"].as_str().unwrap_or("").trim();
         if voter.is_empty() || seen.contains(voter) {
+            continue;
+        }
+        if voter_withdrawn(notes, voter) {
+            seen.insert(voter.to_string());
             continue;
         }
         if let Some(key) = voter_session.get(voter) {
@@ -1273,5 +1316,66 @@ mod tests {
             blocked.contains("already cast") && blocked.contains("Nothing was cast"),
             "{blocked}"
         );
+    }
+
+    #[test]
+    fn a_withdrawn_ballot_drops_out_of_the_tally() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        let sig = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "ship", "sess-r", "-");
+        let authors = std::collections::BTreeSet::new();
+        let (gone, _) = tally_of(&[], std::slice::from_ref(&sig), &authors);
+        assert!(gone.is_empty(), "{gone:?}");
+        let rows = [serde_json::json!({"agent": "reviewer", "choice": "ship"})];
+        let note = ballot_sig::withdrawn_line("reviewer", "sess-r", "-");
+        let (counted, ignored) = tally_of(&rows, &[note.clone(), sig.clone()], &authors);
+        assert!(counted.is_empty(), "{counted:?}");
+        assert!(ignored.is_empty(), "{ignored:?}");
+        let again =
+            session_cast_refusal("demo-w", "sess-r", "reviewer", &[note, sig], &[]).unwrap();
+        assert!(
+            again.contains("withdrawn")
+                && again.contains("first ballot stands")
+                && again.contains("already cast")
+                && again.contains("Nothing was cast"),
+            "{again}"
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_seat_ballot_does_not_decide_a_push() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let ship = ballot_sig::sign_bound(&key, "cite-1", "seat-a", "ship", "sess-a", "-");
+        let hold = ballot_sig::sign_bound(&key, "cite-1", "seat-b", "hold", "sess-b", "-");
+        let withdrawn = ballot_sig::withdrawn_line("seat-a", "sess-a", "-");
+        let rows = [
+            serde_json::json!({"agent": "seat-a", "choice": "ship"}),
+            serde_json::json!({"agent": "seat-b", "choice": "hold"}),
+        ];
+        let notes = vec![withdrawn, hold, ship];
+        let authors = std::collections::BTreeSet::new();
+        let (counted, _) = tally_of(&rows, &notes, &authors);
+        assert_eq!(counted.len(), 1, "{counted:?}");
+        assert_eq!(counted[0]["agent"], "seat-b");
+        assert_eq!(counted[0]["choice"], "hold");
+        let personas = std::collections::BTreeSet::new();
+        let (words, json) = crate::push_cite_reading_signed(
+            "cite-1",
+            &counted,
+            &personas,
+            "seat-c",
+            Ok(Vec::new()),
+        );
+        assert!(words.contains("decides hold"), "{words}");
+        assert!(!words.contains("split"), "{words}");
+        assert_eq!(json["push_cite"]["stands"].as_bool(), Some(true), "{json}");
+        let (only, _) = tally_of(&rows[..1], &notes, &authors);
+        assert!(only.is_empty(), "{only:?}");
+        let (words, json) =
+            crate::push_cite_reading_signed("cite-1", &only, &personas, "seat-c", Ok(Vec::new()));
+        assert!(
+            words.contains("does not stand") && words.contains("no seat voted"),
+            "{words}"
+        );
+        assert_eq!(json["push_cite"]["stands"].as_bool(), Some(false), "{json}");
     }
 }
