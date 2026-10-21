@@ -3,7 +3,9 @@
 //! `agent_id` and the call's `tool_use_id`, but gives the command it runs
 //! no variable that names the agent. The hook leaves the call under the
 //! runtime directory, and the `ljos` the command runs, or the MCP server
-//! the call reaches, takes it back once.
+//! the call reaches, takes it back once. A shell call stays behind as
+//! taken until it expires, so the same line run again inside the call
+//! binds the session its first run bound and is refused as cast.
 //!
 //! A shell call is kept with the hook's ancestors, and only a process that
 //! runs under the nearest of them still alive takes it: the harness that
@@ -84,15 +86,29 @@ fn read(path: &Path) -> Option<Call> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
+/// The extension a call takes once a process took it. It stays until
+/// [`CALL_TTL_MS`], so the same line run again inside the call binds what
+/// the first run bound rather than nothing.
+const TAKEN: &str = "taken";
+
 /// The calls under `dir` still waiting, each with its file. A call past
 /// [`CALL_TTL_MS`] is dropped.
 fn waiting(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
+    listed(dir, now, "json")
+}
+
+/// The calls under `dir` already taken, within [`CALL_TTL_MS`].
+fn spent(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
+    listed(dir, now, TAKEN)
+}
+
+fn listed(dir: &Path, now: u64, ext: &str) -> Vec<(PathBuf, Call)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for path in entries.flatten().map(|e| e.path()) {
-        if path.extension().is_none_or(|e| e != "json") {
+        if path.extension().is_none_or(|e| e != ext) {
             continue;
         }
         let Some(call) = read(&path) else {
@@ -197,7 +213,9 @@ fn forget(root: &Path, session: &str, call: &str) {
     };
     let prefix = format!("{call}.");
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && !name.ends_with(&format!(".{TAKEN}")) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -258,32 +276,48 @@ fn claim_command_in(
     now: u64,
     mine: &[Proc],
 ) -> Option<String> {
-    let found = waiting(&shell_dir(root, session), now)
-        .into_iter()
-        .filter(|(_, c)| {
-            c.session == session && argv_matches(&c.argv, argv) && harness_of(c, mine).is_some()
-        })
-        .collect();
-    take_newest(found).map(|c| c.agent)
+    claim_from(&[shell_dir(root, session)], now, |c| {
+        c.session == session && argv_matches(&c.argv, argv) && harness_of(c, mine).is_some()
+    })
+    .map(|c| c.agent)
 }
 
 fn claim_any_in(root: &Path, argv: &[String], now: u64, mine: &[Proc]) -> Option<(String, String)> {
-    let sessions = std::fs::read_dir(root.join("shell")).ok()?;
-    let found = sessions
+    let dirs: Vec<PathBuf> = std::fs::read_dir(root.join("shell"))
+        .ok()?
         .flatten()
-        .flat_map(|dir| waiting(&dir.path(), now))
-        .filter(|(_, c)| argv_matches(&c.argv, argv) && harness_of(c, mine).is_some())
+        .map(|d| d.path())
         .collect();
-    take_newest(found).map(|c| (c.session, c.agent))
+    claim_from(&dirs, now, |c| {
+        argv_matches(&c.argv, argv) && harness_of(c, mine).is_some()
+    })
+    .map(|c| (c.session, c.agent))
 }
 
-/// The newest call, taken: the first whose file this process removes, so
-/// no other process takes it too.
-fn take_newest(mut found: Vec<(PathBuf, Call)>) -> Option<Call> {
-    found.sort_by(|a, b| b.1.at.cmp(&a.1.at).then_with(|| b.0.cmp(&a.0)));
-    found
-        .into_iter()
-        .find_map(|(path, c)| std::fs::remove_file(&path).is_ok().then_some(c))
+/// The newest waiting call under `dirs` that `fits`, taken. With none, the
+/// newest that fits and was already taken: this line ran before inside
+/// the same call, and binds what it bound then.
+fn claim_from(dirs: &[PathBuf], now: u64, fits: impl Fn(&Call) -> bool) -> Option<Call> {
+    let among = |list: fn(&Path, u64) -> Vec<(PathBuf, Call)>| -> Vec<(PathBuf, Call)> {
+        let mut found: Vec<_> = dirs
+            .iter()
+            .flat_map(|d| list(d, now))
+            .filter(|(_, c)| fits(c))
+            .collect();
+        found.sort_by(|a, b| b.1.at.cmp(&a.1.at).then_with(|| b.0.cmp(&a.0)));
+        found
+    };
+    take_newest(among(waiting)).or_else(|| among(spent).into_iter().next().map(|(_, c)| c))
+}
+
+/// The first of `found` this process takes, so no other process takes it
+/// too. Its file is left as taken for [`spent`].
+fn take_newest(found: Vec<(PathBuf, Call)>) -> Option<Call> {
+    found.into_iter().find_map(|(path, c)| {
+        std::fs::rename(&path, path.with_extension(TAKEN))
+            .is_ok()
+            .then_some(c)
+    })
 }
 
 /// The session and subagent of a Claude Code MCP call, by the tool use id
@@ -378,12 +412,13 @@ mod tests {
             None,
             "another session's calls are not read"
         );
-        let late = 1_000 + CALL_TTL_MS + 1;
+        let late = 2_000 + CALL_TTL_MS + 1;
         assert_eq!(
             claim_command_in(dir.path(), "sess-1", &argv, late, &mine),
             None
         );
         assert!(!shell.join("toolu_old.0.json").exists());
+        assert!(!shell.join("toolu_new.0.taken").exists());
     }
 
     #[test]
@@ -413,7 +448,10 @@ mod tests {
             claim_any_in(dir.path(), &argv, now, &mine),
             Some(("sess-1".into(), "agent-a".into()))
         );
-        assert_eq!(claim_any_in(dir.path(), &argv, now, &mine), None);
+        assert_eq!(
+            claim_any_in(dir.path(), &argv, 2_000 + CALL_TTL_MS + 1, &mine),
+            None
+        );
         assert_eq!(
             claim_any_in(
                 dir.path(),
@@ -425,6 +463,45 @@ mod tests {
         );
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(claim_any_in(empty.path(), &argv, now, &mine), None);
+    }
+
+    #[test]
+    fn a_line_run_again_binds_what_its_first_run_took() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = shell_dir(dir.path(), "sess-1");
+        let line = "vote demo-a --for ship --used none --as reviewer";
+        let argv = words(line);
+        let mine = crate::proc_tree::ancestors();
+        put(
+            &shell.join("toolu_a.0.json"),
+            &call("sess-1", "agent-a", line, 1_000),
+        );
+        let first = Some(("sess-1".to_string(), "agent-a".to_string()));
+        assert_eq!(claim_any_in(dir.path(), &argv, 2_000, &mine), first);
+        forget(dir.path(), "sess-1", "toolu_a");
+        assert!(shell.join("toolu_a.0.taken").exists());
+        assert_eq!(claim_any_in(dir.path(), &argv, 2_500, &mine), first);
+        assert_eq!(
+            claim_command_in(dir.path(), "sess-1", &argv, 2_500, &mine).as_deref(),
+            Some("agent-a")
+        );
+        put(
+            &shell.join("toolu_b.0.json"),
+            &call("sess-1", "", line, 1_500),
+        );
+        assert_eq!(
+            claim_command_in(dir.path(), "sess-1", &argv, 2_500, &mine).as_deref(),
+            Some(""),
+            "a call still waiting comes before one already taken"
+        );
+        let mut elsewhere = call("sess-1", "agent-x", line, 1_800);
+        elsewhere.tree.clear();
+        put(&shell.join("toolu_x.0.taken"), &elsewhere);
+        assert_eq!(
+            claim_command_in(dir.path(), "sess-1", &argv, 2_500, &mine).as_deref(),
+            Some(""),
+            "a taken call names no session unless its hook ran above this one"
+        );
     }
 
     #[test]

@@ -1361,6 +1361,104 @@ fn a_call_record_no_hook_above_this_shell_left_names_no_session() {
 }
 
 #[test]
+fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
+    // A shell loop, or a line pasted twice, runs one hooked call more than
+    // once. The second run binds the session the first took and is refused,
+    // rather than casting again as the seat or as the parent.
+    let world = World::new();
+    let issue = "demo-replay";
+    let parent = "7c1e93aa-replay-parent";
+    let args = [
+        "vote",
+        issue,
+        "--for",
+        "ship",
+        "--used",
+        "none",
+        "--as",
+        "reviewer-a",
+    ];
+    let hook = |env: &[(&str, &str)], tool_use: &str, agent: &str| {
+        let payload = serde_json::json!({
+            "session_id": parent,
+            "agent_id": agent,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": tool_use,
+            "tool_input": {"command": format!("ljos {}", args.join(" "))},
+        });
+        let out = world.hook(env, &payload);
+        assert!(out.status.success(), "{}", text(&out));
+    };
+    let none: &[(&str, &str)] = &[];
+    hook(none, "toolu_r1", "agent-r1");
+    let first = world.ljos_env("eessi", none, &args);
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("session {parent}:agent-r1\n")),
+        "{said}"
+    );
+    let again = world.ljos_env("eessi", none, &args);
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "already cast a ballot on {issue} ({parent}:agent-r1)"
+        )) && said.contains("Nothing was cast"),
+        "{said}"
+    );
+
+    let issue = "demo-replay-env";
+    let args = [
+        "vote",
+        issue,
+        "--for",
+        "ship",
+        "--used",
+        "none",
+        "--as",
+        "reviewer-b",
+    ];
+    let named: &[(&str, &str)] = &[("SEAT_SESSION_ID", parent)];
+    let payload = serde_json::json!({
+        "session_id": parent,
+        "agent_id": "agent-r2",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_r2",
+        "tool_input": {"command": format!("ljos {}", args.join(" "))},
+    });
+    let out = world.hook(named, &payload);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = world.ljos_env("eessi", named, &args);
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("session {parent}:agent-r2\n")),
+        "{said}"
+    );
+    let again = world.ljos_env("eessi", named, &args);
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "already cast a ballot on {issue} ({parent}:agent-r2)"
+        )),
+        "{said}"
+    );
+    for issue in ["demo-replay", "demo-replay-env"] {
+        let tally = world.ljos("eessi", "sess-reader-0001", &["vote", issue]);
+        let said = text(&tally);
+        assert!(tally.status.success(), "{said}");
+        assert!(
+            String::from_utf8_lossy(&tally.stdout).contains("1 ballot counts"),
+            "{said}"
+        );
+    }
+}
+
+#[test]
 fn claude_subagents_voting_over_mcp_each_count() {
     // One ljos-mcp answers the parent and both subagents. Only the hook
     // payload names the agent; the call carries the tool use id.
