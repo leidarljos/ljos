@@ -339,6 +339,66 @@ fn cloud_up_installs_points_the_harness_and_clones() {
 }
 
 #[test]
+fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    executable(&rel.join("ljos"), "#!/bin/sh\nexit 0\n");
+    executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
+    executable(&rel.join("ljos-mcp"), "#!/bin/sh\nprintf ran > \"$1\"\n");
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let bin = home.join(".local/bin");
+    let path = std::env::var("PATH").unwrap_or_default();
+    assert!(
+        path.split(':').next() == Some(bin.to_str().unwrap()),
+        "PATH should start with the install dir: {path}\n{said}"
+    );
+    let marker = root.path().join("marker");
+    let ran = Command::new("ljos-mcp").arg(&marker).output().unwrap();
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+    assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
+    let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
+    assert!(bashrc.contains("$HOME/.local/bin"), "{bashrc}");
+    assert!(fs::read_to_string(home.join(".profile"))
+        .unwrap()
+        .contains("$HOME/.local/bin"));
+    ljos_cli::cloud::up(false).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let dir = bin.display().to_string();
+    assert_eq!(path.matches(&dir).count(), 1, "{path}");
+    assert_eq!(
+        fs::read_to_string(home.join(".bashrc"))
+            .unwrap()
+            .matches(".local/bin")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn two_vms_land_different_issues_and_merge_notes_on_one() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();

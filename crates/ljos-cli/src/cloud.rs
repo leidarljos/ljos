@@ -1,9 +1,9 @@
 //! One command for a fresh machine that should share the tracker.
 //!
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
-//! checks the published SHA-256 sums, writes the harness MCP command as
-//! `ljos-mcp` on PATH, and clones `LJOS_TRACKER_REMOTE`. A later boot
-//! with the binaries already installed only refreshes the clone.
+//! checks the published SHA-256 sums, puts that directory on PATH, writes
+//! the harness MCP command as `ljos-mcp`, and clones `LJOS_TRACKER_REMOTE`.
+//! A later boot with the binaries already installed only refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -41,6 +41,9 @@ pub fn up(force: bool) -> Result<String> {
     let bin_dir = bin_dir(&home);
     let mut lines = Vec::new();
     lines.push(ensure_binaries(&bin_dir, force)?);
+    // The config names a bare `ljos-mcp`. The directory has to be on PATH
+    // before anything reads that file, including a later step in this process.
+    lines.push(ensure_process_path(&bin_dir));
 
     if agent_id().is_some() && seat_matches_file() {
         // A seat left in the env file by an earlier boot must not hide this
@@ -910,8 +913,15 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
 }
 
 fn ensure_profile(home: &Path) -> Result<String> {
-    let path = home.join(".profile");
-    let have = fs::read_to_string(&path).unwrap_or_default();
+    let mut notes = Vec::new();
+    for name in [".profile", ".bashrc"] {
+        notes.push(ensure_path_file(&home.join(name))?);
+    }
+    Ok(notes.join("; "))
+}
+
+fn ensure_path_file(path: &Path) -> Result<String> {
+    let have = fs::read_to_string(path).unwrap_or_default();
     if have.contains(".local/bin") {
         return Ok(format!(
             "path: {} already names ~/.local/bin",
@@ -923,8 +933,27 @@ fn ensure_profile(home: &Path) -> Result<String> {
         out.push('\n');
     }
     out.push_str("export PATH=\"$HOME/.local/bin:$PATH\"\n");
-    fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
     Ok(format!("path: {} adds ~/.local/bin", path.display()))
+}
+
+/// Prepend `bin_dir` to this process's PATH when it is not already there.
+fn ensure_process_path(bin_dir: &Path) -> String {
+    let dir = bin_dir.display().to_string();
+    let current = std::env::var("PATH").unwrap_or_default();
+    if current.split(':').any(|entry| entry == dir) {
+        return format!("path: PATH already names {dir}");
+    }
+    let next = if current.is_empty() {
+        dir.clone()
+    } else {
+        format!("{dir}:{current}")
+    };
+    crate::with_env_mutation(|| std::env::set_var("PATH", &next));
+    format!("path: PATH starts with {dir}")
 }
 
 fn release_started(id: &str, holder: &str) -> Result<Option<String>, String> {
