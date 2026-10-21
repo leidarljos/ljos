@@ -2476,6 +2476,16 @@ pub fn tracker_known_seats() -> std::collections::BTreeSet<String> {
     seats
 }
 
+/// The tracker's `seats` roster alone, without the past claim holders
+/// [`tracker_known_seats`] adds.
+fn tracker_roster() -> std::collections::BTreeSet<String> {
+    let mut seats = std::collections::BTreeSet::new();
+    if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
+        collect_configured_seats(layout.root(), &mut seats);
+    }
+    seats
+}
+
 fn collect_configured_seats(root: &Path, seats: &mut std::collections::BTreeSet<String>) {
     let Ok(text) = std::fs::read_to_string(root.join("vissue.toml")) else {
         return;
@@ -2627,8 +2637,10 @@ fn register_seat(slug: &str) -> Result<(), String> {
 /// Only a name the call passed is checked against the tracker's seats,
 /// to catch a typo. A name from the environment was set by the person
 /// or by `ljos onboard`, and is the seat even when no claim names it
-/// yet. A harness id the tracker does not list is that harness's one
-/// seat here when there is exactly one, else the harness id itself.
+/// yet. A harness id the `seats` roster does not list is that harness's
+/// seat on the roster ([`listed_harness_seat`]), even when an old claim
+/// still names the harness id; with none, the harness's one seat among
+/// the seats the tracker knows, else the harness id itself.
 /// The initialized connection is recognised when it matches the seat
 /// announced at connect, so a write on that connection keeps its seat
 /// when the tracker has only historical holders. A different name still
@@ -2673,7 +2685,12 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     let known = seat_roster(&named_slug);
     // The initialized connection names its own seat even when this tracker
     // has only historical holders. A different name still needs the roster.
-    let slug = if known.contains(&named_slug) {
+    let slug = if let Some(seat) = listed_harness_seat(&named_slug) {
+        bookkeep::log_line(&format!(
+            "note: the roster lists no seat {named_slug}; sitting {seat} for that harness"
+        ));
+        seat
+    } else if known.contains(&named_slug) {
         named_slug
     } else if ANNOUNCED.get().is_some_and(|seat| seat.seat == named_slug) {
         bookkeep::log_line(&format!(
@@ -2737,18 +2754,20 @@ fn harness_ids(harness: &str) -> Vec<&str> {
     ids
 }
 
-/// The tracker's seat for a harness id it does not list itself, so a
-/// server `ljos onboard` gave `LJOS_SEAT=antigravity` sits as the
-/// `free-agy` its hooks sit as.
+/// The roster's seat for a harness id the roster does not list itself, so
+/// a server `ljos onboard` gave `LJOS_SEAT=antigravity` sits as the
+/// `free-agy` its hooks sit as. Only the `seats` roster counts: a past
+/// `CLAIMED_BY: antigravity@...` line neither keeps the harness id nor
+/// names its seat.
 fn listed_harness_seat(name: &str) -> Option<String> {
     if !is_harness_name(name) {
         return None;
     }
-    let known = tracker_known_seats();
-    if known.contains(name) {
+    let roster = tracker_roster();
+    if roster.contains(name) {
         return None;
     }
-    harness_seat(name, &known)
+    harness_seat(name, &roster)
 }
 
 /// What a call that named an unknown seat is told: the name, the seat
