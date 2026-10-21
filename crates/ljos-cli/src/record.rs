@@ -967,6 +967,16 @@ mod tests {
     }
 
     #[test]
+    fn docs_name_first_seen_pin_scope() {
+        let doc = include_str!("../doc/record-v1.md");
+        let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("first key seen in this check is the pin for this check only"),
+            "record-v1.md must state that first-seen pins are check-local"
+        );
+    }
+
+    #[test]
     fn a_second_key_under_one_run_id_is_a_mismatch() {
         let _home = test_home();
         let first = sign_as(
