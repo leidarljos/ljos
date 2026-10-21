@@ -818,7 +818,11 @@ islands over the same claims.
 Cast a reviewer's ballot from its own run
 =========================================
 
-Each reviewer is its own run, such as a cloud agent or a CI job, and casts its own ballot.
+Each reviewer is its own subagent or run, such as a cloud agent or a CI job, and casts its own ballot rather than reporting a verdict in prose.
+A subagent's ballot binds the parent session plus the subagent, ``SESSION:AGENT``: the ``agent_id`` Claude Code's hook sees, or the Codex thread under its root session.
+An opencode subagent is a session of its own.
+Two subagents of one session count twice, the parent and a subagent count as two, and a subagent that wrote a candidate cannot vote.
+A run on another machine needs ljos and the tracker there.
 ``ljos cloud up`` installs ljos on that machine and clones the shared tracker repository that ``LJOS_TRACKER_REMOTE`` names, so the ballot is pushed where the other runs fetch it.
 
 .. code:: console
@@ -826,7 +830,7 @@ Each reviewer is its own run, such as a cloud agent or a CI job, and casts its o
    $ ljos cloud up
    $ ljos vote $id --for ship --confidence 0.8 --used none
 
-The run's harness id is the ballot's session, so two runs count twice and a run that votes again counts once.
+The run's harness id is the ballot's session, so two runs count twice and a run or subagent that votes again counts once.
 When nothing names the run but the seat, ``ljos vote`` and the tally call the session unverified.
 Persona ballots and Jev ballots are advisory.
 The push gate counts seat ballots from another seat.
