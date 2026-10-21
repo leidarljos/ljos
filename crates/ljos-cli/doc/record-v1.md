@@ -11,6 +11,7 @@ Every entry is one JSON file.
   `YYYY-MM-DDTHH:00:00Z`. Offsets, subseconds and other separators are
   refused, so one hour has one spelling and one ballot id.
 - voter ids are `<identity>/<seat-or-run>`.
+- the part after `/` must already be its seat slug (`alpha/seat-a`, not `alpha/Seat-a`).
 
 ## Question entry
 

@@ -559,6 +559,10 @@ fn validate_voter_id(voter: &str) -> Result<()> {
     if identity == "run" {
         bail!("voter id `{voter}` has no identity; a run is `<identity>/run-<id>`");
     }
+    let seat = crate::seat_slug(seat_or_run);
+    if seat_or_run != seat {
+        bail!("voter id `{voter}` must use seat slug `{identity}/{seat}`");
+    }
     Ok(())
 }
 
@@ -925,11 +929,11 @@ mod tests {
     fn each_voter_signs_with_its_own_key_file() {
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
-        let one = sign_entry(ballot_entry("a/b_c", "accept", at), "a/b_c").expect("a/b_c");
-        let two = sign_entry(ballot_entry("a_b/c", "accept", at), "a_b/c").expect("a_b/c");
+        let one = sign_entry(ballot_entry("a/b-c", "accept", at), "a/b-c").expect("a/b-c");
+        let two = sign_entry(ballot_entry("a-b/c", "accept", at), "a-b/c").expect("a-b/c");
         assert_ne!(
             one.signature.key, two.signature.key,
-            "a/b_c and a_b/c signed with one key file"
+            "a/b-c and a-b/c signed with one key file"
         );
         let names = ["a/b_c", "a_b/c", "a_b_c", "a:b_c", "a%2fb_c", "", ".", ".."];
         let files: BTreeSet<PathBuf> = names
@@ -952,6 +956,19 @@ mod tests {
             "mismatched signer passed: {}",
             err_chain(&err)
         );
+    }
+
+    #[test]
+    fn sign_entry_refuses_a_voter_seat_that_is_not_its_slug() {
+        let _home = test_home();
+        let err = sign_entry(
+            ballot_entry("alpha/Seat-a", "accept", "2026-10-21T10:00:00Z"),
+            "alpha/Seat-a",
+        )
+        .expect_err("non-slug seat");
+        let text = err_chain(&err);
+        assert!(text.contains("seat slug"), "{text}");
+        assert!(text.contains("alpha/seat-a"), "{text}");
     }
 
     #[test]
@@ -1705,7 +1722,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seat_spelling_is_checked_against_its_slug_pin() {
+    fn a_voter_seat_part_must_match_its_slug() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -1718,26 +1735,20 @@ mod tests {
         );
         let line = format!("seat-a {}\n", pinned.signature.key);
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
-        for spelling in ["Seat-a", "SEAT-A", "seat_a", "seat.a"] {
-            let other = sign_as(
-                ballot_entry(
-                    &format!("alpha/{spelling}"),
-                    "accept",
-                    "2026-10-21T10:00:00Z",
-                ),
-                2,
-            );
-            let ballots = [as_ballot(pinned.clone()), as_ballot(other.clone())];
-            match check_entries(&[pinned.clone(), other]) {
-                Ok(_) => panic!(
-                    "alpha/{spelling} passed beside the seat-a pin: {:?}",
-                    tally(&ballots)
-                ),
-                Err(err) => assert!(
-                    err_chain(&err).contains("through seat seat-a"),
-                    "{spelling}: {}",
-                    err_chain(&err)
-                ),
+        let other = sign_unchecked(
+            ballot_entry("alpha/Seat-a", "accept", "2026-10-21T11:00:00Z"),
+            1,
+        );
+        let ballots = [as_ballot(pinned.clone()), as_ballot(other.clone())];
+        match check_entries(&[pinned, other]) {
+            Ok(_) => panic!(
+                "alpha/Seat-a passed beside alpha/seat-a: {:?}",
+                tally(&ballots)
+            ),
+            Err(err) => {
+                let text = err_chain(&err);
+                assert!(text.contains("seat slug"), "{text}");
+                assert!(text.contains("alpha/seat-a"), "{text}");
             }
         }
     }
