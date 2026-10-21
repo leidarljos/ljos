@@ -1,8 +1,10 @@
 //! One command for a fresh machine that should share the tracker.
 //!
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
-//! checks the published SHA-256 sums, puts that directory on PATH, writes
-//! the harness MCP command as `ljos-mcp`, and clones `LJOS_TRACKER_REMOTE`.
+//! checks the published SHA-256 sums, puts that directory first on PATH,
+//! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
+//! The command is the bare name when this directory is first, and the
+//! absolute path when an earlier directory would win.
 //! A later boot with the binaries already installed only refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,8 +43,12 @@ pub fn up(force: bool) -> Result<String> {
     let bin_dir = bin_dir(&home);
     let mut lines = Vec::new();
     lines.push(ensure_binaries(&bin_dir, force)?);
-    // The config names a bare `ljos-mcp`. The directory has to be on PATH
-    // before anything reads that file, including a later step in this process.
+    let server = bin_dir.join("ljos-mcp");
+    // which() still sees a stale install while this directory is later on
+    // PATH. Decide the command first, then move the directory to the front.
+    // Absent from PATH, the command stays the bare name once prepended.
+    let early = (bin_dir_later_on_path(&bin_dir) && server.is_file())
+        .then(|| crate::server_command_plan(&server, "cloud up"));
     lines.push(ensure_process_path(&bin_dir));
 
     if agent_id().is_some() && seat_matches_file() {
@@ -58,9 +64,20 @@ pub fn up(force: bool) -> Result<String> {
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
     lines.push(ensure_profile(&home, &bin_dir)?);
+    let plan = early.unwrap_or_else(|| {
+        if server.is_file() {
+            crate::server_command_plan(&server, "cloud up")
+        } else {
+            crate::ServerCommandPlan {
+                command: crate::MCP_SERVER_COMMAND.to_string(),
+                note: None,
+            }
+        }
+    });
     lines.push(write_mcp(
         &home,
-        &bin_dir.join("ljos-mcp"),
+        &server,
+        &plan,
         &seat,
         &key,
         tracker.as_deref(),
@@ -1112,6 +1129,7 @@ fn is_work_tree(dir: &Path) -> bool {
 fn write_mcp(
     home: &Path,
     server: &Path,
+    plan: &crate::ServerCommandPlan,
     seat: &str,
     key: &Path,
     tracker: Option<&Path>,
@@ -1150,20 +1168,33 @@ fn write_mcp(
     if let Some(remote) = remote {
         env.insert("LJOS_TRACKER_REMOTE".into(), serde_json::json!(remote));
     }
+    let command = plan.command.as_str();
     let entry = serde_json::json!({
         "type": "stdio",
-        "command": crate::MCP_SERVER_COMMAND,
+        "command": command,
         "args": [],
         "env": env,
     });
     let path = home.join(".cursor/mcp.json");
     crate::set_json_entry(&path, "/mcpServers/ljos", &entry)?;
-    Ok(format!(
-        "mcp: {} starts {} on PATH ({})",
-        path.display(),
-        crate::MCP_SERVER_COMMAND,
-        server.display()
-    ))
+    let mut line = if command == crate::MCP_SERVER_COMMAND {
+        format!(
+            "mcp: {} starts {command} on PATH ({})",
+            path.display(),
+            server.display()
+        )
+    } else {
+        format!(
+            "mcp: {} starts {command} ({})",
+            path.display(),
+            server.display()
+        )
+    };
+    if let Some(note) = &plan.note {
+        line.push_str("; ");
+        line.push_str(note);
+    }
+    Ok(line)
 }
 
 fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
@@ -1294,18 +1325,38 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
     ))
 }
 
-/// Prepend `bin_dir` to this process's PATH when it is not already there.
+/// True when `bin_dir` is on PATH and some other directory comes first.
+/// `which` would then run that earlier copy.
+fn bin_dir_later_on_path(bin_dir: &Path) -> bool {
+    let dir = bin_dir.display().to_string();
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut saw_other = false;
+    for entry in current.split(':').filter(|entry| !entry.is_empty()) {
+        if entry == dir {
+            return saw_other;
+        }
+        saw_other = true;
+    }
+    false
+}
+
+/// Put `bin_dir` first on this process's PATH and drop a later copy.
+/// Presence is not enough: an earlier directory hides this install.
 fn ensure_process_path(bin_dir: &Path) -> String {
     let dir = bin_dir.display().to_string();
     let current = std::env::var("PATH").unwrap_or_default();
-    if current.split(':').any(|entry| entry == dir) {
-        return format!("path: PATH already names {dir}");
+    let entries: Vec<&str> = current
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.first() == Some(&dir.as_str()) {
+        return format!("path: PATH already starts with {dir}");
     }
-    let next = if current.is_empty() {
-        dir.clone()
-    } else {
-        format!("{dir}:{current}")
-    };
+    let mut next = dir.clone();
+    for entry in entries.into_iter().filter(|entry| *entry != dir) {
+        next.push(':');
+        next.push_str(entry);
+    }
     crate::with_env_mutation(|| std::env::set_var("PATH", &next));
     format!("path: PATH starts with {dir}")
 }
