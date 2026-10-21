@@ -484,11 +484,19 @@ pub fn call_session() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Run `f` as an MCP call that named `session`. One server answers a
-/// parent and all its subagents, so the call is the parent's, whatever
-/// this process holds.
-pub async fn scope_session<F: std::future::Future>(session: Option<String>, f: F) -> F::Output {
-    let f = CALL_AGENT.scope(String::new(), f);
+/// Run `f` as an MCP call that named `session`, made by the subagent
+/// `agent`. One server answers a parent and all its subagents, so a call
+/// that names no agent is the parent's, whatever this process holds.
+pub async fn scope_session<F: std::future::Future>(
+    session: Option<String>,
+    agent: Option<String>,
+    f: F,
+) -> F::Output {
+    let agent = agent
+        .map(|a| field(&a))
+        .filter(|a| a != "-")
+        .unwrap_or_default();
+    let f = CALL_AGENT.scope(agent, f);
     match session.map(|s| field(&s)).filter(|s| s != "-") {
         Some(s) => CALL_SESSION.scope(s, f).await,
         None => f.await,
@@ -1246,5 +1254,22 @@ mod tests {
         )]
         .into();
         assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
+    /// One server answers a parent and its subagents: each call is the
+    /// session plus the agent it names, and a call that names none is the
+    /// parent's.
+    #[tokio::test]
+    async fn an_mcp_call_from_a_subagent_is_a_session_of_its_own() {
+        let call = |agent: Option<&str>| {
+            scope_session(
+                Some("sess-mcp-0001".into()),
+                agent.map(str::to_string),
+                async { identity().harness },
+            )
+        };
+        assert_eq!(call(Some("thread-a")).await, "sess-mcp-0001:thread-a");
+        assert_eq!(call(Some("thread-b")).await, "sess-mcp-0001:thread-b");
+        assert_eq!(call(None).await, "sess-mcp-0001");
     }
 }

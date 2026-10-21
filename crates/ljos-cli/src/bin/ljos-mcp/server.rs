@@ -1132,11 +1132,21 @@ fn thread_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<S
 }
 
 /// The harness session a call names: `session_id` at the top or in the
-/// runner's metadata object, else `conversation_id`.
+/// runner's metadata object, else `conversation_id`, else opencode's
+/// session, which is a subagent's own.
 fn session_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
     named_in_meta(meta, "session_id")
         .or_else(|| named_in_meta(meta, "sessionId"))
         .or_else(|| named_in_meta(meta, "conversation_id"))
+        .or_else(|| named_in_meta(meta, "ai.opencode/sessionID"))
+        .or_else(|| named_in_meta(meta, "sessionID"))
+}
+
+/// The subagent a call names: a Codex thread that is not the root
+/// session it runs under.
+fn agent_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let session = session_in_meta(meta)?;
+    thread_in_meta(meta).filter(|t| *t != session)
 }
 
 fn named_in_meta(meta: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -3474,6 +3484,7 @@ impl ServerHandler for LjosServer {
         let mut request = request;
         let thread = thread_in_meta(&context.meta.0);
         let session = session_in_meta(&context.meta.0);
+        let agent = agent_in_meta(&context.meta.0);
         if let Some(arguments) = request.arguments.as_mut() {
             supply_issue(arguments, session.as_deref());
             arguments.remove("seat");
@@ -3489,10 +3500,13 @@ impl ServerHandler for LjosServer {
                 None => call.await,
             }
         };
-        let response =
-            ljos_cli::ballot_sig::scope_session(session, ljos_cli::as_thread(thread, seated_call))
-                .await
-                .or_else(as_tool_error)?;
+        let response = ljos_cli::ballot_sig::scope_session(
+            session,
+            agent,
+            ljos_cli::as_thread(thread, seated_call),
+        )
+        .await
+        .or_else(as_tool_error)?;
         Ok(attach_next(&name, response))
     }
 
@@ -3681,6 +3695,34 @@ mod tests {
             }))),
             Some("sess-mcp-0001".to_string())
         );
+    }
+
+    /// A Codex subagent's call names its thread under the root session;
+    /// the root's own call names the root twice. An opencode subagent has
+    /// a session of its own.
+    #[test]
+    fn a_call_names_its_subagent_in_the_meta() {
+        let meta = |v: serde_json::Value| v.as_object().unwrap().clone();
+        let codex = |thread: &str| {
+            meta(serde_json::json!({
+                "x-runner-turn-metadata": {"session_id": "019a-root-0001", "thread_id": thread}
+            }))
+        };
+        assert_eq!(
+            agent_in_meta(&codex("019a-thread-a")),
+            Some("019a-thread-a".to_string())
+        );
+        assert_eq!(agent_in_meta(&codex("019a-root-0001")), None);
+        assert_eq!(
+            agent_in_meta(&meta(serde_json::json!({"thread_id": "top-level-thread"}))),
+            None
+        );
+        let opencode = meta(serde_json::json!({"ai.opencode/sessionID": "ses_child-0001"}));
+        assert_eq!(
+            session_in_meta(&opencode),
+            Some("ses_child-0001".to_string())
+        );
+        assert_eq!(agent_in_meta(&opencode), None);
     }
 
     /// A tool call can be read before initialize. Recording `runner` then
