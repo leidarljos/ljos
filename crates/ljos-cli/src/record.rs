@@ -724,8 +724,66 @@ mod tests {
         let Entry::Ballot(ballot) = &mut entry.entry else {
             panic!("ballot expected");
         };
+        // `stance` feeds the ballot id. Recompute it so the failure is the
+        // signature, not the id check that used to hide this edit.
         ballot.stance.replace_range(5..6, "u");
-        assert!(verify_entry(&entry).is_err());
+        ballot.id = Some(ballot_id(ballot).expect("id"));
+        let err = verify_entry(&entry).expect_err("edited ballot");
+        assert!(
+            err.to_string().contains("does not verify"),
+            "edit never reached signature verification: {err}"
+        );
+    }
+
+    #[test]
+    fn number_and_unicode_spellings_follow_the_typed_form() {
+        let _home = test_home();
+        let mut unsigned = ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z");
+        let Entry::Ballot(ballot) = &mut unsigned.entry else {
+            panic!("ballot");
+        };
+        ballot.confidence = Some(1.0);
+        ballot.lineage = "café".to_string();
+        let signed = sign_as(unsigned, 8);
+        let id = as_ballot(signed.clone()).id.clone().expect("id");
+        let text = serde_json::to_string(&signed).expect("json");
+        let checked = |body: &str| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(dir.path().join("entry.json"), body).expect("write");
+            check_dir(dir.path())
+        };
+        let integer = checked(&text.replace("1.0", "1")).expect_err("integer 1");
+        assert!(
+            err_chain(&integer).contains("does not cover"),
+            "{}",
+            err_chain(&integer)
+        );
+        checked(&text.replace("1.0", "1e0")).expect("1e0");
+        checked(&text.replace("1.0", "10E-1")).expect("10E-1");
+        checked(&text.replace("café", "caf\\u00e9")).expect("unicode escape");
+        let mut decomposed = ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z");
+        let Entry::Ballot(ballot) = &mut decomposed.entry else {
+            panic!("ballot");
+        };
+        ballot.confidence = Some(1.0);
+        ballot.lineage = "cafe\u{0301}".to_string();
+        let nfd = as_ballot(sign_as(decomposed, 8)).id.expect("nfd id");
+        assert_ne!(id, nfd, "unicode normalisation changed the ballot id");
+    }
+
+    #[test]
+    fn the_documented_ballot_id_matches_the_example() {
+        let _home = test_home();
+        let entry = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            8,
+        );
+        let id = as_ballot(entry).id.expect("id");
+        let doc = include_str!("../doc/record-v1.md");
+        assert!(
+            doc.contains(&format!("\"id\": \"{id}\"")),
+            "documented ballot id is stale; computed {id}"
+        );
     }
 
     #[test]

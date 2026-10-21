@@ -42,7 +42,7 @@ Every entry is one JSON file.
 {
   "schema": "record/v1",
   "kind": "ballot",
-  "id": "8d66a9c9385fd9d6",
+  "id": "bb6a93382fadce00",
   "question": "correct-3f9a1c2e",
   "stance": "accept",
   "confidence": 0.9,
@@ -66,7 +66,19 @@ Ballot id is:
 
 ## Canonical JSON and signatures
 
-Canonical JSON is recursive key sort with no insignificant whitespace.
+Canonical JSON is the typed entry re-serialised: keys sorted, no
+insignificant whitespace. The file's canonical JSON without `signature`
+must equal the typed form, so an extra field is unsigned and refused.
+Key order and whitespace may differ.
+
+Numbers use the typed spelling. `1e0`, `10E-1` and `1.0` are one value
+and one ballot id, and a file may use the exponent spelling. An integer
+`1` is not the canonical spelling of `1.0`, and the file is refused.
+
+Strings are raw Unicode scalar values. `\u00e9` and `é` are the same
+string. The record does not normalise: `é` and `e` plus a combining
+acute are different strings and different ballot ids.
+
 Entry signatures are ed25519 over:
 
 1. the ASCII label `ljos-record-entry/v1`
@@ -87,5 +99,9 @@ matching, and key pinning:
 
 Tally is pure over ballot entries:
 
-- keep only the latest ballot per `(question, voter)` by `cast_at`
-- if that latest ballot has stance `withdrawn`, it contributes no vote
+- a ballot named by another entry's `replaces` never counts
+- of the rest, the latest `cast_at` per `(question, voter)` counts
+- a latest stance of `withdrawn` contributes no vote
+- two unreplaced ballots from one voter on one question in the same
+  hour are an error. `cast_at` does not break that tie, and neither
+  does file order
