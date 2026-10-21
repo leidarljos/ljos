@@ -300,3 +300,61 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
     );
     assert_eq!(fs::read(&antigravity).unwrap(), kept);
 }
+
+fn row<'a>(text: &'a str, what: &str) -> &'a str {
+    text.lines()
+        .find(|line| line.split('\t').nth(1) == Some(what))
+        .unwrap_or("")
+}
+
+/// A grokbot env an older ljos wrote, and a stale skill ljos wrote, are not
+/// ready. `ljos onboard --harness grokbot` makes both rows ok.
+#[test]
+fn onboard_turns_a_stale_grokbot_env_and_skill_green() {
+    let home = Home::new();
+    let config = home.root.join("config/ljos");
+    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(home.root.join("home")).unwrap();
+    fs::write(
+        config.join("harnesses.toml"),
+        "[[harness]]\nname = \"grokbot\"\n",
+    )
+    .unwrap();
+    let skill = home.root.join("home/.grokbot/skills/ljos/SKILL.md");
+    plant(&skill, OLD_SKILL, OLD_SKILL);
+    fs::write(config.join("grokbot.env"), "# written by an older ljos\n").unwrap();
+
+    let before = home.ljos(&["doctor", "--all"], "120");
+    let text = String::from_utf8(before.stdout).unwrap();
+    let env = row(&text, "runner env");
+    let skill_row = row(&text, "runner skill");
+    assert!(
+        env.starts_with("no\t") && env.contains("grokbot") && env.contains("stale"),
+        "{text}"
+    );
+    assert!(
+        skill_row.starts_with("warn\t")
+            && skill_row.contains("grokbot")
+            && skill_row.contains("stale"),
+        "{text}"
+    );
+
+    let onboard = home.ljos(&["onboard", "--harness", "grokbot"], "120");
+    let onboard_out = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&onboard.stdout),
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    let after = home.ljos(&["doctor", "--all"], "120");
+    let text = String::from_utf8(after.stdout).unwrap();
+    let env = row(&text, "runner env");
+    let skill_row = row(&text, "runner skill");
+    assert!(
+        env.starts_with("ok\t") && env.contains("grokbot"),
+        "onboard:\n{onboard_out}\ndoctor:\n{text}"
+    );
+    assert!(
+        skill_row.starts_with("ok\t") && skill_row.contains("grokbot"),
+        "onboard:\n{onboard_out}\ndoctor:\n{text}"
+    );
+}
