@@ -3475,14 +3475,18 @@ fn is_absolute_ljos_mcp(value: &str) -> bool {
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
 }
 
+fn needs_portable_rewrite(value: &str) -> bool {
+    is_absolute_ljos_mcp(value) && !Path::new(value).is_file()
+}
+
 fn command_made_portable(command: &mut Value) -> bool {
     match command {
-        Value::String(text) if is_absolute_ljos_mcp(text) => {
+        Value::String(text) if needs_portable_rewrite(text) => {
             *text = MCP_SERVER_COMMAND.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
-            Some(Value::String(text)) if is_absolute_ljos_mcp(text) => {
+            Some(Value::String(text)) if needs_portable_rewrite(text) => {
                 *text = MCP_SERVER_COMMAND.to_string();
                 true
             }
@@ -3546,7 +3550,7 @@ fn rewrite_absolute_ljos_mcp(text: &str) -> (String, bool) {
             Some(end) => {
                 let inner = &after[..end];
                 out.push(quote);
-                if is_absolute_ljos_mcp(inner) {
+                if needs_portable_rewrite(inner) {
                     out.push_str(MCP_SERVER_COMMAND);
                     changed = true;
                 } else {
