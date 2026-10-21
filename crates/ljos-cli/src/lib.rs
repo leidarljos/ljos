@@ -1208,8 +1208,9 @@ struct ServerCommandPlan {
 ///
 /// The one installed beside `ljos`, else the one on PATH. A shell a runner
 /// or ssh opens may lack the install directory on PATH, and the pair is
-/// always installed together. Harness configs do not store this path; they
-/// name [`MCP_SERVER_COMMAND`].
+/// always installed together. Harness configs prefer
+/// [`MCP_SERVER_COMMAND`] and fall back to this absolute path when that name
+/// does not resolve to this install.
 pub(crate) fn server_path() -> Result<PathBuf> {
     let beside = std::env::current_exe()
         .ok()
@@ -4092,9 +4093,9 @@ pub fn onboard_to(harness: &str, dry: bool, skills: Option<&Path>) -> Result<Vec
 /// Frozen Grok hook file. Copied to `~/.grok/hooks/ljos.json`.
 const GROK_HOOKS_JSON: &str = include_str!("../assets/grok/ljos.json");
 
-/// The `ljos` a runner's hook runs: the one beside `ljos-mcp`, by absolute
-/// path, since a runner started outside a login shell has no `~/.local/bin`
-/// on its PATH.
+/// The `ljos` a runner hook or plugin runs: the one beside `ljos-mcp`, by
+/// absolute path when possible, since a runner started outside a login
+/// shell may not have the install directory on PATH.
 fn ljos_path() -> Result<PathBuf> {
     let beside = server_path()?.with_file_name("ljos");
     if beside.is_file() {
