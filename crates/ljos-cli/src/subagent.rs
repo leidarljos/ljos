@@ -2,7 +2,8 @@
 //! rather than its parent's. Claude Code hands a hook the subagent's
 //! `agent_id` and the call's `tool_use_id`, but gives the command it runs
 //! no variable that names the agent. The hook leaves the call under the
-//! runtime directory, and the `ljos` the command runs takes it back once.
+//! runtime directory, and the `ljos` the command runs, or the MCP server
+//! the call reaches, takes it back once.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,10 @@ fn now_ms() -> u64 {
 
 fn shell_dir(root: &Path, session: &str) -> PathBuf {
     root.join("shell").join(token(session))
+}
+
+fn mcp_path(root: &Path, call: &str) -> PathBuf {
+    root.join("mcp").join(format!("{call}.json"))
 }
 
 fn put(path: &Path, call: &Call) {
@@ -99,26 +104,51 @@ fn text(v: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether `tool` is one of the seat's MCP tools as Claude Code names it,
+/// `mcp__SERVER__ljos_NAME`, whichever server key carries the seat.
+#[must_use]
+pub fn is_seat_mcp_tool(tool: &str) -> bool {
+    tool.strip_prefix("mcp__")
+        .and_then(|rest| rest.rsplit_once("__"))
+        .is_some_and(|(server, name)| !server.is_empty() && name.starts_with("ljos_"))
+}
+
 /// Leave what a hook payload says about its tool call. On `PreToolUse`,
-/// each `ljos` line of a shell call is kept for the process that runs it.
-/// On `PostToolUse` what the call did not take is dropped. The payload's
-/// agent is this hook process's own.
-pub fn note_hook_call(input: &str, event: &str) {
+/// each `ljos` line of a shell call is kept for the process that runs it,
+/// and a subagent's call to the seat's MCP tool for the server. On
+/// `PostToolUse` what the call did not take is dropped. The payload's
+/// agent is this hook process's own. Returns whether the call is a
+/// `PreToolUse` on the seat's MCP tool: the server judges that call, so
+/// the hook has nothing more to say.
+pub fn note_hook_call(input: &str, event: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
-        return;
+        return false;
     };
     let agent = text(&v, &["agent_id", "agentId"]).map(|a| crate::ballot_sig::field(&a));
     crate::ballot_sig::hook_agent(agent.clone());
+    let tool = text(&v, &["tool_name", "toolName"]).unwrap_or_default();
+    let seat_tool = event == "PreToolUse" && is_seat_mcp_tool(&tool);
     let session = text(&v, &["session_id", "sessionId", "conversation_id"])
         .map(|s| crate::ballot_sig::field(&s));
     let call = text(&v, &["tool_use_id", "toolUseId"])
         .map(|c| token(&c))
         .filter(|c| !c.is_empty());
     let (Some(session), Some(call)) = (session, call) else {
-        return;
+        return seat_tool;
     };
     let root = root();
     match event {
+        "PreToolUse" if seat_tool => {
+            if let Some(agent) = agent {
+                let found = Call {
+                    session,
+                    agent,
+                    argv: Vec::new(),
+                    at: now_ms(),
+                };
+                put(&mcp_path(&root, &call), &found);
+            }
+        }
         "PreToolUse" => {
             let input = if v["tool_input"].is_object() {
                 &v["tool_input"]
@@ -126,7 +156,7 @@ pub fn note_hook_call(input: &str, event: &str) {
                 &v["toolInput"]
             };
             let Some(line) = input["command"].as_str() else {
-                return;
+                return false;
             };
             let at = now_ms();
             let dir = shell_dir(&root, &session);
@@ -143,9 +173,11 @@ pub fn note_hook_call(input: &str, event: &str) {
         "PostToolUse" | "PostToolUseFailure" => forget(&root, &session, &call),
         _ => {}
     }
+    seat_tool
 }
 
 fn forget(root: &Path, session: &str, call: &str) {
+    let _ = std::fs::remove_file(mcp_path(root, call));
     let Ok(entries) = std::fs::read_dir(shell_dir(root, session)) else {
         return;
     };
@@ -189,6 +221,27 @@ fn claim_command_in(root: &Path, session: &str, argv: &[String], now: u64) -> Op
     found
         .into_iter()
         .find_map(|(path, c)| std::fs::remove_file(&path).is_ok().then_some(c.agent))
+}
+
+/// The session and subagent of a Claude Code MCP call, by the tool use id
+/// its `_meta` carries, when its hook saw a subagent make it. Taken once.
+#[must_use]
+pub fn claim_mcp_call(call: &str) -> Option<(String, String)> {
+    claim_mcp_in(&root(), call, now_ms())
+}
+
+fn claim_mcp_in(root: &Path, call: &str, now: u64) -> Option<(String, String)> {
+    let call = token(call);
+    if call.is_empty() {
+        return None;
+    }
+    let path = mcp_path(root, &call);
+    let found = waiting(&root.join("mcp"), now)
+        .into_iter()
+        .find(|(p, _)| *p == path)?
+        .1;
+    std::fs::remove_file(&path).ok()?;
+    (!found.agent.is_empty()).then_some((found.session, found.agent))
 }
 
 #[cfg(test)]
@@ -262,5 +315,38 @@ mod tests {
         let late = 1_000 + CALL_TTL_MS + 1;
         assert_eq!(claim_command_in(dir.path(), "sess-1", &argv, late), None);
         assert!(!shell.join("toolu_old.0.json").exists());
+    }
+
+    #[test]
+    fn an_mcp_call_names_its_subagent_once() {
+        let dir = tempfile::tempdir().unwrap();
+        put(
+            &mcp_path(dir.path(), "toolu_a"),
+            &call("sess-1", "agent-a", "", 1_000),
+        );
+        assert_eq!(
+            claim_mcp_in(dir.path(), "toolu_a", 2_000),
+            Some(("sess-1".into(), "agent-a".into()))
+        );
+        assert_eq!(claim_mcp_in(dir.path(), "toolu_a", 2_000), None);
+        assert_eq!(claim_mcp_in(dir.path(), "toolu_b", 2_000), None);
+        put(
+            &mcp_path(dir.path(), "toolu_c"),
+            &call("sess-1", "agent-c", "", 1_000),
+        );
+        assert_eq!(claim_mcp_in(dir.path(), "../toolu_c", 2_000), None);
+        assert_eq!(
+            claim_mcp_in(dir.path(), "toolu_c", 1_000 + CALL_TTL_MS + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn the_seat_mcp_tools_are_known_by_name() {
+        assert!(is_seat_mcp_tool("mcp__ljos__ljos_vote"));
+        assert!(is_seat_mcp_tool("mcp__plugin_ljos_ljos__ljos_vote"));
+        assert!(!is_seat_mcp_tool("mcp__github__add_issue_comment"));
+        assert!(!is_seat_mcp_tool("ljos_vote"));
+        assert!(!is_seat_mcp_tool("Bash"));
     }
 }

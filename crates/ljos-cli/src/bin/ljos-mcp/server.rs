@@ -1149,6 +1149,20 @@ fn agent_in_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Option<St
     thread_in_meta(meta).filter(|t| *t != session)
 }
 
+/// The session and subagent of a call: Claude Code's tool use id, when
+/// its hook saw a subagent make the call, else what `_meta` names.
+fn call_identity(
+    meta: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<String>, Option<String>) {
+    let session = session_in_meta(meta);
+    let hooked = named_in_meta(meta, "claudecode/toolUseId")
+        .and_then(|id| ljos_cli::subagent::claim_mcp_call(&id));
+    match hooked {
+        Some((parent, agent)) => (session.or(Some(parent)), Some(agent)),
+        None => (session, agent_in_meta(meta)),
+    }
+}
+
 fn named_in_meta(meta: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
     let id = |v: &serde_json::Value| v.get(key).and_then(|t| t.as_str()).map(String::from);
     id(&serde_json::Value::Object(meta.clone()))
@@ -3483,8 +3497,7 @@ impl ServerHandler for LjosServer {
         // their operation arguments and still reject undeclared fields.
         let mut request = request;
         let thread = thread_in_meta(&context.meta.0);
-        let session = session_in_meta(&context.meta.0);
-        let agent = agent_in_meta(&context.meta.0);
+        let (session, agent) = call_identity(&context.meta.0);
         if let Some(arguments) = request.arguments.as_mut() {
             supply_issue(arguments, session.as_deref());
             arguments.remove("seat");
