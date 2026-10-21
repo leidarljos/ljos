@@ -42,6 +42,7 @@ pub struct UnsignedEntry {
 
 /// Signature material for one entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntrySignature {
     pub key: String,
     pub sig: String,
@@ -1058,6 +1059,38 @@ mod tests {
         assert!(
             err_chain(&err).contains("does not cover"),
             "unsigned rationale was accepted: {}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
+    fn unknown_signature_fields_are_refused() {
+        let _home = test_home();
+        let signed = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            8,
+        );
+        let base = serde_json::to_value(&signed).expect("value");
+        for (field, value) in [
+            ("rationale", serde_json::json!("because")),
+            ("findings", serde_json::json!(["one"])),
+            ("Host", serde_json::json!("box")),
+        ] {
+            let mut changed = base.clone();
+            changed["signature"][field] = value;
+            let err = check_value(&changed).expect_err(field);
+            assert!(
+                err_chain(&err).contains(field),
+                "{field} passed under signature: {}",
+                err_chain(&err)
+            );
+        }
+        let mut nested = base.clone();
+        nested["signature"]["note"] = serde_json::json!({"Session": "s"});
+        let err = check_value(&nested).expect_err("nested note.Session");
+        assert!(
+            err_chain(&err).contains("note"),
+            "nested note.Session passed under signature: {}",
             err_chain(&err)
         );
     }
