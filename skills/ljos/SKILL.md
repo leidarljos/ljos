@@ -176,8 +176,8 @@ Every piece of work has an issue before it has a claim.
   `ljos remember --standing` writes a rule now. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
-  is written at once as an `agent-derived` preference; nobody approves
-  it first, and `ljos memories review` keeps or drops it later. When a
+  is filed as a proposal in the person's words, origin `user-declared`.
+  `ljos accept` writes it. It is not stored on the hook. When a
   lesson rewrites an earlier one, it closes the earlier one's window. The
   verb says `revises N earlier memories` when it did. `ljos consolidate`
   reports the pairs the rule would close across what is held, and
@@ -358,7 +358,8 @@ Every typed finding the campaign records is a lesson once somebody
 resolved it: `ljos findings out/campaign.json --remember --issue ISSUE`
 (the MCP `ljos_findings`) files one lesson per resolved finding under
 the recipe's name, the package and the failure class, with origin
-`agent-derived`, written at once, and cites the state file on the issue. A finding a later attempt merely got past is
+`tool-echo` at L0 (`derived`), and cites the state file on the issue.
+`ljos accept` promotes that proposal to `explicit` and writes it. A finding a later attempt merely got past is
 not a lesson; `--all` takes those too. A lesson the seat writes by hand
 names the recipe, the step, the error line and the fix: "GCCcore-15.2.0
 on terra: compile failed in the build step with linux/scc.h missing.
@@ -387,12 +388,13 @@ One verb closes the sitting:
 ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
 ```
 
-It writes the lesson at once as a standing lesson with origin `agent-derived`
-and its provenance (seat, harness, session, time, reason). Nobody approves
-it first: `ljos memories review` (or `ljos memories tui`) keeps, edits,
-merges or drops it later, and `ljos memories prune --stale` names duplicates.
-A lesson the person types with `ljos remember` stays `user-declared`, and
-the same words satisfy the open proposal. The verb then fires the island,
+An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`
+and its provenance (seat, harness, session, time, reason). `ljos accept`
+promotes it to `explicit` and writes it. A lesson the person types at
+`ljos finish` in a terminal of their own, with no agent runner above it,
+is written at once as `user-declared`. A lesson the person types with
+`ljos remember` stays `user-declared`, and the same words satisfy the open
+proposal. The verb then fires the island,
 completes the session node, and learns from a named outcome. Without
 `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the

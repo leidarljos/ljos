@@ -663,8 +663,9 @@ When the campaign ends, its typed findings are the lessons:
 
 The first prints one line per finding. The second files one lesson per
 finding a person or a seat resolved, under the recipe's name, the
-package and the failure class, with origin ``agent-derived``. It does not
-write the atom. ``ljos accept ID`` writes it as a standing lesson, and the command cites the
+package and the failure class, with origin ``tool-echo`` at L0 (``derived``).
+It does not write the atom. ``ljos accept ID`` promotes it to ``explicit``
+and writes it as a standing lesson, and the command cites the
 state file on the issue as a deed. A finding a later attempt merely got
 past is skipped; ``--all`` takes it too. Once someone accepts the
 proposal, the recipe's next bump recalls this lesson from its island.
