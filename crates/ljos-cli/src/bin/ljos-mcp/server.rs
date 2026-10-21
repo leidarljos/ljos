@@ -3733,6 +3733,55 @@ mod tests {
         assert!(!listed(Some(&core), "ljos_bump_plan"));
     }
 
+    /// Recall is in the core set, and `ljos onboard --harness opencode`
+    /// writes a server entry that puts `ljos_ljos_recall` on opencode's
+    /// native tool list. opencode names a tool `server_tool` and leaves MCP
+    /// tools in Code Mode until the server sets `codemode` false. That flag
+    /// is read under `mcp.servers`.
+    #[test]
+    fn the_core_set_contains_recall_and_opencode_exposes_it() {
+        let core = tool_set(None).expect("core set");
+        assert!(
+            core.iter().any(|name| name == "ljos_recall"),
+            "recall is in the core set: {core:?}"
+        );
+        assert!(
+            core.iter().any(|name| name == "ljos_note"),
+            "note is in the core set: {core:?}"
+        );
+        let all: ljos_cli::Harnesses =
+            toml::from_str(ljos_cli::HARNESSES_EXAMPLE).expect("harnesses example");
+        for name in ["opencode", "opencode-v2"] {
+            let harness = all
+                .harness
+                .iter()
+                .find(|harness| harness.name == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(
+                harness.json_pointer.as_deref(),
+                Some("/mcp/servers/ljos"),
+                "{name}"
+            );
+            let entry: serde_json::Value = serde_json::from_str(
+                harness
+                    .json_entry
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{name} entry")),
+            )
+            .unwrap_or_else(|err| panic!("{name} entry: {err}"));
+            assert_eq!(
+                entry.get("codemode").and_then(serde_json::Value::as_bool),
+                Some(false),
+                "{name} exposes its tools: {entry}"
+            );
+            assert_eq!(
+                entry.get("type").and_then(serde_json::Value::as_str),
+                Some("local"),
+                "{name}"
+            );
+        }
+    }
+
     /// The guard and memory tools lead the list, and the persona tools close
     /// it, whichever set the server lists.
     #[test]

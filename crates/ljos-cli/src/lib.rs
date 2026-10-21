@@ -681,8 +681,11 @@ skills = "~/.config/runner/skills"
 [[harness]]
 name = "opencode"
 config_json = "~/.config/opencode/opencode.json"
-json_pointer = "/mcp/ljos"
-json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "timeout": 30000}'
+# opencode names a tool server_tool. codemode false puts that name on the
+# model's tool list, so ljos_recall is ljos_ljos_recall. The flag is read
+# under mcp.servers. 1.19.3 flattens this entry and lists the tool.
+json_pointer = "/mcp/servers/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "codemode": false, "timeout": 30000}'
 skills = "~/.config/opencode/skills"
 # opencode's hooks are a plugin: the memory hook on each prompt, argv law
 # on each bash call, the session id in every shell it opens.
@@ -693,9 +696,10 @@ plugin_template = "opencode"
 name = "opencode-v2"
 # opencode V2 runs only plugins that default-export Plugin.define; a V1
 # plugin loads and does nothing. Onboard this shape on a V2 opencode.
+# The MCP entry matches opencode: codemode false under mcp.servers.
 config_json = "~/.config/opencode/opencode.json"
-json_pointer = "/mcp/ljos"
-json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "timeout": 30000}'
+json_pointer = "/mcp/servers/ljos"
+json_entry = '{"type": "local", "command": ["{server}"], "enabled": true, "codemode": false, "timeout": 30000}'
 skills = "~/.config/opencode/skills"
 plugin = "~/.config/opencode/plugins/ljos.ts"
 plugin_template = "opencode-v2"
