@@ -883,6 +883,7 @@ fn doctor_warns_on_unpushed_commits_and_not_on_zero() {
 #[test]
 fn a_missing_mcp_binary_is_named() {
     let _g = Guard::new();
+    clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     fs::create_dir_all(home.join(".cursor")).unwrap();
@@ -895,7 +896,11 @@ fn a_missing_mcp_binary_is_named() {
     std::env::remove_var("LJOS_MCP_CONFIG");
     let line = ljos_cli::cloud::missing_mcp_line().unwrap();
     assert!(line.contains("does not exist"), "{line}");
-    assert!(line.contains("ljos cloud up"), "{line}");
+    assert!(line.contains("ljos onboard --harness cursor"), "{line}");
+    assert!(
+        !line.contains("ljos cloud up"),
+        "a desktop cursor file is not a cloud VM: {line}"
+    );
     let row = ljos_cli::cloud::mcp_row();
     assert!(!row.ok);
     assert_eq!(ljos_cli::doctor_word(&row), "no");
@@ -918,6 +923,42 @@ fn a_missing_mcp_binary_is_named() {
         "{err}"
     );
     assert!(!out.status.success());
+}
+
+#[test]
+fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+
+    std::env::set_var("CURSOR_AGENT_ID", "bc-0a1b2c3d");
+    let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(line.contains("ljos cloud up"), "{line}");
+    assert!(!line.contains("onboard --harness cursor"), "{line}");
+
+    std::env::remove_var("CURSOR_AGENT_ID");
+    fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    fs::write(
+        home.join(".config/ljos/env"),
+        "LJOS_SEAT=cursor-bc0a1b2c3d\n",
+    )
+    .unwrap();
+    let from_file = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(from_file.contains("ljos cloud up"), "{from_file}");
+
+    fs::remove_file(home.join(".config/ljos/env")).unwrap();
+    std::env::set_var("GITLAB_CI", "true");
+    let ci = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(ci.contains("ljos cloud up"), "{ci}");
 }
 
 #[test]

@@ -359,7 +359,7 @@ fn mcp_files() -> Vec<McpFile> {
             home.join(".cursor/mcp.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
-            "ljos cloud up".into(),
+            cursor_mcp_advice(),
             true,
         );
         push(
@@ -1298,6 +1298,61 @@ fn env_file_value(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `ljos cloud up` on a cloud VM, codespace, or CI job. A desktop Cursor
+/// file is onboarded with the cursor harness; the api socket on a cloud
+/// image is not enough, because doctor is often aimed at another home.
+fn cursor_mcp_advice() -> String {
+    if on_cloud_vm() {
+        "ljos cloud up".into()
+    } else {
+        "ljos onboard --harness cursor".into()
+    }
+}
+
+fn on_cloud_vm() -> bool {
+    if agent_id().is_some() {
+        return true;
+    }
+    match harness_kind() {
+        "codespace" | "ci" => return true,
+        "cursor" if cursor_agent_env() => return true,
+        _ => {}
+    }
+    // harness_kind answers "cursor" when /run/cursor/api.sock exists, and
+    // that hides CI. The variables themselves are still this job.
+    if std::env::var_os("GITHUB_ACTIONS").is_some()
+        || std::env::var_os("GITLAB_CI").is_some()
+        || std::env::var_os("CODESPACES").is_some()
+        || std::env::var_os("CODESPACE_NAME").is_some()
+    {
+        return true;
+    }
+    cloud_env_file_seat()
+}
+
+fn cursor_agent_env() -> bool {
+    [
+        "CURSOR_AGENT",
+        "CURSOR_AGENT_SOCKET",
+        "CURSOR_CONVERSATION_ID",
+        "CURSOR_AGENT_ID",
+        "CLOUD_AGENT_ID",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+}
+
+/// `cloud up` records `cursor-ID`, `ci-ID`, or `codespace-ID` in the env
+/// file. A later shell without the agent variables still is that VM.
+fn cloud_env_file_seat() -> bool {
+    let Some(seat) = env_file_value("LJOS_SEAT") else {
+        return false;
+    };
+    ["cursor-", "ci-", "codespace-"]
+        .iter()
+        .any(|prefix| seat.starts_with(prefix))
 }
 
 fn nonempty_var(key: &str) -> Option<String> {
