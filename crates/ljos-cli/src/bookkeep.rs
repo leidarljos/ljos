@@ -458,6 +458,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         }
     }
     if matches!(call.event.as_str(), "Stop" | "SessionEnd") {
+        cite_written_commits(&mut book);
         finish_open(&mut book);
         drop_unclaimed_rows(&mut book);
     }
@@ -1844,6 +1845,16 @@ fn ensure_deed(book: &mut Book, repo: &str) -> Result<(), String> {
 /// command can write more than one. No baseline means this post is the
 /// first time the sitting saw the repository, so the sha is the one git wrote.
 fn cite_row(book: &mut Book, row_key: &str, git_repo: &str) -> Result<(), String> {
+    cite_row_where(book, row_key, git_repo, |_| true)
+}
+
+/// [`cite_row`] for the landed shas `keep` accepts.
+fn cite_row_where(
+    book: &mut Book,
+    row_key: &str,
+    git_repo: &str,
+    keep: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     let head = match head_sha(git_repo) {
         Ok(sha) => sha,
         Err(e) => {
@@ -1858,7 +1869,10 @@ fn cite_row(book: &mut Book, row_key: &str, git_repo: &str) -> Result<(), String
     let Some(issue) = book.repos.get(row_key).and_then(|row| row.issue.clone()) else {
         return Ok(());
     };
-    for sha in commits_since(git_repo, start.as_deref(), &head) {
+    for sha in commits_since(git_repo, start.as_deref(), &head)
+        .into_iter()
+        .filter(|sha| keep(sha))
+    {
         if book.repos.get(row_key).is_some_and(|row| {
             row.deeds
                 .iter()
@@ -1908,6 +1922,60 @@ fn commits_since(repo: &str, start: Option<&str>, head: &str) -> Vec<String> {
         Some(shas) if !shas.is_empty() => shas,
         _ => vec![head.to_string()],
     }
+}
+
+/// Cite each open row's commits that no post named: a script or an alias
+/// commits with no `git commit` on the command line, and a commit chained
+/// before a step that fails exits non-zero. Only the shas HEAD's reflog
+/// says this checkout wrote since the row's start count, so a pull, a
+/// merge, or a branch switch brings in no deed.
+fn cite_written_commits(book: &mut Book) {
+    let rows: Vec<(String, String)> = book
+        .repos
+        .iter()
+        .filter(|(_, row)| row.issue.is_some() && !row.finished)
+        .filter_map(|(key, row)| Some((key.clone(), row.start_sha.clone()?)))
+        .collect();
+    for (repo, start) in rows {
+        let written = written_since(&repo, &start);
+        if !written.is_empty() {
+            let _ = cite_row_where(book, &repo, &repo, |sha| written.iter().any(|w| w == sha));
+        }
+    }
+}
+
+/// Shas HEAD's reflog records as a commit, a cherry-pick, or a revert
+/// since HEAD was last at `start`, newest first. Empty when the reflog
+/// does not reach `start`: an expired or disabled reflog cites nothing.
+fn written_since(repo: &str, start: &str) -> Vec<String> {
+    let Ok(said) = run_timed(
+        "git",
+        &[
+            "-C",
+            repo,
+            "reflog",
+            "show",
+            "-n",
+            "200",
+            "--format=%H %gs",
+            "HEAD",
+        ],
+        &[],
+    ) else {
+        return Vec::new();
+    };
+    let mut written = Vec::new();
+    for line in said.stdout.lines() {
+        let (sha, subject) = line.split_once(' ').unwrap_or((line, ""));
+        if sha == start.trim() {
+            return written;
+        }
+        let verb = subject.split([':', ' ']).next().unwrap_or("");
+        if matches!(verb, "commit" | "cherry-pick" | "revert") {
+            written.push(sha.to_string());
+        }
+    }
+    Vec::new()
 }
 
 /// Cite `repo`'s new commits on the open sitting that already holds it.
