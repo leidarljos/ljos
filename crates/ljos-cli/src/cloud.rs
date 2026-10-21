@@ -2,8 +2,9 @@
 //!
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory on PATH, writes
-//! the harness MCP command as `ljos-mcp`, and clones `LJOS_TRACKER_REMOTE`.
-//! A later boot with the binaries already installed only refreshes the clone.
+//! the harness MCP command as `ljos-mcp`, clones `LJOS_TRACKER_REMOTE`, and
+//! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. A later boot with
+//! the binaries already installed only refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -94,6 +95,7 @@ pub fn up(force: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
+    lines.extend(ensure_wakes()?);
     let reaped = reap_gone_owners(crate::lease_secs());
     if !reaped.trim().is_empty() {
         lines.push(reaped.trim_end().to_string());
@@ -1123,6 +1125,47 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
     }
     fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
     Ok(())
+}
+
+/// A webhook wake for each `LJOS_WAKE_<SEAT>_URL`, keyed by the variable
+/// `LJOS_WAKE_<SEAT>_KEY`. The launcher passes the key by name, so it is
+/// read when the wake fires and never written down. `GROK_BOT` is the seat
+/// `grok-bot`. The lines name the variables and not the URL.
+fn ensure_wakes() -> Result<Vec<String>> {
+    let vars: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    let mut lines = Vec::new();
+    for (name, url) in &vars {
+        let Some(mid) = name
+            .strip_prefix("LJOS_WAKE_")
+            .and_then(|rest| rest.strip_suffix("_URL"))
+        else {
+            continue;
+        };
+        let url = url.trim();
+        if url.is_empty() || !mid.bytes().any(|b| b.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let seat = crate::seat_slug(mid);
+        if crate::wake::check_webhook(url).is_err() {
+            lines.push(format!(
+                "wake {seat}: {name} is not https, nor http on this machine, so no wake was written"
+            ));
+            continue;
+        }
+        let key_env = format!("LJOS_WAKE_{mid}_KEY");
+        crate::wake::set_webhook(&seat, url, None, Some(&key_env))?;
+        let unset = if nonempty_var(&key_env).is_some() {
+            ""
+        } else {
+            ", which is unset now"
+        };
+        lines.push(format!(
+            "wake {seat}: posts to {name} with the key in {key_env}{unset}"
+        ));
+    }
+    Ok(lines)
 }
 
 fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
