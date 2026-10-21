@@ -16,7 +16,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
@@ -285,7 +285,10 @@ Every piece of work has an issue before it has a claim.
   a nonce of that process, and the signature covers both. `ljos consensus`
   refuses to settle when one session authored more than one ballot, when a
   session authored a candidate and also voted, or when every ballot traces to
-  one session: a seat minted inside a session does not multiply its vote. A
+  one session: a seat minted inside a session does not multiply its vote.
+  Each independent reviewer subagent sets its own `LJOS_HARNESS_SESSION` once
+  at the start. Persona ballots and Jev ballots are advisory. The push gate
+  counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own
   session (`cursor-agent -p` or `claude -p`, `LJOS_PANEL_HARNESS`) and gives a
@@ -317,6 +320,8 @@ Every piece of work has an issue before it has a claim.
   names another parent and `--top` none. A bug in a tool found
   mid-sitting goes to the tool's project: `-p PROJECT` naming another
   project than the held issue's files at its top level, and says so.
+  `ljos file "TITLE" --options A,B` writes `Options: A, B` as the first body
+  line. `ljos options ISSUE A,B` appends that line and refuses fewer than two.
   A board this tracker projects
   from elsewhere takes the issue into its inbox under the printed id,
   so a child can name it at once.

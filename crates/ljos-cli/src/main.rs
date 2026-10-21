@@ -413,6 +413,9 @@ enum Cmd {
         /// Body prose under the heading. A decision's body names `Options: A, B`.
         #[arg(long)]
         body: Option<String>,
+        /// Comma-separated options. Two or more become the first body line `Options: A, B`.
+        #[arg(long, value_name = "A,B")]
+        options: Option<String>,
         /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
         /// lapses the vote once the deadline passes short of it.
         #[arg(long, value_name = "N", requires = "deadline")]
@@ -420,6 +423,13 @@ enum Cmd {
         /// RFC 3339 time the ballots are due, with `--quorum`.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
         deadline: Option<String>,
+    },
+    /// Append `Options: A, B` to an issue. Two or more, separated by commas.
+    Options {
+        /// The issue id.
+        issue: String,
+        /// The options, separated by commas.
+        options: String,
     },
     /// Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief.
     OpenPanel {
@@ -1201,6 +1211,7 @@ fn run_command() -> Result<()> {
             | Cmd::Release { .. }
             | Cmd::Complete { .. }
             | Cmd::File { .. }
+            | Cmd::Options { .. }
             | Cmd::Deed { .. }
     ) && ljos_cli::unseated_subagent()
     {
@@ -1533,6 +1544,7 @@ fn run_command() -> Result<()> {
             tags,
             priority,
             body,
+            options,
             quorum,
             deadline,
         } => {
@@ -1540,6 +1552,7 @@ fn run_command() -> Result<()> {
                 chrono::DateTime::parse_from_rfc3339(d.trim())
                     .map_err(|e| anyhow::anyhow!("--deadline {d:?} is not RFC 3339: {e}"))?;
             }
+            let body = ljos_cli::body_with_options(body, &options.into_iter().collect::<Vec<_>>())?;
             let held = if top || parent.is_some() {
                 None
             } else {
@@ -1608,6 +1621,9 @@ fn run_command() -> Result<()> {
                     Err(e) => eprintln!("ljos file: {e:#}"),
                 }
             }
+        }
+        Cmd::Options { issue, options } => {
+            print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
         Cmd::Note { issue, text } => {
             let text = text.join(" ");
@@ -1763,7 +1779,12 @@ fn run_command() -> Result<()> {
                     &["vote", &issue, "--withdraw"],
                     Some(&who),
                 ) {
-                    Ok(said) => print!("{}", said.stdout),
+                    Ok(said) => {
+                        print!("{}", said.stdout);
+                        if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&issue, &who) {
+                            eprintln!("ljos vote: {e:#}");
+                        }
+                    }
                     Err(e) if format!("{e:#}").contains("holds no ballot") => {
                         println!("{issue}: {who} holds no ballot; withdrawing the forecast");
                     }

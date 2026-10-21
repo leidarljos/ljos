@@ -790,6 +790,11 @@ Cast persona ballots through Jev
 
 With Jev on, a persona's ballot can come from Jev instead of a subagent.
 The issue needs an ``Options: A, B`` line.
+``ljos file "TITLE" --options A,B`` writes that line as the first line of the body.
+``ljos options ISSUE A,B`` appends it to an issue that already exists, and refuses fewer than two.
+Each independent reviewer subagent sets its own ``LJOS_HARNESS_SESSION`` once at the start.
+Persona ballots and Jev ballots are advisory.
+The push gate counts seat ballots from another seat.
 
 .. code:: console
 

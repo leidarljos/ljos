@@ -186,6 +186,12 @@ Command line
 |                                                                                                                                 |                           | a shell runner (``shell = true``, ``grokbot``, or ``shell``) writes the skill and an env file and registers no server and no hook                                                                                                              |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
+``ljos file "TITLE" --options A,B`` writes ``Options: A, B`` as the first body line.
+``ljos options ISSUE A,B`` appends that line and refuses fewer than two.
+Withdrawing a ballot writes ``ballot-withdrawn: VOTER HARNESS NONCE``.
+The tally leaves that ballot out, and so does the push gate.
+A later cast from that session says the ballot was withdrawn.
+
 ``send SEAT TEXT`` writes to one seat. A seat the pack has never heard
 from is refused, with the seats it knows, since mail waits under the name
 it was sent to; ``--new-seat`` writes to one that has not started yet.
@@ -491,6 +497,8 @@ forgotten with ``ljos forget ID``, and the next push asks the forge again.
 +---------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | a tag (``--tags``, ``--follow-tags``, ``refs/tags/``)                                                               | nothing; it runs, as a branch push does                                                                                                                                                                                                                                               |
 +---------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+Persona and Jev ballots are advisory. The push gate counts seat ballots from another seat. Each independent reviewer subagent sets its own ``LJOS_HARNESS_SESSION`` once at the start.
 
 The remote is the one the command names, else the branch's upstream,
 else ``origin``, read in the directory a ``cd`` or ``git -C`` before the push

@@ -79,6 +79,12 @@
 | =protocol= | none | print the sitting protocol |
 | =onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory; a shell runner (=shell = true=, =grokbot=, or =shell=) writes the skill and an env file and registers no server and no hook |
 
+=ljos file "TITLE" --options A,B= writes =Options: A, B= as the first body line.
+=ljos options ISSUE A,B= appends that line and refuses fewer than two.
+Withdrawing a ballot writes =ballot-withdrawn: VOTER HARNESS NONCE=.
+The tally leaves that ballot out, and so does the push gate.
+A later cast from that session says the ballot was withdrawn.
+
 =send SEAT TEXT= writes to one seat. A seat the pack has never heard
 from is refused, with the seats it knows, since mail waits under the name
 it was sent to; =--new-seat= writes to one that has not started yet.
@@ -365,6 +371,8 @@ forgotten with =ljos forget ID=, and the next push asks the forge again.
 | a branch, where the person can push but the repository has releases, other collaborators, or an organisation's name | =LJOS_CITE=ISSUE= where the seats that voted on =ISSUE= agree and one of them is not the seat pushing (persona and Jev ballots neither pass nor block it; open or closed does not matter); a deed cited alone is refused, since the pushing seat can mint one; the pass is noted on =ISSUE= |
 | a remote the person cannot push to, =--mirror=, deleting a remote branch or tag, a force | the person runs it |
 | a tag (=--tags=, =--follow-tags=, =refs/tags/=) | nothing; it runs, as a branch push does |
+
+Persona and Jev ballots are advisory. The push gate counts seat ballots from another seat. Each independent reviewer subagent sets its own =LJOS_HARNESS_SESSION= once at the start.
 
 The remote is the one the command names, else the branch's upstream,
 else =origin=, read in the directory a =cd= or =git -C= before the push

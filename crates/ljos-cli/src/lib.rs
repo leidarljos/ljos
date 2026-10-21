@@ -13757,6 +13757,54 @@ pub fn issue_options(body: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// The `Options: A, B` line for `raw`. Commas split each string.
+///
+/// # Errors
+///
+/// Fewer than two options.
+pub fn options_line(raw: &[String]) -> Result<String> {
+    let options: Vec<String> = raw
+        .iter()
+        .flat_map(|item| item.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect();
+    if options.len() < 2 {
+        bail!("options: name two or more, separated by commas");
+    }
+    Ok(format!("Options: {}", options.join(", ")))
+}
+
+/// `body` with an options line in front. An empty `raw` leaves `body` as it is.
+///
+/// # Errors
+///
+/// Fewer than two options when `raw` is not empty.
+pub fn body_with_options(body: Option<String>, raw: &[String]) -> Result<Option<String>> {
+    if raw.is_empty() {
+        return Ok(body);
+    }
+    let line = options_line(raw)?;
+    match body {
+        Some(rest) if !rest.trim().is_empty() => Ok(Some(format!("{line}\n{}", rest.trim()))),
+        _ => Ok(Some(line)),
+    }
+}
+
+/// Append an `Options:` line to `issue` and commit the tracker.
+///
+/// # Errors
+///
+/// Fewer than two options, or the tracker did not append.
+pub fn append_issue_options(issue: &str, raw: &[String]) -> Result<String> {
+    let line = options_line(raw)?;
+    let said = run_captured("vissue", &["append", issue, &line])
+        .with_context(|| format!("options: {issue} was not updated"))?;
+    let persisted = persist_tracker(issue, "noted options");
+    Ok(format!("{}{persisted}", said.stdout))
+}
+
 /// Jev's answer for a persona on an issue, not yet cast: its brief, less
 /// the closing instructions a subagent needs, is the state, and the
 /// issue's options are the choices.
@@ -13766,7 +13814,7 @@ pub fn issue_options(body: &str) -> Vec<String> {
 /// No such persona, an issue without two options, or Jev off or not
 /// answering.
 pub fn jev_ballot(name: &str, issue: &str) -> Result<jev::Ballot> {
-    let v = tracker_show_json(issue)?;
+    let v = issue_record(issue)?;
     let options = issue_options(v["body"].as_str().unwrap_or(""));
     if options.len() < 2 {
         bail!("vote --jev: {issue} has no `Options: A, B` line with two options or more");
@@ -32632,6 +32680,22 @@ mod tests {
             "one option is no vote"
         );
         assert!(issue_options("no options").is_empty());
+        assert_eq!(
+            options_line(&["age, gpg".into()]).unwrap(),
+            "Options: age, gpg"
+        );
+        assert!(options_line(&["only".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("two or more"));
+        assert_eq!(
+            body_with_options(Some("Why.".into()), &["age".into(), "gpg".into()]).unwrap(),
+            Some("Options: age, gpg\nWhy.".into())
+        );
+        assert_eq!(
+            body_with_options(Some("Why.".into()), &[]).unwrap(),
+            Some("Why.".into())
+        );
     }
 
     #[test]
