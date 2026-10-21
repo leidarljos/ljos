@@ -44,9 +44,10 @@ pub fn up(force: bool) -> Result<String> {
     let mut lines = Vec::new();
     lines.push(ensure_binaries(&bin_dir, force)?);
     let server = bin_dir.join("ljos-mcp");
-    // which() still sees a stale install while this directory is later on
-    // PATH. Decide the command first, then move the directory to the front.
-    // Absent from PATH, the command stays the bare name once prepended.
+    // The command is the bare name when this directory is first on PATH,
+    // and the absolute path when an earlier directory would win. which()
+    // still sees that earlier install until PATH moves, so the choice is
+    // made first. Absent from PATH, the bare name stays once prepended.
     let early = (bin_dir_later_on_path(&bin_dir) && server.is_file())
         .then(|| crate::server_command_plan(&server, "cloud up"));
     lines.push(ensure_process_path(&bin_dir));
