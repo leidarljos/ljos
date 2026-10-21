@@ -298,12 +298,29 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
     let issue = "travel-rx1d";
     // The drawer as the live tracker held it: five personas, then the same
     // five again, one session on every ballot-sig. Newest note first.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
     let mut notes = Vec::new();
     for persona in personas.iter().rev() {
-        notes.push(serde_json::json!({"note": format!("ballot-sig: {persona} bus ab cd {session} n-{persona}-2")}));
+        let note = ljos_cli::ballot_sig::sign_bound(
+            &key,
+            issue,
+            persona,
+            "bus",
+            session,
+            &format!("n-{persona}-2"),
+        );
+        notes.push(serde_json::json!({ "note": note }));
     }
     for persona in personas.iter().rev() {
-        notes.push(serde_json::json!({"note": format!("ballot-sig: {persona} rail ab cd {session} n-{persona}-1")}));
+        let note = ljos_cli::ballot_sig::sign_bound(
+            &key,
+            issue,
+            persona,
+            "rail",
+            session,
+            &format!("n-{persona}-1"),
+        );
+        notes.push(serde_json::json!({ "note": note }));
     }
     let mut ballots = serde_json::Map::new();
     ballots.insert(
@@ -674,4 +691,53 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         prompts.push(id);
     }
     assert_eq!(prompts.len(), 3, "{said}");
+}
+
+#[test]
+fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
+    let world = World::new();
+    std::fs::write(
+        world.state.join("issues.json"),
+        r#"{"parent-1":{"id":"parent-1","title":"parent","body":""},"child-a":{"id":"child-a","title":"child a","body":"","parent":"parent-1"},"child-b":{"id":"child-b","title":"child b","body":"","parent":"parent-1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("children.json"),
+        r#"{"parent-1":[{"id":"child-a"},{"id":"child-b"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("notes.json"),
+        r#"{"child-a":[{"note":"candidate-sig: child-a alice sess-author-0001 n-author - ab cd"}]}"#,
+    )
+    .unwrap();
+    let author = world.ljos(
+        "alice",
+        "sess-author-0001",
+        &["vote", "child-b", "--for", "ship", "--used", "none"],
+    );
+    let said = text(&author);
+    assert!(!author.status.success(), "{said}");
+    assert!(
+        said.contains("authored candidate") && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    let first = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "ship", "--used", "none"],
+    );
+    assert!(first.status.success(), "{}", text(&first));
+    let second = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-b", "--for", "hold", "--used", "none"],
+    );
+    assert!(second.status.success(), "{}", text(&second));
+    let tally = world.ljos("saddle", "sess-reader-0001", &["vote", "child-b"]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("saddle  hold"), "{said}");
 }
