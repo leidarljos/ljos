@@ -1450,3 +1450,68 @@ fn a_launcher_slots_the_seat_its_run_takes() {
         .to_string();
     assert!(err.contains("does not slot itself"), "{err}");
 }
+
+#[test]
+fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (origin, box_repo) = slot_world(root.path(), &["probe-slot", "probe-bare"]);
+    pin_standing(&box_repo, "ljosbot");
+    ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+
+    let vm = clone_of(root.path(), &origin, "vm");
+    std::env::set_var("VISSUE_ROOT", &vm);
+    std::env::set_var("ISSUE_ROOT", &vm);
+    std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
+    let seat = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    std::env::set_var("LJOS_SEAT", &seat);
+    std::env::set_var("VISSUE_AGENT", &seat);
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    for issue in ["probe-slot", "probe-bare"] {
+        vissue_core::ops::vote_with(&layout, issue, Some("ship"), &seat, Some("none"), None)
+            .unwrap();
+        let signed = ljos_cli::ballot_sig::sign_own_ballot(issue).unwrap();
+        assert!(signed.contains("ballot signed"), "{signed}");
+        let pushed = ljos_cli::persist_tracker(issue, "voted");
+        assert!(pushed.contains("pushed"), "{pushed}");
+    }
+
+    git(&box_repo, &["pull", "-q", "--ff-only"]);
+    std::env::set_var("VISSUE_ROOT", &box_repo);
+    std::env::set_var("ISSUE_ROOT", &box_repo);
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [serde_json::json!({"agent": seat, "choice": "ship"})];
+    let personas = std::collections::BTreeSet::new();
+    let slotted = ljos_cli::check_seat_signatures("probe-slot", &rows, &personas);
+    assert_eq!(slotted, Ok(Vec::new()));
+    let bare = ljos_cli::check_seat_signatures("probe-bare", &rows, &personas).unwrap_err();
+    assert!(
+        bare.contains(&format!(
+            "{seat} was first pinned after slots began, and no slot on probe-bare names it"
+        )),
+        "{bare}"
+    );
+
+    std::env::set_var("LJOS_SEAT", "inky");
+    std::env::set_var("VISSUE_AGENT", "inky");
+    let key = ljos_cli::cloud::prepare_seat_key("inky").unwrap();
+    let key = ljos_cli::ballot_sig::load_or_create(&key).unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
+    let pins = box_repo.join(".ljos-seat-keys");
+    let text = fs::read_to_string(&pins).unwrap() + &format!("inky {public}\n");
+    fs::write(&pins, text).unwrap();
+    git(
+        &box_repo,
+        &["commit", "-q", "-m", "pin inky", ".ljos-seat-keys"],
+    );
+    let err = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("inky was first pinned after slots began"),
+        "{err}"
+    );
+}

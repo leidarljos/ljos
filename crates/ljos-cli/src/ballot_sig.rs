@@ -397,25 +397,28 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
 /// or the ballot is not committed yet.
 #[must_use]
 pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
-    let git = |args: &[&str]| -> Option<String> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
     let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
-    let files = git(&["grep", "-l", "-E", &pattern])?;
+    let files = tracker_git(&["grep", "-l", "-E", &pattern])?;
     let file = files.lines().next()?.to_string();
     let needle = format!("] {}: {}", voter.trim(), choice.trim());
-    git(&["log", "-1", "--format=%ct", "-S", &needle, "--", &file])?
+    tracker_git(&["log", "-1", "--format=%ct", "-S", &needle, "--", &file])?
         .parse()
         .ok()
+}
+
+/// What `git ARGS` prints in the tracker at `VISSUE_ROOT`, trimmed, when
+/// it succeeds.
+pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
+    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The note text for a ballot signed by `key` (v1, choice only).

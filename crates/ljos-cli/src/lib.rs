@@ -11074,7 +11074,9 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok` names the legacy ones.
+/// and every signed seat first pinned after slots began is under a slot
+/// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
+/// names the legacy ones.
 ///
 /// # Errors
 ///
@@ -11095,19 +11097,33 @@ pub fn check_seat_signatures(
     let legacy = |voter: &str, choice: &str| {
         ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
-    let (problems, old) = ballot_sig::seat_check(
+    let notes = ballot_sig::notes_of(&v);
+    let pins = ballot_sig::pins();
+    let (problems, old) = ballot_sig::seat_check(issue, &seats, &notes, &pins, &legacy);
+    if !problems.is_empty() {
+        return Err(format!(
+            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
+            problems.join("; ")
+        ));
+    }
+    let signed: Vec<(&str, &str)> = seats
+        .into_iter()
+        .filter(|(voter, _)| !old.iter().any(|o| o == voter))
+        .collect();
+    let unslotted = slot::problems(
         issue,
-        &seats,
-        &ballot_sig::notes_of(&v),
-        &ballot_sig::pins(),
-        &legacy,
+        &signed,
+        &notes,
+        &pins,
+        &slot::pinned_at,
+        &slot::noted_at,
     );
-    if problems.is_empty() {
+    if unslotted.is_empty() {
         Ok(old)
     } else {
         Err(format!(
-            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
-            problems.join("; ")
+            "a run seat on {issue} is not under a slot, so it decides nothing for a push: {}",
+            unslotted.join("; ")
         ))
     }
 }
