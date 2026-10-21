@@ -1,0 +1,1 @@
+`ljos cloud up` now writes a machine-local cloud guard rule file that denies `git push` to `cursor/*` refs and blocks `gh pr create` and `gh pr merge`; `ljos doctor` reports whether that guard file is present.
