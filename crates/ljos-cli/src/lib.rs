@@ -1836,11 +1836,14 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
     // The hooks sit `LJOS_SEAT` (the process, else `~/.config/ljos/env`).
     // The client's harness name is the seat only when nobody named one.
     // A subagent name is kept, so it is not replaced by that harness.
+    // A harness id the tracker does not list is the tracker's seat for
+    // that harness, the seat each call then resolves to.
     let harness = seat_for_client(client);
     let name = named_var("LJOS_SEAT")
         .or_else(|| named_var("VISSUE_AGENT"))
         .and_then(|raw| seated_name(&raw))
         .unwrap_or(harness);
+    let name = listed_harness_seat(&name).unwrap_or(name);
     if let Some(parent) = inherited_record(&name) {
         let seat = Seat::tagged(
             name,
@@ -2671,6 +2674,20 @@ fn harness_ids(harness: &str) -> Vec<&str> {
         );
     }
     ids
+}
+
+/// The tracker's seat for a harness id it does not list itself, so a
+/// server `ljos onboard` gave `LJOS_SEAT=antigravity` sits as the
+/// `free-agy` its hooks sit as.
+fn listed_harness_seat(name: &str) -> Option<String> {
+    if !is_harness_name(name) {
+        return None;
+    }
+    let known = tracker_known_seats();
+    if known.contains(name) {
+        return None;
+    }
+    harness_seat(name, &known)
 }
 
 /// What a call that named an unknown seat is told: the name, the seat
