@@ -274,10 +274,41 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 /// A `cast_at` is not an hour timestamp, or two unreplaced ballots from
 /// one voter share an hour.
 pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
-    let replaced: BTreeSet<&str> = ballots
+    let by_id: BTreeMap<&str, &BallotEntry> = ballots
         .iter()
-        .filter_map(|ballot| ballot.replaces.as_deref())
+        .filter_map(|ballot| ballot.id.as_deref().map(|id| (id, ballot)))
         .collect();
+    let mut replaced = BTreeSet::new();
+    for ballot in ballots {
+        let Some(target_id) = ballot.replaces.as_deref() else {
+            continue;
+        };
+        let source_id = ballot.id.as_deref().unwrap_or("<missing-id>");
+        let target = by_id.get(target_id).copied().ok_or_else(|| {
+            anyhow!(
+                "ballot {source_id} from {} on {} replaces {target_id}, but no ballot has that id",
+                ballot.voter,
+                ballot.question
+            )
+        })?;
+        if target.voter != ballot.voter {
+            bail!(
+                "ballot {source_id} from {} on {} replaces {target_id} from {}; replaces must stay on the same voter",
+                ballot.voter,
+                ballot.question,
+                target.voter
+            );
+        }
+        if target.question != ballot.question {
+            bail!(
+                "ballot {source_id} from {} on {} replaces {target_id} on {}; replaces must stay on the same question",
+                ballot.voter,
+                ballot.question,
+                target.question
+            );
+        }
+        replaced.insert(target_id);
+    }
     let mut grouped: BTreeMap<(String, String), Vec<(i64, &BallotEntry)>> = BTreeMap::new();
     for ballot in ballots {
         if ballot.id.as_deref().is_some_and(|id| replaced.contains(id)) {
@@ -1040,6 +1071,59 @@ mod tests {
                 "{cast_name} before {withdraw_name}"
             );
         }
+    }
+
+    #[test]
+    fn replaces_must_target_the_same_voter_and_question() {
+        let _home = test_home();
+        let missing = as_ballot(sign_as(
+            with_replaces(
+                ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
+                "deadbeefdeadbeef",
+            ),
+            3,
+        ));
+        let err = tally(std::slice::from_ref(&missing)).expect_err("missing replace target");
+        assert!(
+            err_chain(&err).contains("replaces"),
+            "missing replace target passed: {}",
+            err_chain(&err)
+        );
+
+        let cast = as_ballot(sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        ));
+        let cast_id = cast.id.clone().expect("id");
+        let other_voter = as_ballot(sign_as(
+            with_replaces(
+                ballot_entry("beta/seat-b", "withdrawn", "2026-10-21T11:00:00Z"),
+                &cast_id,
+            ),
+            4,
+        ));
+        let err = tally(&[cast.clone(), other_voter]).expect_err("cross-voter replace");
+        assert!(
+            err_chain(&err).contains("same voter"),
+            "cross-voter replace passed: {}",
+            err_chain(&err)
+        );
+
+        let mut other_question_unsigned = with_replaces(
+            ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
+            &cast_id,
+        );
+        let Entry::Ballot(ballot) = &mut other_question_unsigned.entry else {
+            panic!("ballot");
+        };
+        ballot.question = "change-deadbeef".to_string();
+        let other_question = as_ballot(sign_as(other_question_unsigned, 3));
+        let err = tally(&[cast, other_question]).expect_err("cross-question replace");
+        assert!(
+            err_chain(&err).contains("same question"),
+            "cross-question replace passed: {}",
+            err_chain(&err)
+        );
     }
 
     #[test]
