@@ -1037,6 +1037,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     }
     let row = book.repos.entry(place.clone()).or_default();
     row.last_unix = now;
+    clear_lesson_if_issue_changes(row, &issue_id);
     row.issue = Some(issue_id.clone());
     row.finished = false;
     row.started = true;
@@ -1773,6 +1774,7 @@ fn tracker_holder(issue: &str) -> Option<String> {
 /// row, which then holds `issue`.
 fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     let row = book.repos.entry(repo.to_string()).or_default();
+    clear_lesson_if_issue_changes(row, issue);
     row.issue = Some(issue.to_string());
     row.finished = false;
     row.claim_failed = false;
@@ -2833,12 +2835,12 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
             }
         }
         None if placeholder.is_some() => {
+            clear_lesson_if_issue_changes(row, issue);
             row.issue = Some(issue.to_string());
             row.named = true;
             row.filed = false;
             row.started = false;
             row.finished = false;
-            row.lesson = false;
             row.recall = recall_line(issue);
             row.elsewhere.retain(|seen| seen != head);
             if cited.is_ok() && !row.deeds.iter().any(|seen| seen == head) {
@@ -3314,6 +3316,17 @@ fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
     }
     book.prompt_repo = repo.to_string();
     book.prompt_unix = now;
+}
+
+/// A row that moves to another issue must not keep lesson linkage from the
+/// prior issue. Rewrites only supersede lessons from the same issue history.
+fn clear_lesson_if_issue_changes(row: &mut RepoBook, issue: &str) {
+    if row.issue.as_deref() == Some(issue) {
+        return;
+    }
+    row.lesson = false;
+    row.lesson_id = None;
+    row.lesson_title = None;
 }
 
 /// Copy `row.title` into `lesson_title` once, when a lesson already exists.
@@ -5232,6 +5245,113 @@ mod tests {
         assert!(
             queued.contains("atom-old"),
             "the queued rewrite names nothing it closes\n{queued}"
+        );
+    }
+
+    /// A row that once held another issue does not carry that issue's lesson
+    /// title or superseded atom into the next issue's rewrite.
+    #[test]
+    fn a_second_issue_does_not_rewrite_with_the_first_issue_lesson() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "XDG_STATE_HOME",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        // SAFETY: lock() restores the environment when the test returns.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", &state);
+            std::env::set_var("LJOS_SESSION_ID", "jld5-second-issue");
+        }
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] Add a slugify function
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Now add a kebab-case helper
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let old = head_sha(&repo_s).expect("head");
+        let new = "cccccccccccccccccccccccccccccccccccccccc".to_string();
+        let now = unix_secs();
+        let mut book = Book {
+            prompt: "Add a slugify function".into(),
+            prompt_repo: repo_s.clone(),
+            prompt_unix: now,
+            last_unix: now,
+            ..Book::default()
+        };
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                title: Some("Add a slugify function".into()),
+                deeds: vec![old.clone()],
+                finished: true,
+                lesson: true,
+                lesson_id: Some("atom-a".into()),
+                lesson_title: Some("Add a slugify function".into()),
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path("jld5-second-issue"), &book);
+
+        let said = start_work(
+            Some("probe-00ab"),
+            Some(repo.to_str().unwrap()),
+            "Now add a kebab-case helper",
+        )
+        .expect("start the second issue");
+        assert!(said.contains("probe-00ab"), "{said}");
+
+        let path = book_path("jld5-second-issue");
+        let mut switched = load_book(&path);
+        switched.prompt = "Now add a kebab-case helper".into();
+        bind_prompt(&mut switched, &repo_s, unix_secs());
+        let row = switched.repos.get_mut(&repo_s).expect("repo row");
+        row.title = Some("Now add a kebab-case helper".into());
+        row.deeds = vec![old.clone()];
+        row.finished = true;
+        row.lesson = true;
+        store_book(&path, &switched);
+
+        repoint_commits(&repo_s, &[(old, new)]);
+        let queued =
+            std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
+        assert!(
+            queued.contains("kebab case helper"),
+            "the second issue title was lost\n{queued}"
+        );
+        assert!(
+            !queued.contains("slugify"),
+            "the first issue title leaked into the rewrite\n{queued}"
+        );
+        assert!(
+            !queued.contains("atom-a"),
+            "the second issue rewrite superseded the first issue atom\n{queued}"
         );
     }
 
