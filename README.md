@@ -58,6 +58,11 @@ ljos rule 'terraform destroy*' --verdict deny --why "Infra teardown is mine to r
 `gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush`, `cline`,
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
+Codex runs a hook only once you trust it. After `ljos onboard`, open
+`/hooks` in Codex and trust each ljos hook before the guard runs, and
+trust it again after an upgrade rewrites one. Until then only the `rm`,
+`git` and `find` shims guard Codex's commands. `ljos doctor` reports an
+untrusted hook when it can see one.
 
 Start a new session and ask for something the preference bears on, such as
 tagging a release. Before the model reads the prompt, the hook adds:

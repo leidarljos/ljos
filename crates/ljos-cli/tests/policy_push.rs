@@ -18,6 +18,7 @@ fn policy(line: &str) -> std::process::Output {
         .env("XDG_STATE_HOME", home.path().join(".local/state"))
         .env("PACKSET_URL", "off")
         .env("LJOS_ASK_PACK", "off")
+        .env("LJOS_GUARD", "on")
         .env_remove("POLICYD_BIN")
         .env_remove("POLICYD_REQUIRED")
         .env_remove("LJOS_SEAT")
@@ -100,8 +101,26 @@ fn a_dangerous_push_asks_with_no_seat_rule() {
     ];
     for (line, why) in cases {
         let text = stdout_of(line);
+        // A force push is the same `git-force-push` ask the hook gives.
+        // A delete or a mirror keeps the push gate's own words.
+        let (needle, rule) = if why.starts_with("a force push") {
+            (
+                "ask: git-force-push: it rewrites shared history",
+                "(rule: git-force-push)",
+            )
+        } else if why.starts_with("a mirror") {
+            (
+                "ask: a mirror push overwrites and deletes every ref on the remote",
+                "(rule: built-in push)",
+            )
+        } else {
+            (
+                "ask: deleting a remote branch removes shared work",
+                "(rule: built-in push)",
+            )
+        };
         assert!(
-            text.contains(&format!("ask: {why}")) && text.contains("(rule: built-in push)"),
+            text.contains(needle) && text.contains(rule),
             "{line}\n{text}"
         );
         assert!(

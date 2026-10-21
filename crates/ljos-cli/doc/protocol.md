@@ -474,11 +474,14 @@ under equal weights is a count; under calibrated rows it is not.
   then what the pack knows that bears on it. It is not a check.
 - `ljos guard_check` is the commit, push, and merge gate, the same verdict
   the hook gives a shell line. `allow` lets it run. `deny` names the command
-  that makes the line pass. A plain `git push` needs a passing
-  `ljos evidence record -- <test command>` for that exact tip when the
-  checkout sets `test`. With no `test` command a plain push is allowed, and
-  a force push still asks. A merge needs green CI on the head sha and every
-  Cursor Bugbot thread resolved or replied to. A commit that carries a
+  that makes the line pass. A plain `git push` runs, and so does a commit
+  and a push on one line. When the checkout sets `test` and the tip has no
+  passing `ljos evidence record -- <test command>` run, the push still runs
+  and the answer carries a warning. A force, mirror or delete push asks. A
+  push onto a protected branch asks only when `owners` is set and the
+  remote's owner is not in it. A merge pushed to your own repository runs;
+  `gh pr merge` needs green CI on the head sha and every Cursor Bugbot
+  thread resolved or replied to. A commit that carries a
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.

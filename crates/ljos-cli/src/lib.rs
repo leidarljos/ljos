@@ -278,6 +278,11 @@ pub fn session_start_for(session: Option<&str>) -> String {
     }
     let mut line =
         session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"));
+    // A guard that switched itself off says so where the session starts,
+    // not only in `ljos doctor`.
+    if let Some(off) = bookkeep::guard_off_reason() {
+        line = line.replace("command guard on", &format!("command guard {off}"));
+    }
     if let Some(issue) = bookkeep::session_issue(session) {
         if !line.contains(&issue) {
             line.push_str(&format!(" This session's issue is {issue}."));
@@ -3772,9 +3777,12 @@ for d in $PATH; do
 done
 IFS=$old_ifs
 if [ -z "$real" ]; then echo "ljos guard: no $me found on PATH" >&2; exit 127; fi
-# LJOS_OFF and a temp sandbox are not seats. Bookkeeping is a hook, not this shim.
+# LJOS_OFF, and a HOME that is a temporary directory, are not seats. A
+# temporary working directory is: `cd /tmp && rm -rf ~/proj` is judged.
+# LJOS_GUARD=on keeps the guard on under a temporary HOME. Bookkeeping is
+# a hook, not this shim.
 case ",1,true,TRUE,yes,YES,on,ON," in
-  *,"${LJOS_OFF}",*) exec "$real" "$@" ;;
+  *,"${LJOS_OFF:-}",*) exec "$real" "$@" ;;
 esac
 under_temp() {
   p=$1
@@ -3789,9 +3797,97 @@ under_temp() {
   done
   return 1
 }
-if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)" || under_temp "$(pwd -P)"; then
-  exec "$real" "$@"
-fi
+case ",1,true,TRUE,yes,YES,on,ON," in
+  *,"${LJOS_GUARD:-}",*) ;;
+  *) if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)"; then exec "$real" "$@"; fi ;;
+esac
+# The branches a --force-with-lease push may not replace without asking:
+# main, master, develop, and `protected_branches` in the checkout's
+# `.ljos/gates.toml` or `ljos.toml`. A list the shim cannot read on one
+# line is `?`, which matches no branch name, so the push asks.
+guarded_branches() {
+  printf 'main master develop'
+  top=$("$real" -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
+  for f in "$top/.ljos/gates.toml" "$top/ljos.toml"; do
+    [ -f "$f" ] || continue
+    grep -q 'protected_branches' "$f" 2>/dev/null || continue
+    names=$(sed -n 's/^[[:space:]]*protected_branches[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$f" | tr -d "\"'," | tr '\n' ' ')
+    if [ -n "$names" ]; then printf ' %s' "$names"; else printf ' ?'; fi
+  done
+}
+# Whether this git call is a --force-with-lease push the hook would let
+# run: no plain force, no +refspec, no delete or mirror, and every branch
+# it replaces outside guarded_branches. The current branch is
+# `git rev-parse --abbrev-ref HEAD`. A bare push also replaces
+# branch.<name>.merge, the upstream the hook reads.
+lease_free() {
+  [ "$me" = git ] || return 1
+  set -f
+  dir=.; sub=; lease=; remote=; names=; skip=; open=; specs=
+  for a in "$@"; do
+    if [ -n "$skip" ]; then
+      [ "$skip" = C ] && case $a in /*) dir=$a ;; *) dir=$dir/$a ;; esac
+      skip=; continue
+    fi
+    if [ -z "$sub" ]; then
+      case $a in
+        -C) skip=C ;;
+        -c|--git-dir|--work-tree|--namespace) skip=1 ;;
+        -*) ;;
+        *) sub=$a ;;
+      esac
+      continue
+    fi
+    case $a in
+      --force-with-lease) lease=1 ;;
+      --force-with-lease=*)
+        lease=1
+        n=${a#--force-with-lease=}; n=${n%%:*}; n=${n#refs/heads/}
+        case $n in "") ;; HEAD) names="$names HEAD" ;; *) names="$names $n" ;; esac ;;
+      --force|--mirror|--delete|--all|--branches) set +f; return 1 ;;
+      -o|--push-option|--receive-pack|--exec|--repo) skip=1 ;;
+      --*) ;;
+      -*f*) set +f; return 1 ;;
+      -d) set +f; return 1 ;;
+      -*) ;;
+      +*|:*) set +f; return 1 ;;
+      *)
+        if [ -z "$remote" ]; then remote=$a; continue; fi
+        specs=1
+        case $a in *:*) n=${a#*:} ;; *) n=$a ;; esac
+        n=${n#refs/heads/}
+        case $n in ""|*[\*\?\[\$\`]*) open=1 ;; *) names="$names $n" ;; esac
+        ;;
+    esac
+  done
+  set +f
+  [ "$sub" = push ] && [ -n "$lease" ] && [ -z "$open" ] || return 1
+  cur=$("$real" -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
+  [ -n "$cur" ] && [ "$cur" != HEAD ] || return 1
+  # No refspec: the hook reads branch.<name>.merge and the current
+  # branch. A remote-tracking ref is missing until the first fetch.
+  if [ -z "$specs" ]; then
+    up=$("$real" -C "$dir" config --get "branch.${cur}.merge" 2>/dev/null) || return 1
+    up=${up#refs/heads/}
+    [ -n "$up" ] || return 1
+    names="$names $up $cur"
+  fi
+  case " $names " in
+    *" HEAD "*) names="$names $cur" ;;
+  esac
+  guarded=$(guarded_branches "$dir")
+  (
+    set -f
+    for b in $names; do
+      [ "$b" = HEAD ] && continue
+      for g in $guarded; do
+        [ "$g" = '?' ] && exit 1
+        [ "$b" = "$g" ] && exit 1
+      done
+    done
+    exit 0
+  )
+}
 # The first git of a conversation is the session start this runner never
 # hooks. The brief is held claims, recall and unread mail, on stderr, once.
 # Bound the wait: a slow seat must not hold the command. A failure allows it.
@@ -3825,6 +3921,16 @@ if command -v ljos-policyd >/dev/null 2>&1; then
           esac
           printf '%s\n' "the ljos guard is unhealthy ($why) and did not judge this call, so it is allowed. No ljos rule would refuse it. Run \`ljos doctor\`." >&2
           exec "$real" "$@" ;;
+      esac
+      # A force push asks, as the hook does: a lease push onto a branch
+      # outside main, master, develop and the protected ones runs, and
+      # any other force push goes to the person. This shim cannot ask.
+      case "$rule" in
+        git-force-push|git-force-push:*)
+          if lease_free "$@"; then exec "$real" "$@"; fi
+          echo "ljos guard: asks ($rule): $me $*" >&2
+          echo "ljos guard: this rewrites history on the remote, so it is the person's to approve. Tell them the exact command; they can run it, or approve it in a runner whose hook can ask." >&2
+          exit 126 ;;
       esac
       case "$rule" in
         rm-rf-*|find-delete-*) hint="Leave it, or move it to the trash (trash-put or gio trash). Moving it under /tmp to delete it there is the same delete." ;;
@@ -4516,7 +4622,7 @@ pub fn hook_trusted(trust: &Path, hooks: &Path) -> bool {
 /// What onboard and doctor say about a hook the runner has not trusted.
 fn untrusted_hook_note(runner: &str) -> String {
     format!(
-        "{runner} skips the ljos hooks until you trust them: open `/hooks` in {runner} and trust each ljos hook. A rewritten hook needs trusting again"
+        "{runner} skips the ljos hooks until you trust them. Before the guard runs, open `/hooks` in {runner} and trust each ljos hook, and trust it again after an upgrade rewrites one. Until then only the rm, git and find shims guard its commands"
     )
 }
 
@@ -9792,16 +9898,30 @@ pub(crate) fn with_config_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 pub(crate) fn isolated_config_home() -> &'static Path {
     use std::sync::OnceLock;
-    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    // A static is never dropped, so a `TempDir` held here stayed behind
+    // after every run. The directory is removed when the test process
+    // exits instead.
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    extern "C" fn remove_isolated_config_home() {
+        if let Some(dir) = DIR.get() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
     DIR.get_or_init(|| {
         let dir = tempfile::Builder::new()
             .prefix("ljos-isolated-config-")
             .tempdir()
-            .expect("isolated config directory");
-        std::fs::create_dir_all(dir.path().join("ljos")).expect("isolated config dir");
+            .expect("isolated config directory")
+            .keep();
+        std::fs::create_dir_all(dir.join("ljos")).expect("isolated config dir");
+        // SAFETY: `atexit` takes a plain function with no arguments, which
+        // only reads the static set just before it is registered.
+        unsafe {
+            libc::atexit(remove_isolated_config_home);
+        }
         dir
     })
-    .path()
+    .as_path()
 }
 
 fn named_env(key: &str) -> Option<String> {
@@ -17193,6 +17313,11 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// same line is left as it is when the push itself is ordinary.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
+    // A temporary HOME and LJOS_OFF switch the whole guard off, the push
+    // gate included, the same way the shim steps aside.
+    if bookkeep::guard_suspended() {
+        return None;
+    }
     let Some(call) = push_call(line) else {
         return rule.cloned();
     };
@@ -18791,8 +18916,8 @@ pub fn doctor() -> Vec<Habitat> {
 }
 
 /// A row only while the guard is off in this process (`LJOS_OFF`, or a
-/// temporary `HOME` or working directory), so a person who tries ljos in
-/// `/tmp` reads why a command it would stop runs.
+/// temporary `HOME` with no `LJOS_GUARD=on`), so a person who tries ljos
+/// with a scratch home reads why a command it would stop runs.
 fn guard_off_row() -> Option<Habitat> {
     bookkeep::guard_off_reason().map(|state| Habitat {
         name: "guard",
@@ -24302,17 +24427,23 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let context = hook_context(&call, 5);
     // The rules are the law's memory: a deny or an ask fires before the
     // context, so a reader sees the verdict first. A line the fast check
-    // already judged does not wait on policyd, which can hang.
-    let fast = static_guard(&line);
+    // already judged does not wait on policyd, which can hang. A guard that
+    // is switched off judges nothing, policyd included.
+    let off = bookkeep::guard_suspended();
+    let fast = if off { None } else { static_guard(&line) };
     let judged = fast.is_some();
-    let rules = rules_for_gate();
+    let rules = if off { Vec::new() } else { rules_for_gate() };
     let cwd = std::env::current_dir()
         .ok()
         .map(|d| d.display().to_string());
-    let gated = redirect_seat_verb(
-        gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
-        &line,
-    );
+    let gated = if off {
+        None
+    } else {
+        redirect_seat_verb(
+            gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
+            &line,
+        )
+    };
     let deny = gated.as_ref().is_some_and(|rule| rule.verdict == "deny");
     let gated = match fast {
         Some(rule) if !deny => Some(rule),
@@ -24322,7 +24453,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // A TCB `allow` is not the verdict once this seat asks or denies. The
     // line the person reads is the ask, including a force push on a box
     // with no seat rule.
-    let tcb = if judged {
+    let tcb = if judged || off {
         None
     } else {
         match tcb_check(argv) {
@@ -24438,6 +24569,9 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
     if let Some(rule) = static_guard(line) {
+        // The push ran into an ask or a deny. Drop the evidence warning so
+        // the next allowed command does not inherit it.
+        let _ = gates::take_push_warning();
         let text = format!(
             "{line}\n{}: {} (rule: {})\n",
             rule.verdict, rule.reason, rule.pattern
@@ -24454,10 +24588,15 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     if argv.is_empty() {
         bail!("guard: pass the command to check");
     }
-    let text = policy_with_memory(&argv)?;
+    let warning = gates::take_push_warning();
+    let mut text = policy_with_memory(&argv)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
+    }
+    // A push the gate let run with no passing test record says so.
+    if let Some(warning) = warning {
+        text.push_str(&format!("warning: {warning}\n"));
     }
     Ok(GuardReport {
         text,
@@ -24708,7 +24847,8 @@ pub fn unhealthy_note(why: &str) -> String {
 /// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
 /// or a commit, push, or merge the gates refuse, judged in this process.
 /// `None` means the slow check may run: a timeout there allows the line.
-/// A temp home is not a seat, and this returns `None` there too.
+/// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
+/// `None` there too. A temp working directory is still judged.
 ///
 /// `cwd` is the directory the command would run in. Absent, the process
 /// directory. The gates read that checkout's `.ljos/gates.toml` and tip.
@@ -24986,9 +25126,8 @@ pub fn policyd_reason(token: &str) -> String {
              `--signoff`, then commit again"
         }
         "git-push-evidence" => {
-            "no passing test evidence for this exact tip. Run `ljos evidence record -- <test \
-             command>` (the `test` line in `.ljos/gates.toml`), then push that same commit. A \
-             plain push with that record needs no approval"
+            "the push gate could not read this command. A plain push runs, and a tip with no \
+             passing `ljos evidence record -- <test command>` run is a warning, not a refusal"
         }
         "git-merge-unready" => {
             "a merge waits until CI is green on the head sha and every Cursor Bugbot thread is \
@@ -26748,12 +26887,12 @@ mod tests {
         }
     }
 
-    /// A temp home, a temp working directory, or LJOS_OFF runs the real
-    /// binary. The policyd denial that blocked `git branch -D` in a scratch
-    /// repository does not apply there.
+    /// A temp home or LJOS_OFF runs the real binary. A temp working
+    /// directory under a real home is judged, and so is a temp home with
+    /// `LJOS_GUARD=on`.
     #[cfg(unix)]
     #[test]
-    fn a_guard_shim_steps_aside_for_a_temp_sandbox_and_ljos_off() {
+    fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
@@ -26774,7 +26913,7 @@ mod tests {
             ),
         );
         exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
-        let run = |home: &std::path::Path, off: bool, cwd: &std::path::Path| {
+        let run = |home: &std::path::Path, env: &[(&str, &str)], cwd: &std::path::Path| {
             let _ = std::fs::remove_file(&marker);
             let mut cmd = std::process::Command::new("git");
             cmd.arg("branch")
@@ -26786,11 +26925,11 @@ mod tests {
                     "PATH",
                     format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
                 )
-                .env_remove("TMPDIR");
-            if off {
-                cmd.env("LJOS_OFF", "1");
-            } else {
-                cmd.env_remove("LJOS_OFF");
+                .env_remove("TMPDIR")
+                .env_remove("LJOS_OFF")
+                .env_remove("LJOS_GUARD");
+            for (k, v) in env {
+                cmd.env(k, v);
             }
             cmd.output().unwrap()
         };
@@ -26798,14 +26937,21 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let sandbox = dir.path().join("sandbox");
         std::fs::create_dir_all(&sandbox).unwrap();
-        let skipped = run(&home, false, &sandbox);
+        let skipped = run(&home, &[], &sandbox);
         assert!(
             skipped.status.success(),
             "{}",
             String::from_utf8_lossy(&skipped.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&skipped.stdout).trim(), "ran");
-        assert!(!marker.exists(), "policyd was asked in a temp directory");
+        assert!(!marker.exists(), "policyd was asked under a temp HOME");
+        let forced = run(&home, &[("LJOS_GUARD", "on")], &sandbox);
+        assert_eq!(
+            forced.status.code(),
+            Some(126),
+            "LJOS_GUARD=on keeps the guard on"
+        );
+        assert!(marker.exists());
         let outside = SeatDir::new("guard-shim");
         let outside_home = outside.path().join("home");
         let outside_cwd = outside.path().join("work");
@@ -26813,18 +26959,168 @@ mod tests {
         std::fs::create_dir_all(&outside_cwd).unwrap();
         std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(&outside_cwd, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let off = run(&outside_home, true, &outside_cwd);
+        let in_tmp = run(&outside_home, &[], &sandbox);
+        assert_eq!(
+            in_tmp.status.code(),
+            Some(126),
+            "a temp working directory under a real home is judged"
+        );
+        assert!(marker.exists());
+        let off = run(&outside_home, &[("LJOS_OFF", "1")], &outside_cwd);
         assert!(
             off.status.success(),
             "{}",
             String::from_utf8_lossy(&off.stderr)
         );
         assert!(!marker.exists(), "LJOS_OFF still asked policyd");
-        let denied = run(&outside_home, false, &outside_cwd);
+        let denied = run(&outside_home, &[], &outside_cwd);
         assert_eq!(denied.status.code(), Some(126));
         assert!(marker.exists());
         let err = String::from_utf8_lossy(&denied.stderr);
         assert!(err.contains("denied"), "{err}");
+        exe(&guard.join("rm"), super::GUARD_SHIM);
+        let _ = std::fs::remove_file(&marker);
+        let removed = std::process::Command::new(guard.join("rm"))
+            .args(["-rf", "/home/ubuntu/proj"])
+            .current_dir(&sandbox)
+            .env("HOME", &outside_home)
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
+            )
+            .env_remove("TMPDIR")
+            .env_remove("LJOS_OFF")
+            .env_remove("LJOS_GUARD")
+            .output()
+            .unwrap();
+        assert_eq!(
+            removed.status.code(),
+            Some(126),
+            "rm -rf under a temp working directory is judged: {}",
+            String::from_utf8_lossy(&removed.stderr)
+        );
+        assert!(marker.exists(), "policyd was not asked");
+    }
+
+    /// The shim asks about a force push, as the hook does: a lease push
+    /// onto a feature branch runs, read with `git rev-parse`, and a lease
+    /// push onto main or a plain force push goes to the person.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
+        use std::os::unix::fs::PermissionsExt;
+        // A temp home with the explicit guard-on setting, not a directory
+        // moved out of /tmp.
+        let root = tempfile::tempdir().unwrap();
+        let guard = root.path().join("guard-bin");
+        let fake = root.path().join("fake");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        for d in [&guard, &fake, &home, &repo] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let exe = |p: &std::path::Path, text: &str| {
+            std::fs::write(p, text).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        exe(&guard.join("git"), super::GUARD_SHIM);
+        exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
+        );
+        let real_git = which::which("git").expect("git on PATH");
+        let plain = |args: &[&str]| {
+            let out = std::process::Command::new(&real_git)
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Rohit Goswami")
+                .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
+                .env("GIT_COMMITTER_NAME", "Rohit Goswami")
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        plain(&["init", "-q", "-b", "main"]);
+        plain(&["config", "commit.gpgsign", "false"]);
+        plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        plain(&["checkout", "-q", "-b", "feature"]);
+        let shim = |args: &[&str]| {
+            std::process::Command::new(guard.join("git"))
+                .args(args)
+                .current_dir(&repo)
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}:{}",
+                        guard.display(),
+                        fake.display(),
+                        real_git.parent().unwrap().display()
+                    ),
+                )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on")
+                .output()
+                .unwrap()
+        };
+        // There is no remote, so git itself fails once the shim lets the
+        // push through; the shim's own refusal is exit 126.
+        let feature = shim(&["push", "--force-with-lease", "nowhere", "feature"]);
+        assert_ne!(
+            feature.status.code(),
+            Some(126),
+            "{}",
+            String::from_utf8_lossy(&feature.stderr)
+        );
+        let head = shim(&["push", "--force-with-lease", "nowhere", "HEAD"]);
+        assert_ne!(
+            head.status.code(),
+            Some(126),
+            "{}",
+            String::from_utf8_lossy(&head.stderr)
+        );
+        let main = shim(&["push", "--force-with-lease", "nowhere", "HEAD:main"]);
+        assert_eq!(main.status.code(), Some(126));
+        let said = String::from_utf8_lossy(&main.stderr);
+        assert!(said.contains("asks (git-force-push)"), "{said}");
+        let forced = shim(&["push", "--force", "nowhere", "feature"]);
+        assert_eq!(forced.status.code(), Some(126));
+        let said = String::from_utf8_lossy(&forced.stderr);
+        assert!(said.contains("asks (git-force-push)"), "{said}");
+        plain(&["config", "branch.feature.remote", "origin"]);
+        plain(&["config", "branch.feature.merge", "refs/heads/feature"]);
+        let bare = shim(&["push", "--force-with-lease"]);
+        assert_ne!(
+            bare.status.code(),
+            Some(126),
+            "a bare lease push whose upstream is the feature branch runs: {}",
+            String::from_utf8_lossy(&bare.stderr)
+        );
+        plain(&["config", "branch.feature.merge", "refs/heads/main"]);
+        let upstream_main = shim(&["push", "--force-with-lease"]);
+        assert_eq!(
+            upstream_main.status.code(),
+            Some(126),
+            "a bare lease push whose upstream is main asks"
+        );
+        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+        std::fs::write(
+            repo.join(".ljos/gates.toml"),
+            "protected_branches = [\"feature\"]\n",
+        )
+        .unwrap();
+        let protected = shim(&["push", "--force-with-lease", "nowhere", "feature"]);
+        assert_eq!(
+            protected.status.code(),
+            Some(126),
+            "a protected branch asks"
+        );
     }
 
     /// The in-process guard matches the shim: a temp home and LJOS_OFF do
@@ -26859,6 +27155,7 @@ mod tests {
         let keys = [
             "HOME",
             "LJOS_OFF",
+            "LJOS_GUARD",
             "POLICYD_BIN",
             "PACKSET_URL",
             "PACKSET_PORT",
@@ -26872,8 +27169,19 @@ mod tests {
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("PACKSET_PORT");
             std::env::remove_var("LJOS_OFF");
+            std::env::remove_var("LJOS_GUARD");
             std::env::set_var("HOME", "/home/ubuntu");
         }
+        let judged = super::static_guard_in("rm -rf ~/proj", Some(std::path::Path::new("/tmp")))
+            .expect("a temp working directory does not switch the guard off");
+        assert_eq!(judged.verdict, "deny");
+        assert_eq!(judged.pattern, "rm-rf-outside-tmp");
+        let chained = super::static_guard_in(
+            "cd /tmp && rm -rf ~/proj",
+            Some(std::path::Path::new("/tmp")),
+        )
+        .expect("cd /tmp && rm -rf ~/proj");
+        assert_eq!(chained.pattern, "rm-rf-outside-tmp");
         assert!(
             super::tcb_verdict("git branch -D gone").is_some(),
             "outside a sandbox the branch delete is denied"
@@ -26882,6 +27190,10 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         unsafe { std::env::set_var("LJOS_OFF", "1") };
         assert!(super::tcb_verdict("git branch -D gone").is_none());
+        assert!(
+            super::gate_push(None, "git push --force origin main", None).is_none(),
+            "LJOS_OFF skips a force push"
+        );
         assert!(
             super::seat_guard("sed -i s/a/b/ ~/.codex/hooks.json").is_none(),
             "LJOS_OFF skips the seat guard"
@@ -26893,6 +27205,14 @@ mod tests {
             std::env::set_var("HOME", dir.path());
         }
         assert!(super::tcb_verdict("git branch -D gone").is_none());
+        assert!(
+            super::static_guard("rm -rf /home/ubuntu/proj").is_none(),
+            "a temp HOME does not judge rm -rf"
+        );
+        assert!(
+            super::gate_push(None, "git push --force origin main", None).is_none(),
+            "a temp HOME does not ask about a force push"
+        );
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
         assert!(
             refused.to_string().contains("temporary HOME")
@@ -26902,6 +27222,14 @@ mod tests {
         assert!(!marker.exists(), "a temp HOME started the pack daemon");
         let off = crate::bookkeep::guard_off_reason().expect("the guard is off");
         assert!(off.contains("temporary directory"), "{off}");
+        assert!(off.contains("LJOS_GUARD=on"), "{off}");
+        unsafe { std::env::set_var("LJOS_GUARD", "on") };
+        assert!(
+            super::tcb_verdict("git branch -D gone").is_some(),
+            "LJOS_GUARD=on judges a temp HOME"
+        );
+        assert!(crate::bookkeep::guard_off_reason().is_none());
+        unsafe { std::env::remove_var("LJOS_GUARD") };
         unsafe {
             for (k, v) in &saved {
                 match v {
@@ -34061,12 +34389,12 @@ mod tests {
             ("HOME", home.path().to_str().unwrap()),
         ]);
         assert!(tcb_verdict("git status").is_none());
-        let missing = tcb_verdict("git push --force origin main").expect("no evidence");
-        assert_eq!(missing.verdict, "deny");
+        let unrecorded = tcb_verdict("git push --force origin main").expect("a force push asks");
+        assert_eq!(unrecorded.verdict, "ask");
         assert!(
-            missing.reason.contains("git-push-evidence"),
+            !unrecorded.reason.contains("git-push-evidence"),
             "{}",
-            missing.reason
+            unrecorded.reason
         );
         let repo = evidenced_push_repo();
         let rule =
@@ -34160,10 +34488,11 @@ mod tests {
         assert!(bare_cursor.contains("cannot ask here"), "{bare_cursor}");
     }
 
-    /// `ljos_guard_check` refuses a force push that has no test evidence.
-    /// The refusal is an error. `git status` stays allowed.
+    /// `ljos_guard_check` asks about a force push, with or without test
+    /// evidence. `guard_command` reports the ask as an error. `git status`
+    /// stays allowed.
     #[test]
-    fn a_force_push_without_evidence_is_a_guard_error() {
+    fn a_force_push_asks_whether_or_not_it_has_evidence() {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
@@ -34179,14 +34508,17 @@ mod tests {
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
         ]);
-        let err = guard_report("git push --force origin main")
-            .expect_err("missing evidence is a denial")
-            .to_string();
-        assert!(err.contains("git-push-evidence"), "{err}");
+        let report = guard_report("git push --force origin main").expect("an ask is a report");
+        assert_eq!(report.verdict, "ask", "{}", report.text);
+        assert!(
+            !report.text.contains("git-push-evidence"),
+            "{}",
+            report.text
+        );
         let err = guard_command("git push --force origin main")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("git-push-evidence"), "{err}");
+        assert!(err.contains("git-force-push"), "{err}");
         let allowed = guard_report("git status").expect("status is allowed");
         assert_eq!(allowed.verdict, "allow");
         let repo = evidenced_push_repo();
@@ -37079,7 +37411,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("LJOS_OFF", "0"),
         ]);
         let started = std::time::Instant::now();
-        let push = static_guard("git push --force origin main").expect("deny");
+        let push = static_guard("git push --force origin main").expect("ask");
         let rm = static_guard("rm -rf /home/u/proj").expect("deny");
         let both = static_guard("rm -rf /tmp/a /etc").expect("deny");
         let find = static_guard("find /home/u/proj -name x -delete").expect("deny");
@@ -37087,7 +37419,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(static_guard("rm -rf /tmp/a /tmp/b").is_none());
         assert!(static_guard("git status").is_none());
         assert!(static_guard("find /tmp/scratch -name x -delete").is_none());
-        let asked = tcb_verdict("git push --force origin main").expect("deny");
+        let asked = tcb_verdict("git push --force origin main").expect("ask");
         let denied = tcb_verdict("rm -rf /home/u/proj").expect("deny");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
@@ -37095,11 +37427,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             started.elapsed()
         );
         assert!(!marker.exists(), "the slow policyd ran");
-        assert_eq!(push.verdict, "deny");
-        assert_eq!(push.pattern, "push-gate");
-        assert!(push.reason.contains("git-push-evidence"), "{}", push.reason);
-        assert_eq!(asked.verdict, "deny");
-        assert_eq!(asked.pattern, "push-gate");
+        assert_eq!(push.verdict, "ask", "{}", push.reason);
+        assert_eq!(push.pattern, "git-force-push");
+        assert!(
+            !push.reason.contains("git-push-evidence"),
+            "{}",
+            push.reason
+        );
+        assert_eq!(asked.verdict, "ask", "{}", asked.reason);
+        assert_eq!(asked.pattern, "git-force-push");
         let repo = evidenced_push_repo();
         let forced =
             static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
@@ -37902,7 +38238,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .find(|h| h.name == "codex")
             .unwrap();
         assert_eq!(codex.hooks_trust.as_deref(), Some("~/.codex/config.toml"));
-        assert!(untrusted_hook_note("codex").contains("/hooks"));
+        let note = untrusted_hook_note("codex");
+        assert!(note.contains("/hooks"), "{note}");
+        assert!(note.contains("Before the guard"), "{note}");
+        assert!(note.contains("upgrade"), "{note}");
     }
 
     #[test]
