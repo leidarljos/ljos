@@ -93,8 +93,9 @@ pub struct Step {
 /// table each, and `onboard` and `doctor` read it.
 ///
 /// A runner registers MCP servers one of two ways. `register` is a command
-/// that does it (`{server}` is replaced by `ljos-mcp`, resolved on PATH) and
-/// `registered` a command that exits 0 once it is done. Or `config` is a
+/// that does it (`{server}` is `ljos-mcp` when that name on PATH is this
+/// install, and the absolute path otherwise). `registered` is a command
+/// that exits 0 once it is done. Or `config` is a
 /// file the runner reads, `marker` a line that means the entry is present,
 /// and `snippet` what to append when it is not. `skills` is the directory
 /// the runner loads skills from; the protocol goes to `<skills>/ljos/SKILL.md`.
@@ -647,9 +648,10 @@ pub struct Harnesses {
 /// prints it; the two shapes are a registering command and a config file.
 pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners this machine registers by command.
 # Optional: `ljos onboard` alone prints the one entry any runner takes.
-# {server} is replaced by ljos-mcp, resolved on PATH where the runner starts
-# it, and {name} by the runner's name. An absolute path would be the machine
-# that wrote the file.
+# {server} is ljos-mcp when that name on PATH is this install, and the
+# absolute path when it is not. {name} is the runner's name. An absolute
+# path is kept while the file exists here, and rewritten when a synced
+# config names a missing file.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -1190,12 +1192,11 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
     out
 }
 
-/// The MCP command a harness config names.
+/// The MCP command a harness config prefers.
 ///
-/// The runner resolves this on `PATH` when it starts the server. Storing
-/// [`server_path`] instead would bake in the machine that wrote the file,
-/// and a config synced onto another home would name a directory that is
-/// not there.
+/// The bare name when `ljos-mcp` on `PATH` is this install. The absolute
+/// [`server_path`] when that name is missing or resolves to a different
+/// binary.
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
 #[derive(Debug, Clone)]
@@ -1303,9 +1304,8 @@ fn write_skill(dir: &Path, dry: bool) -> Step {
     runner_skills::install_skill(&dir.join("ljos").join("SKILL.md"), dry)
 }
 
-/// `{server}` is the MCP command, `{name}` the runner's name from the
-/// runners file. A harness config passes [`MCP_SERVER_COMMAND`], not an
-/// absolute path.
+/// `{server}` is the MCP command: the bare name when PATH resolves to this
+/// install, and the absolute path otherwise. `{name}` is the runner's name.
 fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
     argv.iter()
         .map(|a| a.replace("{server}", &server.display().to_string()))
@@ -3559,8 +3559,8 @@ fn heal_detail(base: &str, healed: &Result<Option<String>>) -> String {
     }
 }
 
-/// An absolute path whose file name is the MCP server. That path is the
-/// machine that wrote the config.
+/// An absolute path whose file name is the MCP server. It may name another
+/// machine. A path that is a file here is this install and is left alone.
 fn is_absolute_ljos_mcp(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
@@ -3587,9 +3587,10 @@ fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     }
 }
 
-/// Point an existing JSON entry at [`MCP_SERVER_COMMAND`] when it still
-/// names an absolute `ljos-mcp`. A runner that was onboarded before keeps
-/// that path until the next onboard, and then syncs it again.
+/// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
+/// that is not a file here. The replacement is the bare name, or this
+/// install's path when the bare name would not run it. A path that exists
+/// is left alone.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
@@ -35952,6 +35953,21 @@ mod tests {
         assert!(!is_decision(&v(
             r#"{"body":"We weighed the Options: none"}"#
         )));
+    }
+
+    #[test]
+    fn the_harness_example_says_when_the_command_is_bare() {
+        let text = super::HARNESSES_EXAMPLE;
+        assert!(
+            !text.contains("An absolute path would be the machine"),
+            "{text}"
+        );
+        assert!(!text.contains("always bare"), "{text}");
+        assert!(
+            text.contains("ljos-mcp when that name on PATH is this install"),
+            "{text}"
+        );
+        assert!(text.contains("absolute path when it is not"), "{text}");
     }
 
     #[test]
