@@ -1124,6 +1124,11 @@ mod tests {
 
     #[test]
     fn stale_names_duplicates_and_old_never_recalled_ones_but_not_kept_ones() {
+        // sample() counts recalls from the state dir. Another test bumps
+        // the same atom id, so this one keeps its own directory.
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
         let mut all = sample();
         let mut dup = all[1].clone();
         dup.id = "e5eeeeeeeeeeeeee".into();
