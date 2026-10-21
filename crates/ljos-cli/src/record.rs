@@ -206,7 +206,7 @@ pub fn check_dir(dir: &Path) -> Result<CheckReport> {
     for path in &paths {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("record check: read {}", path.display()))?;
-        let entry: SignedEntry = serde_json::from_str(&raw)
+        let entry = parse_signed_json(&raw)
             .with_context(|| format!("record check: parse {}", path.display()))?;
         entries.push(entry);
     }
@@ -290,8 +290,6 @@ fn validate_unsigned(unsigned: &UnsignedEntry) -> Result<()> {
             unsigned.schema.trim()
         );
     }
-    let plain = serde_json::to_value(unsigned)?;
-    reject_reserved_plain_fields(&plain)?;
     match &unsigned.entry {
         Entry::Question(question) => validate_question(question),
         Entry::Ballot(ballot) => validate_ballot(ballot),
@@ -490,6 +488,33 @@ fn decode_sig(hex_text: &str) -> Result<ed25519_dalek::Signature> {
         .try_into()
         .map_err(|_| anyhow!("signature must be 64 bytes"))?;
     Ok(ed25519_dalek::Signature::from_bytes(&sig))
+}
+
+/// Parse one record file. Unknown keys are not dropped before the reserved
+/// name walk, and the canonical bytes without `signature` must be the typed
+/// entry. A field added after signing then fails instead of riding along.
+fn parse_signed_json(raw: &str) -> Result<SignedEntry> {
+    let value: Value = serde_json::from_str(raw).context("record entry is not JSON")?;
+    reject_reserved_plain_fields(&value)?;
+    let entry: SignedEntry =
+        serde_json::from_value(value.clone()).context("record entry does not match schema v1")?;
+    require_signed_coverage(&value, &entry)?;
+    Ok(entry)
+}
+
+fn require_signed_coverage(raw: &Value, entry: &SignedEntry) -> Result<()> {
+    let Value::Object(map) = raw else {
+        bail!("record entry must be a JSON object");
+    };
+    let mut unsigned = map.clone();
+    unsigned.remove("signature");
+    let raw_canon = canonical_json(&Value::Object(unsigned))?;
+    let typed = serde_json::to_value(entry.unsigned())?;
+    let typed_canon = canonical_json(&typed)?;
+    if raw_canon != typed_canon {
+        bail!("entry has a field the signature does not cover");
+    }
+    Ok(())
 }
 
 fn reject_reserved_plain_fields(value: &Value) -> Result<()> {
@@ -709,5 +734,67 @@ mod tests {
         assert_eq!(report.questions, 1);
         assert_eq!(report.ballots, 1);
         assert_eq!(report.questions_with_live_ballots, 1);
+    }
+
+    fn err_chain(err: &anyhow::Error) -> String {
+        format!("{err:#}")
+    }
+
+    /// Reserved names and any key the signature does not cover are refused
+    /// on the file, including inside `signature`.
+    #[test]
+    fn reserved_and_unsigned_fields_are_refused() {
+        let signed = sign_entry(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            &key(8),
+        )
+        .expect("signed");
+        let base = serde_json::to_value(&signed).expect("value");
+
+        let mut host_in_sig = base.clone();
+        host_in_sig["signature"]["host"] = serde_json::json!("box");
+        let err = check_value(&host_in_sig).expect_err("host inside signature");
+        assert!(
+            err_chain(&err).contains("host"),
+            "reserved host was accepted: {}",
+            err_chain(&err)
+        );
+
+        let mut nested_agent = base.clone();
+        nested_agent["signature"]["note"] = serde_json::json!({"agent": "runner"});
+        let err = check_value(&nested_agent).expect_err("nested agent");
+        assert!(
+            err_chain(&err).contains("agent"),
+            "nested agent was accepted: {}",
+            err_chain(&err)
+        );
+
+        let mut session_in_array = base.clone();
+        session_in_array["signature"]["meta"] = serde_json::json!([{"session": "s"}]);
+        let err = check_value(&session_in_array).expect_err("session in array");
+        assert!(
+            err_chain(&err).contains("session"),
+            "session in an array was accepted: {}",
+            err_chain(&err)
+        );
+
+        let mut rationale = base.clone();
+        rationale["rationale"] = serde_json::json!("because");
+        let err = check_value(&rationale).expect_err("unsigned rationale");
+        assert!(
+            err_chain(&err).contains("does not cover"),
+            "unsigned rationale was accepted: {}",
+            err_chain(&err)
+        );
+    }
+
+    fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("entry.json"),
+            serde_json::to_vec(value).expect("json"),
+        )
+        .expect("write");
+        check_dir(dir.path())
     }
 }
