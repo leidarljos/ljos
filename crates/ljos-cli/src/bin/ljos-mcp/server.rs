@@ -1565,19 +1565,20 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<NoteArgs>,
     ) -> Result<Json<Said>, McpError> {
-        // A note never files an issue: it goes on the named one, else the
-        // one held, else it is refused.
+        // A note never files an issue. Prose in `issue` is not a title and
+        // not an id: the note goes on the issue this seat holds, else it
+        // is refused.
+        let raw_issue = args.issue.clone();
+        let note = args.text.clone();
         let issue = tokio::task::spawn_blocking(move || {
-            ljos_cli::bookkeep::canonical_issue(Some(&args.issue), None)
+            let raw = raw_issue.trim();
+            let passed = (!raw.is_empty()).then_some(raw);
+            ljos_cli::bookkeep::note_issue(passed)
         })
         .await
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
-        .ok_or_else(|| {
-            refused(anyhow::anyhow!(
-                "nothing is held to note on: pass issue, or ljos_start first; a note never files an issue"
-            ))
-        })?;
-        habitat("ljos", &["note", &issue, &args.text])
+        .map_err(|e| refused(anyhow::anyhow!(e)))?;
+        habitat("ljos", &["note", &issue, &note])
     }
 
     #[tool(

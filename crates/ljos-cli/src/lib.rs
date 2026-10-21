@@ -22023,9 +22023,11 @@ fn state_before_claim(h: &vissue_core::IssueHeading) -> Option<String> {
 /// see [`unstamp_tracker`].
 fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) -> String {
     let mut out = said;
-    if id == node.trim() {
-        return out;
-    }
+    // `node_for` returns `node` unchanged when the issue id is already 32
+    // hex. Skipping the tracker then left the issue STARTED with nobody
+    // on it: the claim graph had released, and the heading still said
+    // STARTED. A node the tracker does not know is a no-op here.
+    let _ = id;
     let line = match unstamp_tracker(node, holder, reopen) {
         Ok(Some(line)) => line,
         Ok(None) => return out,

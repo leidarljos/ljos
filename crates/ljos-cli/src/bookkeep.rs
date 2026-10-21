@@ -436,11 +436,17 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
                     let _ = take_started_row(&mut book, &path, &repo);
                 }
                 book_named_in(&mut book, &repo, &repo, &head, &issue);
-            } else if names_open {
-                // The command named an id the landed message does not: the
-                // commit still gets the claim a commit files.
-                let offered = subject_title.then_some(offered.as_str());
-                let _ = ensure_claim(&mut book, &path, &repo, offered);
+            } else if let Some(issue) = named_open_issue(&call.cue) {
+                // The harness command named an open issue the landed message
+                // does not. Book that issue. Filing a new one leaves the
+                // named ticket unclaimed and this sitting with a second id.
+                let head = head_sha(&repo).unwrap_or_default();
+                if !head.is_empty() {
+                    if book.repos.get(&repo).is_none_or(|row| row.issue.is_none()) {
+                        let _ = take_started_row(&mut book, &path, &repo);
+                    }
+                    book_named_in(&mut book, &repo, &repo, &head, &issue);
+                }
             }
             let _ = ensure_deed(&mut book, &repo);
         } else if call.event == "PostToolUse" && commit && command_failed(exit) {
@@ -449,6 +455,14 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     }
     if matches!(call.event.as_str(), "Stop" | "SessionEnd") {
         finish_open(&mut book);
+        drop_unclaimed_rows(&mut book);
+    }
+    // A prompt, a read, or a shutdown that never claimed must not leave a
+    // row whose issue is null. The commit's before-hook is the exception:
+    // it records HEAD so the after-hook can tell the new sha from the one
+    // the sitting began on.
+    let keep_baseline = commit && !landed;
+    if !keep_baseline {
         drop_unclaimed_rows(&mut book);
     }
     let held = if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
@@ -578,6 +592,10 @@ pub fn resume_seat() {
 
 fn resume_seat_at(now: u64) {
     let key = sitting_key();
+    {
+        let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+        reap_stale_locked(Some(key.as_str()), now, None);
+    }
     if let Some(limit) = idle_limit() {
         let book = load_book(&book_path(&key));
         let open = book
@@ -971,6 +989,9 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
         if let Some(said) = start_on_held(&place, &task, &cwd) {
             return Ok(said);
         }
+        if let Some(said) = start_on_recorded_hold(&place, &task, &cwd) {
+            return Ok(said);
+        }
     }
     let issue_id = match asked {
         Some(id) => {
@@ -1028,8 +1049,9 @@ fn claim_existing(issue: &str) -> Result<(), String> {
         // bare seat) holds it: this conversation takes its own claim back.
         Err(e)
             if e.to_string().contains("pass --force")
-                && tracker_holder(issue)
-                    .is_some_and(|by| super::same_seat_here(&by, &assignee)) =>
+                && tracker_holder(issue).is_some_and(|by| {
+                    super::same_seat_here(&by, &assignee) || booking_alias(&by, &assignee)
+                }) =>
         {
             run_timed(
                 "vissue",
@@ -1318,7 +1340,7 @@ fn start_on_held(place: &str, task: &str, cwd: &str) -> Option<String> {
             if found.as_ref().is_some_and(|(when, ..)| *when > rank) {
                 continue;
             }
-            if held_by_this_seat(issue) {
+            if this_seat_booked(issue) {
                 found = Some((rank, path.clone(), key.clone(), issue.to_string()));
             }
         }
@@ -1366,6 +1388,88 @@ fn start_on_held(place: &str, task: &str, cwd: &str) -> Option<String> {
     Some(format!("claimed {issue}\n{recall}"))
 }
 
+/// `ljos_start` when this seat already holds an issue for the checkout and
+/// no book row names it: `ljos claim` left a hold record. Filing a second
+/// issue would put two STARTED tickets on one sitting.
+fn start_on_recorded_hold(place: &str, task: &str, cwd: &str) -> Option<String> {
+    let project = project_for(place);
+    let issue = super::held_issue().filter(|id| {
+        id.rsplit_once('-').is_some_and(|(p, _)| p == project) && this_seat_booked(id)
+    })?;
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let own = book_path(&sitting_key());
+    if owned_elsewhere(&own, &issue) {
+        return None;
+    }
+    let mut book = load_book(&own);
+    let now = unix_secs();
+    book.last_unix = now;
+    if book.prompt.trim().is_empty() {
+        book.prompt = task.chars().take(4000).collect();
+        bind_prompt(&mut book, place, now);
+    }
+    adopt_row(&mut book, place, &issue, RepoBook::default());
+    let row = book.repos.entry(place.to_string()).or_default();
+    row.started = true;
+    row.last_unix = now;
+    if !cwd.is_empty() {
+        book.cwd_repo.insert(cwd.to_string(), place.to_string());
+    }
+    store_book(&own, &book);
+    drop(_held);
+    log_line(&format!("start: kept {issue}, already held in {place}"));
+    let recall = format!("{}{}", recall_line(&issue), super::recall_memories(&issue));
+    Some(format!("claimed {issue}\n{recall}"))
+}
+
+/// The issue a note attaches to. A blank argument, or prose that is not an
+/// id, is the live issue this seat holds. A note never files an issue, so
+/// there is no title to take from the note text.
+///
+/// # Errors
+///
+/// Nothing is held, and the argument is not an issue id.
+pub fn note_issue(raw: Option<&str>) -> Result<String, String> {
+    if let Some(id) = raw.map(str::trim).filter(|id| is_issue_id(id)) {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = claimed_issue(None).filter(|id| this_seat_booked(id) || held_by_this_seat(id))
+    {
+        return Ok(id);
+    }
+    if let Some(id) = live_issue_for_seat() {
+        return Ok(id);
+    }
+    Err(
+        "nothing is held to note on: pass issue, or ljos_start first; a note never files an issue"
+            .into(),
+    )
+}
+
+/// The newest live issue this seat holds, in any book. `claimed_issue`
+/// only sees the working directory's book, and a hook's checkout is not
+/// always this process's cwd.
+fn live_issue_for_seat() -> Option<String> {
+    let mut best: Option<(u64, String)> = None;
+    for path in book_files() {
+        let book = load_book(&path);
+        for row in book.repos.values() {
+            let Some(issue) = row.issue.as_deref() else {
+                continue;
+            };
+            if row.finished || !this_seat_booked(issue) {
+                continue;
+            }
+            let rank = row.last_unix.max(book.last_unix);
+            let take = best.as_ref().is_none_or(|(when, _)| rank >= *when);
+            if take {
+                best = Some((rank, issue.to_string()));
+            }
+        }
+    }
+    best.map(|(_, issue)| issue)
+}
+
 /// The title the tracker holds for `issue`, or nothing.
 fn issue_title(issue: &str) -> String {
     super::issue_record(issue)
@@ -1408,7 +1512,7 @@ fn take_held_issue(book: &mut Book, own: &Path, repo: &str) -> bool {
     }
     let project = project_for(repo);
     let Some(issue) = super::held_issue().filter(|id| {
-        id.rsplit_once('-').is_some_and(|(p, _)| p == project) && held_by_this_seat(id)
+        id.rsplit_once('-').is_some_and(|(p, _)| p == project) && this_seat_booked(id)
     }) else {
         return false;
     };
@@ -1536,7 +1640,7 @@ fn take_started_row(book: &mut Book, own: &Path, repo: &str) -> bool {
             if found.as_ref().is_some_and(|(when, ..)| *when > rank) {
                 continue;
             }
-            if held_by_this_seat(issue) {
+            if this_seat_booked(issue) {
                 found = Some((rank, path.clone(), key.clone(), issue.to_string()));
             }
         }
@@ -1568,6 +1672,67 @@ fn held_by_this_seat(issue: &str) -> bool {
         Some(by) if !by.is_empty() => super::same_seat_here(by, &super::holder_name()),
         _ => true,
     }
+}
+
+/// [`held_by_this_seat`], and also the two holder strings one sitting
+/// stamps: the hook's `SEAT@TAG` and the MCP server's raw conversation id.
+/// Those are not the same seat to [`super::same_seat`], so a write after
+/// `ljos_start` filed a second issue. A different seat's name still does not
+/// match.
+fn this_seat_booked(issue: &str) -> bool {
+    if held_by_this_seat(issue) {
+        return true;
+    }
+    let Some(by) = tracker_holder(issue) else {
+        return false;
+    };
+    let Ok(v) = super::issue_record(issue) else {
+        return false;
+    };
+    v["state"].as_str() == Some("STARTED") && booking_alias(&by, &super::holder_name())
+}
+
+fn seat_slug_now() -> Option<String> {
+    let named = super::hook_actor().or_else(|| {
+        std::env::var("LJOS_SEAT")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|raw| !raw.is_empty())
+    })?;
+    let slug = super::seat_slug(&named);
+    if slug == "runner" || super::omitted_actor_name(&slug) {
+        None
+    } else {
+        Some(slug)
+    }
+}
+
+/// A conversation id a runner stamped, as opposed to a bare seat name.
+/// It carries a digit, so `someone-else` is not one and `01a0dab3-…` is.
+fn raw_conversation(name: &str) -> bool {
+    let name = name.trim();
+    name.len() >= 8
+        && !name.contains('@')
+        && super::holder_parts(name).1.is_none()
+        && name.chars().any(|c| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Whether `claimed` and `holder` are the hook's name and the MCP server's
+/// name for one sitting. [`super::same_seat`] already joins `SEAT` and
+/// `SEAT@TAG`. This joins either of those with the raw conversation id the
+/// server stamps when `LJOS_SESSION_ID` is the only session variable, or
+/// when `LJOS_HOLD` is that id.
+fn booking_alias(claimed: &str, holder: &str) -> bool {
+    if super::same_holder(claimed, holder) || super::same_seat_here(claimed, holder) {
+        return true;
+    }
+    let Some(seat) = seat_slug_now() else {
+        return false;
+    };
+    let seat_of = |name: &str| super::seat_slug(&super::holder_parts(name).0);
+    (raw_conversation(claimed) && seat_of(holder) == seat)
+        || (raw_conversation(holder) && seat_of(claimed) == seat)
 }
 
 /// The tracker's holder of `issue`, when the record names one.
@@ -1860,24 +2025,54 @@ fn hook_owner() -> u32 {
 /// does not reach are the next call's, most recently written first.
 const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
 
-/// Finish every other sitting whose runner has exited. A sitting that
-/// never claimed still counts when a tool failed or the guard asked and
-/// the lesson has not been written.
+/// Finish every other sitting whose runner has exited, and every row that
+/// has sat past [`sitting_idle`]. A timeout kills the runner (exit 124)
+/// before Stop and often leaves the parent pid alive, so liveness alone
+/// never releases the claim. Age does. A sitting that never claimed still
+/// counts when a tool failed or the guard asked and the lesson has not
+/// been written. The caller holds `book.lock`.
 fn finish_orphans(current: &str, deadline: std::time::Instant) {
-    let keep = book_path(current);
+    reap_stale_locked(Some(current), unix_secs(), Some(deadline));
+}
+
+fn reap_stale_locked(current: Option<&str>, now: u64, deadline: Option<std::time::Instant>) {
+    let keep = current.map(book_path);
+    let limit = sitting_idle();
     for path in book_files() {
-        if path == keep {
+        if keep.as_ref().is_some_and(|want| want == &path) {
             continue;
         }
-        if std::time::Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             break;
         }
         let mut book = load_book(&path);
         let open = book.repos.values().any(sitting_open);
-        if !open || book.owner_pid == 0 || super::pid_alive(book.owner_pid) {
+        if !open {
             continue;
         }
-        finish_open(&mut book);
+        let dead = book.owner_pid != 0 && !super::pid_alive(book.owner_pid);
+        if dead {
+            finish_open(&mut book);
+            store_book(&path, &book);
+            continue;
+        }
+        let Some(limit) = limit else {
+            continue;
+        };
+        let idle: Vec<String> = book
+            .repos
+            .iter()
+            .filter(|(repo, row)| row_is_idle(now, &book, repo, row, limit, None))
+            .map(|(repo, _)| repo.clone())
+            .collect();
+        if idle.is_empty() {
+            continue;
+        }
+        finish_rows(&mut book, &idle);
+        book.repos.retain(|_, row| !row.finished);
+        book.cwd_repo
+            .retain(|_, repo| book.repos.contains_key(repo));
+        release_spent_prompt(&mut book);
         store_book(&path, &book);
     }
 }
@@ -2107,7 +2302,11 @@ fn head_sha(repo: &str) -> Result<String, String> {
 /// A row with failures or asks stays, since its lesson and the failures it
 /// booked are the sitting's record.
 fn unclaimed_row(row: &RepoBook) -> bool {
-    row.issue.is_none() && row.deeds.is_empty() && row.failures.is_empty() && row.asks.is_empty()
+    row.issue.is_none()
+        && !row.claim_failed
+        && row.deeds.is_empty()
+        && row.failures.is_empty()
+        && row.asks.is_empty()
 }
 
 /// Drop the rows of a sitting that ended without a claim, so no book keeps
@@ -2407,7 +2606,7 @@ fn empty_filed_row(row: &RepoBook, held: &str) -> bool {
     if !row.filed || row.named || row.started || !row.deeds.is_empty() {
         return false;
     }
-    if !held_by_this_seat(held) {
+    if !this_seat_booked(held) {
         return false;
     }
     super::issue_record(held)
@@ -8417,5 +8616,383 @@ print(f"id={ident}")
             .unwrap();
         cancel_placeholder(&done, "probe-named");
         assert_eq!(issue_state(&tracker, &done), "DONE");
+    }
+
+    fn stamp_claimant(tracker: &Path, issue: &str, holder: &str) {
+        let org_path = tracker.join("Software/probe/issues.org");
+        let org = std::fs::read_to_string(&org_path).unwrap();
+        let needle = format!(":ID:         {issue}\n");
+        assert!(org.contains(&needle), "{org}");
+        std::fs::write(
+            &org_path,
+            org.replace(&needle, &format!("{needle}:CLAIMED_BY: {holder}\n")),
+        )
+        .unwrap();
+    }
+
+    /// ljos-2di9 / ljos-3ocl: `ljos_start` books under the seat, and the
+    /// hook under the harness session, and the two stamp different holder
+    /// strings. The write joins the started issue.
+    #[test]
+    fn a_write_after_ljos_start_joins_when_the_holders_differ() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SEAT",
+            "LJOS_HOLD",
+            "CODEX_THREAD_ID",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let uuid = "01a0dab3-895e-7533-93ca-c9807d5cb680";
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "codex");
+            std::env::set_var("LJOS_HOLD", uuid);
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::remove_var("LJOS_SESSION_ID");
+        }
+        let said = start_work(
+            None,
+            Some(repo.to_str().unwrap()),
+            "Add slugify and its test",
+        )
+        .unwrap();
+        let started = said
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("claimed "))
+            .expect("the start claimed")
+            .to_string();
+        assert_eq!(creates(&tracker), 1);
+        let seat = book_path(&sitting_key());
+        assert_eq!(
+            load_book(&seat)
+                .repos
+                .values()
+                .find_map(|r| r.issue.clone()),
+            Some(started.clone())
+        );
+        stamp_claimant(&tracker, &started, uuid);
+        unsafe {
+            std::env::remove_var("LJOS_HOLD");
+            std::env::set_var("CODEX_THREAD_ID", "thread-2di9-mcp-hook");
+        }
+        let holder = crate::holder_name();
+        assert!(
+            !crate::same_seat_here(uuid, &holder),
+            "the two holders are one seat to same_seat, so this does not exercise the alias: {holder}"
+        );
+        assert!(
+            booking_alias(uuid, &holder),
+            "holder {holder} is not the hook's name for this conversation"
+        );
+        assert!(this_seat_booked(&started));
+        let session = "harness-2di9";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(creates(&tracker), 1, "the write filed a second issue");
+        assert_eq!(
+            hook_row(session, &repo).issue.as_deref(),
+            Some(started.as_str())
+        );
+        assert!(
+            load_book(&seat)
+                .repos
+                .values()
+                .all(|row| row.issue.as_deref() != Some(started.as_str())),
+            "the seat book still holds the issue"
+        );
+    }
+
+    /// ljos-6yav: `ljos_start` files nothing when this seat already holds an
+    /// issue for the checkout. The hold record is the claim; the tracker
+    /// names the hook's conversation id, which is not `SEAT@TAG`.
+    #[test]
+    fn ljos_start_keeps_the_issue_the_seat_already_holds() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SEAT",
+            "LJOS_HOLD",
+            "CODEX_THREAD_ID",
+            "CLAIMDAG_DIR",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let uuid = "01a0dab3-895e-7533-93ca-c9807d5cb680";
+        let issue = "probe-6yav";
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "codex");
+            std::env::remove_var("LJOS_HOLD");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+            std::env::remove_var("LJOS_SESSION_ID");
+            std::env::remove_var("CLAIMDAG_DIR");
+            std::env::set_var("CODEX_THREAD_ID", "thread-6yav-hold");
+        }
+        let holder = crate::holder_name();
+        assert!(
+            !crate::same_seat_here(uuid, &holder),
+            "same_seat already joins these, so the hold path is not the bug: {holder}"
+        );
+        let org = tracker.join("Software/probe");
+        std::fs::create_dir_all(&org).unwrap();
+        std::fs::write(
+            org.join("issues.org"),
+            format!(
+                "* STARTED [#C] held already\n:PROPERTIES:\n:ID:         {issue}\n:CLAIMED_BY: {uuid}\n:END:\n"
+            ),
+        )
+        .unwrap();
+        plant_hold(dir.path(), &holder, "codex", issue);
+        assert_eq!(crate::held_issue().as_deref(), Some(issue));
+        assert!(this_seat_booked(issue), "the held issue is not this seat's");
+        let said = start_work(None, Some(repo.to_str().unwrap()), "add the slug").unwrap();
+        assert_eq!(
+            said.lines().next(),
+            Some(format!("claimed {issue}").as_str())
+        );
+        assert_eq!(creates(&tracker), 0, "ljos_start filed a second issue");
+        let row = load_book(&book_path(&sitting_key()))
+            .repos
+            .get(repo.to_str().unwrap())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(row.issue.as_deref(), Some(issue));
+        assert!(row.started);
+    }
+
+    /// ljos-4bfz: a note whose argument is prose attaches to the issue this
+    /// seat holds. It does not file, and the prose is not the issue id.
+    #[test]
+    fn a_note_attaches_to_the_held_issue_and_never_files() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let prose = "slugify stays ascii";
+        let err = note_issue(Some(prose)).unwrap_err();
+        assert!(err.contains("never files"), "{err}");
+        assert_eq!(creates(&tracker), 0);
+        let session = "harness-4bfz";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let held = hook_row(session, &repo).issue.expect("the edit filed");
+        assert_eq!(creates(&tracker), 1);
+        assert_eq!(note_issue(Some(prose)).as_deref(), Ok(held.as_str()));
+        assert_eq!(note_issue(None).as_deref(), Ok(held.as_str()));
+        assert_eq!(creates(&tracker), 1, "the note filed an issue");
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(!org.contains(prose), "the note became a title:\n{org}");
+        assert!(org.contains(&held), "{org}");
+    }
+
+    /// ljos-98du: the harness command names an open issue and the commit
+    /// message does not. The sitting books that issue. It does not file.
+    #[test]
+    fn a_harness_commit_that_names_an_open_issue_books_it() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let named = file_by_hand("Add slugify function and tests");
+        assert_eq!(issue_state(&tracker, &named), "TODO");
+        let _ = land_commit(&repo, "slug.py", "wip only");
+        let session = "harness-98du";
+        let command = format!("git commit -m \"wip only\" {named}");
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 0}}),
+        );
+        let _ = observe(&raw, &call);
+        assert_eq!(creates(&tracker), 1, "the commit filed a new issue");
+        assert_eq!(
+            hook_row(session, &repo).issue.as_deref(),
+            Some(named.as_str())
+        );
+    }
+
+    /// ljos-5a7b: a prompt and a read, and no claim. The book keeps no row
+    /// whose issue is null.
+    #[test]
+    fn a_prompt_and_a_read_leave_no_row() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "harness-5a7b";
+        let (raw, call) = payload(
+            "UserPromptSubmit",
+            session,
+            &repo,
+            serde_json::json!({"prompt": "In this git repo, add a function slugify(s) to slug.py"}),
+        );
+        let _ = observe(&raw, &call);
+        assert!(
+            load_book(&book_path(session)).repos.is_empty(),
+            "the prompt left a row"
+        );
+        let (raw, call) = payload(
+            "PreToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Read", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        assert!(
+            load_book(&book_path(session)).repos.is_empty(),
+            "the read left a row"
+        );
+        assert_eq!(creates(&tracker), 0);
+    }
+
+    /// Software-njbz: resuming the seat and shutting the MCP server down
+    /// leave no row whose issue is null.
+    #[test]
+    fn mcp_shutdown_opens_no_null_issue_row() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_HOLD",
+        ]);
+        let (dir, tracker, _repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::set_var("LJOS_SEAT", "codex");
+            std::env::remove_var("LJOS_HOLD");
+            std::env::remove_var("LJOS_SESSION_ID");
+        }
+        resume_seat();
+        mcp_shutdown();
+        for path in book_files() {
+            let book = load_book(&path);
+            assert!(
+                book.repos.values().all(|row| row.issue.is_some()),
+                "{} has a null issue: {:?}",
+                path.display(),
+                book.repos
+            );
+        }
+        assert_eq!(creates(&tracker), 0);
+    }
+
+    /// ljos-tha1: a timeout kills the runner and leaves the parent alive, so
+    /// the next prompt never comes. A later MCP call finishes a dead owner
+    /// at once, finishes a live owner whose row is old, and leaves a fresh
+    /// live claim.
+    #[test]
+    fn a_timed_out_claim_is_reaped_without_another_prompt() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_HOLD",
+            "LJOS_SITTING_IDLE",
+            "LJOS_MCP_IDLE",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HOLD");
+            std::env::remove_var("LJOS_SESSION_ID");
+            std::env::remove_var("LJOS_SITTING_IDLE");
+            std::env::remove_var("LJOS_MCP_IDLE");
+        }
+        prompt_and_edit(&repo, "tha1-dead", "Add a readme line");
+        prompt_and_edit(&repo, "tha1-old", "Add a readme line");
+        prompt_and_edit(&repo, "tha1-live", "Add a readme line");
+        let dead_issue = hook_row("tha1-dead", &repo).issue.unwrap();
+        let old_issue = hook_row("tha1-old", &repo).issue.unwrap();
+        let live_issue = hook_row("tha1-live", &repo).issue.unwrap();
+        set_owner(dir.path(), "tha1-dead", dead_pid());
+        set_owner(dir.path(), "tha1-live", std::process::id());
+        let path = book_path("tha1-old");
+        let mut book = load_book(&path);
+        book.owner_pid = std::process::id();
+        book.last_unix = 1;
+        for row in book.repos.values_mut() {
+            row.last_unix = 1;
+        }
+        store_book(&path, &book);
+        resume_seat();
+        let dead = load_book(&book_path("tha1-dead"));
+        let dead_row = dead.repos.values().next().expect("the dead row stays");
+        assert!(dead_row.finished, "a dead owner was not finished");
+        assert_eq!(dead_row.issue.as_deref(), Some(dead_issue.as_str()));
+        assert_eq!(issue_state(&tracker, &dead_issue), "DONE");
+        assert!(
+            load_book(&book_path("tha1-old")).repos.is_empty(),
+            "an old row was kept"
+        );
+        assert_eq!(issue_state(&tracker, &old_issue), "DONE");
+        let live = hook_row("tha1-live", &repo);
+        assert!(!live.finished);
+        assert_eq!(live.issue.as_deref(), Some(live_issue.as_str()));
+        assert_eq!(issue_state(&tracker, &live_issue), "STARTED");
+        assert_eq!(
+            git_log(&tracker).matches("finished").count(),
+            2,
+            "{}",
+            git_log(&tracker)
+        );
+        assert_eq!(creates(&tracker), 3);
     }
 }
