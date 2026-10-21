@@ -1813,6 +1813,8 @@ fn run_command() -> Result<()> {
                     msg: msg.unwrap_or_default(),
                     issue,
                     interrupt,
+                    // Push mode fills this after the sealed log is committed.
+                    commit: None,
                 })?
             } else {
                 ljos_cli::wake::show(&seat)

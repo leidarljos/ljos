@@ -800,6 +800,37 @@ pub(crate) fn push_sealed_log() -> Result<()> {
     Ok(())
 }
 
+/// The commit at `HEAD` whose tree holds this machine's sealed log.
+///
+/// A wake in push mode reads this after the push and puts it on the
+/// envelope. A refused push still leaves the commit here, and the next
+/// push sends it. `None` when no tracker checkout holds the log.
+pub(crate) fn log_commit() -> Option<String> {
+    let listed = local().repos;
+    let roots: Vec<PathBuf> = if listed.is_empty() {
+        tracker_root().ok().into_iter().collect()
+    } else {
+        listed.iter().map(|r| expand(r)).collect()
+    };
+    let spec = format!("HEAD:.ljos/atoms/{}.jsonl.age", host());
+    for root in &roots {
+        let Some(out) = git(root, &["rev-parse", "HEAD"]).ok() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        if git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success()) {
+            return Some(sha);
+        }
+    }
+    None
+}
+
 fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
     let listed = local().repos;
     let roots: Vec<PathBuf> = if listed.is_empty() {

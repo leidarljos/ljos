@@ -2,8 +2,9 @@
 //!
 //! Two clones of one bare remote stand in for two machines. `ljos send`
 //! and `ljos reply` return while a pre-push hook is still asleep, and the
-//! wake command finds the log already on the remote. A remote that refuses
-//! the push still gets the wake, and the refusal is a line in the wake log.
+//! wake command finds the log already on the remote, and `LJOS_WAKE_COMMIT`
+//! is that commit. A remote that refuses the push still gets the wake, the
+//! refusal is a line in the wake log, and the commit is the local one.
 
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
@@ -441,16 +442,43 @@ fn script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\nset -e\nhost=$(/usr/bin/hostname)\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
+        "#!/bin/sh\nset -e\nhost=$(/usr/bin/hostname)\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
     );
     path
+}
+
+fn recorded_commit(home: &Path) -> String {
+    std::fs::read_to_string(home.join("wake-commit"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// The wake named a 40-digit commit, and that commit's tree holds `host`'s log.
+fn assert_commit_holds(world: &World, home: &Path, repo: &Path, host: &str) {
+    let commit = recorded_commit(home);
+    assert!(
+        commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+        "LJOS_WAKE_COMMIT is not a commit: {commit:?}"
+    );
+    let head = git(&world.gitconfig, repo, &["rev-parse", "HEAD"]);
+    assert_eq!(commit, head.trim(), "the wake named another commit");
+    git(
+        &world.gitconfig,
+        repo,
+        &[
+            "cat-file",
+            "-e",
+            &format!("{commit}:.ljos/atoms/{host}.jsonl.age"),
+        ],
+    );
 }
 
 fn touch_script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\n/usr/bin/hostname > \"$HOME/wake-host\"\n: > \"$HOME/woke\"\n",
+        "#!/bin/sh\n/usr/bin/hostname > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\n: > \"$HOME/woke\"\n",
     );
     path
 }
@@ -500,6 +528,7 @@ fn a_send_and_a_reply_push_the_log_before_the_wake() {
             .trim(),
         SENDER_HOST
     );
+    assert_commit_holds(&world, &world.sender_home, &world.origin, SENDER_HOST);
     let plain = open_log(&world, SENDER_HOST);
     assert!(
         plain.contains(LETTER),
@@ -555,6 +584,7 @@ fn a_send_and_a_reply_push_the_log_before_the_wake() {
             .trim(),
         RECIPIENT_HOST
     );
+    assert_commit_holds(&world, &world.recipient_home, &world.origin, RECIPIENT_HOST);
     let plain = open_log(&world, RECIPIENT_HOST);
     assert!(
         plain.contains(REPLY),
@@ -613,4 +643,5 @@ fn a_refused_push_still_wakes_and_is_logged() {
         .status()
         .expect("git");
     assert!(!remote.success(), "a refused push still updated the remote");
+    assert_commit_holds(&world, &world.sender_home, &world.sender_repo, SENDER_HOST);
 }
