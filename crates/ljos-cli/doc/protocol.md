@@ -416,9 +416,11 @@ under equal weights is a count; under calibrated rows it is not.
   passing `ljos evidence record -- <test command>` run, the push still runs
   and the answer carries a warning. A force, mirror or delete push asks. A
   push onto a protected branch asks only when `owners` is set and the
-  remote's owner is not in it. A merge pushed to your own repository runs;
-  `gh pr merge` needs green CI on the head sha and every Cursor Bugbot
-  thread resolved or replied to. A commit that carries a
+  remote's owner is not in it. A merge pushed to your own repository runs.
+  `gh pr merge` with red or pending checks is refused. A head sha with no
+  CI checks asks, and that ask names the sha and a local evidence record
+  when one exists for it. Every Cursor Bugbot thread must be resolved or
+  replied to. A commit that carries a
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.
