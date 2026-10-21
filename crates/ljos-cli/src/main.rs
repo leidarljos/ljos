@@ -876,6 +876,14 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit"])]
         brief_once: bool,
     },
+    /// Run the ljos part of one git hook. The block `ljos git-hooks install` appends calls this.
+    GitHook {
+        /// Hook name, for example `post-commit`.
+        name: String,
+        /// Arguments git passed the hook. They are not read.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Install, remove, or show the global git hooks that book commits.
     GitHooks {
         /// `install`, `uninstall`, or `status`.
@@ -934,6 +942,9 @@ enum Cmd {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
+        /// Refresh runner skills this ljos wrote. A skill edited by hand is left in place.
+        #[arg(long)]
+        fix: bool,
     },
     /// Read-only icedtea pane over due, claims, and trust. Execs sibling `ljos-hud`.
     Hud {
@@ -1190,6 +1201,13 @@ fn run_command() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cmd = Cli::parse().cmd;
+    // The first run of a new version refreshes skills ljos wrote. Doctor
+    // stays read-only unless `--fix` is set.
+    match &cmd {
+        Cmd::Doctor { fix: true, .. } => ljos_cli::runner_skills::refresh_for_fix(),
+        Cmd::Doctor { .. } => {}
+        _ => ljos_cli::runner_skills::refresh_on_new_version(),
+    }
     // A subagent with no seat would hold under its process tree ("bash").
     // The commands that name a holder refuse instead.
     if matches!(
@@ -2144,6 +2162,7 @@ fn run_command() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::GitHook { name, .. } => ljos_cli::git_hooks::run_named(&name)?,
         Cmd::GitHooks { action } => ljos_cli::git_hooks::run(&action)?,
         Cmd::Hook {
             limit,
@@ -2826,7 +2845,7 @@ fn run_command() -> Result<()> {
             let v = write_trust(&row, &why)?;
             println!("{v}");
         }
-        Cmd::Doctor { all } => {
+        Cmd::Doctor { all, .. } => {
             let rows = doctor();
             if all {
                 print!("{}", format_doctor(&rows));

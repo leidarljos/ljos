@@ -45,6 +45,7 @@ packset-client.workspace = true
 packset-core = "0.15.2"
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 toml.workspace = true
 which.workspace = true
 vissue-core.workspace = true

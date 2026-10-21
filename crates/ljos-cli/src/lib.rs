@@ -33,6 +33,7 @@ pub mod persona_session;
 pub mod plugin;
 pub mod reap;
 pub mod runner_hooks;
+pub mod runner_skills;
 pub mod sync;
 pub mod tools;
 mod tracker_push;
@@ -1043,7 +1044,7 @@ fn home() -> Result<PathBuf> {
 }
 
 /// `~` at the start of a configured path is the home directory.
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => home().map_or_else(|_| PathBuf::from(path), |h| h.join(rest)),
         None => PathBuf::from(path),
@@ -1223,36 +1224,7 @@ pub fn server_entry() -> Result<Value> {
 }
 
 fn write_skill(dir: &Path, dry: bool) -> Step {
-    let path = dir.join("ljos").join("SKILL.md");
-    let text = skill_text();
-    if std::fs::read_to_string(&path).is_ok_and(|have| have == text) {
-        return Step {
-            what: "skill".into(),
-            detail: format!("{} is current", path.display()),
-            ok: true,
-        };
-    }
-    if dry {
-        return Step {
-            what: "skill".into(),
-            detail: format!("would write {}", path.display()),
-            ok: true,
-        };
-    }
-    let written = std::fs::create_dir_all(path.parent().unwrap_or(dir))
-        .and_then(|()| std::fs::write(&path, text));
-    match written {
-        Ok(()) => Step {
-            what: "skill".into(),
-            detail: format!("wrote {}", path.display()),
-            ok: true,
-        },
-        Err(e) => Step {
-            what: "skill".into(),
-            detail: format!("{}: {e}", path.display()),
-            ok: false,
-        },
-    }
+    runner_skills::install_skill(&dir.join("ljos").join("SKILL.md"), dry)
 }
 
 /// `{server}` is the path to `ljos-mcp`, `{name}` the runner's name from
@@ -9835,9 +9807,6 @@ fn harness_rows() -> Vec<Habitat> {
             .skills
             .as_deref()
             .map(|d| expand(d).join("ljos").join("SKILL.md"));
-        let current = skill
-            .as_ref()
-            .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|t| t == skill_text()));
         if h.shell {
             let env_path = env_path_for(&path, h);
             let written = std::fs::read_to_string(&env_path).ok();
@@ -9945,24 +9914,11 @@ fn harness_rows() -> Vec<Habitat> {
                 });
             }
         }
+        let (skill_ok, skill_state) = runner_skills::doctor_skill(&h.name, skill.as_deref());
         rows.push(Habitat {
             name: "runner skill",
-            state: match (&skill, current) {
-                (Some(p), true) => format!("{}: {}", h.name, p.display()),
-                (Some(p), false) if p.is_file() => {
-                    format!(
-                        "{}: {} is stale; ljos onboard --harness {}",
-                        h.name,
-                        p.display(),
-                        h.name
-                    )
-                }
-                (Some(_), false) => {
-                    format!("{}: absent; ljos onboard --harness {}", h.name, h.name)
-                }
-                (None, _) => format!("{}: no skills directory named", h.name),
-            },
-            ok: current,
+            state: skill_state,
+            ok: skill_ok,
         });
     }
     rows
@@ -10063,7 +10019,7 @@ fn pack_step(dry: bool) -> Step {
 }
 
 /// `$XDG_DATA_HOME`, else `~/.local/share`.
-fn data_base() -> Option<PathBuf> {
+pub(crate) fn data_base() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -20687,8 +20643,10 @@ fn optional_bin(name: &str) -> bool {
 }
 
 /// `ok` when the row answers, `warn` when the policy row names an
-/// `ljos-policyd` without phronesis, `info` when the row is optional and
-/// absent, `no` when a required row failed.
+/// `ljos-policyd` without phronesis or a runner skill is stale or edited
+/// by hand, `info` when the row is optional and absent, `no` when a
+/// required row failed. A stale skill ljos wrote is a warning `ljos doctor
+/// --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -20700,7 +20658,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))
     {
         "info"
-    } else if WARN_ROWS.contains(&row.name) || row.name == "guard" {
+    } else if (row.name == "runner skill" && runner_skills::is_skill_warning(&row.state))
+        || WARN_ROWS.contains(&row.name)
+        || row.name == "guard"
+    {
         "warn"
     } else {
         "no"
@@ -36321,6 +36282,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(super::note_kind_unknown(&old));
         let gate = anyhow::anyhow!("400: atom sentence 1 is very hard to read");
         assert!(!super::note_kind_unknown(&gate));
+    }
+
+    #[test]
+    fn a_stale_runner_skill_is_a_warning_not_a_failure() {
+        let stale = super::Habitat {
+            name: "runner skill",
+            state: "cursor: /skills/ljos/SKILL.md is stale; ljos doctor --fix".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&stale), "warn");
+        assert!(super::healthy(std::slice::from_ref(&stale)));
+        let edited = super::Habitat {
+            name: "runner skill",
+            state: "cursor: /skills/ljos/SKILL.md was edited by hand; ljos left it".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&edited), "warn");
+        let absent = super::Habitat {
+            name: "runner skill",
+            state: "cursor: absent; ljos onboard --harness cursor".into(),
+            ok: false,
+        };
+        assert_eq!(super::doctor_word(&absent), "no");
     }
 
     #[test]
