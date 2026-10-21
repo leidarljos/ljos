@@ -258,6 +258,59 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The public key written above an age identity (`# public key: age1...`).
+/// Absent on a key that was copied without that comment.
+fn commented_public_key(identity: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(identity).ok()?;
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("# public key:") else {
+            continue;
+        };
+        let Some(key) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if key.starts_with("age1") {
+            return Some(key.to_string());
+        }
+    }
+    None
+}
+
+/// This machine's recipient: the identity's public-key comment, else
+/// `age-keygen -y` (or `rage-keygen` when age-keygen is not installed).
+fn identity_recipient(identity: &Path) -> Result<String> {
+    if let Some(key) = commented_public_key(identity) {
+        return Ok(key);
+    }
+    let out = keygen_cmd()
+        .arg("-y")
+        .arg(identity)
+        .output()
+        .context("age-keygen not on PATH; install age")?;
+    if !out.status.success() {
+        bail!(
+            "age-keygen -y: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if key.is_empty() {
+        bail!("age-keygen -y: no public key");
+    }
+    Ok(key)
+}
+
+/// A decrypt miss. This machine's own recipient is an error: the log was
+/// sealed to it and then failed to open. Any other key stays a skip.
+fn miss_report(host: &str, scope: &str, mine: &str, recipients: &[String]) -> Result<String> {
+    if recipients.iter().any(|recipient| recipient == mine) {
+        bail!("sync: {host}'s {scope} log is sealed to this machine and did not open");
+    }
+    Ok(format!(
+        "sync: {host}'s {scope} log is not sealed to this machine\n"
+    ))
+}
+
 /// Open a sealed log with this machine's identity; none when this machine
 /// is not one of its recipients.
 fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
@@ -500,14 +553,17 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(format!("sync: no {} logs yet\n", scope.name));
     };
-    let client = crate::pack()?;
-    let mut out = String::new();
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.to_string_lossy().ends_with(".jsonl.age"))
         .collect();
     paths.sort();
+    // Open before the pack is asked. An owned miss has to surface even
+    // when PACKSET_URL=off, which used to fail first and hide the log.
+    let mut out = String::new();
+    let mut opened: Vec<(String, String)> = Vec::new();
+    let mut mine: Option<String> = None;
     for path in paths {
         let host = path
             .file_name()
@@ -519,12 +575,17 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
             continue;
         }
         let Some(plain) = open(&path, &identity)? else {
-            out.push_str(&format!(
-                "sync: {host}'s {} log is not sealed to this machine\n",
-                scope.name
-            ));
+            if mine.is_none() {
+                mine = Some(identity_recipient(&identity)?);
+            }
+            let key = mine.as_deref().unwrap_or("");
+            out.push_str(&miss_report(&host, &scope.name, key, &scope.recipients)?);
             continue;
         };
+        opened.push((host, plain));
+    }
+    let client = crate::pack()?;
+    for (host, plain) in opened {
         let workspace = client.workspace();
         // The pack names a posted atom afresh, so a text already taken
         // from this host would be held twice; what is held is skipped.
@@ -1979,6 +2040,111 @@ mod tests {
         std::env::set_var("PATH", &old_path);
         assert!(matches!(opened, Ok(None)), "age: {opened:?}");
         assert!(matches!(via_rage, Ok(None)), "rage: {via_rage:?}");
+    }
+
+    /// A miss on a log this machine's key is listed for is a broken seal,
+    /// not a host to skip. Asking the pack first hid that behind
+    /// PACKSET_URL=off.
+    #[test]
+    fn a_log_sealed_to_this_machine_that_will_not_open_is_an_error() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let age = bin.join("age");
+        std::fs::write(
+            &age,
+            "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("PACKSET_URL", "off");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        std::fs::write(
+            config.join("ljos/age.key"),
+            "# public key: age1ownedkey\nAGE-SECRET-KEY-1TEST\n",
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
+        let scope: Scope =
+            toml::from_str("name = \"surf\"\nrecipients = [\"age1ownedkey\"]\n").unwrap();
+        let err = import(&root, &scope).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("peerbox")
+                && msg.contains("sealed to this machine")
+                && msg.contains("did not open"),
+            "{msg}"
+        );
+        assert!(!msg.contains("PACKSET_URL"), "{msg}");
+        assert!(!msg.contains("not sealed"), "{msg}");
+    }
+
+    /// No `# public key:` comment: the recipient comes from age-keygen -y.
+    #[test]
+    fn a_log_sealed_to_the_keygen_recipient_that_will_not_open_is_an_error() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("age"),
+            "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("age-keygen"),
+            "#!/bin/sh\nif [ \"$1\" = -y ]; then echo age1fromkeygen; exit 0; fi\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["age", "age-keygen"] {
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("PACKSET_URL", "off");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        std::fs::write(config.join("ljos/age.key"), "AGE-SECRET-KEY-1TEST\n").unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
+        let scope: Scope =
+            toml::from_str("name = \"surf\"\nrecipients = [\"age1fromkeygen\"]\n").unwrap();
+        let msg = import(&root, &scope).unwrap_err().to_string();
+        assert!(
+            msg.contains("peerbox") && msg.contains("did not open"),
+            "{msg}"
+        );
+        assert!(!msg.contains("PACKSET_URL"), "{msg}");
+    }
+
+    #[test]
+    fn a_miss_for_someone_else_stays_a_skip_line() {
+        let skip = miss_report("peerbox", "surf", "age1mine", &["age1other".into()]).unwrap();
+        assert_eq!(
+            skip,
+            "sync: peerbox's surf log is not sealed to this machine\n"
+        );
+        let owned = miss_report(
+            "peerbox",
+            "surf",
+            "age1mine",
+            &["age1other".into(), "age1mine".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(owned.contains("sealed to this machine"), "{owned}");
+        assert!(owned.contains("did not open"), "{owned}");
+        assert!(!owned.contains("not sealed"), "{owned}");
     }
 
     #[test]
