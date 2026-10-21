@@ -3994,6 +3994,8 @@ mod tests {
 
     /// One queue for the process, so these tests take turns.
     static CALL_QUEUE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Process environment is global; async tests that rewrite PATH take turns.
+    static PATH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// The runtime can poll the later task first. The recall is already in
     /// the queue behind the note, so it waits even though it asks first.
@@ -4331,9 +4333,7 @@ mod tests {
     /// depends on whatever else is on PATH.
     #[tokio::test]
     async fn a_refusal_is_an_error() {
-        let _env_lock = CALL_QUEUE_TEST
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
+        let _env_lock = PATH_TEST_LOCK.lock().await;
         let _saved = RestoreEnv::new(&["PATH"]);
         let cards = tempfile::tempdir().unwrap();
         let server = LjosServer::at(cards.path().to_path_buf());
