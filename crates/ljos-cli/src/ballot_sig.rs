@@ -836,9 +836,9 @@ fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, St
 /// No seat key, a key that does not match the pin, or a tracker write that
 /// failed.
 pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
-    if let Some(existing) = newest_sig(issue, voter) {
+    if let Some((existing, withdrawn)) = newest_sig(issue, voter) {
         if verifies(issue, &existing) {
-            match resign_of(&existing, choice, voter) {
+            match resign_of(&existing, choice, voter, withdrawn) {
                 Resign::Keep => {
                     return Ok(format!("ballot already signed by {voter}\n"));
                 }
@@ -877,11 +877,13 @@ enum Resign {
 }
 
 /// A signature that already verifies stays. The same key may sign a new
-/// choice. Any other key, including the machine key, does not sign again.
-fn resign_of(existing: &SigNote, choice: &str, voter: &str) -> Resign {
+/// choice. A withdrawn ballot is re-signed, even for the same choice, so
+/// the new ballot stands above the withdrawal cut. Any other key,
+/// including the machine key, does not sign again.
+fn resign_of(existing: &SigNote, choice: &str, voter: &str, withdrawn: bool) -> Resign {
     let mine = current_public_hex(voter);
     if mine.as_deref() == Some(existing.key.as_str()) {
-        if existing.choice == choice {
+        if existing.choice == choice && !withdrawn {
             Resign::Keep
         } else {
             Resign::Sign
@@ -897,14 +899,40 @@ fn current_public_hex(voter: &str) -> Option<String> {
     Some(hex::encode(key.verifying_key().to_bytes()))
 }
 
-fn newest_sig(issue: &str, voter: &str) -> Option<SigNote> {
+fn same_voter(signed: &str, voter: &str) -> bool {
+    signed == voter.trim() || signed == field(voter)
+}
+
+fn newest_sig(issue: &str, voter: &str) -> Option<(SigNote, bool)> {
     let layout = vissue_core::Layout::resolve(None, None).ok()?;
     let (heading, _, _) = vissue_core::store::find_by_id(&layout, issue).ok()??;
-    heading.logbook.iter().find_map(|entry| {
-        let text = entry.note.as_deref()?;
-        let sig = parse_note(text)?;
-        (sig.voter == voter).then_some(sig)
-    })
+    let mut cut = None;
+    let mut newest = None;
+    for (at, entry) in heading.logbook.iter().enumerate() {
+        let Some(text) = entry.note.as_deref() else {
+            continue;
+        };
+        if cut.is_none() {
+            if let Some(withdrawn) = parse_withdrawn(text) {
+                if same_voter(&withdrawn.voter, voter) {
+                    cut = Some(at);
+                }
+            }
+        }
+        if newest.is_none() {
+            if let Some(sig) = parse_note(text) {
+                if same_voter(&sig.voter, voter) {
+                    newest = Some((at, sig));
+                }
+            }
+        }
+        if cut.is_some() && newest.is_some() {
+            break;
+        }
+    }
+    let (at, sig) = newest?;
+    let withdrawn = cut.is_some_and(|cut_at| cut_at < at);
+    Some((sig, withdrawn))
 }
 
 fn write_sig_note(issue: &str, note: &str) -> Result<()> {

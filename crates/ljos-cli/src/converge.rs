@@ -23,6 +23,7 @@ use std::path::PathBuf;
 
 /// Severities that stay on the issue as notes once the substance has settled.
 pub const BELOW_CHILD: &[&str] = &["nit", "wording", "style"];
+const DISSENT_TITLE_LIMIT: usize = 120;
 
 /// How serious an objection is. A child is filed only for [`Severity::Blocking`]
 /// with a non-empty reason, or for a held minority on an unsettled issue
@@ -137,7 +138,12 @@ impl Objection {
     /// pair are the same objection.
     #[must_use]
     pub fn key(&self) -> (String, String) {
-        (normalize(&self.text), normalize(&self.target))
+        let text = if self.files_as_child() || self.held {
+            dissent_key_text(&self.text)
+        } else {
+            normalize(&self.text)
+        };
+        (text, normalize(&self.target))
     }
 }
 
@@ -157,6 +163,10 @@ pub fn normalize(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn dissent_key_text(text: &str) -> String {
+    normalize(&clip(text, DISSENT_TITLE_LIMIT))
 }
 
 /// `finding: NAME: TEXT` is a nit. `finding: NAME: wording: TEXT` and
@@ -729,7 +739,7 @@ pub fn filed_key(title: &str, target: &str) -> Option<(String, String)> {
     if text.is_empty() {
         return None;
     }
-    Some((normalize(text), normalize(target)))
+    Some((dissent_key_text(text), normalize(target)))
 }
 
 fn project_of(v: &Value, id: &str) -> String {
@@ -980,7 +990,7 @@ fn format_note(objection: &Objection) -> String {
 }
 
 fn dissent_title(objection: &Objection) -> String {
-    let text = clip(&objection.text, 120);
+    let text = clip(&objection.text, DISSENT_TITLE_LIMIT);
     format!("Dissent holds {text}")
 }
 
@@ -1047,7 +1057,7 @@ pub fn close_settled(id: &str, summary: &str) -> Result<String> {
 /// `ljos consensus` does not call this: it files `Dissent holds TEXT`
 /// through [`record_dissents`].
 pub fn file_fix(parent: &str, project: &str, objection: &Objection) -> Result<String> {
-    let title = format!("fix: {}", clip(&objection.text, 120));
+    let title = format!("fix: {}", clip(&objection.text, DISSENT_TITLE_LIMIT));
     let id = crate::workflow_child(parent, project, "task", crate::Stage::Implement, &title)?;
     let _ = note_issue(
         &id,
@@ -1612,6 +1622,35 @@ mod tests {
             .iter()
             .all(|f| matches!(f, Fate::Duplicate(_))));
         assert!(!disposal.close);
+    }
+
+    #[test]
+    fn a_long_blocking_finding_read_three_times_files_one_child() {
+        let finding = "x".repeat(181);
+        assert_eq!(finding.chars().count(), 181);
+        let objection = Objection::blocking("tester", "this blocks merge", &finding, "panel-long");
+        let title = dissent_title(&objection);
+        let key = filed_key(&title, "panel-long").expect("dissent title yields a filed key");
+        assert_eq!(key, objection.key());
+
+        let mut state = PanelState::at_round(1);
+        state.objections = vec![objection.clone()];
+        let limits = ScopeBudget::panel();
+        let mut filed = 0;
+        for read in 0..3 {
+            state.seen = if read == 0 {
+                Vec::new()
+            } else {
+                vec![key.clone()]
+            };
+            let disposal = dispose(&state, &limits);
+            filed += disposal
+                .fates
+                .iter()
+                .filter(|f| matches!(f, Fate::File(_)))
+                .count();
+        }
+        assert_eq!(filed, 1);
     }
 
     #[test]

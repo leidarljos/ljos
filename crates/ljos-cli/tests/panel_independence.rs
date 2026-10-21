@@ -917,6 +917,49 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
 }
 
 #[test]
+fn a_withdrawn_voter_recasting_the_same_option_counts_once() {
+    let world = World::new();
+    let issue = "demo-wd-same";
+    let session = "sess-review-same";
+    let cast = world.ljos(
+        "clerk",
+        session,
+        &[
+            "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
+        ],
+    );
+    assert!(cast.status.success(), "{}", text(&cast));
+    let withdrawn = world.ljos(
+        "clerk",
+        session,
+        &["vote", issue, "--withdraw", "--as", "reviewer"],
+    );
+    let said = text(&withdrawn);
+    assert!(
+        withdrawn.status.success() || said.contains("forecast"),
+        "{said}"
+    );
+    let recast = world.ljos(
+        "clerk",
+        session,
+        &[
+            "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
+        ],
+    );
+    assert!(recast.status.success(), "{}", text(&recast));
+    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert_eq!(stdout.matches("reviewer  ship").count(), 1, "{said}");
+    let consensus = world.ljos("clerk", "sess-reader-0001", &["consensus", issue]);
+    let said = text(&consensus);
+    assert!(consensus.status.success(), "{said}");
+    assert!(!said.contains("holds no ballots"), "{said}");
+}
+
+#[test]
 fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
     let world = World::new();
     let issue = "demo-held";
