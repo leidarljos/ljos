@@ -1,0 +1,2 @@
+`ljos rule` at a terminal names the verdict and the pattern, and a failed habitat command says `failed (exit N)` with the program named once.
+With no coding agent found, `ljos onboard` and `install.sh` still make the tracker, the deed store and the memory writer, the installer's force-push line runs from the home directory, and the README says so.

@@ -1525,17 +1525,8 @@ pub fn mcp_forward_with_requests(
             .stderr(Stdio::inherit())
             .spawn()
     };
-    let mut spawned = spawn();
-    for _ in 0..20 {
-        match &spawned {
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                spawned = spawn();
-            }
-            _ => break,
-        }
-    }
-    let mut child = spawned.with_context(|| format!("{}: spawn", program.display()))?;
+    let mut child =
+        spawn_while_busy(spawn).with_context(|| format!("{}: spawn", program.display()))?;
     let init = init.unwrap_or_else(|| {
         serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "runner", "version": "0"}})
@@ -1576,6 +1567,35 @@ pub fn mcp_forward_with_requests(
     drop(child.stdin.take());
     let _ = child.wait();
     answer.with_context(|| format!("{}: closed without answering the call", program.display()))
+}
+
+/// Linux ETXTBSY, including when the error carries no raw code and only
+/// the text. `ExecutableFileBusy` is that error from 1.83 on.
+fn executable_busy(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::ExecutableFileBusy
+        || err.raw_os_error() == Some(libc::ETXTBSY)
+        || err
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("text file busy")
+}
+
+/// Try `spawn` again when the binary is busy. The waits add up to about a
+/// second, long enough for a writer that still holds the file, and a
+/// missing binary still fails on the first try.
+fn spawn_while_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const WAITS_MS: &[u64] = &[10, 20, 40, 80, 120, 160, 200, 200, 200];
+    let mut spawned = spawn();
+    for wait in WAITS_MS {
+        match &spawned {
+            Err(err) if executable_busy(err) => {
+                std::thread::sleep(std::time::Duration::from_millis(*wait));
+                spawned = spawn();
+            }
+            _ => break,
+        }
+    }
+    spawned
 }
 
 /// The conversation ids a runner stamped into this environment, by key:
@@ -3689,7 +3709,9 @@ pub fn detect_runners(
 /// Onboard every runner [`detect_runners`] finds, from the shapes ljos
 /// ships and the ones `harnesses.toml` names. Each runner's steps follow a
 /// line naming it, a runner that fails is said and the rest go on, and a
-/// step two runners share (the pack, the host key) is said once.
+/// step two runners share (the pack, the host key) is said once. With no
+/// runner on the machine the deed store, the tracker, the pack and the
+/// host key are still set up.
 ///
 /// # Errors
 ///
@@ -3703,13 +3725,23 @@ pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
     shapes.extend(shipped.harness);
     let found = detect_runners(&shapes, &home()?, &|c| on_path(c));
     if found.is_empty() {
-        return Ok(vec![Step {
+        // The tracker, the deed store and the writer are the seat, not a
+        // runner. A machine with no coding tool still gets them, or the
+        // first `ljos doctor` says the tracker works before one exists.
+        let mut steps = vec![Step {
             what: "runners".into(),
             detail: "found no coding tool on this machine; `ljos onboard --harness NAME` \
                      names one, and `ljos onboard --example` lists the shapes ljos knows"
                 .into(),
             ok: true,
-        }]);
+        }];
+        steps.extend([
+            deed_store_step(dry),
+            tracker_step(dry),
+            pack_step(dry),
+            host_key_step(dry),
+        ]);
+        return Ok(steps);
     }
     let mut steps = vec![Step {
         what: "runners".into(),
@@ -7170,10 +7202,10 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // deadline and the answer is lost. Rank the atoms already stored
     // before asking whether the encoder is loaded: that status call is
     // what starts the download, and a listing behind it would time out.
-    // The warm-up search then holds a pack worker until the model
-    // answers. With nothing to show, the prompt hears that memory is
-    // starting, once a session. A prompt that recalled something does
-    // not hear it.
+    // A prompt the atoms already name is returned at once. A paraphrase
+    // shares no word with them, so this waits a short bound for the
+    // encoder and then searches. Still cold after that, the prompt hears
+    // that memory is starting, once a session.
     let recalled = hook_timed("lexical_recall", || lexical_recall(call, cue, limit));
     if hook_timed("encoder_cold", encoder_is_cold) {
         hook_timed("encoder_warm", start_encoder_warm);
@@ -7186,14 +7218,17 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             };
             return (out, ids);
         }
-        if !seen_ids(call.session.as_deref()).contains(ENCODER_WARMING_KEY) {
-            if !nudge.is_empty() {
-                nudge.push('\n');
+        let warm = hook_timed("encoder_wait", || wait_for_encoder(COLD_PROMPT_WAIT));
+        if !warm {
+            if !seen_ids(call.session.as_deref()).contains(ENCODER_WARMING_KEY) {
+                if !nudge.is_empty() {
+                    nudge.push('\n');
+                }
+                nudge.push_str(ENCODER_WARMING_NOTE);
+                pending.push(ENCODER_WARMING_KEY.to_string());
             }
-            nudge.push_str(ENCODER_WARMING_NOTE);
-            pending.push(ENCODER_WARMING_KEY.to_string());
+            return (nudge, pending);
         }
-        return (nudge, pending);
     }
     // With Jev on for this machine, one call judges which candidates bear on
     // the prompt and whether it corrects or puts a choice. Without it, or
@@ -8873,6 +8908,12 @@ pub fn hook_timed<T>(stage: &str, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// How long a cold prompt with no lexical hit waits for the encoder
+/// before it says memory is still starting. A model already on disk can
+/// answer inside this. A download cannot, and the hook still finishes
+/// inside its deadline.
+const COLD_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// What a prompt hears while the pack's encoder loads. On a new machine the
 /// first load downloads the model, which takes longer than a hook may.
 pub const ENCODER_WARMING_NOTE: &str = "ljos memory is starting: the pack is \
@@ -8935,6 +8976,41 @@ pub fn warm_command(exe: &Path) -> std::process::Command {
         command.process_group(0);
     }
     command
+}
+
+/// Whether status says the encoder has answered at least once. A missing
+/// `answering` field is an older packsetd and is not an answer.
+fn encoder_has_answered(status: &Value) -> bool {
+    status["embedder"]
+        .get("answering")
+        .is_some_and(|value| !value.is_null())
+}
+
+/// Poll status until the encoder has answered or `bound` runs out. This
+/// does not list atoms: a listing after the first status can sit behind
+/// the model load. The caller has already listed them.
+fn wait_for_encoder(bound: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        let answered = with_pack_timeout(200, || {
+            pack()
+                .ok()
+                .and_then(|client| client.status(None).ok())
+                .is_some_and(|status| encoder_has_answered(&status))
+        });
+        if answered {
+            return true;
+        }
+        if started.elapsed() >= bound {
+            return false;
+        }
+        let pause =
+            std::time::Duration::from_millis(40).min(bound.saturating_sub(started.elapsed()));
+        if pause.is_zero() {
+            return false;
+        }
+        std::thread::sleep(pause);
+    }
 }
 
 /// Whether the pack's encoder has not answered yet. The status call has
@@ -19525,11 +19601,12 @@ pub fn local_when(ts: &str) -> String {
     local_when_in(ts, &chrono::Local)
 }
 
-/// What `remember` and `prefer` print to a person at a terminal: the
-/// kind and the text, then on a line of its own the first eight characters
-/// of its id, which `accept`, `forget` and `graded` take, and when it comes
-/// up for review in local time. The text keeps the first line short. A
-/// pipe gets [`format_write_ack`].
+/// What `remember`, `prefer` and `rule` print to a person at a terminal.
+/// A preference or a lesson names its kind and its text. A rule names its
+/// verdict and its pattern, then the reason. The next line is the first
+/// eight characters of the id, which `accept`, `forget` and `graded` take,
+/// and when it comes up for review in local time. A pipe gets
+/// [`format_write_ack`].
 #[must_use]
 pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> String {
     let id = body["id"].as_str().unwrap_or("?");
@@ -19539,11 +19616,16 @@ pub fn format_write_ack_plain(body: &Value, when: &dyn Fn(&str) -> String) -> St
         .as_str()
         .filter(|d| !d.is_empty())
         .map_or_else(String::new, |d| format!(", next review {}", when(d)));
-    format!(
-        "remembered ({}): {}\n  id {short}{due}",
-        body["kind"].as_str().unwrap_or("?"),
-        text.trim()
-    )
+    let kind = body["kind"].as_str().unwrap_or("?");
+    let verdict = body["verdict"].as_str().filter(|v| !v.is_empty());
+    let pattern = body["pattern"].as_str().filter(|p| !p.is_empty());
+    let head = match (kind, verdict, pattern) {
+        ("rule", Some(verdict), Some(pattern)) => {
+            format!("rule {verdict} `{pattern}`: {}", text.trim())
+        }
+        _ => format!("remembered ({kind}): {}", text.trim()),
+    };
+    format!("{head}\n  id {short}{due}")
 }
 
 /// The line a write prints when the pack stored the person's words over a
@@ -22155,12 +22237,7 @@ pub fn run_fed(bin: &str, args: &[impl AsRef<str>], input: &str) -> Result<Said>
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
-        let why = if stderr.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            stderr.trim().to_string()
-        };
-        bail!("{bin} exited {}: {why}", out.status);
+        bail!("{}", tool_failure(bin, &out.status, &stdout, &stderr));
     }
     Ok(Said { stdout, stderr })
 }
@@ -26761,7 +26838,7 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
-    // failed, so the spawn is tried again for a few milliseconds.
+    // failed, so the spawn is tried again for about a second.
     let spawn = || {
         std::process::Command::new(bin)
             .arg("check")
@@ -26772,17 +26849,7 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
             .stderr(std::process::Stdio::null())
             .spawn()
     };
-    let mut child = spawn();
-    for _ in 0..20 {
-        match &child {
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                child = spawn();
-            }
-            _ => break,
-        }
-    }
-    let Ok(mut child) = child else {
+    let Ok(mut child) = spawn_while_busy(spawn) else {
         return unhealthy("did not start");
     };
     let start = std::time::Instant::now();
@@ -27523,14 +27590,37 @@ pub fn run_captured_as(
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
-        let why = if stderr.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            stderr.trim().to_string()
-        };
-        bail!("{bin} exited {}: {why}", out.status);
+        bail!("{}", tool_failure(bin, &out.status, &stdout, &stderr));
     }
     Ok(Said { stdout, stderr })
+}
+
+/// What a habitat printed when it refused: the program once, the exit code,
+/// and its own message. `deedar exited exit status: 1: deedar: ...` named
+/// the program twice and printed the status twice. A leading `{bin}: ` on
+/// the tool's own line is dropped.
+fn tool_failure(
+    bin: &str,
+    status: &std::process::ExitStatus,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let raw = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let prefix = format!("{bin}: ");
+    let why = raw.strip_prefix(&prefix).unwrap_or(raw);
+    let how = match status.code() {
+        Some(code) => format!("failed (exit {code})"),
+        None => format!("failed ({status})"),
+    };
+    if why.is_empty() {
+        format!("{bin} {how}")
+    } else {
+        format!("{bin} {how}: {why}")
+    }
 }
 
 pub fn card_paths(dir: &Path) -> Vec<PathBuf> {
@@ -29730,13 +29820,13 @@ mod tests {
     /// any other claimdag refusal still is.
     #[test]
     fn a_claim_graph_nobody_made_yet_is_not_a_fault() {
-        let fresh = "claimdag exited exit status: 1: no work graph at /h/claims: the directory does not exist, so nothing has been claimed on this seat. Set CLAIMDAG_DIR";
+        let fresh = "claimdag failed (exit 1): no work graph at /h/claims: the directory does not exist, so nothing has been claimed on this seat. Set CLAIMDAG_DIR";
         assert_eq!(
             super::claim_graph_absent(fresh),
             Some("/h/claims".to_string())
         );
         assert_eq!(
-            super::claim_graph_absent("claimdag exited exit status: 1: work.bin is corrupt"),
+            super::claim_graph_absent("claimdag failed (exit 1): work.bin is corrupt"),
             None
         );
         assert_eq!(
@@ -32339,6 +32429,97 @@ mod tests {
         };
         let (note, _) = hook_note(&call, 5);
         assert_eq!(note.matches("Run the lint step").count(), 3, "{note}");
+    }
+
+    /// A cold encoder and a paraphrase share no word, so the atom list
+    /// recalls nothing. The prompt waits until status says the encoder
+    /// has answered, then the search is what the prompt hears.
+    #[test]
+    fn a_cold_first_prompt_waits_and_recalls_a_paraphrase() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let memory = "Push a tag with git push origin TAG; follow-tags skips lightweight tags.";
+        let statuses = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&statuses);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                let answering = if n == 0 {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::Bool(true)
+                };
+                return (
+                    200,
+                    serde_json::json!({"embedder": {"available": true, "answering": answering}})
+                        .to_string(),
+                );
+            }
+            if first.contains("/v1/atoms") {
+                return (
+                    200,
+                    serde_json::json!({"atoms": [{
+                        "id": "atom-tag",
+                        "kind": "preference",
+                        "text": memory,
+                        "entities": ["horizon:standing"],
+                        "ts": "2020-01-01T00:00:00Z"
+                    }]})
+                    .to_string(),
+                );
+            }
+            if first.contains("/v1/search") {
+                return (
+                    200,
+                    serde_json::json!({"hits": [{
+                        "id": "atom-tag",
+                        "text": memory,
+                        "score": 2.0,
+                        "kind": "preference",
+                        "ts": "2020-01-01T00:00:00.000Z",
+                        "entities": ["horizon:standing"],
+                        "ballots": 2,
+                        "of": 3,
+                        "dense_rank": 1,
+                        "cosine": 0.8
+                    }]})
+                    .to_string(),
+                );
+            }
+            (200, r#"{"hits":[]}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "How should a release identifier be published?".into(),
+            session: Some("cold-paraphrase".into()),
+            shape: HookShape::default(),
+        };
+        let started = std::time::Instant::now();
+        let (note, _) = hook_note(&call, 5);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the wait ran past its bound: {note}"
+        );
+        assert!(
+            note.contains("follow-tags skips lightweight tags"),
+            "the first prompt carried no memory: {note}"
+        );
+        assert!(
+            !note.contains(ENCODER_WARMING_NOTE),
+            "the warming line hid the memory: {note}"
+        );
+        assert!(
+            statuses.load(Ordering::SeqCst) >= 2,
+            "status was not polled until the encoder answered"
+        );
     }
 
     #[test]
@@ -36905,17 +37086,55 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(left, vec!["deed-keep"]);
     }
 
+    /// No coding tool is not an empty seat: the tracker and the other
+    /// stores are still prepared, or doctor names a tracker that is not there.
+    #[test]
+    fn a_seat_with_no_runner_still_gets_its_tracker() {
+        let _g = env_guard();
+        let _seat = HermeticSeat::new();
+        let empty = tempfile::tempdir().unwrap();
+        // SAFETY: env_guard restores PATH with the rest of the environment.
+        unsafe { std::env::set_var("PATH", empty.path()) };
+        let steps = super::onboard_detected(true, None).expect("dry onboard");
+        let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
+        assert!(
+            steps[0].detail.contains("found no coding tool"),
+            "{steps:?}"
+        );
+        for need in ["deed store", "tracker", "pack", "host key"] {
+            assert!(whats.contains(&need), "{whats:?}");
+        }
+        assert!(steps.iter().all(|s| s.ok), "{steps:?}");
+        let tracker = steps.iter().find(|s| s.what == "tracker").unwrap();
+        assert!(
+            tracker.detail.starts_with("would create"),
+            "{}",
+            tracker.detail
+        );
+    }
+
     /// A non-zero exit is an error carrying what was said on stderr.
     #[test]
     fn a_refusal_is_an_error_not_an_answer() {
         let _env = env_guard();
         let err = run_captured("false", &[] as &[&str]).unwrap_err();
-        assert!(err.to_string().contains("false exited"), "{err}");
+        assert_eq!(err.to_string(), "false failed (exit 1)");
         let said = run_captured("sh", &["-c", "echo answered; echo aside >&2"]).unwrap();
         assert_eq!(said.stdout.trim(), "answered");
         assert_eq!(said.stderr.trim(), "aside");
-        let said = run_captured("sh", &["-c", "echo reason >&2; exit 3"]).unwrap_err();
-        assert!(said.to_string().contains("reason"), "{said}");
+        let said =
+            run_captured("sh", &["-c", "echo 'sh: the store is missing' >&2; exit 1"]).unwrap_err();
+        assert_eq!(said.to_string(), "sh failed (exit 1): the store is missing");
+        let said = run_captured(
+            "sh",
+            &["-c", "echo 'vissue: /tmp/x is not a tracker' >&2; exit 1"],
+        )
+        .unwrap_err();
+        assert_eq!(
+            said.to_string(),
+            "sh failed (exit 1): vissue: /tmp/x is not a tracker"
+        );
+        assert!(!said.to_string().contains("exit status"), "{said}");
     }
 
     #[test]
@@ -37514,6 +37733,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         // A pipe keeps the tab row.
         assert!(
             format_write_ack(&body).starts_with("922d35cd0123456789abcdef01234567\tpreference\t")
+        );
+        let rule = serde_json::json!({
+            "id": "e58887670123456789abcdef01234567",
+            "kind": "rule",
+            "text": "Destroy only from the release runbook.",
+            "pattern": "terraform destroy*",
+            "verdict": "deny",
+            "due_at": "2026-10-12T14:00:00Z",
+        });
+        assert_eq!(
+            format_write_ack_plain(&rule, &when),
+            "rule deny `terraform destroy*`: Destroy only from the release runbook.\n  id e5888767, next review 2026-10-12 09:00 -05:00"
         );
     }
 
@@ -38819,6 +39050,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(!super::encoder_cold(&status(warm.clone())), "{warm}");
         }
         assert!(!super::encoder_cold(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn a_text_busy_spawn_is_retried_until_the_file_is_free() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tries = AtomicUsize::new(0);
+        let got = super::spawn_while_busy(|| {
+            let n = tries.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(std::io::Error::from_raw_os_error(libc::ETXTBSY))
+            } else {
+                Ok(7)
+            }
+        })
+        .unwrap();
+        assert_eq!(got, 7);
+        assert_eq!(tries.load(Ordering::SeqCst), 3);
+        let busy = std::io::Error::new(std::io::ErrorKind::ExecutableFileBusy, "Text file busy");
+        assert!(super::executable_busy(&busy));
+        assert!(!super::executable_busy(&std::io::Error::from_raw_os_error(
+            libc::ENOENT
+        )));
     }
 
     /// One warm-up per window: the first hook takes the turn and writes the

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Install ljos from its release tarballs, check each tarball against the
 # SHA-256 published beside it and its GitHub build attestation, and run
-# `ljos onboard` for every coding agent found on this machine.
+# `ljos onboard` for every coding agent found on this machine. With none
+# found, the tracker, the memory writer and the deed store are still set up.
 #
 #   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
@@ -455,8 +456,12 @@ if [ "$ONBOARD" = 1 ]; then
     fi
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
-    say "  none found. After you install one, run \`ljos onboard --harness NAME\`;"
-    say "  \`ljos onboard --harness json\` prints the entry for any other agent."
+    say "  none found. Setting up the tracker, memory and deed store."
+    say "  After you install an agent, run \`ljos onboard --harness NAME\`."
+    if ! ljos onboard --harness all > "$TMP/onboard-seat" 2>&1; then
+      say "  seat setup reported a problem:"
+      sed 's/^/    /' "$TMP/onboard-seat"
+    fi
   fi
 fi
 
@@ -480,7 +485,14 @@ case "$(cd "$HOME" && pwd -P)/" in
     say "  \`ljos doctor\` says why. Install into a HOME outside /tmp to try them." ;;
 esac
 say "The guard asks before a force push:"
-ljos policy -- git push --force origin main || true
+# A checkout this script was started in may carry a push gate. Ask from
+# the home directory, and ignore a git dir the caller exported.
+(
+  cd "$HOME" || exit 1
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
+    GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
+  ljos policy -- git push --force origin main
+) || true
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
     "$BIN_DIR/ljos" cloud up
