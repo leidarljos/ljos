@@ -24852,6 +24852,34 @@ impl CommitLock {
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
         Self(ok.then_some(file))
     }
+
+    /// [`CommitLock::acquire`], given up at `deadline`: `None` when another
+    /// holder still has it then.
+    #[must_use]
+    pub fn acquire_by(path: &std::path::Path, deadline: std::time::Instant) -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return Some(Self(None));
+        };
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Some(Self(Some(file)));
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Some(Self(None)),
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for CommitLock {
@@ -24862,6 +24890,74 @@ impl Drop for CommitLock {
             // in a way that matters, since close releases it too.
             unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
         }
+    }
+}
+
+/// The file ljos locks around every write to a tracker checkout's index.
+pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
+
+/// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
+/// `git status` by the repository's `info/exclude`. Not in `.git`, where a
+/// hand clearing `*.lock` after a crash would unlink it under a live holder
+/// and the next seat would lock a new file beside it. `None` outside a git
+/// checkout.
+fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
+    if let Some(common) = lines.next().filter(|l| !l.is_empty()) {
+        exclude_tracker_lock(&dir.join(common));
+    }
+    Some(top.join(TRACKER_LOCK))
+}
+
+fn exclude_tracker_lock(common: &Path) {
+    use std::io::Write as _;
+    let exclude = common.join("info").join("exclude");
+    let line = format!("/{TRACKER_LOCK}");
+    let text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == line) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(common.join("info"));
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude)
+    else {
+        return;
+    };
+    let gap = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = writeln!(file, "{gap}{line}");
+}
+
+/// Hold the tracker checkout that holds `dir` for one write to its index:
+/// a status read, a file write, an add and a commit, or a rebase. Every
+/// ljos writer on the host takes it, so seats queue instead of meeting on
+/// `index.lock`. Taking it twice in one thread waits forever.
+pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
+    tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
+}
+
+/// [`tracker_commit_lock`] for a caller with a time budget: `None` when
+/// another writer still holds the checkout at `deadline`.
+pub fn tracker_commit_lock_by(dir: &Path, deadline: std::time::Instant) -> Option<CommitLock> {
+    match tracker_lock_path(dir) {
+        Some(path) => CommitLock::acquire_by(&path, deadline),
+        None => Some(CommitLock(None)),
     }
 }
 
@@ -24991,20 +25087,27 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// Put `- {Verb} by {seat} [timestamp]` at the top of the issue's logbook.
 /// The line is the seat, with no `:Seat:` property. A file that does not
 /// hold the issue is left alone.
+///
+/// vissue's own writers hold the file's issues lock and replace the file
+/// whole, and so does this. Rewritten in place, the stamp could drop a
+/// ballot another seat wrote between the read and the write, and a `git
+/// add` hashing the file meanwhile dies on unstable object data.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
-    };
     let entry = format!(
         "- {} by {} {}",
         verb_heading(verb),
         seat.trim(),
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
-    let Some(next) = insert_logbook_line(&text, issue, &entry) else {
-        return false;
-    };
-    std::fs::write(path, next).is_ok()
+    vissue_core::store::with_issues_lock(path, || {
+        let text = std::fs::read_to_string(path)?;
+        let Some(next) = insert_logbook_line(&text, issue, &entry) else {
+            return Ok(false);
+        };
+        vissue_core::store::replace_file_atomically(path, &next)?;
+        Ok(true)
+    })
+    .unwrap_or(false)
 }
 
 /// `git log` subjects on the tracker that name a seat, optionally one seat.
@@ -25109,34 +25212,197 @@ pub fn usage_table(acts: &[TrackerAct]) -> String {
 
 /// Commit `.ljos-seat-keys` when a ballot pin is still unpushed. The issue
 /// commit names one file; the pin is the seat's public key and has to travel
-/// with it.
+/// with it. The caller holds [`tracker_commit_lock`].
 fn commit_seat_pin(start: &Path, seat: &str) {
     let root = tracker_push::repo_root(start);
     let name = ballot_sig::PIN_FILE;
     if !root.join(name).is_file() {
         return;
     }
-    let run = |args: &[&str]| {
+    let ignored = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["check-ignore", "-q", "--", name])
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ignored {
+        return;
+    }
+    let _ = commit_paths(&root, &[name], &format!("chore(issues): pin {seat} key"));
+}
+
+/// How a commit of named paths ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathCommit {
+    Made,
+    /// HEAD already holds the paths as they stand: another seat's commit
+    /// carried them, or they did not change.
+    AlreadyIn,
+    /// What git said, never empty.
+    Refused(String),
+}
+
+/// Stage `paths` and commit them alone (`--only`) in the checkout at
+/// `dir`, so another seat's staged work is left out. The caller holds
+/// [`tracker_commit_lock`]. A git process outside ljos that holds the
+/// index is waited out with backoff.
+///
+/// The add runs first and its failure stands on its own: a commit named
+/// for a file git never took in reports a pathspec error that hides why
+/// the add failed. An untracked file is added here, that file only.
+pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
+    let git = |head: &[&str]| {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C")
-            .arg(&root)
-            .args(args)
+            .arg(dir)
+            .args(head)
+            .arg("--")
+            .args(paths)
             .stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
-    let Ok(status) = run(&["status", "--porcelain", "--", name]) else {
-        return;
+    // `Err` is a busy index, with what git said.
+    let attempt = || -> Result<PathCommit, String> {
+        let added = match git(&["add"]) {
+            Ok(out) => out,
+            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        };
+        if !added.status.success() {
+            return refused_or_busy(&added);
+        }
+        if git(&["diff", "--cached", "--quiet"]).is_ok_and(|o| o.status.success()) {
+            return Ok(PathCommit::AlreadyIn);
+        }
+        let made = match git(&["commit", "-q", "--only", "-m", message]) {
+            Ok(out) => out,
+            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        };
+        if made.status.success() {
+            return Ok(PathCommit::Made);
+        }
+        // git says "nothing to commit" on stdout under a branch line, and
+        // exits 1, when a commit made since the add carried the paths.
+        if !index_busy(&made)
+            && git(&["status", "--porcelain"])
+                .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
+        {
+            return Ok(PathCommit::AlreadyIn);
+        }
+        refused_or_busy(&made)
     };
-    if !status.status.success() || status.stdout.is_empty() {
-        return;
+    let mut result = attempt();
+    if result.is_err() {
+        if let Some(orphan) = orphaned_index_lock(dir) {
+            return PathCommit::Refused(orphan);
+        }
     }
-    match run(&["add", "--", name]) {
-        Ok(out) if out.status.success() => {}
-        _ => return,
+    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        result = attempt();
     }
-    let message = format!("chore(issues): pin {seat} key");
-    let _ = run(&["commit", "-q", "--only", "-m", &message, "--", name]);
+    result.unwrap_or_else(PathCommit::Refused)
+}
+
+/// How old an `index.lock` with no git in its checkout must be before ljos
+/// calls it left behind.
+const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The line for an `index.lock` no git holds: older than a minute, with no
+/// git process working in the checkout. A git killed outright leaves one,
+/// and every later commit fails on it until a person removes it.
+pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    let lock = Path::new(lines.next()?).join("index.lock");
+    let top = PathBuf::from(lines.next()?);
+    let age = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())?;
+    if age < ORPHAN_AFTER || git_runs_in(&top) {
+        return None;
+    }
+    Some(format!(
+        "{} is {}s old and no git process runs in {}: a git killed while it held the index left it, and every commit here fails until it is removed (`rm {}`)",
+        lock.display(),
+        age.as_secs(),
+        top.display(),
+        lock.display()
+    ))
+}
+
+/// Whether a git process on this machine works in `top`, by its working
+/// directory. One whose directory cannot be read may be the holder, and
+/// counts.
+fn git_runs_in(top: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        let comm = comm.trim();
+        if comm != "git" && !comm.starts_with("git-") {
+            continue;
+        }
+        match std::fs::read_link(entry.path().join("cwd")) {
+            Ok(cwd) if cwd.starts_with(top) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn index_busy(out: &std::process::Output) -> bool {
+    let said = String::from_utf8_lossy(&out.stderr);
+    said.contains("index.lock") || said.contains(".lock': File exists")
+}
+
+fn refused_or_busy(out: &std::process::Output) -> Result<PathCommit, String> {
+    if index_busy(out) {
+        Err(git_refusal(out))
+    } else {
+        Ok(PathCommit::Refused(git_refusal(out)))
+    }
+}
+
+/// What git said when it refused: the first line of stderr, else of
+/// stdout, else how it exited. A git killed by a signal says nothing.
+fn git_refusal(out: &std::process::Output) -> String {
+    use std::os::unix::process::ExitStatusExt as _;
+    for stream in [&out.stderr, &out.stdout] {
+        let said = first_line(stream);
+        if !said.is_empty() {
+            return said;
+        }
+    }
+    match (out.status.code(), out.status.signal()) {
+        (_, Some(signal)) => format!("git was killed by signal {signal} before it said why"),
+        (Some(code), _) => format!("git exited {code} and said nothing"),
+        _ => "git said nothing".into(),
+    }
 }
 
 /// Commit the tracker file that holds `issue` and push it, when the tracker
@@ -25227,6 +25493,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
     }
+    // Every seat on the host commits this one checkout. From the status
+    // read to the seat pin, one lock outside .git is held, so ljos writers
+    // queue instead of meeting on index.lock, and no seat reads a status
+    // that another seat's commit is about to make stale. A git process
+    // outside ljos that holds the index is waited out a few times before
+    // the line says so.
+    let held = tracker_commit_lock(dir);
     match git(&["status", "--porcelain", "--", &file]) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
@@ -25250,52 +25523,15 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let seat = tracker_seat();
     stamp_seat_logbook(path, issue, verb, &seat);
     let message = format!("chore(issues): {issue} {verb} by {seat}");
-    // Every seat on the host commits this one checkout. The add and the
-    // commit run under one lock in the git directory, so ljos writers queue
-    // instead of meeting on index.lock; a git process outside ljos that
-    // holds the index is waited out a few times before the line says so.
-    let common = git(&["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| dir.join(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_else(|| dir.join(".git"));
-    let _held = CommitLock::acquire(&common.join("ljos-commit.lock"));
-    // The add runs first and its failure stands on its own: a commit named
-    // for a file git never took in reports a pathspec error that hides why
-    // the add failed. An untracked ticket is added here, that file only.
-    let stage_and_commit = || {
-        let added = git(&["add", "--", &file])?;
-        if !added.status.success() {
-            return Ok(added);
-        }
-        git(&["commit", "-q", "--only", "-m", &message, "--", &file])
-    };
-    let mut committed = stage_and_commit();
-    for wait_ms in [200_u64, 400, 800, 1600, 3200] {
-        let busy = matches!(&committed, Ok(o) if !o.status.success()
-            && String::from_utf8_lossy(&o.stderr).contains("index.lock"));
-        if !busy {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-        committed = stage_and_commit();
+    let committed = commit_paths(dir, &[file.as_str()], &message);
+    if !matches!(committed, PathCommit::Refused(_)) {
+        commit_seat_pin(dir, &seat);
     }
-    drop(_held);
+    drop(held);
     match committed {
-        Ok(o) if o.status.success() => {
-            commit_seat_pin(dir, &seat);
-        }
-        Ok(o) => {
-            return format!(
-                "tracker git: commit refused: {}\n",
-                first_line(if o.stderr.is_empty() {
-                    &o.stdout
-                } else {
-                    &o.stderr
-                })
-            );
-        }
-        Err(e) => return format!("tracker git: {e}\n"),
+        PathCommit::Made => {}
+        PathCommit::AlreadyIn => return "tracker git: nothing to commit\n".into(),
+        PathCommit::Refused(why) => return format!("tracker git: commit refused: {why}\n"),
     }
     if mode == "commit" {
         return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
@@ -29044,6 +29280,196 @@ mod tests {
         }
     }
 
+    /// A seat's tracker commit waits for the checkout's lock before it
+    /// reads the status or stamps the file, and the lock file lives at the
+    /// top of the worktree, out of `git status`.
+    #[test]
+    fn a_tracker_commit_waits_for_the_checkout_lock_before_it_reads_or_stamps() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+
+        let held = CommitLock::acquire(&root.join(TRACKER_LOCK));
+        assert!(held.0.is_some(), "the checkout lock opens");
+        let path = issues.clone();
+        let writer =
+            std::thread::spawn(move || persist_tracker_file(&path, "probe-a1b2", "claimed"));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            !std::fs::read_to_string(&issues)
+                .unwrap()
+                .contains("by saddle"),
+            "the stamp waits for the seat that holds the checkout"
+        );
+        assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
+        drop(held);
+        let said = writer.join().unwrap();
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 claimed by saddle"),
+            "{said}"
+        );
+        let status = run(&["status", "--porcelain", "--ignored=no"]);
+        assert!(!status.contains(TRACKER_LOCK), "{status}");
+        assert!(root.join(TRACKER_LOCK).is_file());
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    fn seeded_tracker(root: &Path) -> PathBuf {
+        let run = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        std::fs::write(
+            &issues,
+            "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "seed"]);
+        issues
+    }
+
+    /// Paths HEAD already holds, as another seat's commit leaves them, are
+    /// not a refusal: git's "nothing to commit" came back as `On branch
+    /// master`.
+    #[test]
+    fn paths_head_already_holds_are_committed_already() {
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let probe = dir.path().join("Software/probe");
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "again"),
+            PathCommit::AlreadyIn
+        );
+        std::fs::write(probe.join("issues.org"), "* DONE [#C] Probe\n").unwrap();
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "done"),
+            PathCommit::Made
+        );
+        assert_eq!(
+            commit_paths(&probe, &["issues.org"], "done"),
+            PathCommit::AlreadyIn
+        );
+    }
+
+    /// An empty index.lock two minutes old, with no git working in the
+    /// checkout, is named with its path and age at once, instead of six
+    /// seconds of retries ending in git's `File exists`. A fresh one may
+    /// still be a live git's.
+    #[test]
+    fn an_orphaned_index_lock_is_named_plainly() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let lock = dir.path().join(".git/index.lock");
+        let file = std::fs::File::create(&lock).unwrap();
+        assert!(orphaned_index_lock(dir.path()).is_none(), "a fresh lock");
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        drop(file);
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let started = std::time::Instant::now();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("index.lock is 1")
+                && said.contains("s old and no git process runs in")
+                && said.contains("`rm "),
+            "{said}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A git killed before it printed anything is named, not an empty
+    /// `commit refused: `.
+    #[test]
+    fn a_commit_killed_by_a_signal_says_so() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["config", "core.hooksPath"])
+            .arg(&hooks)
+            .status()
+            .unwrap();
+        assert!(set.success());
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("commit refused: git was killed by signal 9"),
+            "{said}"
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
     /// An issue that exists only in the per-issue ledger is visible, and the
     /// tracker commit names that file. The project board does not contain it.
     #[test]
@@ -31166,6 +31592,36 @@ mod tests {
         // Nothing installed, nothing found; shell runners never are.
         let empty = tempfile::tempdir().unwrap();
         assert!(detect_runners(&shapes.harness, empty.path(), &|_| false).is_empty());
+    }
+
+    #[test]
+    fn a_logbook_stamp_waits_for_the_issue_lock_and_replaces_the_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, "* TODO ship it\n:PROPERTIES:\n:ID: demo-a\n:END:\n").unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let held = CommitLock::acquire(Path::new(&lock));
+        assert!(held.0.is_some(), "the issues lock opens");
+        let target = path.clone();
+        let stamper =
+            std::thread::spawn(move || stamp_seat_logbook(&target, "demo-a", "voted", "alice"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("by alice"),
+            "the stamp waits for the writer that holds the issue"
+        );
+        drop(held);
+        assert!(stamper.join().unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(":LOGBOOK:\n- Voted by alice ["), "{text}");
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            before,
+            "a git add hashing the old file keeps reading the old file"
+        );
     }
 
     #[test]

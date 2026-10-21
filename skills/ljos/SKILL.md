@@ -316,7 +316,10 @@ Every piece of work has an issue before it has a claim.
   and the subagent its hook saw run the line, not the seat. Two
   subagents of one session count twice, the parent and a subagent count as
   two, a subagent that votes again counts once, and a subagent that wrote a
-  candidate cannot vote. A run on another machine has ljos installed there
+  candidate cannot vote. A voter changes its ballot by withdrawing it,
+  `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
+  it still holds one is refused and names those two steps. A run on
+  another machine has ljos installed there
   (`ljos cloud up`) and the tracker synced through the shared tracker
   repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
   names the run but the seat, every run of that seat is one session, and
@@ -432,8 +435,11 @@ lock exists before proceeding": the next seat cannot act on that.
   parent's issue on the subagent's first tool result. It keeps the
   subagent working once at its stop while that issue is open.
 
-- A tracker or sync commit queues under `ljos-commit.lock` in the git
-  directory, and a commit waits out another git process's `index.lock`.
+- A tracker or sync commit queues under `.ljos-commit.lock` at the top of
+  the tracker worktree, outside `.git` and kept out of `git status`, and a
+  commit waits out another git process's `index.lock`. An `index.lock`
+  more than a minute old with no git running in the checkout is named,
+  with the `rm` that clears it.
   Never wrap a verb in a lock of your own, and never stash, reset or
   check out files another seat is editing to get a commit through.
 

@@ -276,23 +276,36 @@ fn candidate_notes(issue: &str) -> Vec<String> {
     notes
 }
 
-/// Whether a `ballot-withdrawn:` note names `voter`.
-fn voter_withdrawn(notes: &[String], voter: &str) -> bool {
-    let named = ballot_sig::field(voter);
-    notes.iter().any(|note| {
-        ballot_sig::parse_withdrawn(note).is_some_and(|w| w.voter == voter || w.voter == named)
-    })
+/// Per voter, where in `notes` (newest first) its newest
+/// `ballot-withdrawn:` note sits. A signature further down came before it
+/// and was taken back; one further up is a ballot cast since.
+fn withdrawal_cuts(notes: &[String]) -> BTreeMap<String, usize> {
+    let mut cuts = BTreeMap::new();
+    for (at, note) in notes.iter().enumerate() {
+        if let Some(w) = ballot_sig::parse_withdrawn(note) {
+            cuts.entry(w.voter).or_insert(at);
+        }
+    }
+    cuts
 }
 
-/// Whether a withdrawn note matches this session or this voter.
-fn cast_was_withdrawn(notes: &[String], voter: &str, key: &str) -> bool {
-    let named = ballot_sig::field(voter);
-    notes.iter().any(|note| {
-        let Some(w) = ballot_sig::parse_withdrawn(note) else {
-            return false;
-        };
-        w.voter == voter || w.voter == named || session_key(&w.harness, &w.nonce) == key
-    })
+fn withdrawn_at(cuts: &BTreeMap<String, usize>, voter: &str) -> Option<usize> {
+    cuts.get(voter)
+        .or_else(|| cuts.get(&ballot_sig::field(voter)))
+        .copied()
+}
+
+fn same_voter(signed: &str, voter: &str) -> bool {
+    signed == voter.trim() || signed == ballot_sig::field(voter)
+}
+
+/// How `voter` replaces the ballot it holds on `issue`.
+#[must_use]
+pub fn replace_hint(issue: &str, voter: &str) -> String {
+    let voter = ballot_sig::field(voter);
+    format!(
+        "To replace it, withdraw it and cast again: `ljos vote {issue} --withdraw --as {voter}` (ljos_vote with withdraw), then `ljos vote {issue} --for OPTION --used ... --as {voter}`."
+    )
 }
 
 /// Why this connection must not cast on `issue`. `own` is that issue's
@@ -304,7 +317,7 @@ fn cast_was_withdrawn(notes: &[String], voter: &str, key: &str) -> bool {
 pub fn session_cast_refusal(
     issue: &str,
     key: &str,
-    _voter: &str,
+    voter: &str,
     own: &[String],
     family: &[String],
 ) -> Option<String> {
@@ -314,7 +327,8 @@ pub fn session_cast_refusal(
             "a ballot on {issue} needs this connection's session. Nothing was cast"
         ));
     }
-    for note in own {
+    let cuts = withdrawal_cuts(own);
+    for (at, note) in own.iter().enumerate() {
         let Some(sig) = ballot_sig::parse_note(note) else {
             continue;
         };
@@ -336,9 +350,23 @@ pub fn session_cast_refusal(
         } else {
             key.to_string()
         };
-        if cast_was_withdrawn(own, &sig.voter, key) {
+        let mine = same_voter(&sig.voter, voter);
+        if withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at) {
+            // The voter that took this ballot back casts again as itself:
+            // the ballot is replaced, and the session is still one voice.
+            if mine {
+                continue;
+            }
             return Some(format!(
                 "this session already cast a ballot on {issue} ({session}), and that ballot was withdrawn. The first ballot stands. A seat argument does not make another voice. Nothing was cast. {OWN_BALLOT}"
+            ));
+        }
+        if mine {
+            return Some(format!(
+                "this session already cast a ballot on {issue} ({session}): {}'s, for {}. Nothing was cast. {} {OWN_BALLOT}",
+                sig.voter,
+                sig.choice,
+                replace_hint(issue, voter)
             ));
         }
         return Some(format!(
@@ -563,13 +591,28 @@ impl Drop for SessionBallot {
     }
 }
 
+/// The choice `voter`'s row in the drawer holds on `issue`, if any.
+fn held_choice(issue: &str, voter: &str) -> Option<String> {
+    crate::raw_ballot_rows(issue)
+        .ok()?
+        .iter()
+        .find(|row| {
+            row["agent"]
+                .as_str()
+                .is_some_and(|agent| same_voter(agent.trim(), voter))
+        })
+        .map(|row| row["choice"].as_str().unwrap_or("").trim().to_string())
+}
+
 /// Reserve this connection's ballot on `issue` for `voter`. The session is
 /// [`ballot_sig::identity`], which a pinned MCP connection fixes for the
 /// process. A later ballot from this session is refused, whoever it names,
 /// including the same persona in a new process once the note is on the
-/// tracker. This process also holds the one claim across the gap before
-/// that note is written. A shell, or a hooked harness, that already cast
-/// on `issue` as one session is refused as another (see [`CastTree`]).
+/// tracker, unless that persona withdrew its ballot first. A voter whose
+/// row is already in the drawer is told to withdraw, then cast. This
+/// process also holds the one claim across the gap before that note is
+/// written. A shell, or a hooked harness, that already cast on `issue` as
+/// one session is refused as another (see [`CastTree`]).
 ///
 /// # Errors
 ///
@@ -585,6 +628,14 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let family = candidate_notes(issue);
     if let Some(why) = session_cast_refusal(issue, &key, voter, &own, &family) {
         bail!("{why}");
+    }
+    // A second cast from another session would only overwrite the drawer:
+    // the voter's first session is the ballot the tally keeps.
+    if let Some(choice) = held_choice(issue, voter) {
+        bail!(
+            "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
+            replace_hint(issue, voter)
+        );
     }
     let mark = format!("{}\n{key}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
@@ -657,27 +708,33 @@ pub struct IgnoredBallot {
 
 /// The ballots that count, and the ones a shared session or an author
 /// session pushed out. `notes` are newest first, as the logbook stores
-/// them. The oldest bound note for a session is the ballot that counts,
-/// and only when that voter still has a drawer row whose choice matches
-/// one of that voter's signatures. A `ballot-withdrawn:` note drops the
-/// voter. A voter with no session binding is kept: a tracker from before
-/// binding.
+/// them. A session is the voice of the voter whose bound note on it is
+/// oldest, and counts that voter's oldest ballot on it not taken back by
+/// a `ballot-withdrawn:` note, only while that voter still has a drawer
+/// row whose choice matches one of its standing signatures. A voter who
+/// withdrew and cast nothing since is dropped. A voter with no session
+/// binding is kept: a tracker from before binding.
 #[must_use]
 pub fn tally_of(
     rows: &[Value],
     notes: &[String],
     authors: &std::collections::BTreeSet<String>,
 ) -> (Vec<Value>, Vec<IgnoredBallot>) {
-    let sigs: Vec<ballot_sig::SigNote> = notes
+    let cuts = withdrawal_cuts(notes);
+    let sigs: Vec<(bool, ballot_sig::SigNote)> = notes
         .iter()
-        .filter_map(|n| ballot_sig::parse_note(n))
+        .enumerate()
+        .filter_map(|(at, n)| {
+            let sig = ballot_sig::parse_note(n)?;
+            let standing = withdrawn_at(&cuts, &sig.voter).is_none_or(|cut| at < cut);
+            Some((standing, sig))
+        })
         .collect();
-    let oldest: Vec<&ballot_sig::SigNote> = sigs.iter().rev().collect();
-    let mut first: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut first: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
     let mut voter_session: BTreeMap<String, String> = BTreeMap::new();
     let mut seat_keys = std::collections::BTreeSet::new();
     let mut session_order = Vec::new();
-    for sig in &oldest {
+    for (standing, sig) in sigs.iter().rev() {
         let key = session_key(
             sig.harness.as_deref().unwrap_or(""),
             sig.nonce.as_deref().unwrap_or(""),
@@ -691,10 +748,14 @@ pub fn tally_of(
         voter_session
             .entry(sig.voter.clone())
             .or_insert_with(|| key.clone());
-        if first.contains_key(&key) {
+        let ballot = standing.then(|| sig.choice.clone());
+        if let Some((owner, choice)) = first.get_mut(&key) {
+            if *owner == sig.voter && choice.is_none() {
+                *choice = ballot;
+            }
             continue;
         }
-        first.insert(key.clone(), (sig.voter.clone(), sig.choice.clone()));
+        first.insert(key.clone(), (sig.voter.clone(), ballot));
         if !authors.contains(&key) {
             session_order.push(key);
         }
@@ -702,13 +763,10 @@ pub fn tally_of(
     let mut counted = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for key in &session_order {
-        let Some((voter, choice)) = first.get(key) else {
+        let Some((voter, Some(choice))) = first.get(key) else {
             continue;
         };
         if !seen.insert(voter.clone()) {
-            continue;
-        }
-        if voter_withdrawn(notes, voter) {
             continue;
         }
         let Some(mut row) = rows
@@ -719,9 +777,9 @@ pub fn tally_of(
             continue;
         };
         let drawer = row["choice"].as_str().unwrap_or("").trim();
-        let signed = sigs
-            .iter()
-            .any(|sig| sig.voter == voter.as_str() && sig.choice == drawer);
+        let signed = sigs.iter().any(|(standing, sig)| {
+            *standing && sig.voter == voter.as_str() && sig.choice == drawer
+        });
         if !signed {
             continue;
         }
@@ -736,7 +794,10 @@ pub fn tally_of(
         if voter.is_empty() || seen.contains(voter) {
             continue;
         }
-        if voter_withdrawn(notes, voter) {
+        let stands = sigs
+            .iter()
+            .any(|(standing, sig)| *standing && same_voter(&sig.voter, voter));
+        if withdrawn_at(&cuts, voter).is_some() && !stands {
             seen.insert(voter.to_string());
             continue;
         }
@@ -1633,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn a_withdrawn_ballot_drops_out_of_the_tally() {
+    fn a_withdrawn_ballot_drops_out_of_the_tally_until_its_voter_casts_again() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         let sig = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "ship", "sess-r", "-");
         let authors = std::collections::BTreeSet::new();
@@ -1641,15 +1702,35 @@ mod tests {
         assert!(gone.is_empty(), "{gone:?}");
         let rows = [serde_json::json!({"agent": "reviewer", "choice": "ship"})];
         let note = ballot_sig::withdrawn_line("reviewer", "sess-r", "-");
-        let (counted, ignored) = tally_of(&rows, &[note.clone(), sig.clone()], &authors);
+        let taken_back = [note.clone(), sig.clone()];
+        let (counted, ignored) = tally_of(&rows, &taken_back, &authors);
         assert!(counted.is_empty(), "{counted:?}");
         assert!(ignored.is_empty(), "{ignored:?}");
-        let again =
-            session_cast_refusal("demo-w", "sess-r", "reviewer", &[note, sig], &[]).unwrap();
+        // Another name from the session is still a second voice.
+        let other = session_cast_refusal("demo-w", "sess-r", "editor", &taken_back, &[]).unwrap();
         assert!(
-            again.contains("withdrawn")
-                && again.contains("first ballot stands")
-                && again.contains("already cast")
+            other.contains("withdrawn")
+                && other.contains("first ballot stands")
+                && other.contains("already cast")
+                && other.contains("Nothing was cast"),
+            "{other}"
+        );
+        // The voter that withdrew casts again, and that ballot counts.
+        assert_eq!(
+            session_cast_refusal("demo-w", "sess-r", "reviewer", &taken_back, &[]),
+            None
+        );
+        let recast = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "hold", "sess-r", "-");
+        let notes = [recast, note, sig];
+        let rows = [serde_json::json!({"agent": "reviewer", "choice": "hold"})];
+        let (counted, _) = tally_of(&rows, &notes, &authors);
+        assert_eq!(counted.len(), 1, "{counted:?}");
+        assert_eq!(counted[0]["choice"], "hold");
+        // A third cast with no withdrawal says how to replace the ballot.
+        let again = session_cast_refusal("demo-w", "sess-r", "reviewer", &notes, &[]).unwrap();
+        assert!(
+            again.contains("already cast a ballot on demo-w (sess-r): reviewer's, for hold.")
+                && again.contains("`ljos vote demo-w --withdraw --as reviewer`")
                 && again.contains("Nothing was cast"),
             "{again}"
         );

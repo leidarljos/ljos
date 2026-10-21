@@ -1,0 +1,1 @@
+A test casts eight persona votes and four notes at once into one git tracker checkout, through vissue-core, and checks every write is committed, the tally counts each ballot, and no `index.lock` is left.

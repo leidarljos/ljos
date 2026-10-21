@@ -667,48 +667,23 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
         format!(".ljos/atoms/{host}.digest"),
     ];
     // The same lock the tracker commits take: one checkout, many seats.
-    let common = git(root, &["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| root.join(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_else(|| root.join(".git"));
-    let held = crate::CommitLock::acquire(&common.join("ljos-commit.lock"));
-    let mut add = vec!["add", "--"];
-    add.extend(files.iter().map(String::as_str));
-    if git(root, &add).map_or(true, |o| !o.status.success()) {
-        return "sync: could not stage the log\n".into();
-    }
-    let staged = git(
-        root,
-        &["diff", "--cached", "--quiet", "--", &files[0], &files[1]],
-    );
-    if staged.is_ok_and(|o| o.status.success()) {
-        // Atoms did not change. A commit already made in this checkout,
-        // such as the tracker's merge attributes, still has to leave,
-        // unless pushes are off. Commit-only mode names that, the same
-        // way the ticket commit does, instead of returning nothing.
-        drop(held);
-        return if push {
-            push_pending(root)
-        } else {
-            kept_local(root)
-        };
-    }
+    let held = crate::tracker_commit_lock(root);
     let message = format!("chore(sync): {host} {scope} atoms");
-    let mut commit = vec!["commit", "-q", "--only", "-m", message.as_str(), "--"];
-    commit.extend(files.iter().map(String::as_str));
-    match git(root, &commit) {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => {
-            return format!(
-                "sync: commit refused: {}\n",
-                String::from_utf8_lossy(&o.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-            )
+    match crate::commit_paths(root, &[&files[0], &files[1]], &message) {
+        crate::PathCommit::Made => {}
+        crate::PathCommit::AlreadyIn => {
+            // Atoms did not change. A commit already made in this checkout,
+            // such as the tracker's merge attributes, still has to leave,
+            // unless pushes are off. Commit-only mode names that, the same
+            // way the ticket commit does, instead of returning nothing.
+            drop(held);
+            return if push {
+                push_pending(root)
+            } else {
+                kept_local(root)
+            };
         }
-        Err(e) => return format!("sync: git: {e}\n"),
+        crate::PathCommit::Refused(why) => return format!("sync: commit refused: {why}\n"),
     }
     drop(held);
     if !push {
@@ -755,6 +730,7 @@ fn catch_up(root: &Path) -> String {
             .map(|(r, b)| format!("{r}/{b}")),
     );
     let mut stuck = Vec::new();
+    let _held = crate::tracker_commit_lock(root);
     for r in refs {
         let forward = git(root, &["merge", "-q", "--ff-only", &r]);
         if forward.is_ok_and(|o| o.status.success()) {
@@ -1020,6 +996,9 @@ fn repo_rows(root: &Path) -> Vec<crate::user_rules::UserRule> {
     rows
 }
 
+/// How long a git past its budget has to clean up after SIGTERM.
+const TERM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn git_within(
     root: &Path,
     args: &[&str],
@@ -1065,11 +1044,22 @@ fn git_within(
         Ok(Ok(out)) => Ok(out),
         Ok(Err(err)) => Err(err).context("sync: user rules: git"),
         Err(_) => {
-            // SAFETY: signal 9 to the child's process group, whose id is
-            // the child's pid after setpgid, and to the child itself.
+            // git removes index.lock when it is terminated and leaves it
+            // when it is killed: an add cut off by SIGKILL left an empty
+            // index.lock that refused every later commit on the checkout.
+            // A group still running after the grace is killed.
+            // SAFETY: signals to the child's process group, whose id is the
+            // child's pid after setpgid, and to the child itself.
             unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-                libc::kill(pid as i32, libc::SIGKILL);
+                libc::kill(-(pid as i32), libc::SIGTERM);
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            if rx.recv_timeout(TERM_GRACE).is_err() {
+                // SAFETY: as above.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
             }
             bail!(
                 "sync: user rules: the tracker did not answer within {} ms",
@@ -1105,6 +1095,7 @@ fn integrate_remote(root: &Path, deadline: std::time::Instant) -> Result<()> {
     let Some(up) = crate::tracker_upstream(root) else {
         return Ok(());
     };
+    let _held = held_by(root, deadline)?;
     let forward = git_within(root, &["merge", "-q", "--ff-only", &up], deadline)?;
     if git_succeeded(&forward) {
         return Ok(());
@@ -1124,6 +1115,18 @@ fn integrate_remote(root: &Path, deadline: std::time::Instant) -> Result<()> {
     )
 }
 
+/// The tracker's commit lock, given up at `deadline`. A hook's budget is
+/// spent waiting for the lock, not on a git that would be cut off while it
+/// holds the index.
+fn held_by(root: &Path, deadline: std::time::Instant) -> Result<crate::CommitLock> {
+    crate::tracker_commit_lock_by(root, deadline).with_context(|| {
+        format!(
+            "sync: user rules: another seat held {} past the budget; nothing was merged or committed",
+            root.display()
+        )
+    })
+}
+
 /// Commit `rels` alone, a deletion included, under the tracker's commit
 /// lock. False when none of them changed.
 fn commit_host(
@@ -1132,25 +1135,15 @@ fn commit_host(
     host: &str,
     deadline: std::time::Instant,
 ) -> Result<bool> {
-    let common = git(root, &["rev-parse", "--git-common-dir"])
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| {
-            let rel_git = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let path = PathBuf::from(&rel_git);
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join(".git"));
-    let held = crate::CommitLock::acquire(&common.join("ljos-commit.lock"));
+    let held = held_by(root, deadline)?;
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
     add.extend(&paths);
     let added = git_within(root, &add, deadline)?;
     if !git_succeeded(&added) {
+        if let Some(orphan) = crate::orphaned_index_lock(root) {
+            bail!("sync: user rules: {orphan}");
+        }
         bail!(
             "sync: user rules: could not stage {}: {}",
             rels.join(", "),
@@ -1432,6 +1425,77 @@ mod tests {
     fn atom(id: &str, text: &str, entities: &[&str]) -> Value {
         serde_json::json!({"id": id, "text": text, "kind": "lesson",
             "entities": entities, "embedding": [0.1, 0.2]})
+    }
+
+    fn hooked_repo(root: &Path, pre_commit: &str) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "seat@example.invalid"]);
+        git(&["config", "user.name", "seat"]);
+        std::fs::write(root.join("seed"), "seed\n").unwrap();
+        git(&["add", "seed"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        let hooks = root.join(".git/test-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, pre_commit).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&["config", "core.hooksPath", &hooks.display().to_string()]);
+        let rel = sealed_rules_rel("probe-host");
+        std::fs::create_dir_all(root.join(".ljos/user-rules")).unwrap();
+        std::fs::write(root.join(&rel), "sealed\n").unwrap();
+        rel
+    }
+
+    /// A commit cut off by the hook's budget leaves no index.lock: git is
+    /// terminated, and cleans up, before anything kills it.
+    #[test]
+    fn a_commit_past_its_budget_leaves_no_index_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let rel = hooked_repo(root, "#!/bin/sh\nsleep 30\n");
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_millis(1500);
+        let cut = commit_host(root, &[rel], "probe-host", deadline).unwrap_err();
+        assert!(format!("{cut:#}").contains("did not answer"), "{cut:#}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            !root.join(".git/index.lock").exists(),
+            "the cut-off commit left index.lock behind"
+        );
+    }
+
+    /// A seat holding the checkout past the budget stops the commit before
+    /// any git starts, instead of leaving git no time to finish.
+    #[test]
+    fn a_held_checkout_stops_the_commit_at_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let rel = hooked_repo(root, "#!/bin/sh\nexit 0\n");
+        let held = crate::tracker_commit_lock(root);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let waited =
+            commit_host(root, std::slice::from_ref(&rel), "probe-host", deadline).unwrap_err();
+        assert!(
+            format!("{waited:#}").contains("past the budget"),
+            "{waited:#}"
+        );
+        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert!(commit_host(root, &[rel], "probe-host", deadline).unwrap());
     }
 
     #[test]
