@@ -1613,27 +1613,30 @@ fn run_command() -> Result<()> {
             let text = text.join(" ");
             run("vissue", &["note", &issue, &text])?;
             match ljos_cli::packset_write_note(&issue, &text) {
-                Ok(body) => {
-                    let id = body["id"].as_str().unwrap_or("?");
-                    let short: String = id.chars().take(8).collect();
-                    println!("noted in memory (id {short})");
-                    match ljos_cli::flush_note_queue() {
-                        Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
-                        Err(e) => eprintln!("ljos note: note queue: {e:#}"),
+                Ok(mem) => {
+                    if let Some(body) = mem.body.as_ref() {
+                        let id = body["id"].as_str().unwrap_or("?");
+                        let short: String = id.chars().take(8).collect();
+                        println!("noted in memory (id {short})");
                     }
-                }
-                Err(e) => {
-                    print!("{}", ljos_cli::note_memory_warning(&issue, &e));
-                    if ljos_cli::note_can_wait(&e) {
-                        match ljos_cli::queue_note(&issue, &text) {
-                            Ok(true) => println!(
-                                "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
-                            ),
-                            Ok(false) => println!("memory: the same note is already queued"),
-                            Err(q) => eprintln!("ljos note: could not queue the copy: {q:#}"),
+                    if let Some(e) = mem.error.as_ref() {
+                        print!("{}", ljos_cli::note_memory_warning(&issue, e));
+                    }
+                    match mem.queued {
+                        Some(true) => println!(
+                            "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
+                        ),
+                        Some(false) => println!("memory: the same note is already queued"),
+                        None => {}
+                    }
+                    if mem.body.is_some() {
+                        match ljos_cli::flush_note_queue() {
+                            Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
+                            Err(e) => eprintln!("ljos note: note queue: {e:#}"),
                         }
                     }
                 }
+                Err(e) => print!("{}", ljos_cli::note_memory_warning(&issue, &e)),
             }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
@@ -2376,6 +2379,11 @@ fn run_command() -> Result<()> {
             // on the next call.
             let mut seen_later: Vec<String> = Vec::new();
             let mut ack_nudge = false;
+            // A lesson or a note queued while the pack was down is sent
+            // before this session reads memory, so the next prompt can recall it.
+            if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
+                let _ = ljos_cli::flush_note_queue();
+            }
             // Search on the prompt. A camel-case runner discards that
             // stdout, so each held note goes out on the next tool result.
             // Stop additionalContext starts another round, so that runner
