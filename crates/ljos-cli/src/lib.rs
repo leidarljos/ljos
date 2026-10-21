@@ -1198,6 +1198,12 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 /// not there.
 const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
+#[derive(Debug, Clone)]
+struct ServerCommandPlan {
+    command: String,
+    note: Option<String>,
+}
+
 /// Where `ljos-mcp` is, for this process to exec.
 ///
 /// The one installed beside `ljos`, else the one on PATH. A shell a runner
@@ -1212,6 +1218,47 @@ fn server_path() -> Result<PathBuf> {
     match beside {
         Some(p) => Ok(p),
         None => which::which("ljos-mcp").context("ljos-mcp not on PATH; install it beside ljos"),
+    }
+}
+
+fn same_binary(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn server_command_plan(server: &Path) -> ServerCommandPlan {
+    match which::which(MCP_SERVER_COMMAND) {
+        Ok(found) if same_binary(&found, server) => ServerCommandPlan {
+            command: MCP_SERVER_COMMAND.to_string(),
+            note: None,
+        },
+        Ok(found) => ServerCommandPlan {
+            command: server.display().to_string(),
+            note: Some(format!(
+                "PATH resolves {MCP_SERVER_COMMAND} to {}, so onboard wrote {}",
+                found.display(),
+                server.display()
+            )),
+        },
+        Err(_) => ServerCommandPlan {
+            command: server.display().to_string(),
+            note: Some(format!(
+                "PATH does not resolve {MCP_SERVER_COMMAND}, so onboard wrote {}",
+                server.display()
+            )),
+        },
+    }
+}
+
+fn with_server_note(detail: String, plan: &ServerCommandPlan) -> String {
+    match &plan.note {
+        Some(note) => format!("{detail}; {note}"),
+        None => detail,
     }
 }
 
@@ -1232,11 +1279,13 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
+    let server = server_path()?;
+    let plan = server_command_plan(&server);
     Ok(serde_json::json!({
         "mcpServers": {
             "ljos": {
                 "type": "stdio",
-                "command": MCP_SERVER_COMMAND,
+                "command": plan.command,
                 "args": [],
                 "env": {}
             }
@@ -3479,15 +3528,15 @@ fn needs_portable_rewrite(value: &str) -> bool {
     is_absolute_ljos_mcp(value) && !Path::new(value).is_file()
 }
 
-fn command_made_portable(command: &mut Value) -> bool {
+fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     match command {
         Value::String(text) if needs_portable_rewrite(text) => {
-            *text = MCP_SERVER_COMMAND.to_string();
+            *text = replacement.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
             Some(Value::String(text)) if needs_portable_rewrite(text) => {
-                *text = MCP_SERVER_COMMAND.to_string();
+                *text = replacement.to_string();
                 true
             }
             _ => false,
@@ -3499,7 +3548,12 @@ fn command_made_portable(command: &mut Value) -> bool {
 /// Point an existing JSON entry at [`MCP_SERVER_COMMAND`] when it still
 /// names an absolute `ljos-mcp`. A runner that was onboarded before keeps
 /// that path until the next onboard, and then syncs it again.
-fn heal_json_command(path: &Path, pointer: &str, dry: bool) -> Result<Option<String>> {
+fn heal_json_command(
+    path: &Path,
+    pointer: &str,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
     if pointer.is_empty() || !path.is_file() {
         return Ok(None);
     }
@@ -3514,18 +3568,12 @@ fn heal_json_command(path: &Path, pointer: &str, dry: bool) -> Result<Option<Str
     let Some(command) = entry.get_mut("command") else {
         return Ok(None);
     };
-    if !command_made_portable(command) {
+    if !command_made_portable(command, replacement) {
         return Ok(None);
     }
-    let note = format!(
-        "set the command in {} to {MCP_SERVER_COMMAND}",
-        path.display()
-    );
+    let note = format!("set the command in {} to {replacement}", path.display());
     if dry {
-        return Ok(Some(format!(
-            "would set the command in {} to {MCP_SERVER_COMMAND}",
-            path.display()
-        )));
+        return Ok(Some(format!("would set the command in {} to {replacement}", path.display())));
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -3538,7 +3586,7 @@ fn heal_json_command(path: &Path, pointer: &str, dry: bool) -> Result<Option<Str
 
 /// Replace a quoted absolute `ljos-mcp` with the bare name. Other quotes
 /// in the file stay.
-fn rewrite_absolute_ljos_mcp(text: &str) -> (String, bool) {
+fn rewrite_absolute_ljos_mcp(text: &str, replacement: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     let mut changed = false;
@@ -3551,7 +3599,7 @@ fn rewrite_absolute_ljos_mcp(text: &str) -> (String, bool) {
                 let inner = &after[..end];
                 out.push(quote);
                 if needs_portable_rewrite(inner) {
-                    out.push_str(MCP_SERVER_COMMAND);
+                    out.push_str(replacement);
                     changed = true;
                 } else {
                     out.push_str(inner);
@@ -3569,12 +3617,12 @@ fn rewrite_absolute_ljos_mcp(text: &str) -> (String, bool) {
     (out, changed)
 }
 
-fn heal_text_command(path: &Path, dry: bool) -> Result<Option<String>> {
+fn heal_text_command(path: &Path, replacement: &str, dry: bool) -> Result<Option<String>> {
     if !path.is_file() {
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let (rewritten, changed) = rewrite_absolute_ljos_mcp(&text);
+    let (rewritten, changed) = rewrite_absolute_ljos_mcp(&text, replacement);
     if !changed {
         return Ok(None);
     }
@@ -3583,24 +3631,25 @@ fn heal_text_command(path: &Path, dry: bool) -> Result<Option<String>> {
     }
     let verb = if dry { "would set" } else { "set" };
     Ok(Some(format!(
-        "{verb} the command in {} to {MCP_SERVER_COMMAND}",
+        "{verb} the command in {} to {replacement}",
         path.display()
     )))
 }
 
-fn heal_registered(h: &Harness, dry: bool) -> Result<Option<String>> {
+fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<String>> {
     let mut notes = Vec::new();
     if let Some(config) = &h.config_json {
         if let Some(note) = heal_json_command(
             &expand(config),
             h.json_pointer.as_deref().unwrap_or(""),
+            replacement,
             dry,
         )? {
             notes.push(note);
         }
     }
     if let Some(config) = &h.config {
-        if let Some(note) = heal_text_command(&expand(config), dry)? {
+        if let Some(note) = heal_text_command(&expand(config), replacement, dry)? {
             notes.push(note);
         }
     }
@@ -3609,7 +3658,7 @@ fn heal_registered(h: &Harness, dry: bool) -> Result<Option<String>> {
     if h.name == "claude" {
         if let Ok(home) = home() {
             if let Some(note) =
-                heal_json_command(&home.join(".claude.json"), "/mcpServers/ljos", dry)?
+                heal_json_command(&home.join(".claude.json"), "/mcpServers/ljos", replacement, dry)?
             {
                 notes.push(note);
             }
@@ -3627,9 +3676,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
+    let plan = server_command_plan(server);
     match is_registered(h, server) {
         Some(true) => {
-            let healed = heal_registered(h, dry);
+            let healed = heal_registered(h, &plan.command, dry);
             let config = expand(h.config.as_deref().unwrap_or_default());
             match bump_ljos_mcp_generation(&config, env!("CARGO_PKG_VERSION"), dry) {
                 Ok(Some(v)) => Step {
@@ -3656,7 +3706,8 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         },
         Some(false) if !h.register.is_empty() => {
-            let argv = filled(&h.register, Path::new(MCP_SERVER_COMMAND), &h.name);
+            let server_word = PathBuf::from(&plan.command);
+            let argv = filled(&h.register, &server_word, &h.name);
             if !on_path(&argv[0]) {
                 return Step {
                     what,
@@ -3667,14 +3718,14 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if dry {
                 return Step {
                     what,
-                    detail: format!("would run {}", argv.join(" ")),
+                    detail: with_server_note(format!("would run {}", argv.join(" ")), &plan),
                     ok: true,
                 };
             }
             match run_captured(&argv[0], &argv[1..]) {
                 Ok(_) => Step {
                     what,
-                    detail: format!("ran {}", argv.join(" ")),
+                    detail: with_server_note(format!("ran {}", argv.join(" ")), &plan),
                     ok: true,
                 },
                 Err(e) => Step {
@@ -3691,7 +3742,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 .json_entry
                 .as_deref()
                 .unwrap_or_default()
-                .replace("{server}", MCP_SERVER_COMMAND)
+                .replace("{server}", &plan.command)
                 .replace("{name}", &h.name);
             let entry: Value = match serde_json::from_str(&entry_text) {
                 Ok(v) => v,
@@ -3706,14 +3757,20 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if dry {
                 return Step {
                     what,
-                    detail: format!("would set {pointer} in {}", config.display()),
+                    detail: with_server_note(
+                        format!("would set {pointer} in {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 };
             }
             match set_json_entry(&config, &pointer, &entry) {
                 Ok(()) => Step {
                     what,
-                    detail: format!("set {pointer} in {}", config.display()),
+                    detail: with_server_note(
+                        format!("set {pointer} in {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 },
                 Err(e) => Step {
@@ -3729,7 +3786,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 .snippet
                 .as_deref()
                 .unwrap_or_default()
-                .replace("{server}", MCP_SERVER_COMMAND)
+                .replace("{server}", &plan.command)
                 .replace("{name}", &h.name);
             if snippet.is_empty() {
                 return Step {
@@ -3741,7 +3798,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             if dry {
                 return Step {
                     what,
-                    detail: format!("would append the entry to {}", config.display()),
+                    detail: with_server_note(
+                        format!("would append the entry to {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 };
             }
@@ -3757,7 +3817,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             match written {
                 Ok(()) => Step {
                     what,
-                    detail: format!("appended the entry to {}", config.display()),
+                    detail: with_server_note(
+                        format!("appended the entry to {}", config.display()),
+                        &plan,
+                    ),
                     ok: true,
                 },
                 Err(e) => Step {
