@@ -1817,3 +1817,140 @@ fn an_opencode_commit_no_post_cited_is_deeded_at_stop() {
     );
     assert!(org.contains("* DONE"), "{org}");
 }
+
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// packsetd from PATH on a free port, with its home in the habitat, and
+/// the env that points `ljos` at it.
+fn packsetd(hab: &Habitat) -> (Daemon, Vec<(&'static str, String)>) {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let Some(bin) = std::env::split_paths(&path)
+        .map(|dir| dir.join("packsetd"))
+        .find(|candidate| candidate.is_file())
+    else {
+        panic!("packsetd is not on PATH; CI builds it from packset develop");
+    };
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .unwrap()
+        .port();
+    let pack_home = hab.home.join(".local/share/packset");
+    std::fs::create_dir_all(&pack_home).unwrap();
+    let daemon = Daemon(
+        Command::new(bin)
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(&pack_home)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &hab.home)
+            .env("PACKSET_HOME", &pack_home)
+            .env("PACKSET_AUTH", "off")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "packsetd did not listen"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let env = vec![
+        ("PACKSET_URL", format!("http://127.0.0.1:{port}")),
+        ("PACKSET_AUTH", "off".to_string()),
+    ];
+    (daemon, env)
+}
+
+/// ljos-gfiz: a Claude turn commits and stops, so the lesson cites that
+/// commit. The next turn amends it under a new prompt. The lesson written
+/// again cites the commit that landed and closes the first one, so the
+/// next session is not handed the replaced sha.
+#[test]
+fn a_rewritten_lesson_closes_the_one_that_cited_an_amended_commit() {
+    let (_dir, hab) = habitat();
+    let (_daemon, pack) = packsetd(&hab);
+    let pack: Vec<(&str, &str)> = pack.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let session = "4c1d7e2a-8b3f-4e6d-9a1c-2f5e8d7b6a90";
+    let cwd = hab.repo.clone();
+    let send = |session: &str, event: &str, extra: serde_json::Value| {
+        let out = ljos(&hab, &claude(event, session, &cwd, extra), &pack);
+        context(&out.stdout)
+    };
+    let bash = |command: &str| {
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0}
+        })
+    };
+    send(
+        session,
+        "UserPromptSubmit",
+        serde_json::json!({"prompt": "Add a slugify function in slug.py with tests and commit it"}),
+    );
+    send(
+        session,
+        "PreToolUse",
+        serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "slug.py"}}),
+    );
+    let replaced = commit_file(&hab.repo, "slug.py");
+    send(
+        session,
+        "PostToolUse",
+        bash("git add slug.py && git commit -m 'add slugify'"),
+    );
+    send(
+        session,
+        "Stop",
+        serde_json::json!({"last_assistant_message": "Committed slugify."}),
+    );
+    send(
+        session,
+        "UserPromptSubmit",
+        serde_json::json!({"prompt": "Reword that commit message to say Add slugify with tests"}),
+    );
+    git(
+        &hab.repo,
+        &["commit", "-q", "--amend", "-m", "Add slugify with tests"],
+    );
+    let landed = head(&hab.repo);
+    send(
+        session,
+        "PostToolUse",
+        bash("git commit --amend -m 'Add slugify with tests'"),
+    );
+    send(
+        session,
+        "Stop",
+        serde_json::json!({"last_assistant_message": "Reworded the commit."}),
+    );
+    let listed = ljos_cmd(&hab, &["memories", "list", "--all", "--json"], "", &pack);
+    let listed = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(
+        listed.contains(&short_sha(&landed)),
+        "no lesson cites the landed commit: {listed}"
+    );
+    assert!(
+        !listed.contains(&short_sha(&replaced)),
+        "a live lesson still cites the replaced commit: {listed}"
+    );
+    let recall = send(
+        "5d2e8f3b-9c40-4f7e-8b2d-3a6f9e8c7b01",
+        "UserPromptSubmit",
+        serde_json::json!({"prompt": "write a slugify function with tests"}),
+    );
+    assert!(recall.contains(&short_sha(&landed)), "{recall}");
+    assert!(!recall.contains(&short_sha(&replaced)), "{recall}");
+}
