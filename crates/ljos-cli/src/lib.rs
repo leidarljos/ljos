@@ -20674,6 +20674,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         ok: true,
     });
     out.push(cloud::mcp_row());
+    out.push(cloud::guard_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
     wake_writer();
@@ -21403,7 +21404,14 @@ pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
 
 /// Rows a fresh seat may lack after the first write. They are reported,
 /// and they do not fail `ljos doctor`.
-const OPTIONAL_ROWS: &[&str] = &["host key", "runners", "deed store", "tracker", "encoder"];
+const OPTIONAL_ROWS: &[&str] = &[
+    "host key",
+    "runners",
+    "deed store",
+    "tracker",
+    "encoder",
+    "cloud guard",
+];
 
 /// Rows about the machine the seat runs on. They fail neither `ljos doctor`
 /// nor a sitting, and print `warn` so the agent reads them before it adds
@@ -27000,6 +27008,9 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {
+        return Some(rule);
+    }
+    if let Some(rule) = cloud::guard_line(line) {
         return Some(rule);
     }
     if let Some(rule) = user_rules::guard_line(line) {
