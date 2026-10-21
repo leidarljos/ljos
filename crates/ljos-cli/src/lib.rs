@@ -3584,45 +3584,108 @@ fn heal_json_command(
     Ok(Some(note))
 }
 
-/// Replace a quoted absolute `ljos-mcp` with the bare name. Other quotes
-/// in the file stay.
-fn rewrite_absolute_ljos_mcp(text: &str, replacement: &str) -> (String, bool) {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut changed = false;
-    while let Some(start) = rest.find(['"', '\'']) {
-        let quote = rest[start..].chars().next().unwrap_or('"');
-        out.push_str(&rest[..start]);
-        let after = &rest[start + quote.len_utf8()..];
-        match after.find(quote) {
-            Some(end) => {
-                let inner = &after[..end];
-                out.push(quote);
-                if needs_portable_rewrite(inner) {
-                    out.push_str(replacement);
-                    changed = true;
-                } else {
-                    out.push_str(inner);
-                }
-                out.push(quote);
-                rest = &after[end + quote.len_utf8()..];
-            }
-            None => {
-                out.push_str(&rest[start..]);
-                rest = "";
-            }
+fn command_value_span(line: &str) -> Option<(usize, usize)> {
+    let trimmed = line.trim_start();
+    let mut offset = line.len().saturating_sub(trimmed.len());
+    for key in ["command", "cmd"] {
+        let Some(rest) = trimmed.strip_prefix(key) else {
+            continue;
+        };
+        offset += key.len();
+        let ws = rest.len().saturating_sub(rest.trim_start().len());
+        offset += ws;
+        let tail = &line[offset..];
+        let Some(sep) = tail.chars().next() else {
+            continue;
+        };
+        if sep != '=' && sep != ':' {
+            continue;
         }
+        offset += sep.len_utf8();
+        let tail = &line[offset..];
+        let ws = tail.len().saturating_sub(tail.trim_start().len());
+        offset += ws;
+        let tail = &line[offset..];
+        let Some(first) = tail.chars().next() else {
+            continue;
+        };
+        if first == '"' || first == '\'' {
+            let start = offset + first.len_utf8();
+            let rest = &line[start..];
+            let end = rest.find(first)?;
+            return Some((start, start + end));
+        }
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == ',' || c == '#')
+            .unwrap_or(tail.len());
+        return Some((offset, offset + end));
     }
-    out.push_str(rest);
-    (out, changed)
+    None
 }
 
-fn heal_text_command(path: &Path, replacement: &str, dry: bool) -> Result<Option<String>> {
+fn marker_section_end(text: &str, start: usize, marker: &str) -> usize {
+    let marker_toml = marker.trim_start().starts_with('[');
+    let mut lines = 0usize;
+    let mut end = start;
+    let mut first = true;
+    for line in text[start..].split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if marker_toml && !first && trimmed.starts_with('[') {
+            break;
+        }
+        end += line.len();
+        lines += 1;
+        first = false;
+        if !marker_toml && lines >= 24 {
+            break;
+        }
+    }
+    end
+}
+
+fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (String, bool) {
+    let Some(found) = text.find(marker) else {
+        return (text.to_string(), false);
+    };
+    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    let end = marker_section_end(text, start, marker);
+    let mut at = start;
+    while at < end {
+        let line_end = text[at..]
+            .find('\n')
+            .map_or(text.len(), |rel| at + rel + 1);
+        let line = &text[at..line_end];
+        if let Some((value_start, value_end)) = command_value_span(line) {
+            let value_start = at + value_start;
+            let value_end = at + value_end;
+            let value = &text[value_start..value_end];
+            if needs_portable_rewrite(value) {
+                let mut out = String::with_capacity(
+                    text.len()
+                        .saturating_sub(value.len())
+                        .saturating_add(replacement.len()),
+                );
+                out.push_str(&text[..value_start]);
+                out.push_str(replacement);
+                out.push_str(&text[value_end..]);
+                return (out, true);
+            }
+            return (text.to_string(), false);
+        }
+        at = line_end;
+    }
+    (text.to_string(), false)
+}
+
+fn heal_text_command(path: &Path, marker: &str, replacement: &str, dry: bool) -> Result<Option<String>> {
+    if marker.is_empty() {
+        return Ok(None);
+    }
     if !path.is_file() {
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let (rewritten, changed) = rewrite_absolute_ljos_mcp(&text, replacement);
+    let (rewritten, changed) = rewrite_marker_command(&text, marker, replacement);
     if !changed {
         return Ok(None);
     }
@@ -3649,7 +3712,12 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
         }
     }
     if let Some(config) = &h.config {
-        if let Some(note) = heal_text_command(&expand(config), replacement, dry)? {
+        if let Some(note) = heal_text_command(
+            &expand(config),
+            h.marker.as_deref().unwrap_or(""),
+            replacement,
+            dry,
+        )? {
             notes.push(note);
         }
     }
