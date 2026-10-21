@@ -217,16 +217,26 @@ struct ApiMerge {
 }
 
 fn deny(pattern: &str, token: &str, detail: &str) -> super::Rule {
-    let base = super::policyd_reason(token);
-    let reason = if detail.is_empty() {
-        base
-    } else {
-        format!("{base} {detail}")
-    };
     super::Rule {
         pattern: pattern.into(),
         verdict: "deny".into(),
-        reason,
+        reason: join_sentences(&super::policyd_reason(token), detail),
+    }
+}
+
+/// `base` and `detail` as two sentences. When `base` already ends with
+/// `.`, `!` or `?`, that stop stays. Otherwise a full stop is added
+/// before `detail`.
+fn join_sentences(base: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return base.to_string();
+    }
+    let base = base.trim_end();
+    if base.ends_with(['.', '!', '?']) {
+        format!("{base} {detail}")
+    } else {
+        format!("{base}. {detail}")
     }
 }
 
@@ -437,8 +447,9 @@ fn on_push(git: &GitCmd, walk: &Walk) -> Result<(), super::Rule> {
     // and neither does a commit made on the same line.
     if let Some(test) = cfg.test.as_deref() {
         if let Some(why) = evidence_gap(&git.cwd, &git.args, current.as_deref(), walk.fresh, test) {
-            warn_push(format!(
-                "This push runs without a passing test record. {why} Run `ljos evidence record -- {test}` to record one."
+            warn_push(join_sentences(
+                &super::policyd_reason("git-push-evidence"),
+                &format!("{why} Run `ljos evidence record -- {test}` to record one."),
             ));
         }
     }
@@ -2572,6 +2583,16 @@ esac
         assert_allows(&unrecorded);
         let warned = take_push_warning().expect("a missing record is a warning");
         assert!(warned.contains("ljos evidence record -- true"), "{warned}");
+        let sha = tip(dir.path());
+        assert!(
+            warned.contains(&format!("refusal. Tip {sha}:")),
+            "the reason and the tip are separate sentences: {warned}"
+        );
+        assert!(
+            !warned.contains(&format!("approval Tip {sha}"))
+                && !warned.contains(&format!("refusal Tip {sha}")),
+            "{warned}"
+        );
         record_in(dir.path(), &["true".into()]).unwrap();
         let allowed = answers("git push origin main", dir.path(), &rules);
         assert_allows(&allowed);
