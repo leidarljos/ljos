@@ -125,6 +125,13 @@ pub fn sign_entry(mut unsigned: UnsignedEntry, seat: &str) -> Result<SignedEntry
         }
     }
     validate_unsigned(&unsigned)?;
+    let (role, named) = match &unsigned.entry {
+        Entry::Question(question) => ("opener", question.opened_by.as_str()),
+        Entry::Ballot(ballot) => ("voter", ballot.voter.as_str()),
+    };
+    if seat.trim() != named {
+        bail!("record signer `{seat}` must match entry {role} `{named}`");
+    }
     let path = crate::ballot_sig::seat_key_path(seat)
         .context("no seat key path: HOME and XDG_DATA_HOME are unset")?;
     let key = crate::ballot_sig::load_or_create(&path)?;
@@ -793,13 +800,20 @@ mod tests {
     }
 
     fn sign_as(unsigned: UnsignedEntry, seed: u8) -> SignedEntry {
-        let seat = format!("seat-{seed}");
+        let seat = signer_on_entry(&unsigned).to_string();
         let path = crate::ballot_sig::seat_key_path(&seat).expect("seat key path");
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("seat dir");
         }
         std::fs::write(&path, [seed; 32]).expect("seed");
         sign_entry(unsigned, &seat).unwrap_or_else(|err| panic!("seat-{seed}: {err:#}"))
+    }
+
+    fn signer_on_entry(unsigned: &UnsignedEntry) -> &str {
+        match &unsigned.entry {
+            Entry::Question(question) => &question.opened_by,
+            Entry::Ballot(ballot) => &ballot.voter,
+        }
     }
 
     fn question_entry() -> UnsignedEntry {
@@ -855,13 +869,28 @@ mod tests {
     fn a_record_entry_is_signed_with_the_seat_ballot_key() {
         let _home = test_home();
         let entry = sign_as(question_entry(), 7);
-        let path = crate::ballot_sig::seat_key_path("seat-7").expect("path");
+        let path = crate::ballot_sig::seat_key_path("alpha/seat-a").expect("path");
         let key = crate::ballot_sig::load_or_create(&path).expect("seat key");
         assert_eq!(
             entry.signature.key,
             hex::encode(key.verifying_key().to_bytes())
         );
         verify_entry(&entry).expect("verifies under the seat key");
+    }
+
+    #[test]
+    fn sign_entry_refuses_a_signer_not_named_on_the_entry() {
+        let _home = test_home();
+        let err = sign_entry(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            "seat-8",
+        )
+        .expect_err("mismatched signer");
+        assert!(
+            err_chain(&err).contains("voter"),
+            "mismatched signer passed: {}",
+            err_chain(&err)
+        );
     }
 
     #[test]
@@ -985,7 +1014,7 @@ mod tests {
         let _home = test_home();
         let err = sign_entry(
             ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
-            "seat-1",
+            "run/run-101",
         )
         .expect_err("bare run identity");
         assert!(err_chain(&err).contains("identity"), "{}", err_chain(&err));
@@ -998,7 +1027,7 @@ mod tests {
             2,
         );
         let err = check_entries(&[first, second]).expect_err("run pin");
-        assert!(err.to_string().contains("pinned"), "{err}");
+        assert!(err_chain(&err).contains("pinned"), "{}", err_chain(&err));
     }
 
     #[test]
@@ -1194,8 +1223,8 @@ mod tests {
             "2026-10-21 10:00:00Z",
             "2026-10-21T10:30:00Z",
         ] {
-            let err =
-                sign_entry(ballot_entry("alpha/seat-a", "accept", bad), "seat-8").expect_err(bad);
+            let err = sign_entry(ballot_entry("alpha/seat-a", "accept", bad), "alpha/seat-a")
+                .expect_err(bad);
             let text = err_chain(&err);
             assert!(
                 text.contains("YYYY-MM-DDTHH:00:00Z"),
@@ -1207,7 +1236,7 @@ mod tests {
             panic!("question");
         };
         question.opened_at = "2026-10-21T09:00:00+00:00".to_string();
-        let err = sign_entry(opened, "seat-8").expect_err("offset opened_at");
+        let err = sign_entry(opened, "alpha/seat-a").expect_err("offset opened_at");
         assert!(
             err_chain(&err).contains("YYYY-MM-DDTHH:00:00Z"),
             "{}",
