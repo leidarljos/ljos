@@ -716,7 +716,7 @@ name = "hermes"
 # `hermes mcp add` asks which tools to enable; the answer is all of them.
 register = ["sh", "-c", "printf 'Y\\n' | hermes mcp add ljos --command {server}"]
 config = "~/.hermes/config.yaml"
-marker = "\n  ljos:\n    command:"
+marker = "  ljos:\n    command:"
 skills = "~/.hermes/skills"
 # A hermes installed without its MCP extra lists ljos and loads nothing.
 probe = ["hermes", "mcp", "test", "ljos"]
@@ -3687,7 +3687,13 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
     let Some(found) = text.find(marker) else {
         return (text.to_string(), false);
     };
-    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    // A marker that begins with a newline already names the next line.
+    // Rewinding once more rewrites the sibling command above it.
+    let start = if marker.starts_with('\n') {
+        found + 1
+    } else {
+        text[..found].rfind('\n').map_or(0, |at| at + 1)
+    };
     let end = marker_section_end(text, start, marker);
     let mut at = start;
     while at < end {
