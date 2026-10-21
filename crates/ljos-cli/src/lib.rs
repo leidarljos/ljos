@@ -27212,12 +27212,9 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 /// subagent's included. The seat argument is not copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
-    if ballot_sig::harness_session().is_empty() {
-        return;
-    }
-    let harness = ballot_sig::identity().harness;
-    if harness != "-" {
-        cmd.env("LJOS_HARNESS_SESSION", harness);
+    let id = ballot_sig::identity();
+    if id.harness != "-" && !id.seat_only() {
+        cmd.env("LJOS_HARNESS_SESSION", id.harness);
     }
 }
 

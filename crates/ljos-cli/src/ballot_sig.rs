@@ -528,6 +528,29 @@ fn subagent(parent: &str) -> Option<String> {
         .clone()
 }
 
+static HOOKED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The session a hook saw run this process's `ljos` line, plus its
+/// subagent, for a process whose environment names no session: a seat
+/// whose runner stamps no id in the shell still binds what its hook saw,
+/// rather than the seat. An MCP call names its own session.
+fn hooked_session() -> Option<String> {
+    if CALL_AGENT.try_with(|_| ()).is_ok() {
+        return None;
+    }
+    HOOKED
+        .get_or_init(|| {
+            let (session, agent) = crate::subagent::claim_unsessioned_command()?;
+            let (session, agent) = (field(&session), field(&agent));
+            Some(if agent == "-" {
+                session
+            } else {
+                format!("{session}:{agent}")
+            })
+        })
+        .clone()
+}
+
 /// The thread Codex runs a subagent in, under the root session:
 /// `CODEX_THREAD_ID` when it is not `CODEX_SESSION_ID`, the root's.
 fn codex_thread(parent: &str) -> Option<String> {
@@ -688,6 +711,8 @@ fn named_session_actor(key: &str) -> Option<String> {
 
 /// This process's session identity. Stable across processes of one holder.
 /// A subagent the harness named is `SESSION:AGENT`, a session of its own.
+/// With no session in the environment, the one the hook saw run this
+/// line comes before the seat.
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
@@ -696,6 +721,12 @@ pub fn identity() -> SessionIdentity {
             Some(agent) => format!("{harness}:{agent}"),
             None => harness,
         };
+        return SessionIdentity {
+            harness,
+            nonce: "-".into(),
+        };
+    }
+    if let Some(harness) = hooked_session() {
         return SessionIdentity {
             harness,
             nonce: "-".into(),

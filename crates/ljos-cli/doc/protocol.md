@@ -229,7 +229,9 @@ Every piece of work has an issue before it has a claim.
   ISSUE --for X --confidence C --used DEED`, never a verdict reported in prose.
   A subagent's ballot binds the parent session plus the subagent,
   `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
-  under its root session. An opencode subagent is a session of its own. Two
+  under its root session. An opencode subagent is a session of its own. A
+  seat whose shell names no session, as on a shared box, binds the session
+  and the subagent its hook saw run the line, not the seat. Two
   subagents of one session count twice, the parent and a subagent count as
   two, a subagent that votes again counts once, and a subagent that wrote a
   candidate cannot vote. A run on another machine has ljos installed there

@@ -205,22 +205,53 @@ fn argv_matches(written: &[String], argv: &[String]) -> bool {
 /// by an older one its subagent left. An empty agent is the parent's.
 #[must_use]
 pub fn claim_command(session: &str) -> Option<String> {
-    let argv: Vec<String> = std::env::args_os()
-        .skip(1)
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    claim_command_in(&root(), session, &argv, now_ms())
+    claim_command_in(&root(), session, &this_line()?, now_ms())
+}
+
+/// The session and agent of the `ljos` line this process runs, when this
+/// process names no session of its own: a seat whose runner stamps no id
+/// in the shell. The hook saw the line under its session, so every
+/// session's calls are read, and the newest whose line is this argv is
+/// taken once. An empty agent is the parent's.
+#[must_use]
+pub fn claim_unsessioned_command() -> Option<(String, String)> {
+    claim_any_in(&root(), &this_line()?, now_ms())
+}
+
+/// This process's argv after the program, when the program is `ljos`: the
+/// hook keeps only lines that run it, so the MCP server takes none.
+fn this_line() -> Option<Vec<String>> {
+    let mut args = std::env::args_os();
+    let program = PathBuf::from(args.next()?);
+    (program.file_name()? == "ljos")
+        .then(|| args.map(|a| a.to_string_lossy().into_owned()).collect())
 }
 
 fn claim_command_in(root: &Path, session: &str, argv: &[String], now: u64) -> Option<String> {
-    let mut found: Vec<(PathBuf, Call)> = waiting(&shell_dir(root, session), now)
+    let found = waiting(&shell_dir(root, session), now)
         .into_iter()
         .filter(|(_, c)| c.session == session && argv_matches(&c.argv, argv))
         .collect();
+    take_newest(found).map(|c| c.agent)
+}
+
+fn claim_any_in(root: &Path, argv: &[String], now: u64) -> Option<(String, String)> {
+    let sessions = std::fs::read_dir(root.join("shell")).ok()?;
+    let found = sessions
+        .flatten()
+        .flat_map(|dir| waiting(&dir.path(), now))
+        .filter(|(_, c)| argv_matches(&c.argv, argv))
+        .collect();
+    take_newest(found).map(|c| (c.session, c.agent))
+}
+
+/// The newest call, taken: the first whose file this process removes, so
+/// no other process takes it too.
+fn take_newest(mut found: Vec<(PathBuf, Call)>) -> Option<Call> {
     found.sort_by(|a, b| b.1.at.cmp(&a.1.at).then_with(|| b.0.cmp(&a.0)));
     found
         .into_iter()
-        .find_map(|(path, c)| std::fs::remove_file(&path).is_ok().then_some(c.agent))
+        .find_map(|(path, c)| std::fs::remove_file(&path).is_ok().then_some(c))
 }
 
 /// The session and subagent of a Claude Code MCP call, by the tool use id
@@ -315,6 +346,41 @@ mod tests {
         let late = 1_000 + CALL_TTL_MS + 1;
         assert_eq!(claim_command_in(dir.path(), "sess-1", &argv, late), None);
         assert!(!shell.join("toolu_old.0.json").exists());
+    }
+
+    #[test]
+    fn a_process_with_no_session_takes_the_newest_call_of_any_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "vote demo-a --for ship --used none --as reviewer";
+        put(
+            &shell_dir(dir.path(), "sess-1").join("toolu_a.0.json"),
+            &call("sess-1", "agent-a", line, 1_000),
+        );
+        put(
+            &shell_dir(dir.path(), "sess-2").join("toolu_b.0.json"),
+            &call("sess-2", "agent-b", line, 2_000),
+        );
+        put(
+            &shell_dir(dir.path(), "sess-2").join("toolu_c.0.json"),
+            &call("sess-2", "", "recall demo-a", 3_000),
+        );
+        let argv = words(line);
+        let now = 4_000;
+        assert_eq!(
+            claim_any_in(dir.path(), &argv, now),
+            Some(("sess-2".into(), "agent-b".into()))
+        );
+        assert_eq!(
+            claim_any_in(dir.path(), &argv, now),
+            Some(("sess-1".into(), "agent-a".into()))
+        );
+        assert_eq!(claim_any_in(dir.path(), &argv, now), None);
+        assert_eq!(
+            claim_any_in(dir.path(), &words("recall demo-a"), 3_000 + CALL_TTL_MS + 1),
+            None
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(claim_any_in(empty.path(), &argv, now), None);
     }
 
     #[test]

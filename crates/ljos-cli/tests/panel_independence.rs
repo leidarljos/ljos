@@ -1138,6 +1138,90 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
 }
 
 #[test]
+fn a_box_seat_with_no_session_counts_each_subagent() {
+    // A seat on a shared box: the shell names the seat and no session.
+    // The hook still sees the Claude Code session and each subagent, and
+    // a Grok Bot subagent carries its own conversation id.
+    let world = World::new();
+    let issue = "demo-box-panel";
+    let parent = "9b2d41f0-box-parent";
+    let none: &[(&str, &str)] = &[];
+    let cast = |tool_use: &str, agent: Option<&str>, name: &str, choice: &str| {
+        let args = [
+            "vote", issue, "--for", choice, "--used", "none", "--as", name,
+        ];
+        let mut payload = serde_json::json!({
+            "session_id": parent,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": tool_use,
+            "tool_input": {"command": format!("ljos {}", args.join(" "))},
+        });
+        if let Some(agent) = agent {
+            payload["agent_id"] = agent.into();
+        }
+        let hook = world.hook(none, &payload);
+        assert!(hook.status.success(), "{}", text(&hook));
+        world.ljos_env("eessi", none, &args)
+    };
+    for (tool_use, agent, name, session) in [
+        (
+            "toolu_b1",
+            Some("agent-a1"),
+            "reviewer-a",
+            format!("{parent}:agent-a1"),
+        ),
+        (
+            "toolu_b2",
+            Some("agent-b2"),
+            "reviewer-b",
+            format!("{parent}:agent-b2"),
+        ),
+        ("toolu_b3", None, "coordinator", parent.to_string()),
+    ] {
+        let out = cast(tool_use, agent, name, "ship");
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains(&format!("session {session}\n")), "{said}");
+        assert!(!said.contains("unverified"), "{said}");
+    }
+    let again = cast("toolu_b4", Some("agent-a1"), "reviewer-c", "hold");
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "already cast a ballot on {issue} ({parent}:agent-a1)"
+        )),
+        "{said}"
+    );
+    for (conversation, name) in [
+        ("sand-subagent-box-0001", "reviewer-d"),
+        ("sand-subagent-box-0002", "reviewer-e"),
+    ] {
+        let out = world.ljos_env(
+            "eessi",
+            &[("CURSOR_CONVERSATION_ID", conversation)],
+            &[
+                "vote", issue, "--for", "ship", "--used", "none", "--as", name,
+            ],
+        );
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(
+            said.contains(&format!("session {conversation}\n")),
+            "{said}"
+        );
+    }
+    let tally = world.ljos("eessi", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("5 ballots count"), "{said}");
+    assert!(!stdout.contains("reviewer-c"), "{said}");
+    assert!(!stdout.contains("unverified"), "{said}");
+}
+
+#[test]
 fn claude_subagents_voting_over_mcp_each_count() {
     // One ljos-mcp answers the parent and both subagents. Only the hook
     // payload names the agent; the call carries the tool use id.
