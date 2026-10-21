@@ -5,3 +5,4 @@ A known harness (claude, codex, cursor-agent, agy, opencode and the rest ljos kn
 A harness that runs as plain `node` still owns its sitting when no known harness sits above it.
 The book keeps the owner's start time next to its pid, so a pid the kernel has handed to another process no longer keeps a finished runner's sitting open.
 The walk reads pid 1 too, so a harness that is a container's pid 1 owns its sitting; any other pid 1 is the init and owns none.
+The walk reads `/proc` and holds on Linux only. On macOS the hook's parent still owns the sitting, so there `ljos_start` after a Write still finishes the Write's claim and files a new one.
