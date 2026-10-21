@@ -1458,6 +1458,123 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     }
 }
 
+/// `script` run by one `sh -c`, as one shell command of an agent runs,
+/// with `$LJOS` the binary under test.
+fn shell(world: &World, env: &[(&str, &str)], script: &str) -> Output {
+    world
+        .program("/bin/sh", "eessi", env, &["-c", script])
+        .env("LJOS", env!("CARGO_BIN_EXE_ljos"))
+        .output()
+        .unwrap()
+}
+
+fn counted(world: &World, issue: &str) -> String {
+    let tally = world.ljos("eessi", "sess-reader-0001", &["vote", issue]);
+    assert!(tally.status.success(), "{}", text(&tally));
+    String::from_utf8_lossy(&tally.stdout).into_owned()
+}
+
+#[test]
+fn one_shell_that_renames_its_session_between_casts_casts_once() {
+    // One shell casts, sets another session or run id, and casts again on
+    // the same issue. Each variable that names a session is a way to try.
+    let world = World::new();
+    for (i, var) in [
+        "LJOS_SESSION_ID",
+        "CURSOR_AGENT_ID",
+        "CLOUD_AGENT_ID",
+        "CURSOR_CONVERSATION_ID",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let issue = format!("demo-flip-{i}");
+        let script = format!(
+            "{var}=sess-flip-a-000{i} \"$LJOS\" vote {issue} --for ship --used none --as reviewer-a; echo \"first $?\"\n\
+             {var}=sess-flip-b-000{i} \"$LJOS\" vote {issue} --for ship --used none --as reviewer-b; echo \"second $?\"\n"
+        );
+        let out = shell(&world, &[], &script);
+        let said = text(&out);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("session sess-flip-a-000"), "{var}: {said}");
+        assert!(stdout.contains("first 0"), "{var}: {said}");
+        assert!(!stdout.contains("second 0"), "{var}: {said}");
+        assert!(
+            said.contains(&format!(
+                "this shell already cast a ballot on {issue} as session sess-flip-a-000{i}."
+            )) && said.contains("Nothing was cast"),
+            "{var}: {said}"
+        );
+        assert!(counted(&world, &issue).contains("1 ballot counts"), "{var}");
+    }
+    // Two agents, each running its own command in its own shell, count.
+    let issue = "demo-flip-apart";
+    for session in ["sess-apart-a-0001", "sess-apart-b-0002"] {
+        let out = shell(
+            &world,
+            &[("LJOS_SESSION_ID", session)],
+            &format!("\"$LJOS\" vote {issue} --for ship --used none --as reviewer-{session}"),
+        );
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    assert!(counted(&world, issue).contains("2 ballots count"));
+}
+
+#[test]
+fn a_hooked_harness_that_renames_its_session_casts_once() {
+    // Separate commands under one harness whose hook saw each line. A
+    // subagent of the hook's session counts; a command that names another
+    // root session in its environment is the same harness and is refused.
+    let world = World::new();
+    let issue = "demo-flip-harness";
+    let parent = "4f0a6c2e-flip-parent";
+    let none: &[(&str, &str)] = &[];
+    let cast = |tool_use: &str, agent: Option<&str>, name: &str, env: &[(&str, &str)]| {
+        let args = [
+            "vote", issue, "--for", "ship", "--used", "none", "--as", name,
+        ];
+        let mut payload = serde_json::json!({
+            "session_id": parent,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": tool_use,
+            "tool_input": {"command": format!("ljos {}", args.join(" "))},
+        });
+        if let Some(agent) = agent {
+            payload["agent_id"] = agent.into();
+        }
+        let hook = world.hook(none, &payload);
+        assert!(hook.status.success(), "{}", text(&hook));
+        world.ljos_env("eessi", env, &args)
+    };
+    let out = cast("toolu_f1", None, "reviewer-a", none);
+    assert!(out.status.success(), "{}", text(&out));
+    let out = cast("toolu_f2", Some("agent-f2"), "reviewer-b", none);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("session {parent}:agent-f2\n")),
+        "{said}"
+    );
+    let out = cast(
+        "toolu_f3",
+        None,
+        "reviewer-c",
+        &[("LJOS_SESSION_ID", "sess-flip-other-0001")],
+    );
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "the harness running this line already cast a ballot on {issue} as session {parent}."
+        )) && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    let tally = counted(&world, issue);
+    assert!(tally.contains("2 ballots count"), "{tally}");
+    assert!(!tally.contains("reviewer-c"), "{tally}");
+}
+
 #[test]
 fn claude_subagents_voting_over_mcp_each_count() {
     // One ljos-mcp answers the parent and both subagents. Only the hook

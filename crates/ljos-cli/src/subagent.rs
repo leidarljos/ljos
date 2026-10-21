@@ -39,7 +39,7 @@ fn root() -> PathBuf {
 
 /// A name safe as one path component. `.` is left out, so it can join a
 /// call to its index.
-fn token(raw: &str) -> String {
+pub(crate) fn token(raw: &str) -> String {
     raw.trim()
         .chars()
         .map(|c| {
@@ -239,14 +239,46 @@ fn harness_of<'a>(call: &'a Call, mine: &[Proc]) -> Option<&'a Proc> {
     mine.iter().any(|m| m.same(nearest)).then_some(nearest)
 }
 
+/// The call a hook saw run this process's `ljos` line, as this process
+/// took it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    pub session: String,
+    pub agent: String,
+    /// The harness that ran the hook and runs this process.
+    pub harness: Proc,
+}
+
+static THIS_CALL: std::sync::OnceLock<Option<Taken>> = std::sync::OnceLock::new();
+
+/// The call this process runs, taken once per process. `session` is the
+/// one its environment names: that session's calls are read first, then
+/// every session's, since a line whose environment names another session
+/// than its hook saw still runs under that hook's harness.
+fn this_call(session: Option<&str>) -> Option<Taken> {
+    THIS_CALL
+        .get_or_init(|| {
+            let mine = crate::proc_tree::ancestors();
+            claim_in(&root(), session, &this_line()?, now_ms(), &mine)
+        })
+        .clone()
+}
+
+/// The harness of the call this process took, once it has looked for one.
+#[must_use]
+pub fn taken_harness() -> Option<Proc> {
+    THIS_CALL.get()?.as_ref().map(|t| t.harness.clone())
+}
+
 /// The agent of the `ljos` line this process runs, when a hook saw it
 /// under `session`. The newest call whose line is this argv is taken, so
 /// no other process takes it too and a parent's call is never answered
 /// by an older one its subagent left. An empty agent is the parent's.
 #[must_use]
 pub fn claim_command(session: &str) -> Option<String> {
-    let mine = crate::proc_tree::ancestors();
-    claim_command_in(&root(), session, &this_line()?, now_ms(), &mine)
+    this_call(Some(session))
+        .filter(|t| t.session == session)
+        .map(|t| t.agent)
 }
 
 /// The session and agent of the `ljos` line this process runs, when this
@@ -256,8 +288,14 @@ pub fn claim_command(session: &str) -> Option<String> {
 /// taken once. An empty agent is the parent's.
 #[must_use]
 pub fn claim_unsessioned_command() -> Option<(String, String)> {
-    let mine = crate::proc_tree::ancestors();
-    claim_any_in(&root(), &this_line()?, now_ms(), &mine)
+    this_call(None).map(|t| (t.session, t.agent))
+}
+
+/// Whether this process is the `ljos` command line, rather than the MCP
+/// server or a test.
+#[must_use]
+pub fn runs_as_ljos() -> bool {
+    this_line().is_some()
 }
 
 /// This process's argv after the program, when the program is `ljos`: the
@@ -269,29 +307,30 @@ fn this_line() -> Option<Vec<String>> {
         .then(|| args.map(|a| a.to_string_lossy().into_owned()).collect())
 }
 
-fn claim_command_in(
+fn claim_in(
     root: &Path,
-    session: &str,
+    session: Option<&str>,
     argv: &[String],
     now: u64,
     mine: &[Proc],
-) -> Option<String> {
-    claim_from(&[shell_dir(root, session)], now, |c| {
-        c.session == session && argv_matches(&c.argv, argv) && harness_of(c, mine).is_some()
+) -> Option<Taken> {
+    let fits = |c: &Call| argv_matches(&c.argv, argv) && harness_of(c, mine).is_some();
+    let own =
+        session.and_then(|s| claim_from(&[shell_dir(root, s)], now, |c| c.session == s && fits(c)));
+    let call = own.or_else(|| {
+        let dirs: Vec<PathBuf> = std::fs::read_dir(root.join("shell"))
+            .ok()?
+            .flatten()
+            .map(|d| d.path())
+            .collect();
+        claim_from(&dirs, now, fits)
+    })?;
+    let harness = harness_of(&call, mine)?.clone();
+    Some(Taken {
+        session: call.session,
+        agent: call.agent,
+        harness,
     })
-    .map(|c| c.agent)
-}
-
-fn claim_any_in(root: &Path, argv: &[String], now: u64, mine: &[Proc]) -> Option<(String, String)> {
-    let dirs: Vec<PathBuf> = std::fs::read_dir(root.join("shell"))
-        .ok()?
-        .flatten()
-        .map(|d| d.path())
-        .collect();
-    claim_from(&dirs, now, |c| {
-        argv_matches(&c.argv, argv) && harness_of(c, mine).is_some()
-    })
-    .map(|c| (c.session, c.agent))
 }
 
 /// The newest waiting call under `dirs` that `fits`, taken. With none, the
@@ -344,6 +383,27 @@ fn claim_mcp_in(root: &Path, call: &str, now: u64) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn claim_command_in(
+        root: &Path,
+        session: &str,
+        argv: &[String],
+        now: u64,
+        mine: &[Proc],
+    ) -> Option<String> {
+        claim_in(root, Some(session), argv, now, mine)
+            .filter(|t| t.session == session)
+            .map(|t| t.agent)
+    }
+
+    fn claim_any_in(
+        root: &Path,
+        argv: &[String],
+        now: u64,
+        mine: &[Proc],
+    ) -> Option<(String, String)> {
+        claim_in(root, None, argv, now, mine).map(|t| (t.session, t.agent))
+    }
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
@@ -410,7 +470,7 @@ mod tests {
         assert_eq!(
             claim_command_in(dir.path(), "sess-2", &argv, now, &mine),
             None,
-            "another session's calls are not read"
+            "another session's call names no agent of this one"
         );
         let late = 2_000 + CALL_TTL_MS + 1;
         assert_eq!(
@@ -501,6 +561,26 @@ mod tests {
             claim_command_in(dir.path(), "sess-1", &argv, 2_500, &mine).as_deref(),
             Some(""),
             "a taken call names no session unless its hook ran above this one"
+        );
+    }
+
+    #[test]
+    fn a_line_whose_environment_names_another_session_still_finds_its_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "vote demo-a --for ship --used none --as reviewer";
+        let argv = words(line);
+        let mine = crate::proc_tree::ancestors();
+        put(
+            &shell_dir(dir.path(), "sess-hook").join("toolu_h.0.json"),
+            &call("sess-hook", "", line, 1_000),
+        );
+        let taken = claim_in(dir.path(), Some("sess-env"), &argv, 2_000, &mine).unwrap();
+        assert_eq!(taken.session, "sess-hook");
+        assert!(taken.harness.same(&mine[0]));
+        assert_eq!(
+            claim_command_in(dir.path(), "sess-env", &argv, 2_000, &mine),
+            None,
+            "the hook's session names no agent of the environment's"
         );
     }
 
