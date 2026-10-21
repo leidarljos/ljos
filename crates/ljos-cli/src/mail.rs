@@ -840,6 +840,7 @@ pub fn send(args: &Send<'_>) -> Result<String> {
 
 /// Start the wake of each recipient that set one, and say which. The
 /// message is already written, so a wake that fails changes nothing here.
+/// In push mode the detached wake pushes the sealed log before it fires.
 fn wake_after(m: &Outgoing) -> String {
     let events: Vec<super::wake::Event> =
         m.to.iter()

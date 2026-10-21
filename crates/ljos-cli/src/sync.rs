@@ -777,6 +777,29 @@ pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<Strin
     sync_repos(pull_import, export_log, false)
 }
 
+/// Export this machine's sealed log and push it.
+///
+/// A wake in push mode does this before it fires. The letter is already
+/// written, and the send has already returned: a refusal is for the wake
+/// log, not an error the send should grow. A tracker with no scope has
+/// nothing to push, and that is not a refusal.
+///
+/// # Errors
+///
+/// The pack did not answer, age refused to seal, or the commit or the
+/// push was refused. The message is the line the wake log stores.
+pub(crate) fn push_sealed_log() -> Result<()> {
+    let said = sync_repo_in_passing(false, true)?;
+    if let Some(why) = said.lines().map(str::trim).find(|line| {
+        line.contains("push refused")
+            || line.contains("commit refused")
+            || line.contains("no remote is configured")
+    }) {
+        bail!("{why}");
+    }
+    Ok(())
+}
+
 fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
     let listed = local().repos;
     let roots: Vec<PathBuf> = if listed.is_empty() {

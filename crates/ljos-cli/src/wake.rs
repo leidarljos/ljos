@@ -15,6 +15,12 @@
 //! A webhook gets only the envelope (seat, sender, message id, issue,
 //! interrupt), never the body, and its key is read from a file or an
 //! environment variable, never from `wake.toml`.
+//!
+//! In push mode the letter is in this machine's pack and not yet on the
+//! tracker the other machine reads. The detached wake pushes the sealed
+//! log before it runs the command or posts the webhook, so the send
+//! itself does not wait. A refused push is a line in the wake log. The
+//! wake still runs, and the send still stands.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -203,6 +209,12 @@ pub fn show(seat: &str) -> String {
     }
 }
 
+/// `LJOS_TRACKER_GIT=push`, the mode a cloud seat uses. Commit-only and
+/// off leave the log where the sitting's own sync puts it.
+fn push_mode() -> bool {
+    std::env::var("LJOS_TRACKER_GIT").as_deref() == Ok("push")
+}
+
 fn log_path() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -380,6 +392,11 @@ fn post(url: &str, wake: &Wake, event: &Event) -> Result<String> {
 /// Run one seat's wake now and say what happened. The outcome is also a
 /// line in the wake log, since a detached wake has nobody to tell.
 ///
+/// In push mode the sealed log is pushed first, from this process, which
+/// `send` and `reply` have already detached. The other machine can then
+/// read the letter. A push that does not land is recorded here and does
+/// not stop the wake.
+///
 /// # Errors
 ///
 /// The seat has no wake, the guard refuses its command, or the command or
@@ -389,6 +406,14 @@ pub fn fire(event: &Event) -> Result<String> {
     let Some(wake) = table.get(&event.seat) else {
         bail!("wake: {} has no wake set", event.seat);
     };
+    // The letter is already in the pack. Pushing here, rather than in
+    // `send`, keeps the sender's wait to the detach. The other host's
+    // inbox stays empty until this push is on the remote.
+    if push_mode() {
+        if let Err(why) = super::sync::push_sealed_log() {
+            log(&format!("{}: {why:#}", event.seat));
+        }
+    }
     let outcome = if let Some(command) = &wake.command {
         let timeout = Duration::from_secs(wake.timeout.unwrap_or(WAKE_TIMEOUT_SECS).max(1));
         run_command(command, event, timeout)
