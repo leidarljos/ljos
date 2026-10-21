@@ -245,3 +245,63 @@ fn onboard_keeps_an_absolute_server_path_that_exists_here() {
     let text = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
     assert!(text.contains(&format!("command = \"{}\"", installed.display())), "{text}");
 }
+
+#[test]
+fn onboard_writes_an_absolute_command_when_path_cannot_find_ljos_mcp() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "cursor"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let (command, _) = json_command(&home.join(".cursor/mcp.json"));
+    assert_eq!(command, bin.join("ljos-mcp").display().to_string());
+    let output = said(&out);
+    assert!(output.contains("PATH does not resolve ljos-mcp"), "{output}");
+
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        "/usr/bin:/bin",
+        &["onboard", "--harness", "json"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let pasted: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        pasted["mcpServers"]["ljos"]["command"],
+        bin.join("ljos-mcp").display().to_string()
+    );
+}
+
+#[test]
+fn onboard_writes_an_absolute_command_when_path_points_to_another_install() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let stale = root.path().join("stale/bin");
+    stub(&stale.join("ljos-mcp"));
+    let path = format!("{}:{}:/usr/bin:/bin", stale.display(), bin.display());
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        &path,
+        &["onboard", "--harness", "cursor"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let (command, _) = json_command(&home.join(".cursor/mcp.json"));
+    assert_eq!(command, bin.join("ljos-mcp").display().to_string(), "{command}");
+    let said = said(&out);
+    assert!(
+        said.contains(&format!(
+            "PATH resolves ljos-mcp to {}/ljos-mcp",
+            stale.display()
+        )),
+        "{said}"
+    );
+}
