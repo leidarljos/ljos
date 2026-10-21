@@ -2641,17 +2641,36 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     })
 }
 
-/// The one seat in `known` that belongs to `harness`: the harness id
-/// itself, or the id joined to a word by a hyphen (`codex-laptop`,
-/// `free-codex`). `None` when no seat or more than one does.
+/// The one seat in `known` that belongs to `harness`: an id of the
+/// harness ([`harness_ids`]) itself, or joined to a word by a hyphen
+/// (`codex-laptop`, `free-codex`, `free-agy` for `antigravity`). `None`
+/// when no seat or more than one does.
 fn harness_seat(harness: &str, known: &std::collections::BTreeSet<String>) -> Option<String> {
-    let head = format!("{harness}-");
-    let tail = format!("-{harness}");
-    let mut mine = known
-        .iter()
-        .filter(|s| *s == harness || s.starts_with(&head) || s.ends_with(&tail));
+    let ids = harness_ids(harness);
+    let mut mine = known.iter().filter(|s| {
+        ids.iter().any(|id| {
+            *s == id || s.starts_with(&format!("{id}-")) || s.ends_with(&format!("-{id}"))
+        })
+    });
     let first = mine.next()?;
     mine.next().is_none().then(|| first.clone())
+}
+
+/// `harness` and the other harness ids its runner goes by: Antigravity's
+/// command is `agy` ([`RUNNER_COMMANDS`]), and a seat is named after either.
+fn harness_ids(harness: &str) -> Vec<&str> {
+    let mut ids = vec![harness];
+    if let Some((name, commands)) = RUNNER_COMMANDS
+        .iter()
+        .find(|(name, commands)| *name == harness || commands.contains(&harness))
+    {
+        ids.extend(
+            std::iter::once(*name)
+                .chain(commands.iter().copied())
+                .filter(|id| *id != harness && HARNESS_NAMES.contains(id)),
+        );
+    }
+    ids
 }
 
 /// What a call that named an unknown seat is told: the name, the seat
@@ -31061,6 +31080,31 @@ mod tests {
         let chain = vec![row(10, "sh", "sh"), row(13, "grok-bot", "grok-bot")];
         assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(13));
         assert!(pick_program(&[row(10, "bash", "bash")], &[]).is_none());
+    }
+
+    #[test]
+    fn a_harness_id_finds_the_seat_named_after_its_command() {
+        let known = |seats: &[&str]| {
+            seats
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let roster = known(&["free-agy", "free-claude", "free-codex"]);
+        assert_eq!(
+            harness_seat("antigravity", &roster).as_deref(),
+            Some("free-agy")
+        );
+        assert_eq!(harness_seat("agy", &roster).as_deref(), Some("free-agy"));
+        assert_eq!(
+            harness_seat("codex", &roster).as_deref(),
+            Some("free-codex")
+        );
+        let two = known(&["free-agy", "antigravity-laptop"]);
+        assert_eq!(harness_seat("antigravity", &two), None);
+        // A command that is no harness id names no seat: `code` is not
+        // `claude-code`'s.
+        assert_eq!(harness_seat("vscode", &known(&["claude-code"])), None);
     }
 
     #[test]
