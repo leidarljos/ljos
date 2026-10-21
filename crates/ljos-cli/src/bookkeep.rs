@@ -153,6 +153,10 @@ struct RepoBook {
     /// The pack's id for that lesson. A rewrite supersedes it.
     #[serde(default)]
     lesson_id: Option<String>,
+    /// The title that lesson was written under. A later prompt is another
+    /// turn and does not replace it; the rewrite closes the old atom by id.
+    #[serde(default)]
+    lesson_title: Option<String>,
     #[serde(default)]
     finished: bool,
     /// `vissue` failed once. Later edits stay on the warm path instead of
@@ -381,8 +385,9 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
         if !open {
             let subject = collapse(&offered);
             if !subject.is_empty() && !repo.is_empty() {
-                book.repos.entry(repo.clone()).or_default().title =
-                    Some(subject.chars().take(4000).collect());
+                let row = book.repos.entry(repo.clone()).or_default();
+                hold_lesson_title(row);
+                row.title = Some(subject.chars().take(4000).collect());
             }
         }
     } else if !ending_elsewhere {
@@ -2164,8 +2169,7 @@ pub(crate) fn repoint_commits(repo: &str, pairs: &[(String, String)]) {
                         .values_mut()
                         .find(|row| row.issue.as_deref() == Some(rewrite.issue.as_str()))
                     {
-                        row.lesson = true;
-                        row.lesson_id = id;
+                        lesson_written(row, &rewrite.title, id);
                     }
                     store_book(&path, &book);
                 }
@@ -2208,8 +2212,7 @@ fn repoint_row(
     let rewrite = {
         let row = book.repos.get(key)?;
         if row.finished && row.lesson {
-            let heard = heard_title(book, key, row);
-            let title = title_from(&heard, key);
+            let title = lesson_title_of(book, key, row);
             Some(LessonRewrite {
                 issue: issue.clone(),
                 title,
@@ -2346,8 +2349,7 @@ fn refresh_landed_deeds(deadline: std::time::Instant) {
             let Some(issue) = row.issue.clone() else {
                 continue;
             };
-            let heard = heard_title(&book, &repo, row);
-            let title = title_from(&heard, &repo);
+            let title = lesson_title_of(&book, &repo, row);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
@@ -2362,8 +2364,7 @@ fn refresh_landed_deeds(deadline: std::time::Instant) {
             ) {
                 Ok(id) => {
                     if let Some(row) = book.repos.get_mut(&repo) {
-                        row.lesson = true;
-                        row.lesson_id = id;
+                        lesson_written(row, &title, id);
                     }
                 }
                 Err(e) => log_line(&format!("lesson: {e}")),
@@ -2600,8 +2601,7 @@ fn finish_rows(book: &mut Book, repos: &[String]) {
         // A claim closes with a lesson. So does a sitting that only failed
         // or was asked: the next session otherwise has nothing to recall.
         if !row.lesson && (issue.is_some() || notes) {
-            let heard = heard_title(book, repo, row);
-            let title = title_from(&heard, repo);
+            let title = lesson_title_of(book, repo, row);
             let deeds = row.deeds.clone();
             let failures = row.failures.clone();
             let asks = row.asks.clone();
@@ -2617,8 +2617,7 @@ fn finish_rows(book: &mut Book, repos: &[String]) {
             ) {
                 Ok(id) => {
                     if let Some(row) = book.repos.get_mut(repo) {
-                        row.lesson = true;
-                        row.lesson_id = id;
+                        lesson_written(row, &title, id);
                     }
                 }
                 Err(e) => log_line(&format!("lesson: {e}")),
@@ -2987,9 +2986,10 @@ fn failure_text(raw: &Value, cue: &str) -> String {
 /// read. The issue id rides in the `issue` field, so a later lesson for
 /// another issue does not close this one. A pack that is off is an error
 /// here; the caller logs it and still closes the ticket. `replaces` is the
-/// id of the lesson this sitting wrote before, which the pack closes: its
-/// title can differ, so the pack would not take it for a near copy. The
-/// new lesson's id comes back for the next rewrite.
+/// id of the lesson this sitting wrote before, which the pack closes.
+/// The title stays the one that lesson was written under. A later prompt
+/// is another turn, and supersedes is what closes the old atom. The new
+/// lesson's id comes back for the next rewrite.
 fn write_lesson(
     issue: &str,
     title: &str,
@@ -3316,6 +3316,59 @@ fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
     book.prompt_unix = now;
 }
 
+/// Copy `row.title` into `lesson_title` once, when a lesson already exists.
+/// The row title may then follow a later prompt. The rewrite does not.
+fn hold_lesson_title(row: &mut RepoBook) {
+    if !(row.lesson || row.lesson_id.is_some()) {
+        return;
+    }
+    if row
+        .lesson_title
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        if let Some(title) = row.title.clone().filter(|title| !title.trim().is_empty()) {
+            row.lesson_title = Some(title);
+        }
+    }
+}
+
+/// Remember the title a lesson was stored under, the first time it is written.
+fn lesson_written(row: &mut RepoBook, title: &str, id: Option<String>) {
+    if row
+        .lesson_title
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+        && !title.trim().is_empty()
+    {
+        row.lesson_title = Some(title.to_string());
+    }
+    row.lesson = true;
+    row.lesson_id = id;
+}
+
+/// The title a rewrite keeps. A lesson that already exists uses the title
+/// it was written under, not the prompt that arrived afterwards.
+fn lesson_title_of(book: &Book, repo: &str, row: &RepoBook) -> String {
+    let kept = if row.lesson || row.lesson_id.is_some() {
+        row.lesson_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+    } else {
+        None
+    };
+    let heard = match kept {
+        Some(title) => title.to_string(),
+        None => heard_title(book, repo, row),
+    };
+    title_from(&heard, repo)
+}
+
 /// The prompt the lesson and the claim use for `repo`. The book's prompt
 /// is that text only when it was recorded for this checkout.
 fn heard_title(book: &Book, repo: &str, row: &RepoBook) -> String {
@@ -3442,14 +3495,17 @@ fn stamp_touch(book: &mut Book, repo: &str, now: u64) {
     book.last_unix = now;
 }
 
-/// Keep the prompt on the repository row. The lesson and a later session
-/// read it from there. An empty prompt leaves a title that was already stored.
+/// Keep the prompt on the repository row. A later claim reads it from
+/// there. A lesson already written keeps the title it was stored under.
+/// An empty prompt leaves a title that was already stored.
 fn remember_title(book: &mut Book, repo: &str) {
     let prompt: String = collapse(&book.prompt).chars().take(4000).collect();
     if prompt.is_empty() || repo.is_empty() {
         return;
     }
-    book.repos.entry(repo.to_string()).or_default().title = Some(prompt);
+    let row = book.repos.entry(repo.to_string()).or_default();
+    hold_lesson_title(row);
+    row.title = Some(prompt);
 }
 
 fn title_from(prompt: &str, repo: &str) -> String {
@@ -5121,6 +5177,76 @@ mod tests {
 
     fn lock() -> crate::EnvLock {
         crate::test_env_lock()
+    }
+
+    /// A lesson already stored keeps the title it was written under when a
+    /// later prompt rewrites it. The pack closes the earlier lesson by id.
+    #[test]
+    fn a_rewritten_lesson_keeps_the_title_it_was_written_under() {
+        let _lock = lock();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        // SAFETY: lock() restores the environment when the test returns.
+        unsafe { std::env::set_var("XDG_STATE_HOME", &state) };
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "* TODO [#C] Add a slugify function\n:PROPERTIES:\n:ID:         probe-00aa\n:END:\n",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let old = head_sha(&repo_s).expect("head");
+        let new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let session = "jld5-title-session";
+        let now = unix_secs();
+        let mut book = Book {
+            prompt: "Add a slugify function".into(),
+            prompt_repo: repo_s.clone(),
+            prompt_unix: now,
+            last_unix: now,
+            ..Book::default()
+        };
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                title: Some("Add a slugify function".into()),
+                deeds: vec![old.clone()],
+                finished: true,
+                lesson: true,
+                lesson_id: Some("atom-old".into()),
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &book);
+
+        let (raw, call) = payload(
+            "UserPromptSubmit",
+            session,
+            Path::new(&repo_s),
+            serde_json::json!({"prompt": "Reword the message to say something else entirely"}),
+        );
+        let _ = observe(&raw, &call);
+        repoint_commits(&repo_s, &[(old, new)]);
+
+        let queued =
+            std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
+        assert!(
+            queued.contains("slugify"),
+            "the rewrite dropped the original title\n{queued}"
+        );
+        assert!(
+            !queued.contains("Reword"),
+            "the rewrite took the later prompt\n{queued}"
+        );
+        assert!(
+            queued.contains("atom-old"),
+            "the queued rewrite names nothing it closes\n{queued}"
+        );
     }
 
     /// willma-20261020f w4, w8 and w12: agy 1.4.3's `write_file` filed no
