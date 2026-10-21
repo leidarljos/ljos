@@ -1121,6 +1121,74 @@ fn doctor_flags_a_command_from_another_home() {
     assert!(literal.contains("onboard --harness codex"), "{literal}");
 }
 
+/// OpenCode expands `{env:HOME}` and leaves `$HOME`, `${HOME}`, `${env:HOME}`
+/// and `~/` as text. A file that exists under the real home is not proof
+/// that `$HOME/...` will run.
+#[test]
+fn doctor_leaves_dollar_home_literal_for_opencode() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    fs::create_dir_all(home.join(".config/opencode")).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let write = |command: &str| {
+        let doc = serde_json::json!({
+            "mcp": { "servers": { "ljos": { "command": [command] } } }
+        });
+        fs::write(
+            home.join(".config/opencode/opencode.json"),
+            serde_json::to_string(&doc).unwrap(),
+        )
+        .unwrap();
+    };
+    write("$HOME/.local/bin/ljos-mcp");
+    let literal = ljos_cli::cloud::missing_mcp_line().unwrap_or_default();
+    assert!(
+        literal.contains("$HOME/.local/bin/ljos-mcp does not exist"),
+        "{literal}"
+    );
+    write("{env:HOME}/.local/bin/ljos-mcp");
+    assert!(
+        ljos_cli::cloud::missing_mcp_line().is_none(),
+        "opencode expands {{env:HOME}}: {:?}",
+        ljos_cli::cloud::missing_mcp_line()
+    );
+    write("${env:HOME}/.local/bin/ljos-mcp");
+    let shell = ljos_cli::cloud::missing_mcp_line().unwrap_or_default();
+    assert!(
+        shell.contains("${env:HOME}/.local/bin/ljos-mcp does not exist"),
+        "{shell}"
+    );
+    write("~/.local/bin/ljos-mcp");
+    let tilde = ljos_cli::cloud::missing_mcp_line().unwrap_or_default();
+    assert!(
+        tilde.contains("~/.local/bin/ljos-mcp does not exist"),
+        "{tilde}"
+    );
+    fs::remove_file(home.join(".config/opencode/opencode.json")).unwrap();
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        serde_json::json!({
+            "mcpServers": { "ljos": { "command": "$HOME/.local/bin/ljos-mcp" } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(
+        ljos_cli::cloud::missing_mcp_line().is_none(),
+        "a shell harness still expands $HOME: {:?}",
+        ljos_cli::cloud::missing_mcp_line()
+    );
+}
+
 #[test]
 fn doctor_harness_advice_clears_after_running_onboard() {
     let _g = Guard::new();

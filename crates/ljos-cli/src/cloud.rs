@@ -264,10 +264,22 @@ struct McpFile {
     path: PathBuf,
     probe: McpProbe,
     advice: String,
-    expands_home: bool,
+    home: HomeExpand,
     /// Parse and read errors fail the row. Harness files are skipped when
     /// they are not the JSON this probe expects (Zed's settings are JSONC).
     strict: bool,
+}
+
+/// How a harness turns a command string into a path.
+///
+/// Codex stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
+/// A shell client expands `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}`
+/// and a leading `~/`.
+#[derive(Clone, Copy)]
+enum HomeExpand {
+    Literal,
+    Opencode,
+    Shell,
 }
 
 enum McpProbe {
@@ -348,7 +360,7 @@ fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let mut push =
-        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expands_home: bool| {
+        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, home: HomeExpand| {
             let kind = match &probe {
                 McpProbe::Json(pointer) => format!("json:{pointer}"),
                 McpProbe::Text(marker) => format!("text:{marker}"),
@@ -358,7 +370,7 @@ fn mcp_files() -> Vec<McpFile> {
                     path,
                     probe,
                     advice,
-                    expands_home,
+                    home,
                     strict,
                 });
             }
@@ -369,7 +381,7 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             "ljos onboard --harness cursor".into(),
-            true,
+            HomeExpand::Shell,
         );
     }
     if let Ok(home) = crate::home() {
@@ -378,19 +390,23 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             cursor_mcp_advice(),
-            true,
+            HomeExpand::Shell,
         );
         push(
             home.join(".claude.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             false,
             "ljos onboard --harness claude".into(),
-            true,
+            HomeExpand::Shell,
         );
     }
     for harness in harness_shapes() {
         let advice = format!("ljos onboard --harness {}", harness.name);
-        let expands_home = harness.name != "codex";
+        let home = match harness.name.as_str() {
+            "codex" => HomeExpand::Literal,
+            "opencode" | "opencode-v2" => HomeExpand::Opencode,
+            _ => HomeExpand::Shell,
+        };
         if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
             if !pointer.is_empty() {
                 push(
@@ -398,7 +414,7 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Json(pointer.clone()),
                     false,
                     advice.clone(),
-                    expands_home,
+                    home,
                 );
             }
         }
@@ -409,7 +425,7 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Text(marker.clone()),
                     false,
                     advice.clone(),
-                    expands_home,
+                    home,
                 );
             }
         }
@@ -674,12 +690,41 @@ fn parse_scalar(rest: &str) -> String {
     }
 }
 
-/// `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}` and a leading `~/` are
-/// the home directory at launch when the client expands them.
-fn expand_launch(command: &str, expands_home: bool) -> String {
-    if !expands_home {
-        return command.to_string();
+/// Substitute the home tokens this harness actually expands.
+fn expand_launch(command: &str, home: HomeExpand) -> String {
+    match home {
+        HomeExpand::Literal => command.to_string(),
+        HomeExpand::Opencode => expand_opencode_home(command),
+        HomeExpand::Shell => expand_shell_home(command),
     }
+}
+
+/// OpenCode substitutes `{env:HOME}` only. `$HOME`, `${HOME}`, `~/` and
+/// `${env:HOME}` stay text: the docs say shell expressions are not expanded.
+fn expand_opencode_home(command: &str) -> String {
+    let Ok(home) = crate::home() else {
+        return command.to_string();
+    };
+    let home = home.display().to_string();
+    let token = "{env:HOME}";
+    let mut out = String::new();
+    let mut rest = command;
+    while let Some(at) = rest.find(token) {
+        let shell_form = at > 0 && rest.as_bytes()[at - 1] == b'$';
+        if shell_form {
+            out.push_str(&rest[..at + token.len()]);
+        } else {
+            out.push_str(&rest[..at]);
+            out.push_str(&home);
+        }
+        rest = &rest[at + token.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}` and a leading `~/`.
+fn expand_shell_home(command: &str) -> String {
     let Ok(home) = crate::home() else {
         return command.to_string();
     };
@@ -700,7 +745,7 @@ fn expand_launch(command: &str, expands_home: bool) -> String {
 }
 
 fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
-    let command = expand_launch(&launch.command, file.expands_home);
+    let command = expand_launch(&launch.command, file.home);
     let found_path = command_path(&command, launch.env_path.as_deref());
     let search_path = launch.env_path.as_deref();
     let shell_path = if search_path.is_none() {
