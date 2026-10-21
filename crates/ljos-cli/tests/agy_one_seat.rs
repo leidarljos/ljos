@@ -376,6 +376,26 @@ fn an_old_antigravity_claim_does_not_keep_the_harness_id() {
     assert_eq!(state_of(&hab, "work-00ff"), "DONE");
 }
 
+/// A seat a person named after a harness is not that harness's seat. A
+/// server whose entry sets `LJOS_SEAT=claude` neither sits as the
+/// roster's only `claude-*` seat nor finishes the claim it holds.
+#[test]
+fn a_harness_id_does_not_finish_a_seat_named_after_it() {
+    let hab = habitat_with(&["claude-reviewer"], "claude-reviewer");
+    write_file_hook(&hab);
+    let held = "work-0001";
+    assert!(holder_of(&hab, held).starts_with("claude-reviewer@"));
+    let answer = mcp_finish_as(&hab, "claude", "claude");
+    let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();
+    let context = format!("{answer}\nbook.log:\n{log}");
+    assert!(!log.contains("sitting claude-reviewer"), "{context}");
+    assert_eq!(state_of(&hab, held), "STARTED", "{context}");
+    assert!(
+        holder_of(&hab, held).starts_with("claude-reviewer@"),
+        "{context}"
+    );
+}
+
 /// A roster that lists `antigravity` keeps it: the hooks and the server
 /// both sit as the harness id the person named.
 #[test]
