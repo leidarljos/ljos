@@ -40069,8 +40069,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(seen.load(Ordering::SeqCst), 1 + BUSY_TRIES as usize);
     }
 
-    /// Answers one scratch pack: `down` fails the listing, `refuse` rejects
-    /// kind `message`, `keep` accepts the kind and refuses the empty probe.
+    /// Answers one scratch pack.
+    ///
+    /// `down` fails the listing. `refuse` and `attach` report packset
+    /// 0.12.1. `reject` reports no version: an empty message is the tool
+    /// dump every packset returns before it looks at the kind, and any
+    /// other message is `unknown atom kind`. `keep` and `unversioned`
+    /// accept the kind and refuse the level probe.
     fn serve_pack(kind: &'static str) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -40084,7 +40089,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 let (code, body): (u16, &str) = if line.starts_with("GET /v1/status") {
                     match kind {
                         "refuse" | "attach" => (200, r#"{"version":"0.12.1"}"#),
-                        "unversioned" => (200, r#"{}"#),
+                        "unversioned" | "reject" => (200, r#"{}"#),
                         _ => (200, r#"{"version":"0.13.0"}"#),
                     }
                 } else if line.starts_with("GET /v1/atoms") {
@@ -40100,11 +40105,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     }
                 } else if line.starts_with("POST /v1/atoms") {
                     count.fetch_add(1, Ordering::SeqCst);
-                    if kind == "attach" && req.contains("\"text\":\"\"") {
+                    if kind == "reject" && req.contains("\"text\":\"\"") {
+                        // What every packset answers an empty message, before the kind.
+                        (400, r#"{"error":"tool dump is attach, not an atom"}"#)
+                    } else if kind == "reject" {
+                        (400, r#"{"error":"unknown atom kind: message"}"#)
+                    } else if kind == "attach" && req.contains("\"text\":\"\"") {
                         // What packset 0.12.1 answers an empty message.
                         (400, r#"{"error":"tool dump is attach, not an atom"}"#)
                     } else if kind == "refuse" || kind == "attach" {
                         (400, r#"{"error":"unknown atom kind: message"}"#)
+                    } else if req.contains("\"level\":\"nope\"") {
+                        (400, r#"{"error":"unknown atom level: nope"}"#)
                     } else if req.contains("\"text\":\"\"") {
                         (400, r#"{"error":"atom text is required"}"#)
                     } else {
@@ -40225,6 +40237,25 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "inbox: nothing unread\n"
         );
         assert_eq!(posts.load(Ordering::SeqCst), 1, "one probe");
+    }
+
+    /// No version, and the empty probe is the tool dump every packset
+    /// returns before the kind. A message that is not empty is refused
+    /// as an unknown kind. The inbox names that refusal and posts nothing
+    /// that would be kept.
+    #[test]
+    fn an_unversioned_writer_that_rejects_the_kind_is_not_an_empty_inbox() {
+        let _g = env_guard();
+        let (url, posts) = serve_pack("reject");
+        let _held = PackUrl::set(&url);
+        let err = super::mail::inbox(false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("inbox:"), "{text}");
+        assert!(text.contains("does not keep mail"), "{text}");
+        assert!(text.contains("kind message"), "{text}");
+        assert!(text.contains(super::mail::MAIL_PACKSET), "{text}");
+        assert!(!text.contains("nothing unread"), "{text}");
+        assert_eq!(posts.load(Ordering::SeqCst), 1, "the kind was probed");
     }
 
     #[test]

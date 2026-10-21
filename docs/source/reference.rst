@@ -103,8 +103,8 @@ Command line
 | ``send SEAT TEXT... [--group NAME] [--interrupt] [--issue ID]``                                                                 | pack                      | write to one seat, or with ``--group`` to the other members of that group; ``--interrupt`` leads the next prompt; ``--issue`` threads the message on that vissue issue and the atom takes the issue's scope, so ``ljos sync`` carries it in    |
 |                                                                                                                                 |                           | that repository's sealed log                                                                                                                                                                                                                   |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ``inbox [--all]``                                                                                                               | pack                      | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; ``ljos hook --prompt`` writes a receipt for each message it shows; a pack that does not answer is an error; ``--all``        |
-|                                                                                                                                 |                           | includes mail already read                                                                                                                                                                                                                     |
+| ``inbox [--all]``                                                                                                               | pack                      | mail this seat has not read, then receipts on what it sent that it has not been shown; listing writes no receipt; ``ljos hook --prompt`` writes a receipt for each message it shows; a pack that does not answer is an error, and so is a      |
+|                                                                                                                                 |                           | writer that refuses kind ``message``; ``--all`` includes mail already read                                                                                                                                                                     |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | ``read ID``                                                                                                                     | pack                      | write a read receipt for one message; a second read writes nothing                                                                                                                                                                             |
 +---------------------------------------------------------------------------------------------------------------------------------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -193,11 +193,23 @@ it was sent to; ``--new-seat`` writes to one that has not started yet.
 ``--issue ID`` threads the message on that vissue issue, and the atom takes
 the issue's scope so ``ljos sync`` carries it in that repository's sealed
 log. ``inbox`` lists unread mail and writes no receipt. A pack that does
-not answer is an error. ``read ID`` writes one receipt. ``reply ID TEXT``
+not answer is an error. A writer that refuses kind ``message`` is an error
+too: the command exits non-zero, names packset 0.13.0, and does not print
+an empty inbox. When the writer reports a version, the error names that
+version. ``read ID`` writes one receipt. ``reply ID TEXT``
 answers the sender and keeps the issue. ``group NAME --add SEAT`` records
-a member. ``ljos hook --prompt`` writes a receipt for each message it
-shows. When the pack does not answer, the hook prints ``mail could not be checked``
-and still exits 0. A shell seat polls ``ljos inbox``.
+a member. ``ljos hook --prompt`` shows at most eight unread messages,
+interrupts first, and writes one receipt for each message it shows.
+The rest stay unread, and the note says how many remain.
+The receipt is an atom whose text is four lines: ``read ID``, ``by SEAT``,
+``at STAMP`` and ``msg ID``. The sender's inbox prints that receipt once,
+as the message id, the reader and the stamp. A second prompt writes
+nothing. A shell writes the receipt before the hook exits. Cursor holds
+the note: the prompt prints nothing and writes no receipt, and the
+receipt is written when the note is delivered, on ``postToolUse`` as
+``additional_context``, or on ``Stop`` when the turn ran no tool, as
+``followup_message``. When the pack does not answer, the hook prints
+``mail could not be checked`` and still exits 0. A shell seat polls ``ljos inbox``.
 
 ``send`` and ``reply`` start the recipient's wake, when it has one, after the message is written.
 ``ljos wake --command CMD`` runs ``CMD`` under ``sh -c`` with ``LJOS_SEAT`` set to the seat, so ``ljos inbox`` in it reads that seat's mail.

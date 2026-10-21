@@ -4,7 +4,9 @@
 //! sets a wake command; a send starts it, and the command reads the
 //! recipient's inbox. Interrupt mail holds a stop in the shape Claude Code
 //! and Cursor send, once. A seat the pack has never heard from is refused
-//! with the seat it most likely meant.
+//! with the seat it most likely meant. A second test walks the whole
+//! exchange: group, send, inbox, read, reply, interrupt, and the receipt
+//! `ljos hook --prompt` writes.
 
 use std::io::Write;
 use std::net::TcpListener;
@@ -311,4 +313,304 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
     let follow = answer["followup_message"].as_str().unwrap_or_default();
     assert!(follow.contains("rebase is off, merge develop"), "{answer}");
     eprintln!("measure: Cursor stop answer: {answer}");
+}
+
+fn sent_id(out: &Output) -> String {
+    text(out)
+        .lines()
+        .find_map(|line| line.strip_prefix("sent "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn show(seat: &str, args: &[&str], out: &Output) {
+    eprintln!(
+        "--- {seat} ljos {} (exit {:?}) ---\n{}",
+        args.join(" "),
+        out.status.code(),
+        text(out)
+    );
+}
+
+fn atoms(port: u16) -> Value {
+    use std::io::{Read, Write};
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).expect("atoms");
+    sock.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    write!(
+        sock,
+        "GET /v1/atoms?workspace=seat&embedding=omit HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write");
+    let mut buf = Vec::new();
+    sock.read_to_end(&mut buf).expect("read");
+    let text = String::from_utf8_lossy(&buf);
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("");
+    serde_json::from_str(body).unwrap_or_else(|err| panic!("{err}: {body}"))
+}
+
+fn receipt_for<'a>(pack: &'a Value, msg: &str) -> Vec<&'a Value> {
+    pack["atoms"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|atom| {
+            atom["kind"].as_str() == Some("receipt")
+                && atom["entities"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|e| e.as_str() == Some(&format!("receipt:{msg}")))
+        })
+        .collect()
+}
+
+/// Two seats on one pack: send, inbox, read, reply, an interrupt, a group,
+/// and the receipt a prompt hook writes. A shell prompt writes it before
+/// the command exits. Cursor holds the note and writes it when the next
+/// tool result delivers the note, or on Stop when the turn ran no tool.
+#[test]
+fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {
+    let (home, _daemon) = home();
+    const ALICE: &str = "alice";
+    const BOB: &str = "bob";
+
+    let run = |seat: &str, args: &[&str], stdin: Option<&str>| {
+        let out = home.ljos(seat, args, stdin);
+        show(seat, args, &out);
+        out
+    };
+
+    let added = run(ALICE, &["group", "ops", "--add", ALICE, "--add", BOB], None);
+    assert!(added.status.success(), "{}", text(&added));
+    assert!(
+        text(&added).contains("added alice to ops"),
+        "{}",
+        text(&added)
+    );
+    assert!(
+        text(&added).contains("added bob to ops"),
+        "{}",
+        text(&added)
+    );
+    let listed = run(BOB, &["group", "ops"], None);
+    assert!(listed.status.success(), "{}", text(&listed));
+    assert!(text(&listed).contains("ops\talice"), "{}", text(&listed));
+    assert!(text(&listed).contains("ops\tbob"), "{}", text(&listed));
+
+    let sent = run(ALICE, &["send", BOB, "the build is red"], None);
+    assert!(sent.status.success(), "{}", text(&sent));
+    let id = sent_id(&sent);
+    assert!(!id.is_empty(), "{}", text(&sent));
+
+    let bob = run(BOB, &["inbox"], None);
+    assert!(bob.status.success(), "{}", text(&bob));
+    assert!(text(&bob).contains(&id), "{}", text(&bob));
+    assert!(text(&bob).contains("the build is red"), "{}", text(&bob));
+    assert!(!text(&bob).contains("receipt\t"), "{}", text(&bob));
+    let quiet = run(ALICE, &["inbox"], None);
+    assert_eq!(text(&quiet).trim(), "inbox: nothing unread");
+
+    let read = run(BOB, &["read", &id], None);
+    assert!(read.status.success(), "{}", text(&read));
+    assert!(
+        text(&read).contains(&format!("read {id}")),
+        "{}",
+        text(&read)
+    );
+    assert!(!text(&read).contains("already"), "{}", text(&read));
+    let again = run(BOB, &["read", &id], None);
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(text(&again).contains("already"), "{}", text(&again));
+
+    let saw = run(ALICE, &["inbox"], None);
+    assert!(saw.status.success(), "{}", text(&saw));
+    assert!(
+        text(&saw).contains(&format!("receipt\t{id}\t{BOB}\t")),
+        "{}",
+        text(&saw)
+    );
+
+    let reply = run(BOB, &["reply", &id, "looking"], None);
+    assert!(reply.status.success(), "{}", text(&reply));
+    let reply_id = sent_id(&reply);
+    assert!(
+        text(&reply).contains(&format!("reply {id}")),
+        "{}",
+        text(&reply)
+    );
+    let back = run(ALICE, &["inbox"], None);
+    assert!(text(&back).contains(&reply_id), "{}", text(&back));
+    assert!(text(&back).contains("looking"), "{}", text(&back));
+    assert!(
+        text(&back).contains(&format!("reply:{id}")) || text(&back).contains("reply"),
+        "{}",
+        text(&back)
+    );
+    let took = run(ALICE, &["read", &reply_id], None);
+    assert!(took.status.success(), "{}", text(&took));
+
+    let urgent = run(
+        ALICE,
+        &["send", BOB, "stop the release", "--interrupt"],
+        None,
+    );
+    assert!(urgent.status.success(), "{}", text(&urgent));
+    let urgent_id = sent_id(&urgent);
+    let hot = run(BOB, &["inbox"], None);
+    assert!(text(&hot).starts_with(&urgent_id), "{}", text(&hot));
+    assert!(text(&hot).contains("interrupt"), "{}", text(&hot));
+    assert!(text(&hot).contains("stop the release"), "{}", text(&hot));
+
+    let prompt = run(BOB, &["hook", "--prompt"], Some("what should I do next\n"));
+    assert!(prompt.status.success(), "{}", text(&prompt));
+    let shown = String::from_utf8_lossy(&prompt.stdout);
+    assert!(shown.contains("stop the release"), "{shown}");
+    assert!(
+        shown.contains(&format!("! {urgent_id} from {ALICE}")),
+        "{shown}"
+    );
+    let unread = run(BOB, &["inbox"], None);
+    assert!(
+        text(&unread).contains("nothing unread"),
+        "{}",
+        text(&unread)
+    );
+    let all = run(BOB, &["inbox", "--all"], None);
+    assert!(text(&all).contains(&urgent_id), "{}", text(&all));
+    assert!(text(&all).contains("read"), "{}", text(&all));
+
+    let pack = atoms(home.port);
+    let receipts = receipt_for(&pack, &urgent_id);
+    assert_eq!(receipts.len(), 1, "one receipt atom: {pack}");
+    let body = receipts[0]["text"].as_str().unwrap_or("");
+    assert!(
+        body.starts_with(&format!("read {urgent_id}\nby {BOB}\n")),
+        "{body}"
+    );
+    assert!(body.contains("\nat "), "{body}");
+    assert!(body.contains("\nmsg "), "{body}");
+    let entities: Vec<&str> = receipts[0]["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        entities.contains(&format!("to:{ALICE}").as_str()),
+        "{entities:?}"
+    );
+    assert!(
+        entities.contains(&format!("from:{BOB}").as_str()),
+        "{entities:?}"
+    );
+    assert!(
+        entities.contains(&format!("receipt:{urgent_id}").as_str()),
+        "{entities:?}"
+    );
+
+    let told = run(ALICE, &["inbox"], None);
+    assert!(
+        text(&told).contains(&format!("receipt\t{urgent_id}\t{BOB}\t")),
+        "{}",
+        text(&told)
+    );
+    let second = run(BOB, &["hook", "--prompt"], Some("anything else to read\n"));
+    assert!(second.status.success(), "{}", text(&second));
+    assert!(
+        !String::from_utf8_lossy(&second.stdout).contains("stop the release"),
+        "{}",
+        text(&second)
+    );
+    let pack = atoms(home.port);
+    assert_eq!(
+        receipt_for(&pack, &urgent_id).len(),
+        1,
+        "a second prompt writes no second receipt"
+    );
+
+    let plain = run(ALICE, &["send", BOB, "the log is in the usual place"], None);
+    assert!(plain.status.success(), "{}", text(&plain));
+    let plain_id = sent_id(&plain);
+    let held = serde_json::json!({
+        "cursor_version": "3.2.0",
+        "conversation_id": "conv-mail",
+        "hook_event_name": "beforeSubmitPrompt",
+        "prompt": "check the mail",
+    })
+    .to_string();
+    let cursor = run(BOB, &["hook"], Some(&held));
+    assert!(cursor.status.success(), "{}", text(&cursor));
+    assert!(
+        !String::from_utf8_lossy(&cursor.stdout).contains("the log is in the usual place"),
+        "cursor shows the prompt note later: {}",
+        text(&cursor)
+    );
+    let pack = atoms(home.port);
+    assert!(
+        receipt_for(&pack, &plain_id).is_empty(),
+        "the prompt hook held the note and wrote no receipt: {pack}"
+    );
+
+    let delivered = serde_json::json!({
+        "cursor_version": "3.2.0",
+        "conversation_id": "conv-mail",
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_input": {"command": "ls"},
+    })
+    .to_string();
+    let tool = run(BOB, &["hook"], Some(&delivered));
+    assert!(tool.status.success(), "{}", text(&tool));
+    assert!(
+        String::from_utf8_lossy(&tool.stdout).contains("the log is in the usual place"),
+        "{}",
+        text(&tool)
+    );
+    let pack = atoms(home.port);
+    assert_eq!(
+        receipt_for(&pack, &plain_id).len(),
+        1,
+        "the tool result writes the receipt: {pack}"
+    );
+
+    let later = run(ALICE, &["send", BOB, "merge after the tag"], None);
+    assert!(later.status.success(), "{}", text(&later));
+    let later_id = sent_id(&later);
+    let ask = serde_json::json!({
+        "cursor_version": "3.2.0",
+        "conversation_id": "conv-stop",
+        "hook_event_name": "beforeSubmitPrompt",
+        "prompt": "one more look",
+    })
+    .to_string();
+    let asked = run(BOB, &["hook"], Some(&ask));
+    assert!(asked.status.success(), "{}", text(&asked));
+    let pack = atoms(home.port);
+    assert!(receipt_for(&pack, &later_id).is_empty(), "{pack}");
+    let stop = serde_json::json!({
+        "hook_event_name": "stop",
+        "cursor_version": "3.2.0",
+        "conversation_id": "conv-stop",
+        "generation_id": "gen-stop",
+        "status": "completed",
+        "loop_count": 0,
+    })
+    .to_string();
+    let stopped = run(BOB, &["hook"], Some(&stop));
+    assert!(stopped.status.success(), "{}", text(&stopped));
+    assert!(
+        String::from_utf8_lossy(&stopped.stdout).contains("merge after the tag"),
+        "{}",
+        text(&stopped)
+    );
+    let pack = atoms(home.port);
+    assert_eq!(
+        receipt_for(&pack, &later_id).len(),
+        1,
+        "stop delivers the held note and writes the receipt: {pack}"
+    );
 }
