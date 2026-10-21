@@ -11105,8 +11105,11 @@ fn client_or_queue(prefix: &str, kind: &str, text: &str, issue: &str) -> Result<
 /// logbook is a separate write. The memory copy is cut to copies the pack's
 /// atom gate accepts, so a long sentence or a third sentence is stored, and
 /// a pack that does not know kind `note` takes the same text as a `summary`.
-/// A pack that is down or answers 401 keeps those copies queued. A refusal
-/// is not queued. The caller keeps the logbook note either way.
+/// The same words on another ticket are another memory. A pack that answers
+/// with the record it already holds for a different ticket is given the note
+/// again under this ticket's set. A pack that is down or answers 401 keeps
+/// those copies queued. A refusal is not queued. The caller keeps the
+/// logbook note either way.
 ///
 /// # Errors
 ///
@@ -11199,7 +11202,26 @@ fn write_note_with(
 }
 
 fn post_note_one(client: &PacksetClient, issue: &str, text: &str) -> Result<Value> {
-    let atom = progress_note_atom(issue, text, &client.workspace())?;
+    let posted = post_note_kind(
+        client,
+        progress_note_atom(issue, text, &client.workspace())?,
+    )?;
+    if kept_for_issue(&posted, issue) {
+        return Ok(posted);
+    }
+    // The same text, kind and set are one memory on a pack that does not
+    // read `issue`. The set is part of that key, so this ticket's note is
+    // stored again where the first ticket's record does not match.
+    let mut again = progress_note_atom(issue, text, &client.workspace())?;
+    again["set"] = Value::String(note_set(issue));
+    let posted = post_note_kind(client, again)?;
+    if kept_for_issue(&posted, issue) {
+        return Ok(posted);
+    }
+    bail!("note: the pack returned another ticket's memory");
+}
+
+fn post_note_kind(client: &PacksetClient, atom: Value) -> Result<Value> {
     let first = with_writer(|| admit::write_agent_one(client, atom.clone()));
     match first {
         Err(e) if note_kind_unknown(&e) => {
@@ -11211,6 +11233,46 @@ fn post_note_one(client: &PacksetClient, issue: &str, text: &str) -> Result<Valu
     }
 }
 
+/// Whether the pack's answer is this ticket's memory.
+///
+/// A body that names no issue is the record just stored: the id is this
+/// post's. A body that names another ticket is the memory that ticket
+/// already holds, returned because the text matched.
+fn kept_for_issue(body: &Value, issue: &str) -> bool {
+    let issue = issue.trim();
+    if let Some(got) = body
+        .get("issue")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|got| !got.is_empty())
+    {
+        return got == issue;
+    }
+    let Some(tags) = body.get("entities").and_then(Value::as_array) else {
+        return true;
+    };
+    let want = format!("issue:{issue}");
+    let tagged = tags.iter().any(|tag| tag.as_str() == Some(want.as_str()));
+    let other = tags.iter().any(|tag| {
+        tag.as_str()
+            .is_some_and(|tag| tag.starts_with("issue:") && tag != want)
+    });
+    tagged || !other
+}
+
+/// A set name the pack accepts for `issue`.
+///
+/// The ticket id when that is a legal set name. Otherwise a short hash, so
+/// a writer that keeps claims apart by set still stores one note per ticket.
+fn note_set(issue: &str) -> String {
+    let raw = issue.trim().to_ascii_lowercase();
+    if let Ok(name) = packset_core::set_name::check(&raw) {
+        return name;
+    }
+    let hashed = format!("n{}", &work_id(issue)[..31]);
+    packset_core::set_name::check(&hashed).unwrap_or(hashed)
+}
+
 /// Whether a memory the pack did not take should wait for it: the pack is
 /// off, missing, not answering, or does not know this seat's token. A
 /// refusal (an HTTP 4xx other than 401, 408 or 429, or the pack's prose
@@ -11220,7 +11282,10 @@ fn post_note_one(client: &PacksetClient, issue: &str, text: &str) -> Result<Valu
 #[must_use]
 pub fn note_can_wait(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}");
-    if text.contains("empty text is not a memory") || text.contains("empty text is not a claim") {
+    if text.contains("empty text is not a memory")
+        || text.contains("empty text is not a claim")
+        || text.contains("another ticket's memory")
+    {
         return false;
     }
     const FINAL: &[&str] = &[
@@ -34884,6 +34949,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let empty = super::progress_note_atom("probe-0001", " ", "ws").unwrap_err();
         assert!(!super::note_can_wait(&empty));
+        let folded = anyhow::anyhow!("note: the pack returned another ticket's memory");
+        assert!(
+            !super::note_can_wait(&folded),
+            "another ticket's memory is not queued"
+        );
         let prose = anyhow::anyhow!(
             "note: POST /v1/atoms failed: 400: atom has 3 sentences; one claim is at most 2"
         );
@@ -34904,6 +34974,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             super::note_can_wait(&unnamed),
             "the words alone are not a refusal"
         );
+    }
+
+    /// A pack that echoes another ticket's record is not this note. A body
+    /// that names no issue is the record this post stored.
+    #[test]
+    fn a_memory_named_for_another_ticket_is_not_this_note() {
+        let ours = serde_json::json!({"id": "1", "issue": "ljos-t1aa"});
+        let theirs = serde_json::json!({"id": "1", "issue": "ljos-t2bb"});
+        let unnamed = serde_json::json!({"id": "1", "kind": "note"});
+        let tagged = serde_json::json!({"entities": ["seat:saddle", "issue:ljos-t1aa"]});
+        let other_tag = serde_json::json!({"entities": ["issue:ljos-t2bb"]});
+        assert!(super::kept_for_issue(&ours, "ljos-t1aa"));
+        assert!(!super::kept_for_issue(&theirs, "ljos-t1aa"));
+        assert!(super::kept_for_issue(&unnamed, "ljos-t1aa"));
+        assert!(super::kept_for_issue(&tagged, "ljos-t1aa"));
+        assert!(!super::kept_for_issue(&other_tag, "ljos-t1aa"));
+    }
+
+    /// The set a second post uses is a name the pack accepts, including
+    /// for a ticket id that is not itself a set name.
+    #[test]
+    fn a_note_set_is_a_name_the_pack_accepts() {
+        assert_eq!(super::note_set("ljos-l9qq"), "ljos-l9qq");
+        assert_eq!(super::note_set(" LJOS-L9QQ "), "ljos-l9qq");
+        let hashed = super::note_set("9aaa-bbbb");
+        assert!(packset_core::set_name::check(&hashed).is_ok(), "{hashed}");
+        assert_ne!(hashed, super::note_set("9aaa-bbbc"));
+        let long = format!("ljos-{}", "a".repeat(40));
+        let name = super::note_set(&long);
+        assert!(packset_core::set_name::check(&name).is_ok(), "{name}");
     }
 
     /// With the pack off, a flush sends nothing and keeps every note.
