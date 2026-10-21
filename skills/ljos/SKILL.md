@@ -500,8 +500,9 @@ under equal weights is a count; under calibrated rows it is not.
   remote's owner is not in it. A merge pushed to your own repository runs.
   `gh pr merge` with red or pending checks is refused. A head sha with no
   CI checks asks, and that ask names the sha and a local evidence record
-  when one exists for it. Every Cursor Bugbot thread must be resolved or
-  replied to. A commit that carries a
+  when one exists for it. A fine-grained token with no Checks permission
+  uses the REST fallback when the rollup read is denied. Every Cursor
+  Bugbot thread must be resolved or replied to. A commit that carries a
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.
