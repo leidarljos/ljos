@@ -1,7 +1,7 @@
 //! Record schema v1: questions and ballots, signed as canonical JSON.
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, FixedOffset, Timelike};
+use chrono::{DateTime, FixedOffset};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -438,12 +438,31 @@ fn validate_voter_id(voter: &str) -> Result<()> {
 }
 
 fn parse_hour_timestamp(text: &str) -> Result<DateTime<FixedOffset>> {
-    let parsed = DateTime::parse_from_rfc3339(text)
-        .with_context(|| format!("timestamp `{text}` is not RFC 3339"))?;
-    if parsed.minute() != 0 || parsed.second() != 0 || parsed.nanosecond() != 0 {
-        bail!("timestamp `{text}` is not hour precision");
+    // Local offsets and subseconds are distinct byte strings for one
+    // instant, and each would mint its own ballot id. The plain layer
+    // accepts a single UTC hour form.
+    if !utc_hour_shape(text) {
+        bail!("timestamp `{text}` must be YYYY-MM-DDTHH:00:00Z");
     }
-    Ok(parsed)
+    DateTime::parse_from_rfc3339(text)
+        .with_context(|| format!("timestamp `{text}` must be YYYY-MM-DDTHH:00:00Z"))
+}
+
+fn utc_hour_shape(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 20
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[16] == b':'
+        && b[19] == b'Z'
+        && &b[14..16] == b"00"
+        && &b[17..19] == b"00"
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[11..13].iter().all(u8::is_ascii_digit)
 }
 
 fn run_id_of(voter: &str) -> Option<&str> {
@@ -738,6 +757,42 @@ mod tests {
 
     fn err_chain(err: &anyhow::Error) -> String {
         format!("{err:#}")
+    }
+
+    #[test]
+    fn timestamps_must_be_utc_hours() {
+        for bad in [
+            "2026-10-21T10:00:00+05:30",
+            "2026-10-21T04:00:00-05:00",
+            "2026-10-21T10:00:00.000Z",
+            "2026-10-21t10:00:00z",
+            "2026-10-21 10:00:00Z",
+            "2026-10-21T10:30:00Z",
+        ] {
+            let err =
+                sign_entry(ballot_entry("alpha/seat-a", "accept", bad), &key(8)).expect_err(bad);
+            let text = err_chain(&err);
+            assert!(
+                text.contains("YYYY-MM-DDTHH:00:00Z"),
+                "{bad} was accepted or the error hid the form: {text}"
+            );
+        }
+        let mut opened = question_entry();
+        let Entry::Question(question) = &mut opened.entry else {
+            panic!("question");
+        };
+        question.opened_at = "2026-10-21T09:00:00+00:00".to_string();
+        let err = sign_entry(opened, &key(8)).expect_err("offset opened_at");
+        assert!(
+            err_chain(&err).contains("YYYY-MM-DDTHH:00:00Z"),
+            "{}",
+            err_chain(&err)
+        );
+        sign_entry(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            &key(8),
+        )
+        .expect("utc hour");
     }
 
     /// Reserved names and any key the signature does not cover are refused
