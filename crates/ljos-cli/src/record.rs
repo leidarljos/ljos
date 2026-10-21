@@ -177,12 +177,15 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
         ..CheckReport::default()
     };
     let (mut pins, pin_source) = crate::ballot_sig::pins_for_check()?;
+    let tracker_pins = pins.clone();
     let mut ballots = Vec::new();
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
             Entry::Question(question) => {
                 report.questions += 1;
+                observe_seat_pin(&tracker_pins, &question.opened_by, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(
                     &mut pins,
                     &question.opened_by,
@@ -192,6 +195,8 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
             }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
+                observe_seat_pin(&tracker_pins, &ballot.voter, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
                 ballots.push(ballot.clone());
@@ -200,6 +205,23 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     }
     report.questions_with_live_ballots = tally(&ballots)?.len();
     Ok(report)
+}
+
+fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
+    let Some((_, seat_or_run)) = split_voter(voter) else {
+        return Ok(());
+    };
+    if seat_or_run.starts_with("run-") {
+        return Ok(());
+    }
+    if let Some(seat_key) = tracker_pins.get(seat_or_run).filter(|pinned| *pinned != key) {
+        bail!(
+            "{voter} is pinned through seat {seat_or_run} to key {}…, got {}…",
+            &seat_key[..12.min(seat_key.len())],
+            &key[..12.min(key.len())]
+        );
+    }
+    Ok(())
 }
 
 /// Validate every `.json` entry under `dir`.
@@ -1381,6 +1403,32 @@ mod tests {
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("duplicate pin voter");
         assert!(
             err_chain(&err).contains("duplicate"),
+            "{}",
+            err_chain(&err)
+        );
+    }
+
+    #[test]
+    fn a_seat_voter_must_match_the_tracker_seat_pin() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let entry = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let line = format!("seat-a {}\n", pinned.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
+        assert!(
+            err_chain(&err).contains("seat-a"),
             "{}",
             err_chain(&err)
         );
