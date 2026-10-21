@@ -5237,6 +5237,10 @@ mod tests {
             !queued.contains("Reword"),
             "the rewrite took the later prompt\n{queued}"
         );
+        assert!(
+            queued.contains("atom-old"),
+            "the queued rewrite names nothing it closes\n{queued}"
+        );
     }
 
     /// willma-20261020f w4, w8 and w12: agy 1.4.3's `write_file` filed no
