@@ -467,6 +467,13 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
                 && said.contains(session),
             "{persona}: {said}"
         );
+        assert!(
+            said.contains(
+                "Each persona brief goes to its own subagent or run, \
+                 which casts `ljos vote --as NAME` itself"
+            ),
+            "{persona}: {said}"
+        );
     }
     let other = world.ljos(
         "clerk",
@@ -1117,10 +1124,7 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
         said.contains("already cast") && said.contains(&format!("({parent}:agent-a1)")),
         "{said}"
     );
-    assert!(
-        said.contains("Each reviewer votes from its own subagent or run"),
-        "{said}"
-    );
+    assert!(said.contains(ljos_cli::panel_gate::OWN_BALLOT), "{said}");
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
