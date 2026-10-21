@@ -17,6 +17,7 @@ const EVERY_TOOL: &[&str] = &[
     "ljos_start",
     "ljos_guard_check",
     "ljos_file",
+    "ljos_options",
     "ljos_note",
     "ljos_recall",
     "ljos_sitting",
