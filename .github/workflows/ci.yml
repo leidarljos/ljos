@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [develop, main, mail-20261020, l0-admission-20261020]
+    branches: ['**']
   pull_request:
     branches: [develop, main]
   workflow_dispatch:
