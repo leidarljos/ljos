@@ -29974,7 +29974,10 @@ mod tests {
         assert_eq!(lock_path, repo.join(TRACKER_LOCK));
         let held = tracker_commit_lock(&arm);
         assert!(held.0.is_some(), "the lock is taken in the checkout root");
-        assert_eq!(commit_paths(&arm, &["kconfig"], "arm update"), PathCommit::Made);
+        assert_eq!(
+            commit_paths(&arm, &["kconfig"], "arm update"),
+            PathCommit::Made
+        );
 
         let cwd = arm.display().to_string();
         assert!(
@@ -30034,7 +30037,10 @@ mod tests {
         assert_eq!(lock_path, home.join(TRACKER_LOCK));
         let held = tracker_commit_lock(&home);
         assert!(held.0.is_some(), "dotfiles checkout still locks");
-        assert_eq!(commit_paths(&home, &[".vimrc"], "dot update"), PathCommit::Made);
+        assert_eq!(
+            commit_paths(&home, &[".vimrc"], "dot update"),
+            PathCommit::Made
+        );
         let cwd = home.display().to_string();
         assert!(
             gate_push(
