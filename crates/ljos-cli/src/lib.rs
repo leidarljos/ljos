@@ -27,6 +27,7 @@ pub mod jev;
 pub mod mail;
 pub mod memories;
 pub mod note_queue;
+pub mod pack_copy;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
@@ -10790,6 +10791,18 @@ pub fn add_entities(atom: &mut Value, more: impl IntoIterator<Item = String>) {
     atom["entities"] = Value::Array(list);
 }
 
+/// The line a log prints for a failed `POST /v1/atoms`. The pack's status
+/// and body are in that line. The original error stays the source, so a
+/// refusal can still be told from a pack that did not answer.
+pub(crate) fn with_post_failure(prefix: &str, err: anyhow::Error) -> anyhow::Error {
+    let why = format!("{err:#}");
+    if why.contains(prefix) {
+        err
+    } else {
+        err.context(format!("{prefix}: {why}"))
+    }
+}
+
 /// POST one explicit claim. Callers pass Remember/Prefer only.
 pub fn post_claim(
     client: &PacksetClient,
@@ -10816,7 +10829,8 @@ fn post_claim_horizon(
     stamp_horizon(&mut atom, kind, trimmed, transient);
     admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
     let posted = with_writer(|| {
-        admit::post_kept(client, &atom).with_context(|| format!("{label}: POST /v1/atoms failed"))
+        admit::post_kept(client, &atom)
+            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
     })?;
     admit::satisfy_text(trimmed);
     Ok(posted)
@@ -10836,23 +10850,21 @@ pub fn packset_write_agent(
     persona: Option<&str>,
     transient: Option<bool>,
 ) -> Result<Value> {
-    let client = pack()?;
-    let workspace = client.workspace();
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = client_or_queue(&prefix, kind, trimmed, "")?;
+    let workspace = client.workspace();
     let mut atom = atom_body(kind, trimmed, &workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
     }
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    store_agent_atom(&client, atom, &prefix)
 }
 
 /// The entity a claim in the person's own words carries. The prompt hook
@@ -10952,22 +10964,25 @@ pub fn packset_write_mcp(
     persona: Option<&str>,
     transient: Option<bool>,
 ) -> Result<Value> {
-    let client = pack()?;
     let basis = Basis::of(text);
+    let kind = atom_kind(label)?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = if basis == Basis::Agent {
+        client_or_queue(&prefix, kind, text.trim(), "")?
+    } else {
+        pack()?
+    };
     let atom = mcp_claim_atom(label, text, &client.workspace(), persona, transient, basis)?;
     match basis {
         Basis::Person => {
             let posted = with_writer(|| {
                 admit::post_kept(&client, &atom)
-                    .with_context(|| format!("{label}: POST /v1/atoms failed"))
+                    .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
             })?;
             admit::satisfy_text(text.trim());
             Ok(posted)
         }
-        Basis::Agent => with_writer(|| {
-            admit::write_agent(&client, atom.clone())
-                .with_context(|| format!("{label}: POST /v1/atoms failed"))
-        }),
+        Basis::Agent => store_agent_atom(&client, atom, &prefix),
     }
 }
 
@@ -10990,7 +11005,8 @@ pub(crate) fn packset_write_agent_sourced(
     command: &str,
     issue: &str,
 ) -> Result<Value> {
-    let client = pack()?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = client_or_queue(&prefix, "lesson", text, issue)?;
     let atom = agent_sourced_atom(
         label,
         text,
@@ -11001,10 +11017,7 @@ pub(crate) fn packset_write_agent_sourced(
         command,
         issue,
     )?;
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    store_agent_atom(&client, atom, &prefix)
 }
 
 /// The atom [`packset_write_agent_sourced`] posts. Split out so a test can
@@ -11042,50 +11055,193 @@ fn agent_sourced_atom(
     Ok(atom)
 }
 
+/// What `ljos note` did with the memory copy. The logbook note is a
+/// separate write and is already on the ticket when this comes back.
+pub struct NoteMemory {
+    /// The last copy the pack stored.
+    pub body: Option<Value>,
+    /// `Some(true)` when a copy was newly queued, `Some(false)` when those
+    /// copies were already waiting, `None` when nothing was queued.
+    pub queued: Option<bool>,
+    /// Why a copy was not stored, when the pack refused or did not answer.
+    pub error: Option<anyhow::Error>,
+}
+
+/// Post `atom`. A lesson the pack did not answer for is queued in fitted
+/// copies. A refusal is not queued.
+fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result<Value> {
+    match with_writer(|| admit::write_agent(client, atom.clone())) {
+        Ok(posted) => Ok(posted),
+        Err(e) if note_can_wait(&e) && atom["kind"].as_str() == Some("lesson") => {
+            let text = atom["text"].as_str().unwrap_or("");
+            let copies = pack_copy::pack_copies(text);
+            if !copies.is_empty() {
+                let issue = atom["issue"].as_str().unwrap_or("");
+                let workspace = atom["workspace"].as_str().unwrap_or("");
+                let _ = queue_copies(issue, &copies, workspace, "lesson");
+            }
+            Err(with_post_failure(prefix, e))
+        }
+        Err(e) => Err(with_post_failure(prefix, e)),
+    }
+}
+
+/// The pack client, or a queued lesson when the pack is off.
+fn client_or_queue(prefix: &str, kind: &str, text: &str, issue: &str) -> Result<PacksetClient> {
+    match pack() {
+        Ok(client) => Ok(client),
+        Err(e) if kind == "lesson" && note_can_wait(&e) => {
+            let copies = pack_copy::pack_copies(text);
+            if !copies.is_empty() {
+                let _ = queue_copies(issue, &copies, "", "lesson");
+            }
+            Err(with_post_failure(prefix, e))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// A progress note, as an agent memory the default list shows. The tracker
-/// logbook is a separate write. The atom is packset's `note` kind (0.15.2),
-/// which keeps logbook text the one-claim gate would refuse and needs the
-/// issue it copies. A pack older than 0.15.2 answers "unknown atom kind",
-/// and the note goes again as a `summary`, the kind it was before. A pack
-/// that refuses is the error; the caller keeps the logbook note.
+/// logbook is a separate write. The memory copy is cut to copies the pack's
+/// atom gate accepts, so a long sentence or a third sentence is stored, and
+/// a pack that does not know kind `note` takes the same text as a `summary`.
+/// A pack that is down or answers 401 keeps those copies queued. A refusal
+/// is not queued. The caller keeps the logbook note either way.
 ///
 /// # Errors
 ///
-/// An empty text, or the pack refusing the note.
-pub fn packset_write_note(issue: &str, text: &str) -> Result<Value> {
-    let client = pack()?;
-    write_note_with(&client, issue, text)
+/// An empty text, or the queue file cannot be written.
+pub fn packset_write_note(issue: &str, text: &str) -> Result<NoteMemory> {
+    match pack() {
+        Ok(client) => write_note_with(&client, issue, text, true),
+        Err(e) if note_can_wait(&e) => {
+            let copies = pack_copy::pack_copies(text);
+            let queued = queue_copies(issue, &copies, "", "note")?;
+            Ok(NoteMemory {
+                body: None,
+                queued,
+                error: Some(with_post_failure("note: POST /v1/atoms failed", e)),
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// [`packset_write_note`] through a client already opened, so a queued
-/// note goes to the workspace it was meant for.
-fn write_note_with(client: &PacksetClient, issue: &str, text: &str) -> Result<Value> {
+/// note goes to the workspace it was meant for. `queue_on_wait` is false
+/// while flushing: the queue already holds the copy.
+fn write_note_with(
+    client: &PacksetClient,
+    issue: &str,
+    text: &str,
+    queue_on_wait: bool,
+) -> Result<NoteMemory> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("note: empty text is not a memory");
+    }
+    let copies = pack_copy::pack_copies(trimmed);
+    let posting = if copies.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        copies
+    };
+    let mut last = None;
+    let mut first_err = None;
+    for (at, copy) in posting.iter().enumerate() {
+        match post_note_one(client, issue, copy) {
+            Ok(body) => last = Some(body),
+            Err(e) if note_can_wait(&e) => {
+                let queued = if queue_on_wait {
+                    Some(queue_copies(
+                        issue,
+                        &posting[at..],
+                        &client.workspace(),
+                        "note",
+                    )?)
+                } else {
+                    None
+                };
+                let queued = queued.flatten();
+                let error = with_post_failure("note: POST /v1/atoms failed", e);
+                if last.is_some() {
+                    return Ok(NoteMemory {
+                        body: last,
+                        queued,
+                        error: None,
+                    });
+                }
+                return Ok(NoteMemory {
+                    body: None,
+                    queued,
+                    error: Some(error),
+                });
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(with_post_failure("note: POST /v1/atoms failed", e));
+                }
+            }
+        }
+    }
+    if last.is_some() {
+        return Ok(NoteMemory {
+            body: last,
+            queued: None,
+            error: None,
+        });
+    }
+    Ok(NoteMemory {
+        body: None,
+        queued: None,
+        error: first_err,
+    })
+}
+
+fn post_note_one(client: &PacksetClient, issue: &str, text: &str) -> Result<Value> {
     let atom = progress_note_atom(issue, text, &client.workspace())?;
-    let first = with_writer(|| {
-        admit::write_agent(client, atom.clone()).context("note: POST /v1/atoms failed")
-    });
+    let first = with_writer(|| admit::write_agent_one(client, atom.clone()));
     match first {
         Err(e) if note_kind_unknown(&e) => {
             let mut atom = atom;
             atom["kind"] = Value::String("summary".into());
-            with_writer(|| {
-                admit::write_agent(client, atom.clone()).context("note: POST /v1/atoms failed")
-            })
+            with_writer(|| admit::write_agent_one(client, atom.clone()))
         }
         other => other,
     }
 }
 
-/// Whether a note the pack did not take should wait for it: the pack is
+/// Whether a memory the pack did not take should wait for it: the pack is
 /// off, missing, not answering, or does not know this seat's token. A
-/// refusal (an HTTP 4xx other than 401, 408 or 429) is final, so the note does not wait, and an empty text is no
-/// note at all.
+/// refusal (an HTTP 4xx other than 401, 408 or 429, or the pack's prose
+/// and size rules) is final, so the copy does not wait. An empty text is
+/// no memory at all. The words `POST /v1/atoms failed` alone are not a
+/// refusal: the status and the pack's reason decide.
 #[must_use]
 pub fn note_can_wait(err: &anyhow::Error) -> bool {
-    if format!("{err:#}").contains("empty text is not a memory") {
+    let text = format!("{err:#}");
+    if text.contains("empty text is not a memory") || text.contains("empty text is not a claim") {
         return false;
     }
-    !err.chain().any(
+    const FINAL: &[&str] = &[
+        "atom sentence",
+        "one claim is at most",
+        "soft cap",
+        "readability grade",
+        "adverb ratio",
+        "credential-shaped",
+        "invisible unicode",
+        "instructs the model",
+        "unknown atom kind",
+        "unknown atom origin",
+        "unknown atom level",
+        "note atom needs issue",
+        "atom text is required",
+    ];
+    if FINAL.iter().any(|phrase| text.contains(phrase)) {
+        return false;
+    }
+    let typed = err.chain().any(
         |cause| match cause.downcast_ref::<packset_client::Error>() {
             Some(packset_client::Error::Bad(why)) => refusal_status(why),
             Some(packset_client::Error::Http(inner)) => {
@@ -11093,7 +11249,11 @@ pub fn note_can_wait(err: &anyhow::Error) -> bool {
             }
             _ => false,
         },
-    )
+    );
+    if typed || refusal_status(&text) {
+        return false;
+    }
+    true
 }
 
 fn refused_code(code: u16) -> bool {
@@ -11114,17 +11274,44 @@ fn refusal_status(why: &str) -> bool {
         .any(refused_code)
 }
 
-/// Queue the memory copy of a note the pack did not take, for the next
-/// note, finish or doctor to send. `false` when it was already queued.
-///
-/// # Errors
-///
-/// The queue file cannot be written.
-pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
-    let workspace = std::env::var("PACKSET_WORKSPACE")
+fn memory_workspace(workspace: &str) -> String {
+    let workspace = workspace.trim();
+    if !workspace.is_empty() {
+        return workspace.to_string();
+    }
+    std::env::var("PACKSET_WORKSPACE")
         .ok()
         .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
+        .unwrap_or_else(|| SEAT_WORKSPACE.to_string())
+}
+
+/// Queue fitted copies. `Some(true)` when one was new, `Some(false)` when
+/// every copy was already waiting, `None` when none of them can be stored.
+fn queue_copies(
+    issue: &str,
+    texts: &[String],
+    workspace: &str,
+    kind: &str,
+) -> Result<Option<bool>> {
+    let mut seen = false;
+    let mut newly = false;
+    for text in texts {
+        if !pack_copy::pack_copy_ok(text) {
+            continue;
+        }
+        seen = true;
+        if queue_memory(issue, text, workspace, kind)? {
+            newly = true;
+        }
+    }
+    Ok(seen.then_some(newly))
+}
+
+pub(crate) fn queue_memory(issue: &str, text: &str, workspace: &str, kind: &str) -> Result<bool> {
+    let text = text.trim();
+    if !pack_copy::pack_copy_ok(text) {
+        bail!("queue: the pack would refuse this copy");
+    }
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -11132,15 +11319,32 @@ pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
         &note_queue::state_dir(),
         note_queue::Queued {
             issue: issue.trim().to_string(),
-            text: text.trim().to_string(),
-            workspace,
+            text: text.to_string(),
+            workspace: memory_workspace(workspace),
             at,
+            kind: kind.to_string(),
         },
     )
 }
 
-/// Send the notes queued while the pack was off or not answering. A pack
-/// that still cannot be reached leaves them all queued.
+/// Queue the memory copy of a note the pack did not take, for the next
+/// note, finish, doctor or session start to send. `false` when it was
+/// already queued, or when the pack would refuse the text.
+///
+/// # Errors
+///
+/// The queue file cannot be written.
+pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
+    let copies = pack_copy::pack_copies(text);
+    match queue_copies(issue, &copies, "", "note")? {
+        Some(newly) => Ok(newly),
+        None => Ok(false),
+    }
+}
+
+/// Send the memories queued while the pack was off or not answering. A
+/// copy the pack would refuse is dropped. A pack that still cannot be
+/// reached leaves the fitted copies queued.
 ///
 /// # Errors
 ///
@@ -11149,7 +11353,37 @@ pub fn flush_note_queue() -> Result<note_queue::Drained> {
     flush_note_queue_in(&note_queue::state_dir())
 }
 
+fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
+    let mut out = Vec::new();
+    for note in notes {
+        for text in pack_copy::pack_copies(&note.text) {
+            let item = note_queue::Queued {
+                text,
+                ..note.clone()
+            };
+            if out.iter().any(|seen: &note_queue::Queued| {
+                seen.issue.trim() == item.issue.trim()
+                    && seen.text.trim() == item.text.trim()
+                    && seen.workspace == item.workspace
+                    && seen.kind == item.kind
+            }) {
+                continue;
+            }
+            out.push(item);
+        }
+    }
+    out
+}
+
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
+    let pending = note_queue::pending_in(dir);
+    if pending.is_empty() {
+        return Ok(note_queue::Drained::default());
+    }
+    let fitted = fit_queued(pending.clone());
+    if fitted != pending {
+        note_queue::replace_in(dir, fitted)?;
+    }
     if note_queue::pending_in(dir).is_empty() {
         return Ok(note_queue::Drained::default());
     }
@@ -11159,12 +11393,36 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Ok(client) => client.clone().with_workspace(note.workspace.clone()),
             Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
         };
-        match write_note_with(&client, &note.issue, &note.text) {
-            Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
+        let sent = if note.kind == "lesson" {
+            post_queued_lesson(&client, note)
+                .map(|body| note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()))
+        } else {
+            match write_note_with(&client, &note.issue, &note.text, false) {
+                Ok(mem) => match mem.body {
+                    Some(body) => Ok(note_queue::Sent::Kept(
+                        body["id"].as_str().unwrap_or("?").to_string(),
+                    )),
+                    None => Err(mem
+                        .error
+                        .unwrap_or_else(|| anyhow::anyhow!("note: empty text is not a memory"))),
+                },
+                Err(e) => Err(e),
+            }
+        };
+        match sent {
+            Ok(done) => done,
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
         }
     })
+}
+
+fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
+    let text = note.text.trim();
+    let mut atom = atom_body("lesson", text, &client.workspace());
+    stamp_issue(&mut atom, &note.issue);
+    stamp_horizon(&mut atom, "lesson", text, Some(false));
+    with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
 /// The doctor row for the note queue. It sends what waits first, so a
@@ -11235,20 +11493,18 @@ fn progress_note_atom(issue: &str, text: &str, workspace: &str) -> Result<Value>
 ///
 /// As [`packset_write_agent`].
 pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> Result<Value> {
-    let client = pack()?;
-    let workspace = client.workspace();
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("{label}: empty text is not a claim");
     }
     let kind = atom_kind(label)?;
+    let prefix = format!("{label}: POST /v1/atoms failed");
+    let client = client_or_queue(&prefix, kind, trimmed, "")?;
+    let workspace = client.workspace();
     let mut atom = atom_body(kind, trimmed, &workspace);
     stamp_horizon(&mut atom, kind, trimmed, Some(true));
     add_entities(&mut atom, tags.iter().cloned());
-    with_writer(|| {
-        admit::write_agent(&client, atom.clone())
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
-    })
+    store_agent_atom(&client, atom, &prefix)
 }
 
 /// The issue this memory belongs to. The pack reads `issue` as identity:
@@ -11341,9 +11597,12 @@ pub fn packset_write_scoped(
     stamp_issue(&mut atom, issue);
     stamp_horizon(&mut atom, kind, trimmed, None);
     with_writer(|| {
-        client
-            .post_atom(&atom)
-            .with_context(|| format!("{label}: POST /v1/atoms failed"))
+        client.post_atom(&atom).map_err(|e| {
+            with_post_failure(
+                &format!("{label}: POST /v1/atoms failed"),
+                anyhow::Error::from(e),
+            )
+        })
     })
 }
 
@@ -11398,7 +11657,8 @@ pub fn packset_write_as(
     // themselves, not against the seat's or another persona's.
     atom["set"] = Value::String(persona_set(name));
     let posted = with_writer(|| {
-        admit::post_kept(&client, &atom).with_context(|| format!("{label}: POST /v1/atoms failed"))
+        admit::post_kept(&client, &atom)
+            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
     })?;
     admit::satisfy_text(trimmed);
     Ok(posted)
@@ -23302,7 +23562,13 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
         let scope = sync::scope_for_issue(issue);
-        let client = pack()?;
+        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let prefix = "finish: POST /v1/atoms failed for the lesson";
+        let client = if persons {
+            pack()?
+        } else {
+            client_or_queue(prefix, "lesson", text, issue)?
+        };
         let workspace = client.workspace();
         let mut atom = atom_body("lesson", text, &workspace);
         let mut tags = vec![format!("issue:{}", issue.trim())];
@@ -23313,13 +23579,12 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         stamp_issue(&mut atom, issue);
         // Standing at once; the review comes afterwards.
         stamp_horizon(&mut atom, "lesson", text, Some(false));
-        if lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal()) {
+        if persons {
             // Typed by the person in a terminal of their own: no
             // runner above it, so it needs no second review.
             admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
             let posted = with_writer(|| {
-                admit::post_kept(&client, &atom)
-                    .context("finish: POST /v1/atoms failed for the lesson")
+                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
             })?;
             admit::satisfy_text(text);
             let id: String = posted["id"]
@@ -23332,10 +23597,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
                 "remembered your lesson (id {id}); the hook shows it from the next prompt\n"
             ));
         }
-        let posted = with_writer(|| {
-            admit::write_agent(&client, atom.clone())
-                .context("finish: POST /v1/atoms failed for the lesson")
-        })?;
+        let posted = store_agent_atom(&client, atom, prefix)?;
         let id: String = posted["id"]
             .as_str()
             .unwrap_or("?")
@@ -32717,6 +32979,18 @@ mod tests {
             "stderr on a clean commit is not a failed commit"
         );
         assert!(!text.contains("lets the work go on"));
+        assert!(
+            text.contains("process.env"),
+            "the hook inherits the seat environment"
+        );
+        assert!(
+            text.contains("OPENCODE_SESSION_ID"),
+            "the session id reaches ljos hook"
+        );
+        assert!(
+            text.contains("sessionId"),
+            "idle events name the session in either case"
+        );
     }
 
     #[test]
@@ -32763,6 +33037,18 @@ mod tests {
         assert!(
             text.contains("A zero exit still cites it"),
             "stderr on a clean commit is not a failed commit"
+        );
+        assert!(
+            text.contains("process.env"),
+            "the hook inherits the seat environment"
+        );
+        assert!(
+            text.contains("OPENCODE_SESSION_ID"),
+            "the session id reaches ljos hook"
+        );
+        assert!(
+            text.contains("sessionId"),
+            "idle events name the session in either case"
         );
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".config/opencode")).unwrap();
@@ -34598,6 +34884,26 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let empty = super::progress_note_atom("probe-0001", " ", "ws").unwrap_err();
         assert!(!super::note_can_wait(&empty));
+        let prose = anyhow::anyhow!(
+            "note: POST /v1/atoms failed: 400: atom has 3 sentences; one claim is at most 2"
+        );
+        assert!(
+            !super::note_can_wait(&prose),
+            "a prose refusal is not queued"
+        );
+        let grade = anyhow::anyhow!("readability grade 19.4 exceeds 14");
+        assert!(!super::note_can_wait(&grade));
+        let cap = anyhow::anyhow!("atom text exceeds soft cap 500");
+        assert!(!super::note_can_wait(&cap));
+        let down = anyhow::anyhow!(
+            "the pack writer at PACKSET_URL is not answering. This seat is not pointed at the default writer, so it was not started"
+        );
+        assert!(super::note_can_wait(&down));
+        let unnamed = anyhow::anyhow!("Remember: POST /v1/atoms failed");
+        assert!(
+            super::note_can_wait(&unnamed),
+            "the words alone are not a refusal"
+        );
     }
 
     /// With the pack off, a flush sends nothing and keeps every note.
@@ -34612,6 +34918,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 text: "the pack was off".into(),
                 workspace: "ws".into(),
                 at: 1,
+                kind: "note".into(),
             },
         )
         .unwrap();
@@ -34622,6 +34929,104 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(done.kept.is_empty(), "{done:?}");
         assert_eq!(done.left, 1, "{done:?}");
         assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
+    }
+
+    fn queued_note(dir: &std::path::Path, text: &str) {
+        crate::note_queue::push_in(
+            dir,
+            crate::note_queue::Queued {
+                issue: "probe-0001".into(),
+                text: text.into(),
+                workspace: "ws".into(),
+                at: 1,
+                kind: "note".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A long copy left in the queue is cut to what the pack takes before
+    /// it waits again. The raw sentence does not stay.
+    #[test]
+    fn a_long_queued_note_is_cut_before_it_waits_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = format!("{}end", "word ".repeat(40));
+        queued_note(tmp.path(), &long);
+        let _env = crate::test_env_lock();
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert!(done.left >= 1, "{done:?}");
+        let pending = crate::note_queue::pending_in(tmp.path());
+        assert!(
+            pending
+                .iter()
+                .all(|note| pack_copy::pack_copy_ok(&note.text)),
+            "{pending:?}"
+        );
+        assert!(
+            pending.iter().all(|note| note.text != long.trim()),
+            "{pending:?}"
+        );
+    }
+
+    /// A copy the pack refuses leaves the queue. It is not kept to be sent again.
+    #[test]
+    fn a_refused_queued_copy_leaves_the_queue() {
+        let _g = env_guard();
+        let (url, _) = serve_http(|_| {
+            (
+                400,
+                r#"{"error":"atom sentence 1 is very hard to read: 38 words, the limit is 29"}"#
+                    .into(),
+            )
+        });
+        let _url = PackUrl::set(&url);
+        let tmp = tempfile::tempdir().unwrap();
+        queued_note(tmp.path(), &format!("{}end", "word ".repeat(40)));
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert_eq!(done.left, 0, "{done:?}");
+        assert!(!done.refused.is_empty(), "{done:?}");
+        assert!(crate::note_queue::pending_in(tmp.path()).is_empty());
+    }
+
+    /// An agent lesson of three sentences is stored as copies the atom gate accepts.
+    #[test]
+    fn a_three_sentence_lesson_is_stored_as_copies_the_gate_accepts() {
+        let _g = env_guard();
+        let texts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (url, _) = serve_http({
+            let texts = std::sync::Arc::clone(&texts);
+            move |req| {
+                let line = req.lines().next().unwrap_or("");
+                if !line.starts_with("POST /v1/atoms ") && !line.starts_with("POST /v1/atoms\r") {
+                    return (200, "{}".into());
+                }
+                let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                let atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let text = atom["text"].as_str().unwrap_or("").to_string();
+                if !pack_copy::pack_copy_ok(&text) {
+                    return (
+                        400,
+                        r#"{"error":"atom has 3 sentences; one claim is at most 2"}"#.into(),
+                    );
+                }
+                texts.lock().unwrap().push(text);
+                (
+                    200,
+                    r#"{"id":"atom-1","kind":"lesson","origin":"agent-derived"}"#.into(),
+                )
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let three = "The parser kept the hyphen. The test pins it. The release ships it.";
+        packset_write_agent("Remember", three, None, Some(false)).unwrap();
+        let stored = texts.lock().unwrap().clone();
+        assert!(stored.len() > 1, "{stored:?}");
+        assert!(stored
+            .iter()
+            .all(|text| text != three && pack_copy::pack_copy_ok(text)));
     }
 
     #[test]

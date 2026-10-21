@@ -238,12 +238,48 @@ fn post_direct(client: &PacksetClient, atom: &Value) -> Result<Option<String>> {
 /// It carries origin `agent-derived`. A writer from before agent writes
 /// were live answers `held as proposal ID`; that proposal is accepted on
 /// the spot, so the memory is live there too. Nothing waits for a person.
+/// A lesson the atom gate would refuse is posted as the shorter copies
+/// [`crate::pack_copy::pack_copies`] cuts. A preference is posted as written.
 ///
 /// # Errors
 ///
 /// An empty text, or the pack refusing the claim for a reason other than
 /// holding it (a secret, the size cap).
-pub fn write_agent(client: &PacksetClient, mut atom: Value) -> Result<Value> {
+pub fn write_agent(client: &PacksetClient, atom: Value) -> Result<Value> {
+    let text = atom["text"].as_str().unwrap_or("").trim().to_string();
+    if text.is_empty() {
+        bail!("remember: empty text is not a claim");
+    }
+    if atom["kind"].as_str() != Some("lesson") {
+        return write_agent_one(client, atom);
+    }
+    let copies = crate::pack_copy::pack_copies(&text);
+    if copies.is_empty() || (copies.len() == 1 && copies[0] == text) {
+        return write_agent_one(client, atom);
+    }
+    let mut last = None;
+    let mut first_err = None;
+    for copy in &copies {
+        let mut one = atom.clone();
+        one["text"] = Value::String(copy.clone());
+        match write_agent_one(client, one) {
+            Ok(posted) => last = Some(posted),
+            Err(e) if crate::note_can_wait(&e) => return Err(e),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    if let Some(posted) = last {
+        return Ok(posted);
+    }
+    Err(first_err.unwrap_or_else(|| anyhow::anyhow!("remember: empty text is not a claim")))
+}
+
+/// One agent atom, with no further split.
+pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     if atom["text"].as_str().unwrap_or("").trim().is_empty() {
         bail!("remember: empty text is not a claim");
     }

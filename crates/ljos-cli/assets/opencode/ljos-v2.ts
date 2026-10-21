@@ -38,13 +38,35 @@ function seatTool(name: string): { tool: string; bash: boolean } | undefined {
   return tool ? { tool, bash: false } : undefined
 }
 
+function sessionId(event: any): string | undefined {
+  const props = event?.properties ?? {}
+  const info = props.info ?? event?.info ?? {}
+  const id =
+    props.sessionID ??
+    props.sessionId ??
+    event?.sessionID ??
+    event?.sessionId ??
+    info.id ??
+    info.sessionID ??
+    info.sessionId ??
+    event?.session?.id
+  return typeof id === "string" && id !== "" ? id : undefined
+}
+
 async function hook(payload: Record<string, unknown>): Promise<Answer> {
   let proc
+  const session = payload.session_id
   try {
     proc = Bun.spawn([LJOS, "hook"], {
       stdin: new Blob([JSON.stringify(payload)]),
       stdout: "pipe",
       stderr: "pipe",
+      env: {
+        ...process.env,
+        ...(typeof session === "string" && session !== ""
+          ? { OPENCODE_SESSION_ID: session }
+          : {}),
+      },
     })
   } catch (e) {
     return { ok: false, why: `${LJOS} did not start: ${e}` }
@@ -88,6 +110,10 @@ export default Plugin.define({
     // The before hook sees the command. The after hook cites the commit
     // from it when the result does not carry the args.
     const commands = new Map<string, string>()
+    let lastSession: string | undefined
+    const remember = (id: string | undefined) => {
+      if (id) lastSession = id
+    }
     const blockKey = (sessionID: string | undefined, tool: string) =>
       `${sessionID ?? ""}:${tool}`
 
@@ -97,7 +123,8 @@ export default Plugin.define({
     })
 
     await ctx.session.hook("prompt", async (event: any) => {
-      const id = event.sessionID ?? event.session?.id
+      const id = event.sessionID ?? event.session?.id ?? event.sessionId
+      remember(id)
       const prompt = text(event.parts ?? event.message?.parts)
       if (!id || !prompt) return
       const a = await hook({ session_id: id, hook_event_name: "UserPromptSubmit", prompt, cwd })
@@ -200,14 +227,24 @@ export default Plugin.define({
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: stop.signal }) as any) {
         if (event?.type === "session.idle") {
-          const id = event.properties?.sessionID ?? event.properties?.info?.id
+          const id =
+            sessionId(event) ??
+            event.properties?.sessionID ??
+            event.properties?.info?.id ??
+            event.sessionID ??
+            lastSession
+          if (!id) continue
+          remember(id)
           await hook({ session_id: id, hook_event_name: "Stop", cwd })
           continue
         }
         if (event?.type !== "session.deleted") continue
-        const id = event.properties?.info?.id
+        const id =
+          sessionId(event) ?? event.properties?.info?.id ?? event.sessionID ?? lastSession
         held.delete(id)
         started.delete(id)
+        if (lastSession === id) lastSession = undefined
+        if (!id) continue
         await hook({ session_id: id, hook_event_name: "SessionEnd", cwd })
       }
     })()

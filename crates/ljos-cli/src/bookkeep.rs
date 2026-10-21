@@ -1086,18 +1086,21 @@ fn mcp_session() -> String {
         .unwrap_or_else(|| format!("mcp-{}", std::process::id()))
 }
 
+fn env_session(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn session_key(call: &super::HookCall) -> String {
     call.session
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .or_else(|| {
-            std::env::var("LJOS_SESSION_ID")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
+        .or_else(|| env_session("LJOS_SESSION_ID"))
+        .or_else(|| env_session("OPENCODE_SESSION_ID"))
         .unwrap_or_else(|| std::process::id().to_string())
 }
 
