@@ -35,6 +35,7 @@ pub mod plugin;
 pub mod reap;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod subagent;
 pub mod sync;
 pub mod tools;
 mod tracker_push;
@@ -1414,7 +1415,7 @@ pub fn conversation_tag(pid: u32) -> String {
 
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
-fn runtime_dir() -> PathBuf {
+pub(crate) fn runtime_dir() -> PathBuf {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
@@ -15653,6 +15654,40 @@ fn command_segments_at(line: &str, depth: usize) -> Vec<String> {
     out
 }
 
+/// The words after the name of each `ljos` the shell runs for `line`, as
+/// the process gets them: quotes resolved, assignments, wrappers and
+/// redirections off. Two runs of one line are two entries.
+pub(crate) fn ljos_invocations(line: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for sub in nested_lines(line, 0) {
+        for raw in raw_segments(&sub) {
+            let words = shell_words(&strip_prefixes(&raw).join(" "));
+            let Some((name, rest)) = words.split_first() else {
+                continue;
+            };
+            if name.rsplit('/').next() != Some("ljos") {
+                continue;
+            }
+            let mut argv = Vec::new();
+            let mut skip = false;
+            for word in rest {
+                if std::mem::take(&mut skip) {
+                    continue;
+                }
+                if word == ">" || (!word.is_empty() && word.chars().all(|c| c == '<')) {
+                    skip = true;
+                } else if !word.starts_with('<') {
+                    argv.push(word.clone());
+                }
+            }
+            if !argv.is_empty() {
+                out.push(argv);
+            }
+        }
+    }
+    out
+}
+
 /// How deep [`nested_lines`] reads substitutions and scripts inside one
 /// another. A real command never nests this far; a line that does is
 /// refused whole ([`nested_too_deep`]) rather than read part of the way.
@@ -27141,12 +27176,15 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 }
 
 /// Give a child this process's connection. A nested `ljos vote` then signs
-/// with the same session instead of minting a nonce of its own. The seat
-/// argument is not copied onto the session.
+/// with the same session instead of minting a nonce of its own, a
+/// subagent's included. The seat argument is not copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
-    let harness = ballot_sig::harness_session();
-    if !harness.is_empty() && harness != "-" {
+    if ballot_sig::harness_session().is_empty() {
+        return;
+    }
+    let harness = ballot_sig::identity().harness;
+    if harness != "-" {
         cmd.env("LJOS_HARNESS_SESSION", harness);
     }
 }
@@ -40544,6 +40582,33 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(command_segments("env -i A=1 -- make"), ["make"]);
         assert_eq!(command_segments("command -v git"), ["command -v git"]);
         assert_eq!(command_segments("stdbuf -oL tail -f log"), ["tail -f log"]);
+    }
+
+    /// A hook reads each `ljos` a shell line runs as its process will get
+    /// the words, so the process can find the call the hook saw.
+    #[test]
+    fn each_ljos_a_line_runs_is_read_as_its_argv() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            ljos_invocations(
+                r#"cd /x && FOO=1 ~/.cargo/bin/ljos vote demo-a --for ship --used none --as "reviewer a" 2>&1 | tee log"#
+            ),
+            [argv(&[
+                "vote",
+                "demo-a",
+                "--for",
+                "ship",
+                "--used",
+                "none",
+                "--as",
+                "reviewer a"
+            ])]
+        );
+        assert_eq!(
+            ljos_invocations("sh -c 'ljos recall demo-a < /dev/null'; ljos recall demo-a"),
+            [argv(&["recall", "demo-a"]), argv(&["recall", "demo-a"])]
+        );
+        assert!(ljos_invocations("echo ljos vote demo-a; ljos-mcp; ljos").is_empty());
     }
 
     #[test]

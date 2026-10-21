@@ -468,6 +468,7 @@ pub fn unverified_sentence(seat: &str) -> String {
 
 tokio::task_local! {
     static CALL_SESSION: String;
+    static CALL_AGENT: String;
 }
 
 std::thread_local! {
@@ -483,12 +484,38 @@ pub fn call_session() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Run `f` as an MCP call that named `session`.
+/// Run `f` as an MCP call that named `session`. One server answers a
+/// parent and all its subagents, so the call is the parent's, whatever
+/// this process holds.
 pub async fn scope_session<F: std::future::Future>(session: Option<String>, f: F) -> F::Output {
+    let f = CALL_AGENT.scope(String::new(), f);
     match session.map(|s| field(&s)).filter(|s| s != "-") {
         Some(s) => CALL_SESSION.scope(s, f).await,
         None => f.await,
     }
+}
+
+static PROCESS_AGENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Name the subagent a hook payload says this hook process runs for.
+pub fn hook_agent(agent: Option<String>) {
+    let _ = PROCESS_AGENT.set(agent);
+}
+
+/// The subagent this process or MCP call runs for under `parent`, when the
+/// harness named one: the agent a hook saw make this call. The command
+/// line takes no agent, so a parent cannot cast as its subagent.
+fn subagent(parent: &str) -> Option<String> {
+    if let Ok(agent) = CALL_AGENT.try_with(Clone::clone) {
+        return (!agent.is_empty()).then_some(agent);
+    }
+    PROCESS_AGENT
+        .get_or_init(|| {
+            crate::subagent::claim_command(parent)
+                .filter(|a| !a.is_empty())
+                .map(|a| field(&a))
+        })
+        .clone()
 }
 
 /// Remember the hook payload's session for this process, and export it for
@@ -640,10 +667,15 @@ fn named_session_actor(key: &str) -> Option<String> {
 }
 
 /// This process's session identity. Stable across processes of one holder.
+/// A subagent the harness named is `SESSION:AGENT`, a session of its own.
 #[must_use]
 pub fn identity() -> SessionIdentity {
     let harness = harness_session();
     if !harness.is_empty() {
+        let harness = match subagent(&harness) {
+            Some(agent) => format!("{harness}:{agent}"),
+            None => harness,
+        };
         return SessionIdentity {
             harness,
             nonce: "-".into(),

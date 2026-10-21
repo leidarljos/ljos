@@ -206,6 +206,27 @@ printf '%s' "$2" > "$d/$id.prompt"
 
     /// `ljos` as `seat`, with only the harness variables in `env`.
     fn ljos_env(&self, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
+        self.command(seat, env, args).output().unwrap()
+    }
+
+    /// `ljos hook` fed `payload` on stdin, as a runner's hook is run.
+    fn hook(&self, env: &[(&str, &str)], payload: &serde_json::Value) -> Output {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = self
+            .command("ljosbot", env, &["hook"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(payload.to_string().as_bytes()).unwrap();
+        drop(stdin);
+        child.wait_with_output().unwrap()
+    }
+
+    fn command(&self, seat: &str, env: &[(&str, &str)], args: &[&str]) -> Command {
         let path = format!(
             "{}:{}",
             self.bin.display(),
@@ -229,7 +250,7 @@ printf '%s' "$2" > "$d/$id.prompt"
             .env("LJOS_SEAT", seat)
             .env("VISSUE_AGENT", seat)
             .envs(env.iter().copied());
-        cmd.output().unwrap()
+        cmd
     }
 }
 
@@ -994,6 +1015,84 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
         assert!(stdout.contains(&format!("{name}  ship")), "{said}");
     }
     assert!(!stdout.contains("reviewer-e"), "{said}");
+    assert!(!stdout.contains("ignored"), "{said}");
+}
+
+#[test]
+fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
+    // A coordinator in one Claude Code session starts its reviewers as
+    // subagents. Every reviewer's shell carries the parent's session id;
+    // only the hook payload names the agent.
+    let world = World::new();
+    let issue = "demo-subagents";
+    let parent = "5f0c8e2a-parent";
+    let env: &[(&str, &str)] = &[("CLAUDE_CODE_SESSION_ID", parent)];
+    let hook = |tool_use: &str, agent: Option<&str>, args: &[&str]| {
+        let mut payload = serde_json::json!({
+            "session_id": parent,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": tool_use,
+            "tool_input": {"command": format!("ljos {}", args.join(" "))},
+        });
+        if let Some(agent) = agent {
+            payload["agent_id"] = agent.into();
+            payload["agent_type"] = "reviewer".into();
+        }
+        let out = world.hook(env, &payload);
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(!said.contains("deny"), "{said}");
+    };
+    let cast = |tool_use: &str, agent: Option<&str>, name: &str, choice: &str| {
+        let args = [
+            "vote", issue, "--for", choice, "--used", "none", "--as", name,
+        ];
+        hook(tool_use, agent, &args);
+        world.ljos_env("ljosbot", env, &args)
+    };
+    for (tool_use, agent, name) in [
+        ("toolu_01a", Some("agent-a1"), "reviewer-a"),
+        ("toolu_01b", Some("agent-b2"), "reviewer-b"),
+    ] {
+        let out = cast(tool_use, agent, name, "ship");
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        let session = format!("session {parent}:{}\n", agent.unwrap());
+        assert!(said.contains(&session), "{said}");
+    }
+    // A subagent call the hook saw but that never ran is not the parent's.
+    let coordinator = [
+        "vote",
+        issue,
+        "--for",
+        "ship",
+        "--used",
+        "none",
+        "--as",
+        "coordinator",
+    ];
+    hook("toolu_01z", Some("agent-z9"), &coordinator);
+    let out = cast("toolu_01p", None, "coordinator", "ship");
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(&format!("session {parent}\n")), "{said}");
+    let again = cast("toolu_01c", Some("agent-a1"), "reviewer-c", "hold");
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast") && said.contains(&format!("({parent}:agent-a1)")),
+        "{said}"
+    );
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("3 ballots count"), "{said}");
+    for name in ["reviewer-a", "reviewer-b", "coordinator"] {
+        assert!(stdout.contains(&format!("{name}  ship")), "{said}");
+    }
+    assert!(!stdout.contains("reviewer-c"), "{said}");
     assert!(!stdout.contains("ignored"), "{said}");
 }
 
