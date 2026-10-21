@@ -328,7 +328,7 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(!signing.contains("host.key"), "{env}");
     assert_eq!(fs::read(&host_key).unwrap(), vec![9u8; 32]);
     let profile = fs::read_to_string(home.join(".profile")).unwrap();
-    assert!(profile.contains(".local/bin"), "{profile}");
+    assert!(profile.contains(&home.join(".local/bin").display().to_string()), "{profile}");
     let tracker = home.join(".local/share/ljos/tracker");
     assert_eq!(
         git(&tracker, &["rev-parse", "--is-inside-work-tree"]).trim(),
@@ -346,6 +346,11 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
+    fs::write(
+        home.join(".bashrc"),
+        "# test rc\n[ -z \"$PS1\" ] && return\necho after\n",
+    )
+    .unwrap();
     let names = ["ljos", "ljos-mcp", "ljos-policyd"];
     executable(&rel.join("ljos"), "#!/bin/sh\nexit 0\n");
     executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
@@ -381,10 +386,14 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
     assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
-    assert!(bashrc.contains("$HOME/.local/bin"), "{bashrc}");
+    let bin_line = format!("export PATH=\"{}:$PATH\"", bin.display());
+    assert!(bashrc.contains(&bin_line), "{bashrc}");
+    let path_at = bashrc.find(&bin_line).unwrap();
+    let guard_at = bashrc.find("[ -z \"$PS1\" ] && return").unwrap();
+    assert!(path_at < guard_at, "{bashrc}");
     assert!(fs::read_to_string(home.join(".profile"))
         .unwrap()
-        .contains("$HOME/.local/bin"));
+        .contains(&bin_line));
     ljos_cli::cloud::up(false).unwrap();
     let path = std::env::var("PATH").unwrap_or_default();
     let dir = bin.display().to_string();
@@ -392,10 +401,53 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     assert_eq!(
         fs::read_to_string(home.join(".bashrc"))
             .unwrap()
-            .matches(".local/bin")
+            .matches(&bin_line)
             .count(),
         1
     );
+}
+
+#[test]
+fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    let custom = root.path().join("custom/bin");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        home.join(".bashrc"),
+        "if [ -z \"$PS1\" ]; then return; fi\necho prompt\n",
+    )
+    .unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("LJOS_BIN_DIR", &custom);
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let line = format!("export PATH=\"{}:$PATH\"", custom.display());
+    let profile = fs::read_to_string(home.join(".profile")).unwrap();
+    assert!(profile.contains(&line), "{profile}");
+    let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
+    assert!(bashrc.contains(&line), "{bashrc}");
+    let line_at = bashrc.find(&line).unwrap();
+    let guard_at = bashrc.find("return").unwrap();
+    assert!(line_at < guard_at, "{bashrc}");
 }
 
 #[test]
