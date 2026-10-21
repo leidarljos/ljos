@@ -1,1 +1,4 @@
-A tracker under a test's target directory no longer takes the crate's commit lock or adds that lock to the crate's git exclude.
+A real checkout that includes a `target/` subtree now keeps git
+discovery for tracker locking, push gating and tracker commits, and a
+dotfiles-style checkout that uses `GIT_DIR`/`GIT_WORK_TREE` keeps that
+behavior as well.
