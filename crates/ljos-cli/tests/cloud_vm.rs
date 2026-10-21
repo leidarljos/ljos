@@ -410,6 +410,79 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     );
 }
 
+/// A stale `ljos-mcp` earlier on PATH is what `command -v` runs. Naming
+/// the bare command would keep that binary; the install dir has to come
+/// first, and the config has to name this install while the stale one
+/// still wins.
+#[test]
+fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    let custom = root.path().join("custom/bin");
+    let stale = root.path().join("stale/bin");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&stale).unwrap();
+    executable(
+        &stale.join("ljos-mcp"),
+        "#!/bin/sh\nprintf stale > \"$1\"\n",
+    );
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nprintf fresh > \"$1\"\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("LJOS_BIN_DIR", &custom);
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}:/usr/bin:/bin", stale.display(), custom.display()),
+    );
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    assert_eq!(
+        path.split(':').next(),
+        Some(custom.to_str().unwrap()),
+        "{path}\n{said}"
+    );
+    assert_eq!(path.matches(custom.to_str().unwrap()).count(), 1, "{path}");
+    let found = Command::new("sh")
+        .arg("-c")
+        .arg("command -v ljos-mcp")
+        .output()
+        .unwrap();
+    let found = String::from_utf8_lossy(&found.stdout);
+    assert!(
+        found.trim() == custom.join("ljos-mcp").to_str().unwrap(),
+        "command -v: {found}"
+    );
+    let marker = root.path().join("marker");
+    let ran = Command::new("ljos-mcp").arg(&marker).output().unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "fresh");
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+    assert_eq!(
+        doc["mcpServers"]["ljos"]["command"],
+        custom.join("ljos-mcp").display().to_string(),
+        "{mcp}\n{said}"
+    );
+    assert!(said.contains(stale.to_str().unwrap()), "{said}");
+    assert!(said.contains("cloud up wrote"), "{said}");
+}
+
 #[test]
 fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     let _g = Guard::new();

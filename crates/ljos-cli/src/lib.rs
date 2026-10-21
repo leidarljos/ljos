@@ -1199,9 +1199,9 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
 #[derive(Debug, Clone)]
-struct ServerCommandPlan {
-    command: String,
-    note: Option<String>,
+pub(crate) struct ServerCommandPlan {
+    pub(crate) command: String,
+    pub(crate) note: Option<String>,
 }
 
 /// Where `ljos-mcp` is, for this process to exec.
@@ -1232,7 +1232,7 @@ fn same_binary(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn server_command_plan(server: &Path) -> ServerCommandPlan {
+pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
     match which::which(MCP_SERVER_COMMAND) {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
@@ -1241,7 +1241,7 @@ fn server_command_plan(server: &Path) -> ServerCommandPlan {
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH resolves {MCP_SERVER_COMMAND} to {}, so onboard wrote {}",
+                "PATH resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
                 found.display(),
                 server.display()
             )),
@@ -1249,7 +1249,7 @@ fn server_command_plan(server: &Path) -> ServerCommandPlan {
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH does not resolve {MCP_SERVER_COMMAND}, so onboard wrote {}",
+                "PATH does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
                 server.display()
             )),
         },
@@ -1281,7 +1281,7 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
     let server = server_path()?;
-    let plan = server_command_plan(&server);
+    let plan = server_command_plan(&server, "onboard");
     Ok(serde_json::json!({
         "mcpServers": {
             "ljos": {
@@ -3796,7 +3796,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan(server);
+    let plan = server_command_plan(server, "onboard");
     match is_registered(h, server) {
         Some(true) => {
             let healed = heal_registered(h, &plan.command, dry);
