@@ -1196,7 +1196,7 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 /// [`server_path`] instead would bake in the machine that wrote the file,
 /// and a config synced onto another home would name a directory that is
 /// not there.
-const MCP_SERVER_COMMAND: &str = "ljos-mcp";
+pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
 #[derive(Debug, Clone)]
 struct ServerCommandPlan {
@@ -1210,7 +1210,7 @@ struct ServerCommandPlan {
 /// or ssh opens may lack the install directory on PATH, and the pair is
 /// always installed together. Harness configs do not store this path; they
 /// name [`MCP_SERVER_COMMAND`].
-fn server_path() -> Result<PathBuf> {
+pub(crate) fn server_path() -> Result<PathBuf> {
     let beside = std::env::current_exe()
         .ok()
         .map(|me| me.with_file_name("ljos-mcp"))
@@ -21306,6 +21306,9 @@ fn optional_bin(name: &str) -> bool {
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "tracker" && names_unpushed(&row.state) {
+        return "warn";
+    }
+    if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {

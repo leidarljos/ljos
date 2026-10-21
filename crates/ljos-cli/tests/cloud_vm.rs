@@ -849,7 +849,10 @@ fn doctor_flags_a_command_from_another_home() {
     assert!(line.contains(".claude.json"), "{line}");
     assert!(line.contains("opencode.json"), "{line}");
     assert!(line.contains("config.yaml"), "{line}");
-    assert!(line.contains("ljos cloud up"), "{line}");
+    assert!(line.contains("onboard --harness codex"), "{line}");
+    assert!(line.contains("onboard --harness claude"), "{line}");
+    assert!(line.contains("onboard --harness opencode"), "{line}");
+    assert!(line.contains("onboard --harness goose"), "{line}");
     assert!(!line.contains("settings.json"), "{line}");
     assert!(!line.contains("not JSON"), "{line}");
     let row = ljos_cli::cloud::mcp_row();
@@ -870,7 +873,7 @@ fn doctor_flags_a_command_from_another_home() {
     }
     let bare = ljos_cli::cloud::missing_mcp_line().unwrap();
     assert!(bare.contains("is not on PATH"), "{bare}");
-    assert!(bare.contains("ljos cloud up"), "{bare}");
+    assert!(bare.contains("onboard --harness codex"), "{bare}");
 
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
@@ -880,10 +883,130 @@ fn doctor_flags_a_command_from_another_home() {
         "[mcp_servers.ljos]\ncommand = \"$HOME/.local/bin/ljos-mcp\"\nargs = []\n",
     )
     .unwrap();
+    let literal = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(literal.contains("$HOME/.local/bin/ljos-mcp does not exist"), "{literal}");
+    assert!(literal.contains("onboard --harness codex"), "{literal}");
+}
+
+#[test]
+fn doctor_harness_advice_clears_after_running_onboard() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let tracker = home.join("tracker");
+    fs::create_dir_all(tracker.join("Software")).unwrap();
+    fs::create_dir_all(home.join(".local/share")).unwrap();
+    fs::create_dir_all(root.path().join("run")).unwrap();
+    let foreign = "/home/box/.cargo/bin/ljos-mcp";
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        format!("[mcp_servers.ljos]\ncommand = \"{foreign}\"\nargs = []\n"),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("XDG_RUNTIME_DIR", root.path().join("run"));
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(line.contains("onboard --harness codex"), "{line}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["onboard", "--harness", "codex"])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", root.path().join("run"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("PACKSET_URL", "off")
+        .env("DEEDAR_HOST_SIGNING_KEY", "off")
+        .env(
+            "DEEDAR_URL",
+            format!("file://{}", home.join("deeds").display()),
+        )
+        .env("VISSUE_ROOT", &tracker)
+        .env("ISSUE_ROOT", &tracker)
+        .env("GIT_CONFIG_GLOBAL", root.path().join("gitconfig"))
+        .env("GIT_CONFIG_SYSTEM", root.path().join("gitconfig"))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         ljos_cli::cloud::missing_mcp_line().is_none(),
-        "a command under $HOME that exists here is runnable"
+        "following the onboard advice should clear the mcp row"
     );
+}
+
+#[test]
+fn doctor_warns_when_shell_path_finds_ljos_mcp() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n",
+    )
+    .unwrap();
+    let shell = root.path().join("shell");
+    executable(
+        &shell,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+            bin.join("ljos-mcp").display()
+        ),
+    );
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("SHELL", &shell);
+    assert!(
+        ljos_cli::cloud::missing_mcp_line().is_none(),
+        "a shell-resolved command should warn, not fail"
+    );
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(row.ok, "{row:?}");
+    assert_eq!(ljos_cli::doctor_word(&row), "warn");
+    assert!(row.state.contains("warning:"), "{row:?}");
+}
+
+#[test]
+fn doctor_respects_env_path_in_the_entry() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join("entry-bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        format!(
+            "{{\"mcpServers\":{{\"ljos\":{{\"command\":\"ljos-mcp\",\"args\":[],\"env\":{{\"PATH\":\"{}\"}}}}}}}}\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    assert!(
+        ljos_cli::cloud::missing_mcp_line().is_none(),
+        "env.PATH should be used to resolve the command"
+    );
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "ok");
 }
 
 #[test]
