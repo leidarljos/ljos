@@ -9331,18 +9331,58 @@ pub const TWIN_EVENTS: &[&str] = &[
 /// with the plugin and an earlier onboard, or a runner that also loads
 /// Claude's settings, runs the seat's hook twice for one event, and both
 /// copies get the same payload. A later event of the same kind carries a
-/// new generation, loop count or transcript, and is not a twin.
+/// new generation, loop count or transcript, and is not a twin. Claude's
+/// Stop often repeats the payload; the transcript file is what the next
+/// turn changes, so its length and tail are part of a Stop's key.
 pub fn hook_twin(call: &HookCall, input: &str) -> bool {
     if !TWIN_EVENTS.contains(&call.event.as_str()) {
         return false;
     }
+    let turn = if call.event == "Stop" {
+        stop_turn_mark(input)
+    } else {
+        String::new()
+    };
     let key = work_id(&format!(
-        "twin|{}|{}|{}",
+        "twin|{}|{}|{}|{turn}",
         call.event,
         call.session.as_deref().unwrap_or(""),
         input.trim()
     ));
     hook_marker_fresh(&key, std::time::Duration::from_secs(10))
+}
+
+/// Length and a hash of the last 4KiB of a Stop transcript. Two
+/// registrations of one stop share the file; the next turn appends to it.
+/// A missing or unreadable transcript leaves the key on the payload.
+fn stop_turn_mark(input: &str) -> String {
+    let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
+        return String::new();
+    };
+    let Some(path) = v
+        .get("transcript_path")
+        .or_else(|| v.get("transcriptPath"))
+        .and_then(Value::as_str)
+    else {
+        return String::new();
+    };
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return String::new();
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return len.to_string();
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let start = len.saturating_sub(4096);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return len.to_string();
+    }
+    let mut buf = Vec::new();
+    if file.take(4096).read_to_end(&mut buf).is_err() {
+        return len.to_string();
+    }
+    let tail = String::from_utf8_lossy(&buf);
+    format!("{len}|{}", work_id(&tail))
 }
 
 /// Make the marker for `key`, or say whether one younger than `window`
@@ -31827,6 +31867,46 @@ mod tests {
         assert!(
             !hook_twin(&call("PreToolUse"), gate),
             "a gate always answers"
+        );
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    /// Claude's Stop payload is the same bytes on the next turn of a
+    /// session. The transcript is what grew, so that stop is a new turn
+    /// and its deeds and lessons are kept. Two registrations of one stop,
+    /// with the transcript unchanged, are still one.
+    #[test]
+    fn a_claude_stop_is_a_new_turn_when_the_transcript_grew() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"user\",\"message\":\"one\"}\n").unwrap();
+        let stop = serde_json::json!({
+            "session_id": "sess-1",
+            "transcript_path": transcript.to_str().unwrap(),
+            "cwd": "/work",
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+        })
+        .to_string();
+        let call = HookCall {
+            event: "Stop".into(),
+            cue: String::new(),
+            session: Some("sess-1".into()),
+            shape: HookShape::Asks,
+        };
+        assert!(!hook_twin(&call, &stop), "the first turn answers");
+        assert!(
+            hook_twin(&call, &stop),
+            "a second registration of it returns"
+        );
+        let mut grown = std::fs::read_to_string(&transcript).unwrap();
+        grown.push_str("{\"type\":\"assistant\",\"message\":\"two\"}\n");
+        std::fs::write(&transcript, grown).unwrap();
+        assert!(
+            !hook_twin(&call, &stop),
+            "the next turn answers even with the same payload"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
     }
