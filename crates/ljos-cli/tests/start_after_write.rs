@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 const SEAT: &str = "free-claude";
@@ -186,6 +186,62 @@ fn hook_through_a_shell(hab: &Habitat, payload: &str) {
     );
 }
 
+/// A process named `name` that runs `body` and then stays up until its
+/// stdin closes, the way a terminal or a multiplexer stays up after the
+/// command typed in it. The kernel names a script's process after the
+/// script, cut to fifteen bytes. `$PAYLOAD` is the hook's input.
+fn long_lived(hab: &Habitat, name: &str, body: &str, payload: &str) -> Child {
+    let procs = hab.home.with_file_name("procs");
+    std::fs::create_dir_all(&procs).unwrap();
+    std::fs::write(procs.join("payload.json"), payload).unwrap();
+    script(&procs, name, &format!("#!/bin/sh\n{body}\nread _\n"));
+    let mut cmd = Command::new(procs.join(name));
+    seat_env(&mut cmd, hab);
+    cmd.env("LJOS_BIN", env!("CARGO_BIN_EXE_ljos"))
+        .env("PAYLOAD", procs.join("payload.json"))
+        .env("DONE", procs.join("done"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// The hook through `sh -c`, as [`hook_through_a_shell`] runs it, from a
+/// script; `$DONE` holds its exit status once the shell has exited.
+const HOOK_IN_A_SHELL: &str = r#"/bin/sh -c '"$0" hook < "$1"; exit $?' "$LJOS_BIN" "$PAYLOAD""#;
+
+/// Wait for the hook a [`long_lived`] process ran to exit.
+fn hook_done(hab: &Habitat) {
+    let done = hab.home.with_file_name("procs").join("done");
+    for _ in 0..600 {
+        if let Ok(status) = std::fs::read_to_string(&done) {
+            assert_eq!(status.trim(), "0", "ljos hook failed");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("the hook did not finish");
+}
+
+fn stop(mut child: Child) {
+    drop(child.stdin.take());
+    let _ = child.wait();
+}
+
+/// The pid the hook's book records as the runner that owns its sitting.
+fn book_owner(hab: &Habitat) -> u32 {
+    let books: Vec<serde_json::Value> = std::fs::read_dir(hab.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("book-"))
+        .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
+        .filter(|b: &serde_json::Value| b["repos"].as_object().is_some_and(|r| !r.is_empty()))
+        .collect();
+    assert_eq!(books.len(), 1, "{books:?}");
+    u32::try_from(books[0]["owner_pid"].as_u64().unwrap()).unwrap()
+}
+
 /// One `ljos_start` call to a fresh `ljos-mcp`, and the text it answered.
 fn mcp_start(hab: &Habitat, task: &str) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
@@ -264,18 +320,23 @@ fn creates(hab: &Habitat) -> usize {
         .count()
 }
 
-#[test]
-fn ljos_start_after_a_write_keeps_the_hooks_claim() {
-    let hab = habitat();
+/// The Write of `slug.py`, and the hook payload a runner sends after it.
+fn write_slug(hab: &Habitat) -> String {
     std::fs::write(hab.repo.join("slug.py"), "import re\n").unwrap();
-    let write = serde_json::json!({
+    serde_json::json!({
         "hook_event_name": "PostToolUse",
         "session_id": "6b3c9a2e-1f0d-4c55-9a51-2f6f3c1e8d70",
         "cwd": hab.repo,
         "tool_name": "Write",
         "tool_input": {"file_path": hab.repo.join("slug.py"), "content": "import re\n"},
-    });
-    hook_through_a_shell(&hab, &write.to_string());
+    })
+    .to_string()
+}
+
+#[test]
+fn ljos_start_after_a_write_keeps_the_hooks_claim() {
+    let hab = habitat();
+    hook_through_a_shell(&hab, &write_slug(&hab));
     assert_eq!(creates(&hab), 1, "the write filed its claim");
     let held = "probe-0001";
     assert_eq!(state_of(&hab, held), "STARTED");
@@ -301,4 +362,26 @@ fn ljos_start_after_a_write_keeps_the_hooks_claim() {
         log.contains(&format!("start: kept {held}")),
         "book.log:\n{log}"
     );
+}
+
+/// A terminal or a multiplexer that ran the hook's shell outlives every
+/// sitting under it, so it does not own the hook's. Here nothing but that
+/// shell ran the hook, the shell exits with it, and the next call finds
+/// the sitting orphaned. `gnome-terminal-server` runs as `gnome-terminal-`.
+#[test]
+fn a_session_above_the_hooks_shell_does_not_own_its_sitting() {
+    for name in ["tmux", "gnome-terminal-server"] {
+        let hab = habitat();
+        let body = format!("{HOOK_IN_A_SHELL}\necho $? > \"$DONE\"");
+        let session = long_lived(&hab, name, &body, &write_slug(&hab));
+        hook_done(&hab);
+        assert_eq!(state_of(&hab, "probe-0001"), "STARTED", "{name}");
+        assert_ne!(book_owner(&hab), session.id(), "{name} owns the sitting");
+        let said = mcp_start(&hab, "add a slug helper");
+        let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();
+        let context = format!("{name}: {said}\nbook.log:\n{log}");
+        assert_eq!(state_of(&hab, "probe-0001"), "DONE", "{context}");
+        assert_eq!(said.lines().next(), Some("claimed probe-0002"), "{context}");
+        stop(session);
+    }
 }

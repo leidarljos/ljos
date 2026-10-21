@@ -169,15 +169,24 @@ pub fn calling_shell(chain: &[Proc]) -> Option<&Proc> {
     Some(top)
 }
 
-/// The program that ran the process whose ancestors are `chain`: the
-/// nearest one that is neither a shell nor a wrapper. A chain of shells
-/// alone ends at its outermost shell.
+/// Where a chain stops being the hook's own: the person's session, a
+/// terminal or the init system ([`crate::is_session`]). Every sitting in
+/// that session shares it, and it outlives each of them.
+fn ends_the_walk(p: &Proc) -> bool {
+    crate::is_session(&p.comm)
+}
+
+/// The program that ran the process whose ancestors are `chain`, read up
+/// to the session ([`ends_the_walk`]), which is never the program: the
+/// nearest one that is neither a shell nor a wrapper, else the outermost
+/// of the shells and wrappers below the session. `None` when the session
+/// ran the process itself.
 #[must_use]
 pub fn runner(chain: &[Proc]) -> Option<&Proc> {
-    chain
-        .iter()
+    let own = chain.iter().take_while(|p| !ends_the_walk(p));
+    own.clone()
         .find(|p| !is_shell(p) && !is_wrapper(p))
-        .or_else(|| chain.last())
+        .or_else(|| own.last())
 }
 
 #[cfg(test)]
@@ -262,5 +271,18 @@ mod tests {
         let shells = [named(4, "sh"), named(5, "bash")];
         assert_eq!(runner(&shells).map(|p| p.pid), Some(5));
         assert_eq!(runner(&[]), None);
+    }
+
+    #[test]
+    fn a_session_above_the_hook_is_never_its_runner() {
+        for session in ["tmux", "tmux: server", "gnome-terminal-", "systemd", "sshd"] {
+            let chain = [named(4, "sh"), named(5, "bash"), named(2, session)];
+            assert_eq!(runner(&chain).map(|p| p.pid), Some(5), "{session}");
+            let chain = [named(4, "sh"), named(2, session), named(10, "claude")];
+            assert_eq!(runner(&chain).map(|p| p.pid), Some(4), "{session}");
+            assert_eq!(runner(&[named(2, session), named(10, "claude")]), None);
+        }
+        let chain = [named(4, "sh"), named(7, "git"), named(2, "kitty")];
+        assert_eq!(runner(&chain).map(|p| p.pid), Some(7));
     }
 }

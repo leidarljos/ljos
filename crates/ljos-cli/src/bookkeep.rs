@@ -2250,14 +2250,17 @@ fn next_owner_pid(event: &str, current: u32, incoming: u32) -> u32 {
 /// The runner that spawned this hook. When it is gone, the next session
 /// finishes the claims this book still has open. A runner starts the hook
 /// command through `sh -c` or a wrapper that exits with the hook, so the
-/// parent alone is gone by the next call.
+/// parent alone is gone by the next call. A terminal, a multiplexer or
+/// init outlives every sitting under it and never owns one: when one of
+/// those ran the hook itself, the hook is the owner, and its sitting is
+/// orphaned once it exits.
 fn hook_owner() -> u32 {
     let chain = super::proc_tree::ancestors();
-    if let Some(runner) = super::proc_tree::runner(&chain) {
-        return runner.pid;
+    if chain.is_empty() {
+        // SAFETY: getppid only reads the parent pid.
+        return unsafe { libc::getppid() as u32 };
     }
-    // SAFETY: getppid only reads the parent pid.
-    unsafe { libc::getppid() as u32 }
+    super::proc_tree::runner(&chain).map_or_else(std::process::id, |runner| runner.pid)
 }
 /// How long the sweeps over past sittings may take in one hook call. They
 /// walk every book the seat has kept, and the landed check runs git once per
