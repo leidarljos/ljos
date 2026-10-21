@@ -40,7 +40,9 @@ pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
 /// then the pack's rules, the same composition the hook uses. `None` lets
 /// the line run. A plain push is held for test evidence only when the
 /// checkout configures a `test` command and that tip has no passing record.
-/// A force-push still asks.
+/// A force-push still asks. A merge whose head sha has no recorded checks
+/// asks too: the reason names that sha, and a local evidence record when
+/// the checkout has one for it.
 #[must_use]
 pub fn guard_verdict(line: &str, cwd: Option<&Path>, rules: &[super::Rule]) -> Option<super::Rule> {
     let fast = super::static_guard_in(line, cwd);
@@ -750,6 +752,19 @@ fn write_evidence(cwd: &Path, sha: &str, command: &str, ts: &str) -> Result<()> 
     std::fs::write(&tmp, serde_json::to_vec_pretty(&body)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// A passing `ljos evidence record` for this exact sha: the file under
+/// `.git/ljos-evidence/<sha>.json`, with that sha and exit 0.
+fn evidence_recorded(cwd: &Path, sha: &str) -> bool {
+    let Some(path) = evidence_file(cwd, sha) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Stored>(&text)
+        .is_ok_and(|rec| rec.sha == sha && rec.exit == 0 && !rec.ts.trim().is_empty())
 }
 
 fn evidence_file(cwd: &Path, sha: &str) -> Option<PathBuf> {
@@ -1714,9 +1729,11 @@ fn review_pr(
             ));
         }
     }
-    if let Some(problem) = ci_problem(&view["statusCheckRollup"]) {
+    let rollup = &view["statusCheckRollup"];
+    if let Some(problem) = ci_problem(rollup) {
         return Err(merge_deny(action, &sha, &number.to_string(), &problem));
     }
+    let absent = ci_absent(rollup);
     let url = view["url"].as_str().unwrap_or("");
     let Some((owner, name)) = owner_repo(url) else {
         return Err(merge_io(
@@ -1728,7 +1745,24 @@ fn review_pr(
     if let Some(problem) = bugbot_problem(&threads).map_err(|e| merge_io(action, &e))? {
         return Err(merge_deny(action, &sha, &number.to_string(), &problem));
     }
+    if absent {
+        return Err(merge_ask(cwd, &sha));
+    }
     Ok(())
+}
+
+/// An ask for a head sha with no CI checks. A passing local record for
+/// that exact sha is named. The merge still asks.
+fn merge_ask(cwd: &Path, sha: &str) -> super::Rule {
+    let mut detail = format!("no CI ran on head sha {sha}.");
+    if evidence_recorded(cwd, sha) {
+        detail.push_str(&format!(" A local evidence record exists for {sha}."));
+    }
+    super::Rule {
+        pattern: "merge-gate".into(),
+        verdict: "ask".into(),
+        reason: format!("git-merge-unready: {detail}"),
+    }
 }
 
 fn merge_deny(action: &str, sha: &str, pr: &str, problem: &str) -> super::Rule {
@@ -1756,14 +1790,19 @@ fn merge_io(action: &str, err: &str) -> super::Rule {
     )
 }
 
+/// No checks on the head sha: a null rollup or an empty list. That is an
+/// ask in [`review_pr`], not a denial.
+fn ci_absent(rollup: &Value) -> bool {
+    rollup.is_null() || rollup.as_array().is_some_and(Vec::is_empty)
+}
+
 fn ci_problem(rollup: &Value) -> Option<String> {
-    if rollup.is_null() {
-        return Some("no CI checks are recorded".into());
+    // No checks at all is an ask, decided in [`review_pr`]. A red or
+    // pending check is a denial.
+    if ci_absent(rollup) {
+        return None;
     }
     let arr = rollup.as_array()?;
-    if arr.is_empty() {
-        return Some("no CI checks are recorded".into());
-    }
     let mut bad = Vec::new();
     for check in arr {
         let name = check["name"]
@@ -2455,12 +2494,27 @@ mod tests {
     }
 
     fn stub_gh(view: &str, threads: &str, list: &str) -> GhHold {
+        stub_gh_at(view, threads, list, false)
+    }
+
+    fn stub_gh_unreadable() -> GhHold {
+        stub_gh_at("", "", "", true)
+    }
+
+    fn stub_gh_at(view: &str, threads: &str, list: &str, fail: bool) -> GhHold {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("view.json"), view).unwrap();
         std::fs::write(dir.path().join("threads.json"), threads).unwrap();
         std::fs::write(dir.path().join("list.json"), list).unwrap();
+        if fail {
+            std::fs::write(dir.path().join("fail"), "1").unwrap();
+        }
         let script = r#"#!/bin/sh
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+if [ -f "$here/fail" ]; then
+  echo "HTTP 401: Bad credentials" >&2
+  exit 1
+fi
 case "$*" in
   *graphql*) cat "$here/threads.json" ;;
   *"pr list"*) cat "$here/list.json" ;;
@@ -2502,6 +2556,66 @@ esac
                 "status": "COMPLETED",
                 "conclusion": "FAILURE"
             }]
+        })
+        .to_string()
+    }
+
+    fn rollup_view(sha: &str, rollup: serde_json::Value) -> String {
+        serde_json::json!({
+            "number": 7,
+            "headRefOid": sha,
+            "state": "OPEN",
+            "url": "https://github.com/acme/widgets/pull/7",
+            "statusCheckRollup": rollup,
+        })
+        .to_string()
+    }
+
+    fn pending_view(sha: &str) -> String {
+        rollup_view(
+            sha,
+            serde_json::json!([{
+                "name": "ci",
+                "status": "IN_PROGRESS",
+                "conclusion": null
+            }]),
+        )
+    }
+
+    fn quiet_threads() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": []
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn human_thread() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "pageInfo": {"hasNextPage": false},
+                            "nodes": [{
+                                "isResolved": false,
+                                "comments": {"nodes": [{
+                                    "author": {"login": "octocat"},
+                                    "body": "please rename this"
+                                }]}
+                            }]
+                        }
+                    }
+                }
+            }
         })
         .to_string()
     }
@@ -2907,6 +3021,7 @@ esac
 
         let _hold = stub_gh(&green_view(sha), &threads(false, false), "[]");
         let open = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(open.verdict, "deny");
         assert!(open.reason.contains("Bugbot"), "{}", open.reason);
         drop(_hold);
 
@@ -2914,6 +3029,178 @@ esac
         assert!(guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none());
         let api = "curl -X PUT https://api.github.com/repos/acme/widgets/pulls/7/merge";
         assert!(guard_verdict(api, Some(dir.path()), &[]).is_none(), "{api}");
+    }
+
+    #[test]
+    fn a_pending_check_on_a_merge_is_refused() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _hold = stub_gh(&pending_view(sha), &quiet_threads(), "[]");
+        let pending = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(pending.verdict, "deny");
+        assert!(
+            pending.reason.contains("ci=IN_PROGRESS"),
+            "{}",
+            pending.reason
+        );
+        assert!(
+            pending.reason.contains("git-merge-unready"),
+            "{}",
+            pending.reason
+        );
+        assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "ci=IN_PROGRESS");
+        drop(_hold);
+
+        let state = rollup_view(
+            sha,
+            serde_json::json!([{
+                "context": "build",
+                "state": "PENDING"
+            }]),
+        );
+        let _hold = stub_gh(&state, &quiet_threads(), "[]");
+        let held = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(held.verdict, "deny");
+        assert!(held.reason.contains("build=PENDING"), "{}", held.reason);
+    }
+
+    #[test]
+    fn a_head_sha_with_no_ci_asks_and_names_local_evidence() {
+        let dir = repo();
+        seed(dir.path());
+        let sha = tip(dir.path());
+        for rollup in [serde_json::Value::Null, serde_json::json!([])] {
+            let _hold = stub_gh(&rollup_view(&sha, rollup), &quiet_threads(), "[]");
+            let asked =
+                guard_verdict("gh pr merge 7", Some(dir.path()), &[]).expect("no checks asks");
+            assert_eq!(asked.verdict, "ask", "{}", asked.reason);
+            assert_eq!(asked.pattern, "merge-gate");
+            assert!(asked.reason.contains("no CI ran"), "{}", asked.reason);
+            assert!(asked.reason.contains(&sha), "{}", asked.reason);
+            assert!(!asked.reason.contains("evidence"), "{}", asked.reason);
+            let rows = answers("gh pr merge 7", dir.path(), &[]);
+            let shell = rows
+                .iter()
+                .find(|(name, _)| name == "cursor-shell")
+                .unwrap();
+            assert!(shell.1.contains("\"permission\":\"ask\""), "{}", shell.1);
+            assert!(shell.1.contains("no CI ran"), "{}", shell.1);
+            assert!(shell.1.contains(&sha), "{}", shell.1);
+        }
+
+        let bad = evidence_file(dir.path(), &sha).unwrap();
+        if let Some(parent) = bad.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &bad,
+            serde_json::json!({
+                "command": "true",
+                "exit": 1,
+                "sha": sha,
+                "ts": "2026-10-20T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _hold = stub_gh(
+            &rollup_view(&sha, serde_json::Value::Null),
+            &quiet_threads(),
+            "[]",
+        );
+        let failed = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(failed.verdict, "ask");
+        assert!(!failed.reason.contains("evidence"), "{}", failed.reason);
+        drop(_hold);
+
+        gates(dir.path(), "test = \"true\"\n");
+        record_in(dir.path(), &["true".into()]).unwrap();
+        let _hold = stub_gh(
+            &rollup_view(&sha, serde_json::json!([])),
+            &quiet_threads(),
+            "[]",
+        );
+        let recorded = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(recorded.verdict, "ask", "{}", recorded.reason);
+        assert!(recorded.reason.contains("no CI ran"), "{}", recorded.reason);
+        assert!(recorded.reason.contains(&sha), "{}", recorded.reason);
+        assert!(
+            recorded.reason.contains("local evidence record"),
+            "{}",
+            recorded.reason
+        );
+        assert!(
+            recorded.reason.contains(&format!("exists for {sha}")),
+            "{}",
+            recorded.reason
+        );
+        drop(_hold);
+
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let _hold = stub_gh(
+            &rollup_view(other, serde_json::Value::Null),
+            &quiet_threads(),
+            "[]",
+        );
+        let elsewhere = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(elsewhere.verdict, "ask");
+        assert!(elsewhere.reason.contains(other), "{}", elsewhere.reason);
+        assert!(
+            !elsewhere.reason.contains("evidence"),
+            "{}",
+            elsewhere.reason
+        );
+        drop(_hold);
+
+        let _hold = stub_gh(&red_view(&sha), &quiet_threads(), "[]");
+        let red = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(red.verdict, "deny");
+        assert!(red.reason.contains("ci=FAILURE"), "{}", red.reason);
+        drop(_hold);
+
+        let _hold = stub_gh(
+            &rollup_view(&sha, serde_json::Value::Null),
+            &threads(false, false),
+            "[]",
+        );
+        let open = guard_verdict("gh pr merge 7", Some(dir.path()), &[]).unwrap();
+        assert_eq!(open.verdict, "deny");
+        assert!(open.reason.contains("Bugbot"), "{}", open.reason);
+        assert!(!open.reason.contains("no CI ran"), "{}", open.reason);
+    }
+
+    #[test]
+    fn an_unreadable_pull_request_is_refused_without_saying_ci_is_missing() {
+        let dir = repo();
+        let _hold = stub_gh_unreadable();
+        let denied =
+            guard_verdict("gh pr merge 7", Some(dir.path()), &[]).expect("unreadable pull request");
+        assert_eq!(denied.verdict, "deny");
+        assert_eq!(denied.pattern, "merge-gate");
+        assert!(denied.reason.contains("gh auth login"), "{}", denied.reason);
+        assert!(!denied.reason.contains("no CI"), "{}", denied.reason);
+        assert!(
+            !denied.reason.contains("CI is missing"),
+            "{}",
+            denied.reason
+        );
+        assert_denies(&answers("gh pr merge 7", dir.path(), &[]), "gh auth login");
+    }
+
+    #[test]
+    fn no_bugbot_threads_lets_a_green_merge_through() {
+        let dir = repo();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let _hold = stub_gh(&green_view(sha), &quiet_threads(), "[]");
+        assert!(guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none());
+        assert_allows(&answers("gh pr merge 7", dir.path(), &[]));
+        drop(_hold);
+
+        let _hold = stub_gh(&green_view(sha), &human_thread(), "[]");
+        assert!(
+            guard_verdict("gh pr merge 7", Some(dir.path()), &[]).is_none(),
+            "a thread that is not Bugbot does not refuse the merge"
+        );
     }
 
     #[test]

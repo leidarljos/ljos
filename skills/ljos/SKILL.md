@@ -483,8 +483,10 @@ under equal weights is a count; under calibrated rows it is not.
   that makes the line pass. A plain `git push` needs a passing
   `ljos evidence record -- <test command>` for that exact tip when the
   checkout sets `test`. With no `test` command a plain push is allowed, and
-  a force push still asks. A merge needs green CI on the head sha and every
-  Cursor Bugbot thread resolved or replied to. A commit that carries a
+  a force push still asks. A merge with red or pending checks is refused. A
+  head sha with no CI checks asks, and that ask names the sha and a local
+  evidence record when one exists for it. An open Cursor Bugbot thread must
+  be resolved or replied to. A commit that carries a
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.
