@@ -305,7 +305,15 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(server.is_file(), "ljos-mcp was not installed");
     assert!(home.join(".local/bin/packsetd").is_file());
     let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
-    assert!(mcp.contains(&server.display().to_string()), "{mcp}");
+    let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+    assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
+    assert!(
+        !doc["mcpServers"]["ljos"]["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains(home.to_str().unwrap()),
+        "{mcp}"
+    );
     assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
     let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
     assert!(env.contains("LJOS_SEAT=cursor-abcdef012345\n"), "{env}");

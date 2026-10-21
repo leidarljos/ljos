@@ -1,8 +1,8 @@
 //! One command for a fresh machine that should share the tracker.
 //!
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
-//! checks the published SHA-256 sums, writes the harness MCP command as a
-//! path that exists here, and clones `LJOS_TRACKER_REMOTE`. A later boot
+//! checks the published SHA-256 sums, writes the harness MCP command as
+//! `ljos-mcp` on PATH, and clones `LJOS_TRACKER_REMOTE`. A later boot
 //! with the binaries already installed only refreshes the clone.
 
 use std::collections::BTreeMap;
@@ -676,15 +676,16 @@ fn write_mcp(
     }
     let entry = serde_json::json!({
         "type": "stdio",
-        "command": server.display().to_string(),
+        "command": crate::MCP_SERVER_COMMAND,
         "args": [],
         "env": env,
     });
     let path = home.join(".cursor/mcp.json");
     crate::set_json_entry(&path, "/mcpServers/ljos", &entry)?;
     Ok(format!(
-        "mcp: {} starts {}",
+        "mcp: {} starts {} on PATH ({})",
         path.display(),
+        crate::MCP_SERVER_COMMAND,
         server.display()
     ))
 }
