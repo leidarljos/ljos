@@ -4,7 +4,15 @@
 //! no variable that names the agent. The hook leaves the call under the
 //! runtime directory, and the `ljos` the command runs, or the MCP server
 //! the call reaches, takes it back once.
+//!
+//! A shell call is kept with the hook's ancestors, and only a process that
+//! runs under the nearest of them still alive takes it: the harness that
+//! ran the hook runs the command too. The files are not signed. Anything
+//! running as the same user can still write one naming a live ancestor of
+//! a later `ljos`; the check stops a record left by hand, or by a process
+//! in another tree, from naming a session.
 
+use crate::proc_tree::Proc;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +26,9 @@ struct Call {
     agent: String,
     argv: Vec<String>,
     at: u64,
+    /// The hook's ancestors, nearest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tree: Vec<Proc>,
 }
 
 fn root() -> PathBuf {
@@ -145,6 +156,7 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
                     agent,
                     argv: Vec::new(),
                     at: now_ms(),
+                    tree: Vec::new(),
                 };
                 put(&mcp_path(&root, &call), &found);
             }
@@ -160,12 +172,14 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
             };
             let at = now_ms();
             let dir = shell_dir(&root, &session);
+            let tree = crate::proc_tree::ancestors();
             for (i, argv) in crate::ljos_invocations(line).into_iter().enumerate() {
                 let found = Call {
                     session: session.clone(),
                     agent: agent.clone().unwrap_or_default(),
                     argv,
                     at,
+                    tree: tree.clone(),
                 };
                 put(&dir.join(format!("{call}.{i}.json")), &found);
             }
@@ -199,13 +213,22 @@ fn argv_matches(written: &[String], argv: &[String]) -> bool {
             .all(|(w, a)| w == a || w.contains(['$', '`', '*', '?', '[', '~']))
 }
 
+/// The process that ran the hook for `call` and runs this line too: the
+/// nearest of the hook's ancestors still alive, when it is one of `mine`.
+/// A record that names none is no call.
+fn harness_of<'a>(call: &'a Call, mine: &[Proc]) -> Option<&'a Proc> {
+    let nearest = call.tree.iter().find(|p| crate::proc_tree::alive(p))?;
+    mine.iter().any(|m| m.same(nearest)).then_some(nearest)
+}
+
 /// The agent of the `ljos` line this process runs, when a hook saw it
 /// under `session`. The newest call whose line is this argv is taken, so
 /// no other process takes it too and a parent's call is never answered
 /// by an older one its subagent left. An empty agent is the parent's.
 #[must_use]
 pub fn claim_command(session: &str) -> Option<String> {
-    claim_command_in(&root(), session, &this_line()?, now_ms())
+    let mine = crate::proc_tree::ancestors();
+    claim_command_in(&root(), session, &this_line()?, now_ms(), &mine)
 }
 
 /// The session and agent of the `ljos` line this process runs, when this
@@ -215,7 +238,8 @@ pub fn claim_command(session: &str) -> Option<String> {
 /// taken once. An empty agent is the parent's.
 #[must_use]
 pub fn claim_unsessioned_command() -> Option<(String, String)> {
-    claim_any_in(&root(), &this_line()?, now_ms())
+    let mine = crate::proc_tree::ancestors();
+    claim_any_in(&root(), &this_line()?, now_ms(), &mine)
 }
 
 /// This process's argv after the program, when the program is `ljos`: the
@@ -227,20 +251,28 @@ fn this_line() -> Option<Vec<String>> {
         .then(|| args.map(|a| a.to_string_lossy().into_owned()).collect())
 }
 
-fn claim_command_in(root: &Path, session: &str, argv: &[String], now: u64) -> Option<String> {
+fn claim_command_in(
+    root: &Path,
+    session: &str,
+    argv: &[String],
+    now: u64,
+    mine: &[Proc],
+) -> Option<String> {
     let found = waiting(&shell_dir(root, session), now)
         .into_iter()
-        .filter(|(_, c)| c.session == session && argv_matches(&c.argv, argv))
+        .filter(|(_, c)| {
+            c.session == session && argv_matches(&c.argv, argv) && harness_of(c, mine).is_some()
+        })
         .collect();
     take_newest(found).map(|c| c.agent)
 }
 
-fn claim_any_in(root: &Path, argv: &[String], now: u64) -> Option<(String, String)> {
+fn claim_any_in(root: &Path, argv: &[String], now: u64, mine: &[Proc]) -> Option<(String, String)> {
     let sessions = std::fs::read_dir(root.join("shell")).ok()?;
     let found = sessions
         .flatten()
         .flat_map(|dir| waiting(&dir.path(), now))
-        .filter(|(_, c)| argv_matches(&c.argv, argv))
+        .filter(|(_, c)| argv_matches(&c.argv, argv) && harness_of(c, mine).is_some())
         .collect();
     take_newest(found).map(|c| (c.session, c.agent))
 }
@@ -283,12 +315,14 @@ mod tests {
         line.split_whitespace().map(str::to_string).collect()
     }
 
+    /// A call as a hook running in this process's place would leave it.
     fn call(session: &str, agent: &str, argv: &str, at: u64) -> Call {
         Call {
             session: session.into(),
             agent: agent.into(),
             argv: words(argv),
             at,
+            tree: crate::proc_tree::ancestors(),
         }
     }
 
@@ -330,21 +364,25 @@ mod tests {
         );
         let argv = words(line);
         let now = 3_000;
+        let mine = crate::proc_tree::ancestors();
         assert_eq!(
-            claim_command_in(dir.path(), "sess-1", &argv, now).as_deref(),
+            claim_command_in(dir.path(), "sess-1", &argv, now, &mine).as_deref(),
             Some("")
         );
         assert_eq!(
-            claim_command_in(dir.path(), "sess-1", &argv, now).as_deref(),
+            claim_command_in(dir.path(), "sess-1", &argv, now, &mine).as_deref(),
             Some("agent-a")
         );
         assert_eq!(
-            claim_command_in(dir.path(), "sess-2", &argv, now),
+            claim_command_in(dir.path(), "sess-2", &argv, now, &mine),
             None,
             "another session's calls are not read"
         );
         let late = 1_000 + CALL_TTL_MS + 1;
-        assert_eq!(claim_command_in(dir.path(), "sess-1", &argv, late), None);
+        assert_eq!(
+            claim_command_in(dir.path(), "sess-1", &argv, late, &mine),
+            None
+        );
         assert!(!shell.join("toolu_old.0.json").exists());
     }
 
@@ -366,21 +404,74 @@ mod tests {
         );
         let argv = words(line);
         let now = 4_000;
+        let mine = crate::proc_tree::ancestors();
         assert_eq!(
-            claim_any_in(dir.path(), &argv, now),
+            claim_any_in(dir.path(), &argv, now, &mine),
             Some(("sess-2".into(), "agent-b".into()))
         );
         assert_eq!(
-            claim_any_in(dir.path(), &argv, now),
+            claim_any_in(dir.path(), &argv, now, &mine),
             Some(("sess-1".into(), "agent-a".into()))
         );
-        assert_eq!(claim_any_in(dir.path(), &argv, now), None);
+        assert_eq!(claim_any_in(dir.path(), &argv, now, &mine), None);
         assert_eq!(
-            claim_any_in(dir.path(), &words("recall demo-a"), 3_000 + CALL_TTL_MS + 1),
+            claim_any_in(
+                dir.path(),
+                &words("recall demo-a"),
+                3_000 + CALL_TTL_MS + 1,
+                &mine
+            ),
             None
         );
         let empty = tempfile::tempdir().unwrap();
-        assert_eq!(claim_any_in(empty.path(), &argv, now), None);
+        assert_eq!(claim_any_in(empty.path(), &argv, now, &mine), None);
+    }
+
+    #[test]
+    fn a_call_whose_hook_ran_in_another_tree_is_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "vote demo-a --for ship --used none --as reviewer";
+        let argv = words(line);
+        let mine = crate::proc_tree::ancestors();
+        let mut sibling = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let reused = crate::proc_tree::Proc {
+            start: mine[0].start + 1,
+            ..mine[0].clone()
+        };
+        let forged = [
+            ("toolu_bare", Vec::new()),
+            (
+                "toolu_sibling",
+                vec![crate::proc_tree::of(sibling.id()).unwrap()],
+            ),
+            ("toolu_gone", vec![reused]),
+        ];
+        for (id, tree) in forged {
+            let mut c = call("sess-1", "agent-forged", line, 1_000);
+            c.tree = tree;
+            put(
+                &shell_dir(dir.path(), "sess-1").join(format!("{id}.0.json")),
+                &c,
+            );
+        }
+        assert_eq!(claim_any_in(dir.path(), &argv, 2_000, &mine), None);
+        assert_eq!(
+            claim_command_in(dir.path(), "sess-1", &argv, 2_000, &mine),
+            None
+        );
+        sibling.kill().unwrap();
+        sibling.wait().unwrap();
+        put(
+            &shell_dir(dir.path(), "sess-1").join("toolu_real.0.json"),
+            &call("sess-1", "agent-a", line, 1_500),
+        );
+        assert_eq!(
+            claim_any_in(dir.path(), &argv, 2_000, &mine),
+            Some(("sess-1".into(), "agent-a".into()))
+        );
     }
 
     #[test]

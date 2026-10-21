@@ -32,6 +32,7 @@ pub mod pack_copy;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
+pub mod proc_tree;
 pub mod reap;
 pub mod runner_hooks;
 pub mod runner_skills;

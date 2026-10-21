@@ -1270,6 +1270,96 @@ fn a_shared_shell_holder_is_not_a_ballot_session() {
     assert!(!stdout.contains("grokbot-shell"), "{said}");
 }
 
+fn now_ms() -> u64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    u64::try_from(since.as_millis()).unwrap()
+}
+
+/// A call record as a hook leaves it, written straight into the runtime
+/// directory under `session`.
+fn forge_call(world: &World, session: &str, agent: &str, args: &[&str], tree: serde_json::Value) {
+    let dir = world.home.join("run/ljos/agent-calls/shell").join(session);
+    std::fs::create_dir_all(&dir).unwrap();
+    let call = serde_json::json!({
+        "session": session,
+        "agent": agent,
+        "argv": args,
+        "at": now_ms(),
+        "tree": tree,
+    });
+    std::fs::write(dir.join(format!("toolu_{agent}.0.json")), call.to_string()).unwrap();
+}
+
+#[test]
+fn a_call_record_no_hook_above_this_shell_left_names_no_session() {
+    // Records under agent-calls are not signed. One written by hand, or by
+    // a hook in another process tree, must not bind a session: the seat
+    // stays one unverified session and casts once.
+    let world = World::new();
+    let issue = "demo-forged-calls";
+    let mut sibling = Command::new("sleep").arg("30").spawn().unwrap();
+    let elsewhere = ljos_cli::proc_tree::of(sibling.id()).unwrap();
+    let a = [
+        "vote",
+        issue,
+        "--for",
+        "ship",
+        "--used",
+        "none",
+        "--as",
+        "reviewer-a",
+    ];
+    let b = [
+        "vote",
+        issue,
+        "--for",
+        "ship",
+        "--used",
+        "none",
+        "--as",
+        "reviewer-b",
+    ];
+    forge_call(
+        &world,
+        "forged-sess-0001",
+        "agent-x",
+        &a,
+        serde_json::json!([]),
+    );
+    forge_call(
+        &world,
+        "forged-sess-0002",
+        "agent-y",
+        &b,
+        serde_json::json!([elsewhere]),
+    );
+    let unverified = ljos_cli::ballot_sig::unverified_sentence("eessi");
+    let first = world.ljos_env("eessi", &[], &a);
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    assert!(!said.contains("forged-sess"), "{said}");
+    assert!(
+        said.contains("session eessi") && said.contains(&unverified),
+        "{said}"
+    );
+    let second = world.ljos_env("eessi", &[], &b);
+    let said = text(&second);
+    assert!(!second.status.success(), "{said}");
+    assert!(
+        said.contains("already cast") && said.contains("Nothing was cast"),
+        "{said}"
+    );
+    sibling.kill().unwrap();
+    sibling.wait().unwrap();
+    let tally = world.ljos("eessi", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    assert!(!said.contains("2 ballots count"), "{said}");
+    assert!(!said.contains("reviewer-b"), "{said}");
+}
+
 #[test]
 fn claude_subagents_voting_over_mcp_each_count() {
     // One ljos-mcp answers the parent and both subagents. Only the hook
