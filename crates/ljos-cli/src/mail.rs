@@ -850,6 +850,8 @@ fn wake_after(m: &Outgoing) -> String {
                 msg: m.id.clone(),
                 issue: m.issue.clone(),
                 interrupt: m.interrupt,
+                // The detached wake discovers the log commit after it pushes.
+                commit: None,
             })
             .collect();
     let woken = super::wake::spawn(&events);

@@ -21,6 +21,10 @@
 //! log before it runs the command or posts the webhook, so the send
 //! itself does not wait. A refused push is a line in the wake log. The
 //! wake still runs, and the send still stands.
+//!
+//! The envelope carries the tracker commit that holds the log, when push
+//! mode made one. A command sees `LJOS_WAKE_COMMIT`, and a webhook's JSON
+//! has `commit`. The field is absent when no log commit was made.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -65,6 +69,9 @@ pub struct Event {
     pub msg: String,
     pub issue: Option<String>,
     pub interrupt: bool,
+    /// The tracker commit whose tree holds the sealed log, when push
+    /// mode made one. Absent otherwise.
+    pub commit: Option<String>,
 }
 
 /// Where the wakes are kept: `wake.toml` beside `harnesses.toml`.
@@ -293,7 +300,7 @@ pub fn spawn(events: &[Event]) -> Vec<String> {
 /// The envelope a webhook gets. The body stays in the pack.
 #[must_use]
 pub fn envelope(event: &Event) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "event": "ljos-mail",
         "seat": event.seat,
         "from": event.from,
@@ -301,7 +308,11 @@ pub fn envelope(event: &Event) -> serde_json::Value {
         "issue": event.issue,
         "interrupt": event.interrupt,
         "read": format!("LJOS_SEAT={} ljos inbox", event.seat),
-    })
+    });
+    if let Some(commit) = &event.commit {
+        v["commit"] = serde_json::Value::String(commit.clone());
+    }
+    v
 }
 
 fn webhook_key(wake: &Wake) -> Option<String> {
@@ -335,6 +346,14 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
             if event.interrupt { "1" } else { "0" },
         )
         .stdin(std::process::Stdio::null());
+    match &event.commit {
+        Some(commit) => {
+            cmd.env("LJOS_WAKE_COMMIT", commit);
+        }
+        None => {
+            cmd.env_remove("LJOS_WAKE_COMMIT");
+        }
+    }
     // What the command prints goes to the wake log, above the line that
     // says how it ended.
     let path = log_path();
@@ -395,7 +414,8 @@ fn post(url: &str, wake: &Wake, event: &Event) -> Result<String> {
 /// In push mode the sealed log is pushed first, from this process, which
 /// `send` and `reply` have already detached. The other machine can then
 /// read the letter. A push that does not land is recorded here and does
-/// not stop the wake.
+/// not stop the wake. The envelope then names the commit that holds the
+/// log, including when the push was refused and the commit stayed local.
 ///
 /// # Errors
 ///
@@ -408,28 +428,31 @@ pub fn fire(event: &Event) -> Result<String> {
     };
     // The letter is already in the pack. Pushing here, rather than in
     // `send`, keeps the sender's wait to the detach. The other host's
-    // inbox stays empty until this push is on the remote.
+    // inbox stays empty until this push is on the remote. The commit is
+    // read after the push, so a refusal still names the local log.
+    let mut carried = event.clone();
     if push_mode() {
         if let Err(why) = super::sync::push_sealed_log() {
-            log(&format!("{}: {why:#}", event.seat));
+            log(&format!("{}: {why:#}", carried.seat));
         }
+        carried.commit = super::sync::log_commit();
     }
     let outcome = if let Some(command) = &wake.command {
         let timeout = Duration::from_secs(wake.timeout.unwrap_or(WAKE_TIMEOUT_SECS).max(1));
-        run_command(command, event, timeout)
+        run_command(command, &carried, timeout)
     } else if let Some(url) = &wake.webhook {
-        post(url, wake, event)
+        post(url, wake, &carried)
     } else {
         Err(anyhow::anyhow!("neither a command nor a webhook"))
     };
     match outcome {
         Ok(said) => {
-            log(&format!("{} {}: {said}", event.seat, event.msg));
-            Ok(format!("wake {}: {said}\n", event.seat))
+            log(&format!("{} {}: {said}", carried.seat, carried.msg));
+            Ok(format!("wake {}: {said}\n", carried.seat))
         }
         Err(e) => {
-            log(&format!("{} {}: {e:#}", event.seat, event.msg));
-            Err(e).context(format!("wake {}", event.seat))
+            log(&format!("{} {}: {e:#}", carried.seat, carried.msg));
+            Err(e).context(format!("wake {}", carried.seat))
         }
     }
 }
@@ -471,12 +494,22 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: true,
+            commit: None,
         };
         let v = envelope(&event);
         assert_eq!(v["seat"], "grok");
         assert_eq!(v["msg"], "m1");
         assert_eq!(v["interrupt"], true);
+        assert!(v.get("commit").is_none(), "{v}");
         assert!(v.get("body").is_none() && v.get("text").is_none(), "{v}");
+        let named = Event {
+            commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            ..event
+        };
+        assert_eq!(
+            envelope(&named)["commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
         assert!(check_webhook("http://example.com/hook").is_err());
         assert!(check_webhook("https://api2.cursor.sh/automations/webhook/x").is_ok());
         assert!(check_webhook("http://127.0.0.1:9/hook").is_ok());
