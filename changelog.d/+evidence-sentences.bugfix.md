@@ -1,1 +1,2 @@
-The evidence reason and the tip it names are separate sentences, in a refusal and in the warning a plain push prints.
+A gate refusal puts a full stop between the rule's reason and the detail after it.
+The warning a plain push prints with no passing test record keeps its own words.

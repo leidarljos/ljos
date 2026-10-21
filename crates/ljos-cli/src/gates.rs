@@ -451,9 +451,8 @@ fn on_push(git: &GitCmd, walk: &Walk) -> Result<(), super::Rule> {
     // and neither does a commit made on the same line.
     if let Some(test) = cfg.test.as_deref() {
         if let Some(why) = evidence_gap(&git.cwd, &git.args, current.as_deref(), walk.fresh, test) {
-            warn_push(join_sentences(
-                &super::policyd_reason("git-push-evidence"),
-                &format!("{why} Run `ljos evidence record -- {test}` to record one."),
+            warn_push(format!(
+                "This push runs without a passing test record. {why} Run `ljos evidence record -- {test}` to record one."
             ));
         }
     }
@@ -3260,13 +3259,14 @@ esac
         assert!(warned.contains("ljos evidence record -- true"), "{warned}");
         let sha = tip(dir.path());
         assert!(
-            warned.contains(&format!("refusal. Tip {sha}:")),
-            "the reason and the tip are separate sentences: {warned}"
+            warned.starts_with(&format!(
+                "This push runs without a passing test record. Tip {sha}:"
+            )),
+            "the warning names the missing record, then the tip: {warned}"
         );
         assert!(
-            !warned.contains(&format!("approval Tip {sha}"))
-                && !warned.contains(&format!("refusal Tip {sha}")),
-            "{warned}"
+            !warned.contains("could not read this command"),
+            "the gate read this push: {warned}"
         );
         record_in(dir.path(), &["true".into()]).unwrap();
         let allowed = answers("git push origin main", dir.path(), &rules);
