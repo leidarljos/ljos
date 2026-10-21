@@ -16,10 +16,11 @@ permissions:
   pages: write
   id-token: write
 
-# Develop and a release tag build the docs and do not publish them. The
-# github-pages environment takes main only, and main is moved to the tag's
-# commit before the tag, so main's deploy publishes the same docs. Main
-# has its own group, so no other run can cancel a deploy.
+# Develop builds the docs and does not publish them. Main publishes on its
+# push. A release tag builds and checks the docs here. docs-deploy.yml
+# publishes that tag: the github-pages environment allows main only, and a
+# workflow_run on the default branch checks out the tagged commit. Main
+# has its own group, so no other run of this workflow can cancel a deploy.
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && 'pages' || format('docs-{0}', github.ref) }}
   cancel-in-progress: true
