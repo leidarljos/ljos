@@ -1644,19 +1644,20 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<NoteArgs>,
     ) -> Result<Json<Said>, McpError> {
-        // A note never files an issue: it goes on the named one, else the
-        // one held, else it is refused.
+        // A note never files an issue. Prose in `issue` is not a title and
+        // not an id: the note goes on the issue this seat holds, else it
+        // is refused.
+        let raw_issue = args.issue.clone();
+        let note = args.text.clone();
         let issue = tokio::task::spawn_blocking(move || {
-            ljos_cli::bookkeep::canonical_issue(Some(&args.issue), None)
+            let raw = raw_issue.trim();
+            let passed = (!raw.is_empty()).then_some(raw);
+            ljos_cli::bookkeep::note_issue(passed)
         })
         .await
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
-        .ok_or_else(|| {
-            refused(anyhow::anyhow!(
-                "nothing is held to note on: pass issue, or ljos_start first; a note never files an issue"
-            ))
-        })?;
-        habitat("ljos", &["note", &issue, &args.text])
+        .map_err(|e| refused(anyhow::anyhow!(e)))?;
+        habitat("ljos", &["note", &issue, &note])
     }
 
     #[tool(
@@ -3066,13 +3067,41 @@ fn call_order(name: &str) -> Order {
     }
 }
 
-/// Initialization notifications and tool requests can run concurrently.
-/// Admission uses the peer's identity only after its connection is recorded.
-fn announce_client_once(client: &str) {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        announce_seat(client, runner_pid());
-    });
+/// The client name already recorded for this connection. Empty until the
+/// client has identified itself. `runner` is not stored: a tool call that
+/// arrives before initialize has no peer info, and recording that stand-in
+/// would leave the seat pinned.
+static CONNECTED_CLIENT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record the seat for this connection from the peer's client name.
+/// `None` is a tool call before the client has identified itself. The
+/// stand-in `runner` is the same absence. A later real name is recorded;
+/// a real name is not replaced.
+fn note_connected_client(client: Option<&str>) {
+    let Some(client) = client.map(str::trim).filter(|name| !name.is_empty()) else {
+        return;
+    };
+    if ljos_cli::seat_slug(client) == "runner" {
+        return;
+    }
+    let mut seen = CONNECTED_CLIENT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if seen.as_deref() == Some(client) {
+        return;
+    }
+    if seen.is_some() {
+        return;
+    }
+    announce_seat(client, runner_pid());
+    *seen = Some(client.to_string());
+}
+
+#[cfg(test)]
+fn reset_connected_client() {
+    *CONNECTED_CLIENT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = None;
 }
 
 fn call_queue() -> std::sync::MutexGuard<'static, std::collections::VecDeque<QueuedCall>> {
@@ -3335,10 +3364,9 @@ impl ServerHandler for LjosServer {
         let client = context
             .peer
             .peer_info()
-            .map(|info| info.client_info.name.clone())
-            .unwrap_or_else(|| "runner".to_string());
+            .map(|info| info.client_info.name.clone());
         let resolved = tokio::task::spawn_blocking(move || {
-            announce_client_once(&client);
+            note_connected_client(client.as_deref());
             ljos_cli::resolve_call_seat(seat_text.as_deref())
         })
         .await
@@ -3443,14 +3471,14 @@ impl ServerHandler for LjosServer {
     }
 
     /// The client has said who it is: name the seat after it and leave the
-    /// record a shell below the same runner reads.
+    /// record a shell below the same runner reads. A missing name is not
+    /// recorded; the next call that carries one does.
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         let client = context
             .peer
             .peer_info()
-            .map(|info| info.client_info.name.clone())
-            .unwrap_or_else(|| "runner".to_string());
-        announce_client_once(&client);
+            .map(|info| info.client_info.name.clone());
+        note_connected_client(client.as_deref());
     }
 
     /// The two cards and the protocol, and nothing else.
@@ -3588,6 +3616,89 @@ mod tests {
             }))),
             Some("sess-mcp-0001".to_string())
         );
+    }
+
+    /// A tool call can be read before initialize. Recording `runner` then
+    /// would pin the seat; the name arrives with the client, and that is
+    /// what the shell below this runner reads.
+    #[test]
+    fn a_tool_call_before_initialized_does_not_pin_runner() {
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _reset = ConnectedReset;
+        reset_connected_client();
+        let dir = tempfile::tempdir().unwrap();
+        let _saved = RestoreEnv::new(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+        ]);
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::remove_var("LJOS_HOLD");
+        }
+        let seat_file = dir
+            .path()
+            .join("run/ljos")
+            .join(format!("seat-{}", ljos_cli::runner_pid()));
+        note_connected_client(None);
+        assert!(
+            !seat_file.exists(),
+            "a tool call before initialize recorded a seat"
+        );
+        note_connected_client(Some("runner"));
+        assert!(
+            !seat_file.exists(),
+            "the stand-in runner was recorded: {}",
+            std::fs::read_to_string(&seat_file).unwrap_or_default()
+        );
+        note_connected_client(Some("Codex"));
+        let text = std::fs::read_to_string(&seat_file).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(text.lines().next(), Some("codex"), "{text}");
+    }
+
+    struct ConnectedReset;
+
+    impl Drop for ConnectedReset {
+        fn drop(&mut self) {
+            reset_connected_client();
+        }
+    }
+
+    struct RestoreEnv {
+        pairs: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    impl RestoreEnv {
+        fn new(keys: &[&str]) -> Self {
+            Self {
+                pairs: keys
+                    .iter()
+                    .map(|key| ((*key).to_string(), std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.pairs {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
     }
 
     /// The default lists the core set, every name in it is a tool, and the

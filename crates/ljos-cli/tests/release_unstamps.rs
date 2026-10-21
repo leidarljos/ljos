@@ -25,7 +25,9 @@ const ORG: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CAN
 :CLAIMED_BY: inky@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
 * STARTED [#C] hook claimed\n:PROPERTIES:\n:ID:         proj-dddd\n:CREATED:    [2026-10-11 Sun]\n\
 :CLAIMED_BY: saddle\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\
-:LOGBOOK:\n- State \"STARTED\" from \"BLOCKED\" [2026-10-11 Sun 05:00]\n:END:\n";
+:LOGBOOK:\n- State \"STARTED\" from \"BLOCKED\" [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] hex id, nobody on it\n:PROPERTIES:\n:ID:         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+:CREATED:    [2026-10-11 Sun]\n:END:\n";
 
 fn heading<'a>(org: &'a str, id: &str) -> &'a str {
     let at = org.find(&format!(":ID:         {id}")).unwrap();
@@ -93,6 +95,12 @@ fn release_reopens_and_complete_keeps_the_state() {
     ]);
     let other = ljos(&["release", "proj-cccc", "--assignee", "saddle@main"]);
     let bare = ljos(&["release", "proj-dddd", "--assignee", "saddle@main"]);
+    // The id is 32 hex, so it is its own claim-graph node. Release still
+    // has to leave TODO: STARTED with nobody on it is not a ready issue
+    // and not a held one (ljos-cjd8).
+    let hex_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert_eq!(hex_id.len(), 32, "the fixture id has to be 32 hex");
+    let hex = ljos(&["release", hex_id, "--assignee", "saddle@main"]);
     let org = std::fs::read_to_string(&file).unwrap();
     for id in ["proj-aaaa", "proj-bbbb", "proj-dddd"] {
         let h = heading(&org, id);
@@ -131,6 +139,18 @@ fn release_reopens_and_complete_keeps_the_state() {
         "another name's claim keeps its state:\n{org}"
     );
     assert!(other.contains("stays claimed by inky@main"), "{other}");
+    assert!(
+        heading(&org, hex_id).starts_with("\n* TODO"),
+        "a release of a STARTED issue with nobody on it is TODO:\n{org}"
+    );
+    assert!(
+        !heading(&org, hex_id).contains(":CLAIMED_BY:"),
+        "the hex id grew a claimant:\n{org}"
+    );
+    assert!(
+        hex.contains("nobody held it") || hex.contains("back to TODO"),
+        "{hex}"
+    );
 }
 
 /// `ljos finish` without `--close` ends the sitting the way a release
