@@ -106,7 +106,7 @@ fn refusal(command: &str, rule: &super::Rule) -> String {
     )
 }
 
-fn check_webhook(url: &str) -> Result<()> {
+pub(crate) fn check_webhook(url: &str) -> Result<()> {
     let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
         .iter()
         .any(|p| url.starts_with(p));
