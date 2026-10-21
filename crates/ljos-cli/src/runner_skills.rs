@@ -1,12 +1,12 @@
-//! Runner skills ljos installed, refreshed when a new version starts.
+//! Runner skills ljos installed, refreshed when shipped bytes change.
 //!
 //! `onboard` writes `<skills>/ljos/SKILL.md` and records the sha256 of those
-//! bytes in `<skills>/ljos/.ljos-skill-sha256`. The first run of a new ljos,
-//! including `ljos-mcp` as a session starts, rewrites a file whose bytes
-//! still match that hash. `ljos doctor` only reports; `ljos doctor --fix`
-//! rewrites too. A file whose bytes differ from the recorded hash was
-//! edited by hand: it is left in place and the doctor warns, which does
-//! not fail the command.
+//! bytes in `<skills>/ljos/.ljos-skill-sha256`. The first run whose shipped
+//! skill bytes differ from the recorded stamp, including `ljos-mcp` as a
+//! session starts, rewrites a file whose bytes still match that hash.
+//! `ljos doctor` only reports; `ljos doctor --fix` rewrites too. A file
+//! whose bytes differ from the recorded hash was edited by hand: it is left
+//! in place and the doctor warns, which does not fail the command.
 //!
 //! A skill installed before hashes were recorded has no sidecar. It is
 //! refreshed once when it still starts as an ljos skill, and the hash is
@@ -195,8 +195,8 @@ pub fn refresh_installed() -> bool {
     held
 }
 
-fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+fn refresh_identity() -> String {
+    skill_hash(crate::skill_text().as_bytes())
 }
 
 fn stamp_path() -> Option<PathBuf> {
@@ -207,23 +207,25 @@ fn stamp_path() -> Option<PathBuf> {
 }
 
 fn stamp_is_current() -> bool {
+    let want = refresh_identity();
     stamp_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_some_and(|text| text.trim() == version())
+        .is_some_and(|text| text.trim() == want)
 }
 
 fn write_stamp() {
     let Some(path) = stamp_path() else {
         return;
     };
+    let stamp = refresh_identity();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, format!("{}\n", version()));
+    let _ = std::fs::write(path, format!("{stamp}\n"));
 }
 
-/// Refresh on the first run of this version. Later runs of the same
-/// version do nothing. `ljos doctor` does not call this.
+/// Refresh on the first run whose shipped skill bytes differ from the
+/// bytes this ljos already stamped. `ljos doctor` does not call this.
 pub fn refresh_on_new_version() {
     if stamp_is_current() {
         return;

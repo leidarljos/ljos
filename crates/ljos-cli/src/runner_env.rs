@@ -1,12 +1,14 @@
 //! Env files a shell runner sources.
 //!
 //! `onboard` writes the file and records those bytes in
-//! `.<filename>.ljos-wrote`. The first run of a new ljos rewrites a file
-//! that is still those bytes, keeps lines the user added, and leaves a
-//! file it did not write alone. `ljos doctor` warns when a file it wrote
-//! is stale, and `ljos doctor --fix` rewrites it.
+//! `.<filename>.ljos-wrote`. The first run whose shipped env bytes differ
+//! rewrites a file that is still those bytes, keeps lines the user added,
+//! and leaves a file it did not write alone. `ljos doctor` warns when a
+//! file it wrote is stale, and `ljos doctor --fix` rewrites it.
 
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 const STALE_MARK: &str = " is stale; ljos doctor --fix";
 const EDITED_MARK: &str = " was edited by hand; ljos left it";
@@ -297,22 +299,29 @@ fn stamp_path() -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+fn refresh_identity() -> String {
+    let text = crate::seat_env_text("grokbot");
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
 fn write_stamp() {
     let Some(path) = stamp_path() else {
         return;
     };
+    let stamp = refresh_identity();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, format!("{}\n", env!("CARGO_PKG_VERSION")));
+    let _ = std::fs::write(path, format!("{stamp}\n"));
 }
 
-/// The first run of this version. Later runs do nothing. `ljos doctor`
-/// does not call this.
+/// The first run whose shipped env bytes differ from what this ljos
+/// already stamped. `ljos doctor` does not call this.
 pub fn refresh_on_new_version() {
-    if stamp_path().is_some_and(|path| {
-        std::fs::read_to_string(path).is_ok_and(|text| text.trim() == env!("CARGO_PKG_VERSION"))
-    }) {
+    let want = refresh_identity();
+    if stamp_path()
+        .is_some_and(|path| std::fs::read_to_string(path).is_ok_and(|text| text.trim() == want))
+    {
         return;
     }
     if refresh_installed() {

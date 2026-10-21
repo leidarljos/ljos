@@ -313,6 +313,35 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
     assert_eq!(fs::read(&antigravity).unwrap(), kept);
 }
 
+#[test]
+fn a_same_version_stamp_from_an_older_build_does_not_block_skill_refresh() {
+    let home = Home::new();
+    let cursor = home.root.join("cursor-skills/ljos/SKILL.md");
+    let antigravity = home.root.join("antigravity-skills/ljos/SKILL.md");
+    plant(&cursor, OLD_SKILL, OLD_SKILL);
+    plant(&antigravity, OLD_SKILL, OLD_SKILL);
+    harnesses(
+        &home,
+        cursor.parent().unwrap().parent().unwrap(),
+        antigravity.parent().unwrap().parent().unwrap(),
+    );
+    let stamp = home.root.join("share/ljos/skill-refresh-version");
+    fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    fs::write(&stamp, format!("{}\n", env!("CARGO_PKG_VERSION"))).unwrap();
+
+    let out = home.ljos(&["protocol"], "30");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("refreshed cursor:"), "{err}");
+    let now = fs::read_to_string(&cursor).unwrap();
+    assert!(now.contains("\n# The seat protocol\n"), "{now}");
+    assert_ne!(now, OLD_SKILL);
+}
+
 fn row<'a>(text: &'a str, what: &str) -> &'a str {
     text.lines()
         .find(|line| line.split('\t').nth(1) == Some(what))
@@ -453,6 +482,42 @@ _ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n";
     assert!(!String::from_utf8_lossy(&again.stderr).contains("refreshed"));
     assert_eq!(fs::read_to_string(&grok).unwrap(), got);
     assert!(home.root.join("share/ljos/env-refresh-version").is_file());
+}
+
+#[test]
+fn a_same_version_stamp_from_an_older_build_does_not_block_env_refresh() {
+    let home = Home::new();
+    let config = home.root.join("config/ljos");
+    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(home.root.join("home")).unwrap();
+    fs::write(
+        config.join("harnesses.toml"),
+        "[[harness]]\nname = \"grokbot\"\n",
+    )
+    .unwrap();
+    let env_path = config.join("grokbot.env");
+    fs::write(&env_path, format!("{OLD_ENV}export BOX_NOTES=keep-me\n")).unwrap();
+    fs::write(env_record(&env_path), OLD_ENV).unwrap();
+    let stamp = home.root.join("share/ljos/env-refresh-version");
+    fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    fs::write(&stamp, format!("{}\n", env!("CARGO_PKG_VERSION"))).unwrap();
+
+    let out = home.ljos(&["protocol"], "30");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("refreshed grokbot:") && err.contains("BOX_NOTES"),
+        "{err}"
+    );
+    let got = fs::read_to_string(&env_path).unwrap();
+    assert!(
+        got.contains("export LJOS_GIT_HOOKS=") && got.contains("export BOX_NOTES=keep-me\n"),
+        "{got}"
+    );
 }
 
 #[test]
