@@ -3452,18 +3452,20 @@ fn project_for(repo: &str) -> String {
     project_for_at(repo, forced.as_deref(), tracker.as_deref())
 }
 
-/// The tracker vissue would use: `VISSUE_ROOT`, then `ISSUE_ROOT`, then
+/// The tracker vissue would use: `ISSUE_ROOT`, then `VISSUE_ROOT`, then
 /// `root` in the vissue config. A hook often has neither variable, and
-/// the config is how vissue itself finds the tracker.
+/// the config is how vissue itself finds the tracker. A root that is not
+/// a directory is ignored, as vissue ignores it.
 fn configured_tracker() -> Option<PathBuf> {
-    for key in ["VISSUE_ROOT", "ISSUE_ROOT"] {
+    for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
         if let Some(path) = env_path(key) {
-            return Some(path);
+            return Some(expand_home_path(&path));
         }
     }
     let path = vissue_config_path()?;
     let text = std::fs::read_to_string(path).ok()?;
-    tracker_root_from_config(&text)
+    let root = tracker_root_from_config(&text)?;
+    root.is_dir().then_some(root)
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
@@ -3480,9 +3482,13 @@ fn vissue_config_path() -> Option<PathBuf> {
         return Some(path);
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })?;
     Some(base.join("vissue").join("config.toml"))
 }
 
@@ -3512,12 +3518,19 @@ fn tracker_root_from_config(text: &str) -> Option<PathBuf> {
 }
 
 fn expand_home(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/") {
+    if raw == "~" || raw.starts_with("~/") {
         if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            let rest = raw.strip_prefix("~/").unwrap_or("");
             return PathBuf::from(home).join(rest);
         }
     }
     PathBuf::from(raw)
+}
+
+fn expand_home_path(path: &Path) -> PathBuf {
+    path.to_str()
+        .map(expand_home)
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn project_for_at(repo: &str, forced: Option<&str>, tracker: Option<&Path>) -> String {
@@ -3732,7 +3745,8 @@ fn unquote_config(raw: &str) -> String {
 
 /// `git config --get remote.origin.url`, with the hook's `GIT_DIR` removed
 /// so `-C` is the checkout. `remote get-url` rewrites the URL through
-/// insteadOf and can hide the repository name.
+/// insteadOf and can hide the repository name. An included config is the
+/// case the file read above does not see.
 fn git_remote_from_command(repo: &str) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
@@ -3765,7 +3779,7 @@ fn git_remote_from_command(repo: &str) -> Option<String> {
                 if let Some(mut out) = child.stdout.take() {
                     let _ = out.read_to_string(&mut stdout);
                 }
-                let url = stdout.trim();
+                let url = stdout.lines().next().unwrap_or("").trim();
                 return (!url.is_empty()).then(|| url.to_string());
             }
             Ok(None) if started.elapsed() > COMMAND_DEADLINE => {
@@ -5528,8 +5542,8 @@ mod tests {
     /// A job folder such as `ljos-rohit-main-audit` is not the project.
     /// The origin is read from the git config, including a worktree's
     /// common dir, even when `git` on PATH fails and `GIT_DIR` names
-    /// another checkout. The tracker root comes from the vissue config
-    /// when no variable names it, and a recorded remote wins over the slug.
+    /// another checkout. A recorded remote still wins when the tracker
+    /// root comes from the vissue config and no variable names it.
     #[test]
     fn a_job_folder_files_on_the_remote_or_the_tracker() {
         use std::os::unix::fs::PermissionsExt;
@@ -5551,15 +5565,15 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("git"), "#!/bin/sh\nexit 1\n").unwrap();
         std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        set_var("PATH", &format!("{}:{}", bin.display(), path));
-        let real_path = path;
+        let real_path = std::env::var("PATH").unwrap_or_default();
+        set_var("PATH", &format!("{}:{}", bin.display(), real_path));
         for key in [
             "VISSUE_ROOT",
             "ISSUE_ROOT",
             "VISSUE_CONFIG",
             "LJOS_PROJECT",
             "GIT_DIR",
+            "GIT_WORK_TREE",
         ] {
             unsafe { std::env::remove_var(key) };
         }
@@ -5634,17 +5648,10 @@ mod tests {
             Some(home.join("vault").as_path())
         );
         assert!(tracker_root_from_config("[store]\nroot = \"/nope\"\n").is_none());
-        assert_eq!(
-            normalize_remote("https://x-access-token:abc/def@github.com/leidarljos/ljos.git"),
-            "github.com/leidarljos/ljos"
-        );
-        assert_eq!(
-            normalize_remote("example.com/user@host/repo"),
-            "example.com/user@host/repo"
-        );
 
         // An origin that lives in an included file is still the checkout's,
         // and GIT_DIR must not send the lookup at a different repository.
+        // `remote get-url` would also apply insteadOf and hide the name.
         unsafe { std::env::remove_var("HOME") };
         set_var("PATH", &real_path);
         let included = root.join("included");
@@ -5673,6 +5680,45 @@ mod tests {
             project_for_at(included.to_str().unwrap(), None, None),
             "ljos",
             "GIT_DIR named the decoy"
+        );
+        unsafe { std::env::remove_var("GIT_DIR") };
+        let rewritten = root.join("bench-w18b-tfn7");
+        std::fs::create_dir_all(&rewritten).unwrap();
+        git(&rewritten, &["init", "-q", "-b", "main"]);
+        git(
+            &rewritten,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/leidarljos/bench.git",
+            ],
+        );
+        git(
+            &rewritten,
+            &[
+                "config",
+                "--local",
+                "url./srv/git/.insteadOf",
+                "https://github.com/leidarljos/",
+            ],
+        );
+        assert_eq!(
+            project_for_at(rewritten.to_str().unwrap(), None, None),
+            "bench",
+            "insteadOf rewrote the origin into a path, so the folder became the project"
+        );
+        assert_eq!(
+            title_at("", rewritten.to_str().unwrap(), None, None),
+            "Work in bench"
+        );
+        assert_eq!(
+            normalize_remote("https://x-access-token:abc/def@github.com/leidarljos/ljos.git"),
+            "github.com/leidarljos/ljos"
+        );
+        assert_eq!(
+            normalize_remote("example.com/user@host/repo"),
+            "example.com/user@host/repo"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
