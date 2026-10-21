@@ -1,0 +1,1 @@
+The protocol and the ljos skill say the tracker commit lock is `.ljos-commit.lock` at the top of the worktree, not a file in the git directory, and that a stale `index.lock` is named with the `rm` that clears it.
