@@ -14,6 +14,7 @@ pub const SCHEMA_V1: &str = "record/v1";
 const SIGNING_LABEL: &str = "ljos-record-entry/v1";
 const RESERVED_PLAIN_FIELDS: &[&str] = &["host", "session", "agent"];
 const QUESTION_TYPES: &[&str] = &["correct", "locate", "change", "design", "lead"];
+const BALLOT_STANCES: &[&str] = &["accept", "reject", "withdrawn"];
 
 /// One signed entry in the plain record layer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -365,7 +366,7 @@ pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String
         let Some((_, ballot)) = group.iter().max_by_key(|(stamp, _)| *stamp) else {
             continue;
         };
-        if ballot.stance.eq_ignore_ascii_case("withdrawn") {
+        if ballot.stance == "withdrawn" {
             continue;
         }
         *counts
@@ -426,8 +427,8 @@ fn validate_ballot(ballot: &BallotEntry) -> Result<()> {
         bail!("ballot id mismatch: expected {computed}, got {id}");
     }
     validate_question_id(&ballot.question, None)?;
-    if ballot.stance.trim().is_empty() {
-        bail!("ballot stance is required");
+    if !BALLOT_STANCES.contains(&ballot.stance.as_str()) {
+        bail!("ballot stance must be one of `accept`, `reject` or `withdrawn`");
     }
     if let Some(confidence) = ballot.confidence {
         if !(confidence > 0.0 && confidence <= 1.0) {
@@ -1246,6 +1247,30 @@ mod tests {
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
             8,
         );
+    }
+
+    #[test]
+    fn stance_spelling_must_be_exact_lowercase() {
+        let _home = test_home();
+        for bad in ["accept ", "accept\u{200b}", "Accept", "WITHDRAWN"] {
+            let err = sign_entry(
+                ballot_entry("alpha/seat-a", bad, "2026-10-21T10:00:00Z"),
+                "alpha/seat-a",
+            )
+            .expect_err(bad);
+            assert!(
+                err_chain(&err).contains("stance"),
+                "{bad} passed stance validation: {}",
+                err_chain(&err)
+            );
+        }
+        for ok in ["accept", "reject", "withdrawn"] {
+            sign_entry(
+                ballot_entry("alpha/seat-a", ok, "2026-10-21T10:00:00Z"),
+                "alpha/seat-a",
+            )
+            .unwrap_or_else(|err| panic!("{ok}: {err:#}"));
+        }
     }
 
     /// Reserved names and any key the signature does not cover are refused
