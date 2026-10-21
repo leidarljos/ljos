@@ -222,9 +222,6 @@ fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &
     let Some((_, seat_or_run)) = split_voter(voter) else {
         return Ok(());
     };
-    if seat_or_run.starts_with("run-") {
-        return Ok(());
-    }
     let seat = crate::seat_slug(seat_or_run);
     if let Some(seat_key) = tracker_pins.get(&seat).filter(|pinned| *pinned != key) {
         bail!(
@@ -1528,6 +1525,33 @@ mod tests {
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
         assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
+    }
+
+    #[test]
+    fn a_run_seat_with_a_pin_row_is_held_to_it() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let pinned = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let entry = sign_as(
+            ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
+            2,
+        );
+        let line = format!("run-101 {}\n", pinned.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry))
+            .expect_err("alpha/run-101 passed beside a run-101 pin row");
+        assert!(
+            err_chain(&err).contains("through seat run-101"),
+            "{}",
+            err_chain(&err)
+        );
     }
 
     #[test]
