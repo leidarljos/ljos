@@ -563,9 +563,12 @@ enum Cmd {
     },
     /// How mail wakes a seat that is idle: a command this machine runs or a
     /// webhook it posts to, which `ljos send` and `ljos reply` start without
-    /// waiting. Alone, show the seat's wake.
+    /// waiting. A name ending in `-` matches every longer seat that starts
+    /// with it. Alone, show the seat's wake.
     Wake {
-        /// The seat. Absent: this seat.
+        /// The seat. Absent: this seat. A name ending in `-` is a prefix:
+        /// mail to a longer seat that starts with it uses this wake unless
+        /// that seat has its own. The longest prefix wins.
         seat: Option<String>,
         /// Run this shell line, with `LJOS_SEAT` set to the seat, when mail
         /// reaches it. The guard judges it now and on every run.
