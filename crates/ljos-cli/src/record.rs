@@ -2,7 +2,6 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -104,12 +103,17 @@ pub struct CheckReport {
     pub questions_with_live_ballots: usize,
 }
 
-/// Sign one entry. Ballot entries get `id` filled when absent.
+/// Sign one entry with `seat`'s ballot key.
+///
+/// The key is the file [`crate::ballot_sig::seat_key_path`] names, loaded
+/// with [`crate::ballot_sig::load_or_create`], the same path a seat ballot
+/// uses. Ballot entries get `id` filled when absent.
 ///
 /// # Errors
 ///
-/// The entry does not pass schema validation.
-pub fn sign_entry(mut unsigned: UnsignedEntry, key: &SigningKey) -> Result<SignedEntry> {
+/// The seat key cannot be loaded, or the entry does not pass schema
+/// validation.
+pub fn sign_entry(mut unsigned: UnsignedEntry, seat: &str) -> Result<SignedEntry> {
     if unsigned.schema.trim().is_empty() {
         unsigned.schema = SCHEMA_V1.to_string();
     }
@@ -119,15 +123,15 @@ pub fn sign_entry(mut unsigned: UnsignedEntry, key: &SigningKey) -> Result<Signe
         }
     }
     validate_unsigned(&unsigned)?;
+    let path = crate::ballot_sig::seat_key_path(seat)
+        .context("no seat key path: HOME and XDG_DATA_HOME are unset")?;
+    let key = crate::ballot_sig::load_or_create(&path)?;
     let payload = signing_payload(&unsigned)?;
-    let sig = key.sign(&payload);
+    let (public, sig) = crate::ballot_sig::signed_hex(&key, &payload);
     Ok(SignedEntry {
         schema: unsigned.schema,
         entry: unsigned.entry,
-        signature: EntrySignature {
-            key: hex::encode(key.verifying_key().to_bytes()),
-            sig: hex::encode(sig.to_bytes()),
-        },
+        signature: EntrySignature { key: public, sig },
     })
 }
 
@@ -141,17 +145,24 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
     let unsigned = entry.unsigned();
     validate_unsigned(&unsigned)?;
     let payload = signing_payload(&unsigned)?;
-    let key = decode_key(&entry.signature.key)?;
-    let sig = decode_sig(&entry.signature.sig)?;
-    key.verify(&payload, &sig)
-        .map_err(|_| anyhow!("entry signature does not verify"))
+    if !crate::ballot_sig::is_hex_len(&entry.signature.key, 64) {
+        bail!("signature key must be 64 hex chars");
+    }
+    if !crate::ballot_sig::is_hex_len(&entry.signature.sig, 128) {
+        bail!("signature must be 128 hex chars");
+    }
+    if !crate::ballot_sig::signature_ok(&entry.signature.key, &entry.signature.sig, &payload) {
+        bail!("entry signature does not verify");
+    }
+    Ok(())
 }
 
 /// Run schema + signature checks over many entries, including run-key pinning.
 ///
-/// A voter id of the form `run/<run-id>` pins `<run-id>` to the first public
-/// key seen for it. A later ballot from the same run id under another key is
-/// a mismatch.
+/// A voter id of the form `run/<run-id>` pins `<run-id>` to the tracker pin
+/// file when that run is already there, otherwise to the first public key
+/// seen for it. A later ballot from the same run id under another key is a
+/// mismatch.
 ///
 /// # Errors
 ///
@@ -163,7 +174,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
         entries: entries.len(),
         ..CheckReport::default()
     };
-    let mut run_keys: BTreeMap<String, String> = BTreeMap::new();
+    let mut pins = crate::ballot_sig::pins();
     let mut ballots = Vec::new();
     for entry in entries {
         verify_entry(entry)?;
@@ -172,17 +183,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
                 if let Some(run_id) = run_id_of(&ballot.voter) {
-                    if let Some(pinned) = run_keys.get(run_id) {
-                        if pinned != &entry.signature.key {
-                            bail!(
-                                "run id {run_id} is pinned to key {}…, got {}…",
-                                short_key(pinned),
-                                short_key(&entry.signature.key)
-                            );
-                        }
-                    } else {
-                        run_keys.insert(run_id.to_string(), entry.signature.key.clone());
-                    }
+                    crate::ballot_sig::observe_pin(&mut pins, run_id, &entry.signature.key)?;
                 }
                 ballots.push(ballot.clone());
             }
@@ -517,22 +518,6 @@ fn signing_payload(unsigned: &UnsignedEntry) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
-fn decode_key(hex_text: &str) -> Result<VerifyingKey> {
-    let bytes = hex::decode(hex_text).context("signature key is not valid hex")?;
-    let key: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("signature key must be 32 bytes"))?;
-    VerifyingKey::from_bytes(&key).map_err(|_| anyhow!("signature key bytes are invalid"))
-}
-
-fn decode_sig(hex_text: &str) -> Result<ed25519_dalek::Signature> {
-    let bytes = hex::decode(hex_text).context("signature is not valid hex")?;
-    let sig: [u8; 64] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("signature must be 64 bytes"))?;
-    Ok(ed25519_dalek::Signature::from_bytes(&sig))
-}
-
 /// Parse one record file. Unknown keys are not dropped before the reserved
 /// name walk, and the canonical bytes without `signature` must be the typed
 /// entry. A field added after signing then fails instead of riding along.
@@ -603,12 +588,7 @@ fn canonical_value(value: &Value) -> Value {
 }
 
 fn is_hex_len(text: &str, len: usize) -> bool {
-    text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn short_key(key: &str) -> &str {
-    let n = 12.min(key.len());
-    &key[..n]
+    crate::ballot_sig::is_hex_len(text, len)
 }
 
 fn entry_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -641,8 +621,31 @@ fn entry_files(dir: &Path) -> Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
 
-    fn key(seed: u8) -> SigningKey {
-        SigningKey::from_bytes(&[seed; 32])
+    /// Hold a private seat-key directory for the rest of this test.
+    fn test_home() -> (crate::EnvLock, tempfile::TempDir) {
+        let lock = crate::test_env_lock();
+        let home = tempfile::tempdir().expect("home");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe {
+                std::env::set_var("XDG_DATA_HOME", home.path());
+                std::env::remove_var("LJOS_SEAT_KEY");
+                std::env::remove_var("LJOS_SEAT");
+                std::env::remove_var("VISSUE_AGENT");
+                std::env::remove_var("VISSUE_ROOT");
+            }
+        });
+        (lock, home)
+    }
+
+    fn sign_as(unsigned: UnsignedEntry, seed: u8) -> SignedEntry {
+        let seat = format!("seat-{seed}");
+        let path = crate::ballot_sig::seat_key_path(&seat).expect("seat key path");
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("seat dir");
+        }
+        std::fs::write(&path, [seed; 32]).expect("seed");
+        sign_entry(unsigned, &seat).unwrap_or_else(|err| panic!("seat-{seed}: {err:#}"))
     }
 
     fn question_entry() -> UnsignedEntry {
@@ -689,17 +692,31 @@ mod tests {
 
     #[test]
     fn a_signed_entry_verifies() {
-        let entry = sign_entry(question_entry(), &key(7)).expect("signed");
+        let _home = test_home();
+        let entry = sign_as(question_entry(), 7);
         verify_entry(&entry).expect("valid signature");
     }
 
     #[test]
+    fn a_record_entry_is_signed_with_the_seat_ballot_key() {
+        let _home = test_home();
+        let entry = sign_as(question_entry(), 7);
+        let path = crate::ballot_sig::seat_key_path("seat-7").expect("path");
+        let key = crate::ballot_sig::load_or_create(&path).expect("seat key");
+        assert_eq!(
+            entry.signature.key,
+            hex::encode(key.verifying_key().to_bytes())
+        );
+        verify_entry(&entry).expect("verifies under the seat key");
+    }
+
+    #[test]
     fn a_one_byte_edit_fails_verification() {
-        let mut entry = sign_entry(
+        let _home = test_home();
+        let mut entry = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            &key(8),
-        )
-        .expect("signed");
+            8,
+        );
         let Entry::Ballot(ballot) = &mut entry.entry else {
             panic!("ballot expected");
         };
@@ -709,43 +726,34 @@ mod tests {
 
     #[test]
     fn a_second_key_under_one_run_id_is_a_mismatch() {
-        let first = sign_entry(
+        let _home = test_home();
+        let first = sign_as(
             ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
-            &key(1),
-        )
-        .expect("first signed");
-        let second = sign_entry(
+            1,
+        );
+        let second = sign_as(
             ballot_entry("run/run-101", "reject", "2026-10-21T11:00:00Z"),
-            &key(2),
-        )
-        .expect("second signed");
+            2,
+        );
         let err = check_entries(&[first, second]).expect_err("must reject run key mismatch");
         assert!(err.to_string().contains("pinned"));
     }
 
     #[test]
     fn latest_ballot_per_voter_wins_and_withdrawn_does_not_count() {
-        let a1 = as_ballot(
-            sign_entry(
-                ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-                &key(3),
-            )
-            .expect("signed"),
-        );
-        let a2 = as_ballot(
-            sign_entry(
-                ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
-                &key(3),
-            )
-            .expect("signed"),
-        );
-        let b1 = as_ballot(
-            sign_entry(
-                ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
-                &key(4),
-            )
-            .expect("signed"),
-        );
+        let _home = test_home();
+        let a1 = as_ballot(sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        ));
+        let a2 = as_ballot(sign_as(
+            ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
+            3,
+        ));
+        let b1 = as_ballot(sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
+            4,
+        ));
         let read = tally(&[a1, a2, b1]).expect("tally");
         let by_stance = read.get("correct-3f9a1c2e").expect("question tally");
         assert_eq!(by_stance.get("accept"), Some(&1));
@@ -754,16 +762,15 @@ mod tests {
 
     #[test]
     fn two_unreplaced_ballots_in_one_hour_are_flagged() {
-        let accept = sign_entry(
+        let _home = test_home();
+        let accept = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            &key(3),
-        )
-        .expect("accept");
-        let reject = sign_entry(
+            3,
+        );
+        let reject = sign_as(
             ballot_entry("alpha/seat-a", "reject", "2026-10-21T10:00:00Z"),
-            &key(3),
-        )
-        .expect("reject");
+            3,
+        );
         let err = tally(&[as_ballot(accept), as_ballot(reject)]).expect_err("same hour");
         assert!(err.to_string().contains("same hour"), "{err}");
     }
@@ -778,20 +785,19 @@ mod tests {
 
     #[test]
     fn a_same_hour_withdrawal_does_not_count_in_either_order() {
-        let cast = sign_entry(
+        let _home = test_home();
+        let cast = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            &key(3),
-        )
-        .expect("cast");
+            3,
+        );
         let cast_id = as_ballot(cast.clone()).id.clone().expect("id");
-        let withdrawal = sign_entry(
+        let withdrawal = sign_as(
             with_replaces(
                 ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T10:00:00Z"),
                 &cast_id,
             ),
-            &key(3),
-        )
-        .expect("withdrawal");
+            3,
+        );
         let cast_ballot = as_ballot(cast.clone());
         let withdrawal_ballot = as_ballot(withdrawal.clone());
         for (name, order) in [
@@ -833,13 +839,13 @@ mod tests {
 
     #[test]
     fn check_dir_reads_and_verifies_json_entries() {
+        let _home = test_home();
         let dir = tempfile::tempdir().expect("tempdir");
-        let q = sign_entry(question_entry(), &key(5)).expect("signed question");
-        let b = sign_entry(
+        let q = sign_as(question_entry(), 5);
+        let b = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            &key(5),
-        )
-        .expect("signed ballot");
+            5,
+        );
         std::fs::write(
             dir.path().join("question.json"),
             serde_json::to_string_pretty(&q).expect("json"),
@@ -864,6 +870,7 @@ mod tests {
 
     #[test]
     fn timestamps_must_be_utc_hours() {
+        let _home = test_home();
         for bad in [
             "2026-10-21T10:00:00+05:30",
             "2026-10-21T04:00:00-05:00",
@@ -873,7 +880,7 @@ mod tests {
             "2026-10-21T10:30:00Z",
         ] {
             let err =
-                sign_entry(ballot_entry("alpha/seat-a", "accept", bad), &key(8)).expect_err(bad);
+                sign_entry(ballot_entry("alpha/seat-a", "accept", bad), "seat-8").expect_err(bad);
             let text = err_chain(&err);
             assert!(
                 text.contains("YYYY-MM-DDTHH:00:00Z"),
@@ -885,28 +892,27 @@ mod tests {
             panic!("question");
         };
         question.opened_at = "2026-10-21T09:00:00+00:00".to_string();
-        let err = sign_entry(opened, &key(8)).expect_err("offset opened_at");
+        let err = sign_entry(opened, "seat-8").expect_err("offset opened_at");
         assert!(
             err_chain(&err).contains("YYYY-MM-DDTHH:00:00Z"),
             "{}",
             err_chain(&err)
         );
-        sign_entry(
+        sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            &key(8),
-        )
-        .expect("utc hour");
+            8,
+        );
     }
 
     /// Reserved names and any key the signature does not cover are refused
     /// on the file, including inside `signature`.
     #[test]
     fn reserved_and_unsigned_fields_are_refused() {
-        let signed = sign_entry(
+        let _home = test_home();
+        let signed = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            &key(8),
-        )
-        .expect("signed");
+            8,
+        );
         let base = serde_json::to_value(&signed).expect("value");
 
         let mut host_in_sig = base.clone();
@@ -944,6 +950,28 @@ mod tests {
             "unsigned rationale was accepted: {}",
             err_chain(&err)
         );
+    }
+
+    #[test]
+    fn a_pin_file_rejects_a_different_run_key() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let entry = sign_as(
+            ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
+            1,
+        );
+        let other = sign_as(
+            ballot_entry("beta/seat-b", "reject", "2026-10-21T11:00:00Z"),
+            2,
+        );
+        let line = format!("run-101 {}\n", other.signature.key);
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
+        let err = check_entries(std::slice::from_ref(&entry)).expect_err("pinned key");
+        assert!(err.to_string().contains("pinned"), "{err}");
     }
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
