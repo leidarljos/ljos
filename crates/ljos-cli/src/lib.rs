@@ -25340,6 +25340,11 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         refused_or_busy(&made)
     };
     let mut result = attempt();
+    if result.is_err() {
+        if let Some(orphan) = orphaned_index_lock(dir) {
+            return PathCommit::Refused(orphan);
+        }
+    }
     for wait_ms in [200_u64, 400, 800, 1600, 3200] {
         if result.is_ok() {
             break;
@@ -25348,6 +25353,73 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         result = attempt();
     }
     result.unwrap_or_else(PathCommit::Refused)
+}
+
+/// How old an `index.lock` with no git in its checkout must be before ljos
+/// calls it left behind.
+const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The line for an `index.lock` no git holds: older than a minute, with no
+/// git process working in the checkout. A git killed outright leaves one,
+/// and every later commit fails on it until a person removes it.
+pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim);
+    let lock = Path::new(lines.next()?).join("index.lock");
+    let top = PathBuf::from(lines.next()?);
+    let age = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())?;
+    if age < ORPHAN_AFTER || git_runs_in(&top) {
+        return None;
+    }
+    Some(format!(
+        "{} is {}s old and no git process runs in {}: a git killed while it held the index left it, and every commit here fails until it is removed (`rm {}`)",
+        lock.display(),
+        age.as_secs(),
+        top.display(),
+        lock.display()
+    ))
+}
+
+/// Whether a git process on this machine works in `top`, by its working
+/// directory. One whose directory cannot be read may be the holder, and
+/// counts.
+fn git_runs_in(top: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        let comm = comm.trim();
+        if comm != "git" && !comm.starts_with("git-") {
+            continue;
+        }
+        match std::fs::read_link(entry.path().join("cwd")) {
+            Ok(cwd) if cwd.starts_with(top) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn index_busy(out: &std::process::Output) -> bool {
@@ -29365,6 +29437,46 @@ mod tests {
             commit_paths(&probe, &["issues.org"], "done"),
             PathCommit::AlreadyIn
         );
+    }
+
+    /// An empty index.lock two minutes old, with no git working in the
+    /// checkout, is named with its path and age at once, instead of six
+    /// seconds of retries ending in git's `File exists`. A fresh one may
+    /// still be a live git's.
+    #[test]
+    fn an_orphaned_index_lock_is_named_plainly() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let lock = dir.path().join(".git/index.lock");
+        let file = std::fs::File::create(&lock).unwrap();
+        assert!(orphaned_index_lock(dir.path()).is_none(), "a fresh lock");
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        drop(file);
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let started = std::time::Instant::now();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(
+            said.contains("index.lock is 1")
+                && said.contains("s old and no git process runs in")
+                && said.contains("`rm "),
+            "{said}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
     }
 
     /// A git killed before it printed anything is named, not an empty

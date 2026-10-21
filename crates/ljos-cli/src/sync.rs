@@ -1141,6 +1141,9 @@ fn commit_host(
     add.extend(&paths);
     let added = git_within(root, &add, deadline)?;
     if !git_succeeded(&added) {
+        if let Some(orphan) = crate::orphaned_index_lock(root) {
+            bail!("sync: user rules: {orphan}");
+        }
         bail!(
             "sync: user rules: could not stage {}: {}",
             rels.join(", "),
