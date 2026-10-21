@@ -7,9 +7,10 @@
 //! the pack, `ljos finish`, `ljos doctor`, or the next session start sends
 //! it. A refusal is not queued: the pack would refuse it again. A line left
 //! from before that rule is cut to what the pack takes, or dropped, on the
-//! next send. The queue holds one entry per issue, text, workspace and kind,
-//! and packsetd answers an identical issue and text with the claim it
-//! already holds, so a resend after a lost answer stores nothing new.
+//! next send. The queue holds one entry per issue, text, workspace, kind
+//! and, for a lesson, the atoms it closes. packsetd answers an identical
+//! issue and text with the claim it already holds, so a resend after a
+//! lost answer stores nothing new.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,14 +34,19 @@ pub struct Queued {
     /// `note` or `lesson`. A line written before this field reads as `note`.
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// Atoms a queued lesson closes. Empty for a note, and for a lesson
+    /// that closes nothing. A line written before this field reads as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<String>,
 }
 
 impl Queued {
-    fn same(&self, other: &Self) -> bool {
+    pub(crate) fn same(&self, other: &Self) -> bool {
         self.issue.trim() == other.issue.trim()
             && self.text.trim() == other.text.trim()
             && self.workspace == other.workspace
             && self.kind == other.kind
+            && self.supersedes == other.supersedes
     }
 }
 
@@ -130,8 +136,8 @@ pub fn replace_in(dir: &Path, notes: Vec<Queued>) -> Result<()> {
     write(dir, &notes)
 }
 
-/// Add `note` to the queue in `dir`. `false` when the same issue and
-/// text already wait there.
+/// Add `note` to the queue in `dir`. `false` when the same copy already
+/// waits there, including the atoms a lesson closes.
 ///
 /// # Errors
 ///
@@ -228,6 +234,7 @@ mod tests {
             workspace: "ws".into(),
             at: 1,
             kind: "note".into(),
+            supersedes: Vec::new(),
         }
     }
 
@@ -252,6 +259,21 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind, "note");
         assert_eq!(pending[0].text, "one line");
+        assert!(pending[0].supersedes.is_empty());
+    }
+
+    #[test]
+    fn a_lesson_that_closes_another_atom_is_a_different_copy() {
+        let dir = dir("closes");
+        let mut lesson = note("p-1", "one line");
+        lesson.kind = "lesson".into();
+        lesson.supersedes = vec!["atom-old".into()];
+        assert!(push_in(&dir, lesson.clone()).unwrap());
+        assert!(!push_in(&dir, lesson.clone()).unwrap());
+        let mut other = lesson;
+        other.supersedes = vec!["atom-new".into()];
+        assert!(push_in(&dir, other).unwrap());
+        assert_eq!(pending_in(&dir).len(), 2);
     }
 
     #[test]
