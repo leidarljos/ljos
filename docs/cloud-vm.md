@@ -10,6 +10,8 @@
 
 `LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not fetch or push. `off` skips the commit.
 
+`ljos send` and `ljos reply` in push mode push the sealed log from the detached wake before the wake fires, so the woken seat does not read an empty inbox. The send does not wait on that push. A failed push is a line in the wake log, and the wake still runs.
+
 `LJOS_SEAT` is the seat name. `ljos cloud up` appends the run id when one is present, at most 16 characters. On GitHub Actions that id is `GITHUB_RUN_ID`. Otherwise it is `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID`, `AGENT_ID`, `CURSOR_CONVERSATION_ID`, or `CODESPACE_NAME`. `LJOS_SEAT=ridley-ci-a` with run `555001` is the seat `ridley-ci-a-555001`. Unset, the seat is the harness name and that id, or the machine name when there is no id. A seat left in `~/.config/ljos/env` by an earlier boot does not hide a new id.
 
 Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SEAT/ballot.key`. `cloud up` points `LJOS_SEAT_KEY` and `DEEDAR_HOST_SIGNING_KEY` at that file, and writes `VISSUE_AGENT` as the same seat. The machine key `~/.config/deedar/host.key` stays where it is. A later process on that machine does not sign a ballot or a handover that already has a signature.

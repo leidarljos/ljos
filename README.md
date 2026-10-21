@@ -328,6 +328,8 @@ sender and keeps the issue. `ljos hook --prompt` prints unread mail and writes
 a receipt for each message it shows. When the pack does not answer, it prints
 `mail could not be checked` and still exits 0. A shell seat polls
 `ljos inbox`.
+In push mode the detached wake pushes the sealed log before it fires.
+The send does not wait, and a failed push is a line in the wake log.
 
 ## Decision panel concurrency
 
