@@ -17781,10 +17781,16 @@ fn push_facts(url: &str, tagged: bool) -> PushFacts {
 }
 
 fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
-    if let Some(d) = dir {
-        cmd.arg("-C").arg(d);
-    }
+    let mut cmd = match dir {
+        Some(d) => git_at(Path::new(d)),
+        None => {
+            let mut cmd = std::process::Command::new("git");
+            for key in git_hooks::HOOK_GIT_ENV {
+                cmd.env_remove(key);
+            }
+            cmd
+        }
+    };
     let out = cmd
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -20689,11 +20695,8 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(std::process::Stdio::null());
+    let mut cmd = git_at(dir);
+    cmd.args(args).stdin(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut cmd);
     cmd.output().ok()
 }
@@ -25226,15 +25229,58 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
+/// `git` in `dir` that follows `-C`. An inherited `GIT_DIR` would ignore
+/// `-C` and land the command in another checkout. A directory under
+/// `target` cannot see the source checkout above that directory: tests
+/// keep scratch trackers there, and discovery would lock the crate.
+pub(crate) fn git_at(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for key in git_hooks::HOOK_GIT_ENV {
+        cmd.env_remove(key);
+    }
+    if let Some(ceiling) = checkout_ceiling(dir) {
+        cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
+    cmd.arg("-C").arg(dir);
+    cmd
+}
+
+/// The directory git must not walk up into. A scratch path under `target`
+/// with no `.git` of its own stops at that `target`, so the source
+/// checkout above it is not this path's repository. A checkout that
+/// already has `.git` is left to discovery.
+pub(crate) fn checkout_ceiling(dir: &Path) -> Option<PathBuf> {
+    let start = if let Ok(canon) = std::fs::canonicalize(dir) {
+        canon
+    } else if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    let mut cur = start.clone();
+    loop {
+        if cur.join(".git").exists() {
+            return None;
+        }
+        if cur.file_name().is_some_and(|name| name == "target") {
+            if cur == start {
+                return cur.parent().map(Path::to_path_buf);
+            }
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
 /// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
 /// `git status` by the repository's `info/exclude`. Not in `.git`, where a
 /// hand clearing `*.lock` after a crash would unlink it under a live holder
 /// and the next seat would lock a new file beside it. `None` outside a git
 /// checkout.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = git_at(dir)
         .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -25450,9 +25496,7 @@ pub fn tracker_log(seat: Option<&str>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let out = git_at(&root)
         .args(["log", "--format=%h %s"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -25496,9 +25540,7 @@ pub fn tracker_usage(since: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let out = git_at(&root)
         .args(["log", &format!("--since={since}"), "--format=%s"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -25549,9 +25591,7 @@ fn commit_seat_pin(start: &Path, seat: &str) {
     if !root.join(name).is_file() {
         return;
     }
-    let ignored = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let ignored = git_at(&root)
         .args(["check-ignore", "-q", "--", name])
         .stdin(std::process::Stdio::null())
         .status()
@@ -25583,10 +25623,8 @@ pub enum PathCommit {
 /// the add failed. An untracked file is added here, that file only.
 pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     let git = |head: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(dir)
-            .args(head)
+        let mut cmd = git_at(dir);
+        cmd.args(head)
             .arg("--")
             .args(paths)
             .stdin(std::process::Stdio::null());
@@ -25646,9 +25684,7 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = git_at(dir)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -25805,11 +25841,8 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         return format!("tracker git: {} has no directory\n", path.display());
     };
     let git = |args: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdin(std::process::Stdio::null());
+        let mut cmd = git_at(dir);
+        cmd.args(args).stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
@@ -29684,6 +29717,91 @@ mod tests {
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
+    }
+
+    /// A tracker created under `target` is still inside this checkout.
+    /// Discovery must not walk up into it: the commit lock and the exclude
+    /// line would land on the crate, and an inherited `GIT_DIR` does the
+    /// same to a scratch repo that has its own `.git`.
+    #[test]
+    fn a_scratch_tracker_under_target_does_not_lock_the_crate() {
+        let _g = env_guard();
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let exclude = crate_root.join(".git/info/exclude");
+        let config = crate_root.join(".git/config");
+        let before_exclude = std::fs::read_to_string(&exclude).unwrap_or_default();
+        let before_config = std::fs::read(&config).unwrap_or_default();
+        let crate_lock = crate_root.join(TRACKER_LOCK);
+        struct PutBack {
+            exclude: PathBuf,
+            exclude_text: String,
+            config: PathBuf,
+            config_bytes: Vec<u8>,
+            lock: PathBuf,
+            scratch: PathBuf,
+        }
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.exclude, &self.exclude_text);
+                let _ = std::fs::write(&self.config, &self.config_bytes);
+                let _ = std::fs::remove_file(&self.lock);
+                let _ = std::fs::remove_dir_all(&self.scratch);
+            }
+        }
+        let scratch = crate_root.join("target/zdnr-lock-test");
+        let _back = PutBack {
+            exclude: exclude.clone(),
+            exclude_text: before_exclude.clone(),
+            config: config.clone(),
+            config_bytes: before_config.clone(),
+            lock: crate_lock.clone(),
+            scratch: scratch.clone(),
+        };
+        let _ = std::fs::remove_dir_all(&scratch);
+        let bare = scratch.join("share/vissue/tracker");
+        std::fs::create_dir_all(&bare).unwrap();
+        let repo = scratch.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success(), "scratch repo init");
+        unsafe {
+            std::env::set_var("GIT_DIR", crate_root.join(".git"));
+            std::env::set_var("GIT_WORK_TREE", &crate_root);
+        }
+        assert!(
+            super::tracker_lock_path(&bare).is_none(),
+            "a directory under target with no git of its own is not this crate"
+        );
+        let locked = super::tracker_lock_path(&repo).expect("the scratch repo is a checkout");
+        assert_eq!(locked, repo.join(TRACKER_LOCK));
+        super::tracker_push::prepare_tracker(&bare, true, false).unwrap();
+        assert!(
+            bare.join(".git").exists(),
+            "the scratch tracker was not inited"
+        );
+        let held = super::tracker_lock_path(&bare).expect("the inited tracker locks itself");
+        assert_eq!(held, bare.join(TRACKER_LOCK));
+        assert!(!crate_lock.exists(), "the crate gained the commit lock");
+        assert_eq!(
+            std::fs::read_to_string(&exclude).unwrap_or_default(),
+            before_exclude,
+            "the crate exclude gained the lock"
+        );
+        assert_eq!(
+            std::fs::read(&config).unwrap_or_default(),
+            before_config,
+            "the crate git config was written"
+        );
     }
 
     fn seeded_tracker(root: &Path) -> PathBuf {
