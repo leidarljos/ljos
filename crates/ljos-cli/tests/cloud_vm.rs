@@ -454,6 +454,81 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
 }
 
 #[test]
+fn cloud_up_installs_cloud_guard_refusals_idempotently() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    std::env::set_var("LJOS_GUARD", "on");
+    clear_agent_ids();
+
+    let missing = ljos_cli::cloud::guard_row();
+    assert_eq!(missing.name, "cloud guard");
+    assert!(!missing.ok, "{missing:?}");
+    assert!(missing.state.contains("run `ljos cloud up`"), "{missing:?}");
+
+    let first = ljos_cli::cloud::up(false).unwrap();
+    assert!(first.contains("guard:"), "{first}");
+    let rules = home.join(".config/ljos/cloud-guard-rules.json");
+    let before = fs::read_to_string(&rules).unwrap();
+    assert!(!before.trim().is_empty(), "{before:?}");
+
+    for denied in [
+        "git push origin cursor/probe",
+        "git push origin HEAD:cursor/probe",
+        "gh pr create --fill",
+        "gh pr merge 7",
+    ] {
+        let hit = ljos_cli::static_guard(denied).unwrap_or_else(|| panic!("{denied} was allowed"));
+        assert_eq!(hit.verdict, "deny", "{denied}: {hit:?}");
+        assert!(
+            hit.reason.contains("cloud seat rule"),
+            "{denied}: {:?}",
+            hit.reason
+        );
+    }
+    assert!(ljos_cli::static_guard("git push origin develop").is_none());
+
+    let present = ljos_cli::cloud::guard_row();
+    assert_eq!(present.name, "cloud guard");
+    assert!(present.ok, "{present:?}");
+    assert!(
+        present.state.contains("denies cursor/* pushes"),
+        "{present:?}"
+    );
+
+    let second = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        second.contains("already has cloud seat refusals"),
+        "{second}"
+    );
+    assert_eq!(
+        fs::read_to_string(&rules).unwrap(),
+        before,
+        "a second cloud up rewrote cloud guard rules"
+    );
+}
+
+#[test]
 fn two_vms_land_different_issues_and_merge_notes_on_one() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
