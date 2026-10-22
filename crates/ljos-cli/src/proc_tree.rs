@@ -383,7 +383,17 @@ mod tests {
             .env("LJOS_PROC_TREE_PROBE", "started-with")
             .spawn()
             .unwrap();
-        let env = environ(child.id()).unwrap_or_default();
+        // Until the child has exec'd, its environment is the fork's.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let env = loop {
+            let env = environ(child.id()).unwrap_or_default();
+            if env.iter().any(|(k, _)| k == "LJOS_PROC_TREE_PROBE")
+                || std::time::Instant::now() > deadline
+            {
+                break env;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(
