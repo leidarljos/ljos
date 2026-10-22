@@ -121,9 +121,15 @@ pub fn sender_entity(host: &str) -> String {
     format!("sync:{host}")
 }
 
-/// This machine's short host name.
+/// This machine's short host name, as [`machine_name`] folds it. Export,
+/// adopt and every log path use this one name, so the log an export
+/// writes is the one an adopt commit stages.
 #[must_use]
 pub fn host() -> String {
+    machine_name(&raw_host())
+}
+
+fn raw_host() -> String {
     if let Some(host) = std::env::var_os("LJOS_TEST_HOSTNAME").and_then(|raw| {
         let host = raw.to_string_lossy().trim().to_string();
         (!host.is_empty()).then_some(host)
@@ -932,7 +938,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         let Some((host, scope_name)) = host_scope_from_log_path(path, scope) else {
             continue;
         };
-        if host.is_empty() || host == me {
+        if host.is_empty() || machine_name(&host) == me {
             continue;
         }
         let Some(plain) = open_identities(path, &identities)? else {
@@ -1022,10 +1028,9 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
 /// imported above; this set is what the other machines still hold as
 /// `sync:` copies after the file is gone.
 fn adopted_hosts(root: &Path, me: &str) -> BTreeSet<String> {
-    let mine = machine_name(me);
     adopted_stems(root)
         .into_iter()
-        .filter(|stem| log_stem_host(stem).is_some_and(|host| host != me && host != mine))
+        .filter(|stem| log_stem_host(stem).is_some_and(|host| host != me))
         .filter(|stem| !in_head(root, &format!(".ljos/atoms/{stem}.jsonl.age")))
         .collect()
 }
@@ -4601,6 +4606,47 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&subject.stdout).trim(),
             "chore(sync): adopt gone cloud atoms"
+        );
+    }
+
+    /// The export and the adopt commit name this host's log the same way,
+    /// so the commit that drops the gone log carries the adopted atoms.
+    #[test]
+    fn an_adopt_commit_carries_the_log_of_a_host_with_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        std::env::set_var("LJOS_TEST_HOSTNAME", "bad host");
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(said.contains("2 cloud atoms adopted"), "{said}");
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        let changed = git(&fix.root, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
+        let changed = String::from_utf8_lossy(&changed.stdout);
+        let rel = ".ljos/atoms/bad-host.jsonl.age";
+        assert!(changed.lines().any(|line| line == rel), "{changed}");
+        let sealed = head_blob(&fix.root, rel).unwrap();
+        let opened = open_sealed_bytes(&sealed, &[identity_path()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(opened.lines().count(), 3, "{opened}");
+        let raw = log_dir(&fix.root).join("bad host.jsonl.age");
+        assert!(!raw.exists());
+        assert_eq!(require_host_name(&host()).unwrap(), host());
+        let stale = "{\"text\":\"stale\",\"kind\":\"lesson\",\"entities\":[]}\n";
+        seal(stale, std::slice::from_ref(&fix.public), &raw).unwrap();
+        let said = import(&fix.root, &scope_of(&fix.public)).unwrap();
+        assert!(
+            !said.contains("bad host:"),
+            "this host's log under its raw name was imported: {said}"
         );
     }
 
