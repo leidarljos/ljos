@@ -1422,6 +1422,62 @@ fn an_ordinary_curl_option_is_not_a_refusal() {
     );
 }
 
+/// The guard reads a config before the client does. A write on the same
+/// line to `SYSTEM_WGETRC` or to a config a curl or wget there names
+/// could change it in between, so that write is refused.
+#[test]
+fn a_write_to_a_config_the_line_names_is_refused() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let cfg = root.path().join("k.cfg");
+    fs::write(&cfg, "silent\n").unwrap();
+    let cfg = cfg.display();
+    let url = "printf 'url = https://api.github.com/user\\n'";
+
+    allowed(&format!("curl -K {cfg} -s https://example.com/x"), here);
+    allowed(&format!("{url} > {cfg}"), here);
+    for client in [
+        format!("curl -K {cfg} -s https://example.com/x"),
+        format!("curl -sK{cfg} https://example.com/x"),
+        format!("curl --config {cfg} https://example.com/x"),
+        format!("wget --config={cfg} -q https://example.com/x"),
+    ] {
+        refused(&format!("{client} & {url} > {cfg}"), here);
+        refused(&format!("{url} >> {cfg} & {client}"), here);
+        refused(&format!("{client} & cp /tmp/other {cfg}"), here);
+    }
+
+    refused(
+        &format!("curl -K {cfg} -o {cfg} https://example.com/x"),
+        here,
+    );
+    fs::write(home.join(".curlrc"), "silent\n").unwrap();
+    allowed(
+        &format!(
+            "curl -K {} -s https://example.com/x",
+            home.join(".curlrc").display()
+        ),
+        here,
+    );
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    let system = root.path().join("system.wgetrc");
+    std::env::set_var("SYSTEM_WGETRC", &system);
+    refused(
+        &format!("echo input=/tmp/urls > {}", system.display()),
+        here,
+    );
+    std::env::remove_var("SYSTEM_WGETRC");
+    allowed(
+        &format!("echo input=/tmp/urls > {}", system.display()),
+        here,
+    );
+}
+
 /// A curl option that names a proxy, a resolver, a socket, an address
 /// map, or a `Host:` header sends the request somewhere the URL does not
 /// say. So does an address for a host, and an option the guard does not
