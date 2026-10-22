@@ -57,6 +57,10 @@ pub struct UserRule {
     /// The lesson id a promote copied, when this row came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// [`lesson_hash`] of that lesson's record as the promote read it. A
+    /// record under `from` that hashes otherwise is another lesson.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lesson_hash: Option<String>,
     /// Absent on every row the commands write. Present only so a sweep can
     /// drop a row that was given a review date by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,6 +335,7 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
         updated_at: now,
         deleted: false,
         from,
+        lesson_hash: None,
         due_at: None,
     })
 }
@@ -399,9 +404,35 @@ pub fn promote_atom(
         .unwrap_or("")
         .trim();
     let mut rule = fresh(text, reason, Some(id))?;
+    rule.lesson_hash = Some(lesson_hash(atom));
     rule.deny_mention = clean_people(deny_mention)?;
     rule.deny_reply_to = clean_people(deny_reply_to)?;
     append(rule)
+}
+
+/// Sha256 of what makes lesson record `atom` the lesson it is: its kind,
+/// its text, its `ts` and `valid_from`, and the origin it was stored
+/// under as [`super::stored_by`] reads it. packsetd keeps the first `ts`
+/// when a tombstoned id is posted again and stamps a new `valid_from`, so
+/// a repost is another lesson even in the same words, as are an edit of
+/// the text and an origin changed in place. Links, grades and the update
+/// stamp move on writes that leave the lesson as it was, and are not read.
+#[must_use]
+pub fn lesson_hash(atom: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let field = |key: &str| atom.get(key).and_then(Value::as_str).unwrap_or("");
+    let mut hash = Sha256::new();
+    for part in [
+        field("kind"),
+        field("text"),
+        field("ts"),
+        field("valid_from"),
+        super::stored_by(atom).origin(),
+    ] {
+        hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    hex::encode(hash.finalize())
 }
 
 /// Tombstone `id`. The author and the reason stay, so a later sync can say
@@ -586,14 +617,18 @@ pub fn preface() -> String {
 /// Whether the preface may state `rule` as the person's. A rule written
 /// as words is. A rule promoted from a lesson is only when this read got
 /// that lesson from this seat's pack just now, under its id, stored as
-/// the person's. Anything less leaves the rule out of the preface, not
-/// stated as unverified: the preface is read as the person's, and a pack
-/// that is slow, down or answers for another atom confirms nothing.
+/// the person's, and it is the record the rule was promoted from: its
+/// [`lesson_hash`] is the one the row kept. A row with no hash kept has
+/// nothing to match. Anything less leaves the rule out of the preface,
+/// not stated as unverified: the preface is read as the person's, and a
+/// pack that is slow, down or answers for another atom confirms nothing.
 fn persons_rule(rule: &UserRule) -> bool {
     let Some(id) = rule.from.as_deref() else {
         return true;
     };
-    super::stored_origin_of(id) == super::Stored::Origin(super::StoredBy::Person)
+    matches!(super::atom_now(id), Ok(Some(lesson))
+        if super::person_stored(&lesson)
+            && rule.lesson_hash.as_deref() == Some(lesson_hash(&lesson).as_str()))
 }
 
 fn render(rules: &[UserRule], budget: usize) -> String {
@@ -1273,6 +1308,7 @@ mod tests {
             updated_at: "2020-01-01T00:00:00Z".into(),
             deleted: false,
             from: None,
+            lesson_hash: None,
             due_at: Some("2020-01-02T00:00:00Z".into()),
         });
         std::fs::write(
@@ -1544,6 +1580,10 @@ mod tests {
         promote_atom(&stored, "fixture", &People::default(), &People::default()).unwrap();
         assert!(preface().contains("deploy form checks"), "{}", preface());
         assert_eq!(
+            super::super::stored_origin_of(&id),
+            super::super::Stored::Origin(super::super::StoredBy::Person)
+        );
+        assert_eq!(
             super::super::recorded_origin(&id),
             Some(super::super::StoredBy::Person)
         );
@@ -1605,6 +1645,41 @@ mod tests {
         );
     }
 
+    /// A write that leaves the lesson as it was keeps its hash. Other
+    /// words, another write of the id, or another origin do not.
+    #[test]
+    fn a_lesson_hash_reads_only_what_makes_the_lesson() {
+        let lesson = serde_json::json!({
+            "id": "lesson-h", "kind": "lesson", "text": "Keep the form short.",
+            "origin": "user-declared", "source": {"basis": "person"},
+            "ts": "2026-10-20T00:00:00.000Z", "valid_from": "2026-10-20T00:00:00.000Z",
+            "updated": "2026-10-20T00:00:00.000Z", "links": [],
+        });
+        let with = |key: &str, value: Value| {
+            let mut atom = lesson.clone();
+            atom[key] = value;
+            lesson_hash(&atom)
+        };
+        let kept = lesson_hash(&lesson);
+        assert_eq!(with("links", serde_json::json!(["lesson-x"])), kept);
+        assert_eq!(
+            with("updated", serde_json::json!("2026-10-21T00:00:00.000Z")),
+            kept
+        );
+        assert_eq!(with("review", serde_json::json!({"reps": 3})), kept);
+        assert_ne!(with("text", serde_json::json!("Keep the form long.")), kept);
+        assert_ne!(
+            with("ts", serde_json::json!("2026-10-21T00:00:00.000Z")),
+            kept
+        );
+        assert_ne!(
+            with("valid_from", serde_json::json!("2026-10-21T00:00:00.000Z")),
+            kept
+        );
+        assert_ne!(with("origin", serde_json::json!("agent-derived")), kept);
+        assert_ne!(with("source", serde_json::json!({"basis": "agent"})), kept);
+    }
+
     #[test]
     fn promote_copies_a_lesson_and_refuses_anything_else() {
         let (_lock, _dir) = isolated();
@@ -1630,6 +1705,10 @@ mod tests {
         assert_eq!(rule.text, "Never post or reply to Alan (ocaisa).");
         assert_eq!(rule.author, "rohit");
         assert_eq!(rule.from.as_deref(), Some("lesson-ocaisa"));
+        assert_eq!(
+            rule.lesson_hash.as_deref(),
+            Some(lesson_hash(&atom).as_str())
+        );
         assert!(rule.due_at.is_none());
         assert_eq!(rule.deny_mention.handles, ["ocaisa"]);
         let raw = std::fs::read_to_string(rules_path().unwrap()).unwrap();
