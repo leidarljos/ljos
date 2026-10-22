@@ -28236,19 +28236,56 @@ fn tcb_argvs(line: &str) -> Vec<Vec<String>> {
     argvs
 }
 
-/// `line` with each backslash-newline dropped, as the shell drops them
-/// before it splits words, but not inside single quotes or `$'...'`, in
-/// a comment, or after an escaped backslash. ljos-policyd's lexer would
-/// read the newline as part of the next word.
+/// `line` as ljos-policyd is to read it. Each backslash-newline is
+/// dropped, as the shell drops them before it splits words, but not
+/// inside single quotes or `$'...'`, in a comment, or after an escaped
+/// backslash; ljos-policyd's lexer would read the newline as part of the
+/// next word. Each here-document's body, which it would read as commands,
+/// stands as [`heredoc_reading`] says.
 fn tcb_script(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
+    tcb_text(&chars, Some(heredocs_are_data(line)))
+}
+
+/// [`tcb_script`] over `chars`. `data` is whether a here-document body is
+/// data, and None inside a substitution, subshell or `${...}`, where
+/// `<<` opens no here-document this reads: `$((1<<2))` is a shift.
+fn tcb_text(chars: &[char], data: Option<bool>) -> String {
+    let mut out = String::with_capacity(chars.len());
     let mut double = false;
+    // Each here-document waiting for its line to end: where `<<WORD` sits
+    // in `out`, the word, and whether it was quoted.
+    let mut pending: Vec<(std::ops::Range<usize>, String, bool)> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        // A substitution, subshell or `${...}`: its opener, then its inside.
+        let open = match (c, next) {
+            ('$', Some('(' | '{' | '[')) | ('<' | '>', Some('(')) if c == '$' || !double => 2,
+            ('`', _) => 1,
+            ('(', _) if !double && opens_subshell(chars, i) => 1,
+            _ => 0,
+        };
+        if open > 0 {
+            let end = if c == '$' {
+                construct_end(chars, i)
+            } else {
+                nested_end(chars, i)
+            };
+            // bash may read a waiting body from inside a construct that
+            // spans lines, so such a body is left where it stands.
+            if chars[i..end].contains(&'\n') {
+                pending.clear();
+            }
+            let inner = (i + open).min(end);
+            out.extend(&chars[i..inner]);
+            out.push_str(&tcb_text(&chars[inner..end], None));
+            i = end;
+            continue;
+        }
         let end = match c {
-            '\\' if chars.get(i + 1) == Some(&'\n') => {
+            '\\' if next == Some('\n') => {
                 i += 2;
                 continue;
             }
@@ -28257,7 +28294,7 @@ fn tcb_script(line: &str) -> String {
                 .iter()
                 .position(|&q| q == '\'')
                 .map_or(chars.len(), |p| i + p + 2),
-            '$' if !double && chars.get(i + 1) == Some(&'\'') => {
+            '$' if !double && next == Some('\'') => {
                 let mut j = i + 2;
                 while j < chars.len() && chars[j] != '\'' {
                     j += if chars[j] == '\\' { 2 } else { 1 };
@@ -28274,6 +28311,62 @@ fn tcb_script(line: &str) -> String {
                     .position(|&q| q == '\n')
                     .map_or(chars.len(), |p| i + p)
             }
+            '<' if data.is_some() && !double && next == Some('<') => {
+                if chars.get(i + 2) == Some(&'<') {
+                    i + 3
+                } else {
+                    let opener = chars[i + 2..]
+                        .iter()
+                        .find(|c| !matches!(c, '-' | ' ' | '\t'))
+                        .copied();
+                    match heredoc_word(chars, i + 2).filter(|(_, after, _)| {
+                        let closed = !matches!(opener, Some('\'' | '"'))
+                            || chars.get(after - 1).copied() == opener;
+                        closed
+                            && chars.get(*after).is_none_or(|c| {
+                                c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | ')')
+                            })
+                    }) {
+                        Some((word, after, quoted)) => {
+                            let at = out.len();
+                            out.extend(&chars[i..after]);
+                            pending.push((at..out.len(), word, quoted));
+                            i = after;
+                            continue;
+                        }
+                        // A word this does not read, quoted in part or with
+                        // a space or a `$`, leaves its body as it stands.
+                        None => i + 2,
+                    }
+                }
+            }
+            '\n' if !double && !pending.is_empty() => {
+                out.push('\n');
+                let mut j = i + 1;
+                let mut read = Vec::new();
+                for (span, word, quoted) in std::mem::take(&mut pending) {
+                    let mut body = String::new();
+                    while j < chars.len() {
+                        let end = chars[j..]
+                            .iter()
+                            .position(|&q| q == '\n')
+                            .map_or(chars.len(), |p| j + p);
+                        let text: String = chars[j..end].iter().collect();
+                        j = (end + 1).min(chars.len());
+                        if text.trim() == word {
+                            break;
+                        }
+                        body.push_str(&text);
+                        body.push('\n');
+                    }
+                    read.push((span, heredoc_reading(&body, quoted, data == Some(true))));
+                }
+                for (span, text) in read.into_iter().rev() {
+                    out.replace_range(span, &text);
+                }
+                i = j;
+                continue;
+            }
             _ => {
                 double ^= c == '"';
                 i + 1
@@ -28283,6 +28376,85 @@ fn tcb_script(line: &str) -> String {
         i = end;
     }
     out
+}
+
+/// Just past the construct that opens at `chars[i]`: the `}` that closes
+/// `${`, the `]` that closes `$[`, and otherwise [`nested_end`]. Quotes,
+/// escapes and substitutions inside count; an unclosed one runs to the
+/// end.
+fn construct_end(chars: &[char], i: usize) -> usize {
+    let (open, close) = match chars.get(i + 1) {
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return nested_end(chars, i),
+    };
+    let n = chars.len();
+    let mut depth = 0usize;
+    let mut j = i + 1;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '\'' => j = (j + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1),
+            '"' => j = double_end(chars, j),
+            '`' => j = nested_end(chars, j),
+            '$' if chars.get(j + 1) == Some(&'(') => j = nested_end(chars, j),
+            c => {
+                depth = if c == open {
+                    depth + 1
+                } else if c == close {
+                    depth - 1
+                } else {
+                    depth
+                };
+                j += 1;
+                if depth == 0 {
+                    return j;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Commands that take a here-document as data and run none of it.
+const HEREDOC_READERS: &[&str] = &[
+    "cat", "tee", "git", "gh", "glab", "echo", "printf", "cd", "mkdir", "true", "wc", "head",
+    "tail", "grep", "sort", "jq",
+];
+
+/// Whether every command `line` runs takes a here-document as data: one
+/// of [`HEREDOC_READERS`], or an interpreter whose program
+/// [`stdin_programs`] sends on its own. Any other command may run what a
+/// body holds, from its standard input, down a pipe, or from a file the
+/// line writes and then runs.
+fn heredocs_are_data(line: &str) -> bool {
+    raw_segments(line).iter().all(|s| {
+        let words = shell_words(s);
+        let (at, split) = prefix_end(&words);
+        let reads = words
+            .get(at)
+            .is_none_or(|w| HEREDOC_READERS.contains(&w.rsplit('/').next().unwrap_or(w.as_str())));
+        split.is_none() && reads || reads_program_on_stdin(s).is_some()
+    })
+}
+
+/// What stands in place of a here-document whose body is `body`: the body
+/// as a script a subshell runs, unless the line's bodies are `data`; then
+/// the substitutions an unquoted body expands, each run so, or nothing.
+fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
+    let run = |script: &str| {
+        format!(
+            " <(bash -c '{}')",
+            tcb_script(script).replace('\'', "'\\''")
+        )
+    };
+    if !data {
+        return run(body);
+    }
+    if quoted {
+        return String::new();
+    }
+    substitutions(body, true).iter().map(|s| run(s)).collect()
 }
 
 /// ljos-policyd's answer on `line` run from `cwd`, over each call of
