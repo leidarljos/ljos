@@ -13,11 +13,11 @@ Nothing leaves the machine unless you turn on a remote judge.
 
 It blocks denied commands in Claude Code, Codex, Cursor, GitHub Copilot CLI,
 Gemini CLI, Windsurf, Factory's Droid, Kiro, Qwen Code, Crush, Auggie, Amp,
-goose, OpenHands, Grok Build, opencode, omp, hermes and Antigravity's `agy`.
+goose, OpenHands, Grok Build, opencode, omp and Antigravity's `agy`.
 Cline hooks are installed too, but upstream docs do not yet document whether a
 hook failure blocks the command.
 It serves memory, skills and tools over MCP in Zed, VS Code, Claude Desktop,
-Continue, Roo Code and Kilo Code.
+Continue, Roo Code, Kilo Code, hermes and Amazon Q.
 
 ## Five minutes
 
