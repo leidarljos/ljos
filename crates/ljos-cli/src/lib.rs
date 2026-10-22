@@ -50370,6 +50370,53 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(toml.ends_with("[mcp_servers.ljos]\ncommand = \"x\"\n"));
     }
 
+    /// Codex builds its MCP server's environment from `env_vars` alone, so
+    /// the entry must forward the session the prompt hook binds, and an
+    /// entry written before it did is brought up to date.
+    #[test]
+    fn the_codex_entry_forwards_its_session_and_an_old_one_is_healed() {
+        let _g = env_guard();
+        let shipped: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).unwrap();
+        let codex = shipped.harness.iter().find(|h| h.name == "codex").unwrap();
+        let snippet = codex.snippet.as_deref().unwrap();
+        for var in ["XDG_RUNTIME_DIR", "CODEX_SESSION_ID", "CODEX_THREAD_ID"] {
+            assert!(snippet.contains(&format!("\"{var}\"")), "{var}: {snippet}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("HOME", home.path().to_str().unwrap())]);
+        let config = home.path().join(".codex/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "model = \"x\"\n\n[mcp_servers.ljos]\ncommand = \"/x/ljos-mcp\"\nargs = []\n\
+             env_vars = [\"XDG_RUNTIME_DIR\"]\nenv = { LJOS_SEAT = \"codex\" }\n\n\
+             [mcp_servers.other]\ncommand = \"o\"\nenv_vars = [\"HOME\"]\n",
+        )
+        .unwrap();
+        let note =
+            super::heal_registered(codex, Path::new("/x/ljos-mcp"), "/x/ljos-mcp", false).unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        let vars = |name: &str| -> Vec<String> {
+            parsed["mcp_servers"][name]["env_vars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            vars("ljos"),
+            ["XDG_RUNTIME_DIR", "CODEX_SESSION_ID", "CODEX_THREAD_ID"],
+            "{text}"
+        );
+        assert_eq!(vars("other"), ["HOME"], "{text}");
+        assert!(note.is_some_and(|n| n.contains("env_vars")), "{text}");
+        let again =
+            super::heal_registered(codex, Path::new("/x/ljos-mcp"), "/x/ljos-mcp", false).unwrap();
+        assert!(again.is_none(), "{again:?}");
+    }
+
     #[test]
     fn the_new_runners_ship_as_shapes() {
         let shipped: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).unwrap();
