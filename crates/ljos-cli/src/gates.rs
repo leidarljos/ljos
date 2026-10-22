@@ -1057,6 +1057,134 @@ fn consensus_keys(path: &Path) -> Result<(Option<usize>, Option<Vec<String>>), S
     Ok((quorum, branches))
 }
 
+/// Where `call`, a `git push` on `line`, lands that needs a consensus: a
+/// branch in `branches`, in backticks, or why the push cannot be told
+/// from one that does. `None` when each ref it updates is read and none
+/// is in `branches`. The push is read the way git reads it: the first
+/// positional is the repository; a bare push lands on the current branch
+/// and its upstream unless `push.default` says otherwise; a branch named
+/// alone lands on its upstream under `push.default=upstream`. A tag, or
+/// any ref outside `refs/heads/`, is not a branch.
+#[must_use]
+pub fn protected_push(call: &GitCall, line: &str, branches: &[String]) -> Option<String> {
+    let unread = |why: String| {
+        Some(format!(
+            "a branch the guard cannot tell from a protected one, since {why}"
+        ))
+    };
+    let cwd = call.cwd.as_path();
+    let args = &call.args;
+    for word in [
+        "GIT_CONFIG",
+        "GIT_DIR",
+        "--git-dir",
+        "GIT_NAMESPACE",
+        "--namespace",
+    ] {
+        if line.contains(word) {
+            return unread(format!("the line sets `{word}`"));
+        }
+    }
+    for (key, _) in &call.config {
+        let key = key.to_ascii_lowercase();
+        if ["remote.", "push.", "branch."]
+            .iter()
+            .any(|p| key.starts_with(p))
+        {
+            return unread(format!("it sets `{key}` for this push"));
+        }
+    }
+    if args.iter().any(|a| has_subst(a)) {
+        return unread("an argument is filled in when the line runs".into());
+    }
+    if let Some(all) = args
+        .iter()
+        .find(|a| matches!(a.as_str(), "--all" | "--mirror" | "--branches" | "--prune"))
+    {
+        return Some(format!("every branch `{all}` reaches"));
+    }
+    if let Some(flag) = args.iter().find(|a| {
+        a.starts_with("--repo")
+            || (a.starts_with("--recurse-submodules")
+                && !a.ends_with("=check")
+                && !a.ends_with("=no"))
+    }) {
+        return unread(format!("`{flag}` moves where it goes"));
+    }
+    if git_text(cwd, &["config", "--get-regexp", r"^remote\..*\.push$"]).is_some() {
+        return unread("a remote in this checkout sets its own push refspecs".into());
+    }
+    let mode = git_config(cwd, "push.default")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let upstream = |branch: &str| git_config(cwd, &format!("branch.{branch}.merge"));
+    let here = || -> Result<Vec<String>, String> {
+        if ["checkout", "switch", "symbolic-ref"]
+            .iter()
+            .any(|w| line.contains(w))
+        {
+            return Err("the line may change branch before it pushes".into());
+        }
+        let head = git_text(cwd, &["symbolic-ref", "-q", "--short", "HEAD"])
+            .filter(|head| !head.is_empty())
+            .ok_or_else(|| "HEAD names no branch".to_string())?;
+        let up = upstream(&head).filter(|_| mode != "current");
+        Ok(std::iter::once(head).chain(up).collect())
+    };
+    let pos = positionals(args);
+    let specs = pos.get(1..).unwrap_or_default();
+    let mut dests = Vec::new();
+    if specs.is_empty() {
+        match mode.as_str() {
+            "nothing" => return None,
+            "matching" => {
+                return Some("every branch both sides have, under `push.default=matching`".into())
+            }
+            _ => match here() {
+                Ok(here) => dests.extend(here),
+                Err(why) => return unread(why),
+            },
+        }
+    }
+    for spec in specs {
+        let spec = spec.strip_prefix('+').unwrap_or(spec);
+        if spec.contains('*') {
+            let dst = spec.rsplit(':').next().unwrap_or(spec);
+            if !dst.starts_with("refs/") || dst.starts_with("refs/heads/") {
+                return Some(format!("the branches `{spec}` matches"));
+            }
+            continue;
+        }
+        match spec.split_once(':') {
+            Some((_, "HEAD" | "@")) => {
+                return unread(format!("`{spec}` lands on what the far side's HEAD names"))
+            }
+            Some((src, "")) => dests.push(src.to_string()),
+            Some((_, dst)) => dests.push(dst.to_string()),
+            None if matches!(spec, "HEAD" | "@") => match here() {
+                Ok(here) => dests.extend(here),
+                Err(why) => return unread(why),
+            },
+            None => {
+                dests.push(spec.to_string());
+                if matches!(mode.as_str(), "upstream" | "tracking") {
+                    dests.extend(upstream(spec));
+                }
+            }
+        }
+    }
+    dests.iter().find_map(|dest| {
+        let name = dest
+            .strip_prefix("refs/heads/")
+            .or_else(|| dest.strip_prefix("heads/"))
+            .unwrap_or(dest);
+        branches
+            .iter()
+            .find(|b| b.eq_ignore_ascii_case(name))
+            .map(|b| format!("`{b}`"))
+    })
+}
+
 fn repo_root(cwd: &Path) -> Option<PathBuf> {
     git_text(cwd, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
@@ -4410,6 +4538,97 @@ esac
         write_toml(&cwd.join("ljos.toml"), "quorum = [\n");
         let broken = consensus_push(Some(cwd)).unwrap_err();
         assert!(broken.contains("does not parse"), "{broken}");
+    }
+
+    #[test]
+    fn a_push_lands_where_git_would_put_it_and_an_unread_one_is_protected() {
+        let dir = repo();
+        let cwd = dir.path();
+        seed(cwd);
+        git(cwd, &["checkout", "-q", "-b", "topic"]);
+        let branches = ["develop".to_string(), "main".to_string()];
+        let lands = |line: &str| {
+            let calls = git_calls(line, Some(cwd)).unwrap();
+            let push = calls.iter().find(|c| c.sub == "push").unwrap();
+            protected_push(push, line, &branches)
+        };
+        let unread = |line: &str| {
+            lands(line).is_some_and(|d| d.starts_with("a branch the guard cannot tell"))
+        };
+        for line in [
+            "git push",
+            "git push origin",
+            "git push origin topic",
+            "git push -u origin HEAD",
+            "git push origin topic:refs/heads/topic",
+            "git push origin v1:refs/tags/develop",
+            "git push origin 'refs/tags/*:refs/tags/*'",
+            "git push develop topic",
+        ] {
+            assert_eq!(lands(line), None, "{line}");
+        }
+        for (line, dest) in [
+            ("git push origin HEAD:develop", "`develop`"),
+            ("git push origin topic:refs/heads/develop", "`develop`"),
+            ("git push origin +topic:heads/develop", "`develop`"),
+            ("git push origin :develop", "`develop`"),
+            ("git push --delete origin develop", "`develop`"),
+            ("git push origin topic HEAD:Main", "`main`"),
+            (
+                "git push https://example.com/acme/widgets.git main",
+                "`main`",
+            ),
+            ("git push --all origin", "every branch `--all` reaches"),
+            (
+                "git push origin 'refs/heads/*:refs/heads/*'",
+                "the branches `refs/heads/*:refs/heads/*` matches",
+            ),
+        ] {
+            assert_eq!(lands(line).as_deref(), Some(dest), "{line}");
+        }
+        for line in [
+            "git checkout develop && git push",
+            "GIT_DIR=../other git push origin topic",
+            "git -c remote.origin.push=refs/heads/topic:refs/heads/develop push origin topic",
+            "git push origin $BRANCH",
+            "git push --repo=origin topic",
+            "git push origin topic:HEAD",
+        ] {
+            assert!(unread(line), "{line}: {:?}", lands(line));
+        }
+
+        git(cwd, &["config", "branch.topic.merge", "refs/heads/develop"]);
+        assert_eq!(lands("git push").as_deref(), Some("`develop`"));
+        assert_eq!(lands("git push origin HEAD").as_deref(), Some("`develop`"));
+        assert_eq!(
+            lands("git push origin topic"),
+            None,
+            "simple names the branch"
+        );
+        git(cwd, &["config", "push.default", "upstream"]);
+        assert_eq!(lands("git push origin topic").as_deref(), Some("`develop`"));
+        git(cwd, &["config", "push.default", "current"]);
+        assert_eq!(lands("git push"), None);
+        git(cwd, &["config", "push.default", "nothing"]);
+        assert_eq!(lands("git push"), None);
+        git(cwd, &["config", "push.default", "matching"]);
+        assert!(lands("git push")
+            .unwrap()
+            .starts_with("every branch both sides have"));
+        git(cwd, &["config", "--unset", "push.default"]);
+        git(
+            cwd,
+            &[
+                "config",
+                "remote.origin.push",
+                "refs/heads/topic:refs/heads/develop",
+            ],
+        );
+        assert!(unread("git push origin topic"));
+        git(cwd, &["config", "--unset", "remote.origin.push"]);
+        git(cwd, &["checkout", "-q", "--detach"]);
+        assert!(unread("git push origin HEAD"));
+        assert_eq!(lands("git push origin HEAD:refs/heads/topic"), None);
     }
 
     #[test]
