@@ -638,6 +638,22 @@ fn a_ci_job_downloads_no_encoder() {
     assert!(!home.join(".local/lib/onnxruntime").exists());
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_generic_ci_job_downloads_no_encoder() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _rel) = encoder_machine(root.path());
+    std::env::set_var("CI", "true");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains("encoder: not a cloud VM"),
+        "CI=true is not a cloud VM: {said}"
+    );
+    assert!(!home.join(".local/bin/packset-embed").exists());
+    assert!(!home.join(".local/lib/onnxruntime").exists());
+}
+
 #[test]
 fn cloud_up_installs_points_the_harness_and_clones() {
     let _g = Guard::new();
@@ -2352,6 +2368,71 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
     assert!(ci.contains("ljos cloud up"), "{ci}");
 }
 
+/// `CURSOR_AGENT=1` is the desktop agent terminal. A CI variable counts
+/// only when its value says so: `false` is not a job, and Buildkite,
+/// Azure Pipelines, CircleCI, Jenkins, and `CI=true` are.
+#[test]
+fn desktop_cursor_and_ci_values_choose_cloud_up() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+
+    std::env::set_var("CURSOR_AGENT", "1");
+    let desktop = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(
+        desktop.contains("ljos onboard --harness cursor"),
+        "{desktop}"
+    );
+    assert!(
+        !desktop.contains("ljos cloud up"),
+        "CURSOR_AGENT=1 without a cloud id is the desktop agent: {desktop}"
+    );
+
+    std::env::remove_var("CURSOR_AGENT");
+    for (key, value) in [("GITHUB_ACTIONS", "false"), ("CI", "false")] {
+        clear_agent_ids();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(key, value);
+        let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+        assert!(
+            !line.contains("ljos cloud up"),
+            "{key}={value} is not a CI job: {line}"
+        );
+    }
+
+    for (key, value) in [
+        ("GITHUB_ACTIONS", "true"),
+        ("GITLAB_CI", "true"),
+        ("CI", "true"),
+        ("BUILDKITE", "true"),
+        ("TF_BUILD", "True"),
+        ("CIRCLECI", "true"),
+        ("JENKINS_URL", "https://jenkins.example/"),
+    ] {
+        clear_agent_ids();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(key, value);
+        let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+        assert!(
+            line.contains("ljos cloud up"),
+            "{key}={value} should be CI: {line}"
+        );
+        assert!(
+            !line.contains("onboard --harness cursor"),
+            "{key}={value}: {line}"
+        );
+    }
+}
+
 #[test]
 fn doctor_flags_a_command_from_another_home() {
     let _g = Guard::new();
@@ -2785,6 +2866,11 @@ fn clear_agent_ids() {
         "GITHUB_RUN_ID",
         "GITHUB_ACTIONS",
         "GITLAB_CI",
+        "CI",
+        "BUILDKITE",
+        "TF_BUILD",
+        "CIRCLECI",
+        "JENKINS_URL",
         "CODESPACES",
         "LJOS_SEAT",
         "LJOS_SEAT_KEY",
