@@ -105,6 +105,18 @@ pub fn load() -> BTreeMap<String, Wake> {
         .unwrap_or_default()
 }
 
+fn load_for_write() -> Result<BTreeMap<String, Wake>> {
+    let wake_path = path();
+    let text = match std::fs::read_to_string(&wake_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("wake: {}", wake_path.display()));
+        }
+    };
+    toml::from_str(&text).with_context(|| format!("wake: parse {}", wake_path.display()))
+}
+
 fn save(table: &BTreeMap<String, Wake>) -> Result<()> {
     let path = path();
     if let Some(dir) = path.parent() {
@@ -180,7 +192,7 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
     if let Some(rule) = judge(command) {
         bail!("wake: {}", refusal(command, &rule));
     }
-    let mut table = load();
+    let mut table = load_for_write()?;
     table.insert(
         seat.to_string(),
         Wake {
@@ -207,7 +219,7 @@ pub fn set_webhook(
 ) -> Result<String> {
     let url = url.trim();
     check_webhook(url)?;
-    let mut table = load();
+    let mut table = load_for_write()?;
     table.insert(
         seat.to_string(),
         Wake {
@@ -233,7 +245,7 @@ pub fn set_webhook(
 pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<()> {
     let url = url.trim();
     check_webhook(url)?;
-    let mut table = load();
+    let mut table = load_for_write()?;
     table.insert(
         seat.to_string(),
         Wake {
@@ -251,7 +263,7 @@ pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<()
 ///
 /// Returns whether an env-owned entry was present and removed.
 pub(crate) fn clear_env_webhook(seat: &str) -> Result<bool> {
-    let mut table = load();
+    let mut table = load_for_write()?;
     let remove = table
         .get(seat)
         .is_some_and(|wake| wake.source.as_deref() == Some(ENV_SOURCE));
@@ -269,7 +281,7 @@ pub(crate) fn clear_env_webhook(seat: &str) -> Result<bool> {
 ///
 /// `wake.toml` cannot be written.
 pub fn clear(seat: &str) -> Result<String> {
-    let mut table = load();
+    let mut table = load_for_write()?;
     if table.remove(seat).is_none() {
         if let Some((key, _)) = resolve(&table, seat) {
             if key != seat {
@@ -894,6 +906,24 @@ mod tests {
             std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
         }
         (lock, dir)
+    }
+
+    #[test]
+    fn set_webhook_refuses_to_overwrite_a_broken_wake_toml() {
+        let (_lock, _dir) = isolated();
+        let wake_file = path();
+        std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
+        let broken = "[inky\nwebhook = \"https://old.example/hook\"\n";
+        std::fs::write(&wake_file, broken).expect("seed broken wake");
+        let err = set_webhook("inky", "http://127.0.0.1:9/hook", None, None)
+            .expect_err("broken wake.toml should refuse writes");
+        let said = format!("{err:#}");
+        assert!(said.contains("wake"), "{said}");
+        assert!(
+            said.contains("parse"),
+            "the refusal should say this is a parse error: {said}"
+        );
+        assert_eq!(std::fs::read_to_string(&wake_file).unwrap(), broken);
     }
 
     #[test]
