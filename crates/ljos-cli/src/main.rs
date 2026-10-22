@@ -355,6 +355,12 @@ enum Cmd {
         /// Fold a gone host's atoms into this host's log and drop that host's log file.
         #[arg(long, value_name = "HOST", conflicts_with_all = ["key", "import", "export"])]
         adopt: Option<String>,
+        /// Adopt a host whose log was committed within the last 14 days.
+        #[arg(long, requires = "adopt")]
+        force: bool,
+        /// Print what --adopt would post, retire, and delete, and write nothing.
+        #[arg(long, requires = "adopt")]
+        dry_run: bool,
     },
     /// Re-export this machine's atoms over a conflicted tracker log. git calls
     /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
@@ -1522,9 +1528,11 @@ fn run_command() -> Result<()> {
             import,
             export,
             adopt,
+            force,
+            dry_run,
         } => {
             if let Some(host) = adopt {
-                print!("{}", ljos_cli::sync::adopt(&host)?);
+                print!("{}", ljos_cli::sync::adopt(&host, force, dry_run)?);
             } else if key {
                 println!("{}", ljos_cli::sync::public_key()?);
             } else {
