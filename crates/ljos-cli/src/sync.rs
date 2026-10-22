@@ -926,19 +926,20 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     Ok(out)
 }
 
-fn host_log_rels(host: &str) -> [String; 2] {
-    [
-        format!(".ljos/atoms/{host}.jsonl.age"),
-        format!(".ljos/atoms/{host}.digest"),
-    ]
-}
-
 fn tracked_path(root: &Path, rel: &str) -> bool {
     git(root, &["ls-files", "--error-unmatch", "--", rel]).is_ok_and(|o| o.status.success())
 }
 
 fn stageable_path(root: &Path, rel: &str) -> bool {
     root.join(rel).exists() || tracked_path(root, rel)
+}
+
+/// One gone host's log for a scope this repository still configures.
+struct GoneLog {
+    scope_name: String,
+    log_rel: String,
+    digest_rel: String,
+    plain: String,
 }
 
 fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<String> {
@@ -950,99 +951,127 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
     if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
-    let [gone_log, gone_digest] = host_log_rels(gone);
-    let log_path = root.join(&gone_log);
-    if !log_path.is_file() {
+    let names: Vec<String> = scope
+        .all_scopes()
+        .into_iter()
+        .map(|named| named.name.to_string())
+        .collect();
+    let mut present = Vec::new();
+    for name in &names {
+        let [log_rel, digest_rel] = host_log_rels_for_scope(gone, &scope.name, name);
+        if root.join(&log_rel).is_file() {
+            present.push((name.clone(), log_rel, digest_rel));
+        }
+    }
+    if present.is_empty() {
         return Ok(format!(
             "sync: {gone} has no {} log in this tracker\n",
             scope.name
         ));
     }
-    let Some(plain) = open_identities(&log_path, &identities)? else {
-        return Ok(format!(
-            "sync: {gone}'s {} log is not sealed to this machine\n",
-            scope.name
-        ));
-    };
+    let mut opened = Vec::new();
+    let mut out = String::new();
+    for (name, log_rel, digest_rel) in present {
+        match open_identities(&root.join(&log_rel), &identities)? {
+            Some(plain) => opened.push(GoneLog {
+                scope_name: name,
+                log_rel,
+                digest_rel,
+                plain,
+            }),
+            None => out.push_str(&format!(
+                "sync: {gone}'s {name} log is not sealed to this machine\n"
+            )),
+        }
+    }
+    if opened.is_empty() {
+        return Ok(out);
+    }
     let client = crate::pack()?;
     let workspace = client.workspace();
     let before = crate::atoms_lean(&client, &workspace)?;
-    let own: BTreeSet<String> = before
+    let mut own: BTreeSet<String> = before
         .iter()
         .filter(|a| is_own(a))
         .filter_map(|a| a["text"].as_str().map(crate::work_id))
         .collect();
-    let plan = adopt_plan(&plain, &own);
-    let mut adopted = BTreeSet::new();
-    let (mut kept, mut refused) = (0usize, 0usize);
-    for mut atom in plan.post {
-        let text = atom["text"].as_str().unwrap_or("");
-        let id = crate::work_id(text);
-        if let Some(map) = atom.as_object_mut() {
-            map.insert("workspace".into(), Value::String(workspace.clone()));
-        }
-        match crate::admit::post_kept(&client, &atom) {
-            Ok(_) => {
-                adopted.insert(id);
-                kept += 1;
+    for log in &opened {
+        let plan = adopt_plan(&log.plain, &own);
+        let mut adopted = BTreeSet::new();
+        let (mut kept, mut refused) = (0usize, 0usize);
+        for mut atom in plan.post {
+            let text = atom["text"].as_str().unwrap_or("");
+            let id = crate::work_id(text);
+            if let Some(map) = atom.as_object_mut() {
+                map.insert("workspace".into(), Value::String(workspace.clone()));
             }
-            Err(_) => refused += 1,
-        }
-    }
-    let tag = sender_entity(gone);
-    let mut moved = 0usize;
-    for atom in before {
-        let Some(text) = atom["text"].as_str() else {
-            continue;
-        };
-        let from_gone = atom["entities"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|e| e.as_str() == Some(tag.as_str()));
-        if !from_gone {
-            continue;
-        }
-        let text_id = crate::work_id(text);
-        if !plan.live.contains(&text_id) {
-            continue;
-        }
-        if !(own.contains(&text_id) || adopted.contains(&text_id)) {
-            continue;
-        }
-        if let Some(id) = atom["id"].as_str() {
-            if crate::packset_forget(id, None).is_ok() {
-                moved += 1;
+            match crate::admit::post_kept(&client, &atom) {
+                Ok(_) => {
+                    own.insert(id.clone());
+                    adopted.insert(id);
+                    kept += 1;
+                }
+                Err(_) => refused += 1,
             }
         }
+        let tag = sender_entity_for_scope(gone, scope, &log.scope_name);
+        let mut moved = 0usize;
+        for atom in &before {
+            let Some(text) = atom["text"].as_str() else {
+                continue;
+            };
+            let from_gone = atom["entities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|e| e.as_str() == Some(tag.as_str()));
+            if !from_gone {
+                continue;
+            }
+            let text_id = crate::work_id(text);
+            if !plan.live.contains(&text_id) {
+                continue;
+            }
+            if !(own.contains(&text_id) || adopted.contains(&text_id)) {
+                continue;
+            }
+            if let Some(id) = atom["id"].as_str() {
+                if crate::packset_forget(id, None).is_ok() {
+                    moved += 1;
+                }
+            }
+        }
+        out.push_str(&format!(
+            "sync: {gone}: {kept} {} atoms adopted, {refused} refused, {moved} moved\n",
+            log.scope_name
+        ));
     }
     let atoms = crate::atoms_lean(&client, &workspace)?;
-    let exported = export(root, scope, &atoms)?;
+    let exported = export_all(root, scope, &atoms)?;
     if exported.contains("age is not installed") {
         bail!("sync: age is not installed, so adoption cannot seal {me}'s log; install age and try again");
     }
-    let gone_paths = [gone_log.clone(), gone_digest.clone()];
     let mut stage = Vec::new();
-    for rel in gone_paths {
-        if stageable_path(root, &rel) {
-            stage.push(rel.clone());
+    for log in &opened {
+        for rel in [&log.log_rel, &log.digest_rel] {
+            if stageable_path(root, rel) {
+                stage.push((*rel).clone());
+            }
+            let path = root.join(rel);
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
         }
-        let path = root.join(rel);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
+        let _ = std::fs::remove_file(taken_path(&log.scope_name, gone));
     }
-    let _ = std::fs::remove_file(taken_path(&scope.name, gone));
-    for rel in host_log_rels(&me) {
-        if stageable_path(root, &rel) {
-            stage.push(rel);
+    for name in &names {
+        for rel in host_log_rels_for_scope(&me, &scope.name, name) {
+            if stageable_path(root, &rel) {
+                stage.push(rel);
+            }
         }
     }
     let committed = commit_adopt(root, &scope.name, gone, &stage, push);
-    let mut out = format!(
-        "sync: {gone}: {kept} {} atoms adopted, {refused} refused, {moved} moved\n",
-        scope.name
-    );
     out.push_str(&exported);
     out.push_str(&committed);
     Ok(out)
@@ -2015,6 +2044,23 @@ pub fn exchange_user_rules(
 mod tests {
     use super::*;
 
+    fn packsetd_bin() -> PathBuf {
+        if let Some(path) = std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join("packsetd"))
+                .find(|candidate| candidate.is_file())
+        }) {
+            return path;
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = PathBuf::from(home).join(".local/bin/packsetd");
+            if path.is_file() {
+                return path;
+            }
+        }
+        panic!("packsetd is not on PATH; CI builds it from packset develop");
+    }
+
     fn atom(id: &str, text: &str, entities: &[&str]) -> Value {
         serde_json::json!({"id": id, "text": text, "kind": "lesson",
             "entities": entities, "embedding": [0.1, 0.2]})
@@ -2841,6 +2887,165 @@ mod tests {
             .unwrap()
             .iter()
             .all(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:"))));
+    }
+
+    /// Adoption used to read only `<host>.jsonl.age`, so a cloud log on the
+    /// gone machine was left behind and never copied into this host's log.
+    #[test]
+    fn an_adopt_takes_every_configured_scope() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let config = home.join(".config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let pack_home = dir.path().join("pack");
+        std::fs::create_dir_all(&pack_home).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let packsetd = packsetd_bin();
+        let mut daemon = Command::new(&packsetd)
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(&pack_home)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("PACKSET_HOME", &pack_home)
+            .env("PACKSET_AUTH", "off")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                daemon.try_wait().unwrap().is_none(),
+                "packsetd exited before listening"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "packsetd did not listen"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _daemon = Kill(daemon);
+        // SAFETY: this test holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PACKSET_WORKSPACE", "adopt-scopes");
+            std::env::remove_var(WRITE_SCOPE_KEY);
+        }
+        let key = identity_path();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "age-keygen must be installed");
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let seal = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let mut child = Command::new("age")
+                .args(["-r", &public, "-o"])
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write as _;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+            let done = child.wait_with_output().unwrap();
+            assert!(
+                done.status.success(),
+                "age: {}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+        };
+        let line = |text: &str, scope_name: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "kind": "lesson",
+                    "level": "explicit",
+                    "text": text,
+                    "entities": [format!("scope:{scope_name}")],
+                })
+            )
+        };
+        let [box_rel, _] = host_log_rels_for_scope("oldbox", "grokbot", "grokbot");
+        let [cloud_rel, _] = host_log_rels_for_scope("oldbox", "grokbot", "cloud");
+        seal(
+            &box_rel,
+            &line("The gone host kept this on the box.", "grokbot"),
+        );
+        seal(
+            &cloud_rel,
+            &line("The gone host kept this on the cloud.", "cloud"),
+        );
+        let said = adopt_in_repo(&root, &scope, "oldbox", false).unwrap();
+        assert!(said.contains("1 grokbot atoms adopted"), "{said}");
+        assert!(said.contains("1 cloud atoms adopted"), "{said}");
+        assert!(!root.join(&box_rel).exists(), "the gone box log remains");
+        assert!(
+            !root.join(&cloud_rel).exists(),
+            "the gone cloud log remains"
+        );
+        let me = host();
+        let [mine_box, _] = host_log_rels_for_scope(&me, "grokbot", "grokbot");
+        let [mine_cloud, _] = host_log_rels_for_scope(&me, "grokbot", "cloud");
+        let open_log = |rel: &str| {
+            open(&root.join(rel), &key)
+                .unwrap()
+                .unwrap_or_else(|| panic!("could not open {rel}"))
+        };
+        let box_text = open_log(&mine_box);
+        let cloud_text = open_log(&mine_cloud);
+        assert!(box_text.contains("kept this on the box"), "{box_text}");
+        assert!(!box_text.contains("kept this on the cloud"), "{box_text}");
+        assert!(
+            cloud_text.contains("kept this on the cloud"),
+            "{cloud_text}"
+        );
+        assert!(!cloud_text.contains("kept this on the box"), "{cloud_text}");
     }
 
     #[test]
