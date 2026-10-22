@@ -28221,17 +28221,68 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
 
 /// What ljos-policyd is asked about `line`: the line itself as `bash -c
 /// LINE`, so it reads the line with its own shell lexer, subshells,
-/// substitutions and separators with no space around them included.
+/// substitutions and separators with no space around them included,
+/// and with each backslash-newline already joined, see [`tcb_script`].
 /// A here-document fed to `python3 -` or `node` is that program, sent as
 /// `python3 -c BODY`, so a shell call inside it is judged. A download and
 /// each later pipeline go once more as one call, so a file `curl -o i.sh
 /// URL` saves and `sh i.sh` then runs is judged as the pair it is.
 fn tcb_argvs(line: &str) -> Vec<Vec<String>> {
-    let mut argvs = vec![vec!["bash".to_string(), "-c".to_string(), line.to_string()]];
+    let script = tcb_script(line);
+    let mut argvs = vec![vec!["bash".to_string(), "-c".to_string(), script.clone()]];
     argvs.extend(stdin_programs(line));
-    argvs.extend(fetch_pairs(line));
+    argvs.extend(fetch_pairs(&script));
     argvs.retain(|argv| !argv.is_empty());
     argvs
+}
+
+/// `line` with each backslash-newline dropped, as the shell drops them
+/// before it splits words, but not inside single quotes or `$'...'`, in
+/// a comment, or after an escaped backslash. ljos-policyd's lexer would
+/// read the newline as part of the next word.
+fn tcb_script(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut double = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let end = match c {
+            '\\' if chars.get(i + 1) == Some(&'\n') => {
+                i += 2;
+                continue;
+            }
+            '\\' => (i + 2).min(chars.len()),
+            '\'' if !double => chars[i + 1..]
+                .iter()
+                .position(|&q| q == '\'')
+                .map_or(chars.len(), |p| i + p + 2),
+            '$' if !double && chars.get(i + 1) == Some(&'\'') => {
+                let mut j = i + 2;
+                while j < chars.len() && chars[j] != '\'' {
+                    j += if chars[j] == '\\' { 2 } else { 1 };
+                }
+                (j + 1).min(chars.len())
+            }
+            '#' if !double
+                && out.chars().next_back().is_none_or(|p| {
+                    p.is_whitespace() || matches!(p, ';' | '&' | '|' | '(' | ')' | '<' | '>')
+                }) =>
+            {
+                chars[i..]
+                    .iter()
+                    .position(|&q| q == '\n')
+                    .map_or(chars.len(), |p| i + p)
+            }
+            _ => {
+                double ^= c == '"';
+                i + 1
+            }
+        };
+        out.extend(&chars[i..end]);
+        i = end;
+    }
+    out
 }
 
 /// ljos-policyd's answer on `line` run from `cwd`, over each call of
@@ -28256,7 +28307,7 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
         if t.starts_with("deny") {
             let token = policyd_token(&t);
             let code = token.split(':').next().unwrap_or(token).trim();
-            let words = if i == 0 { shell_words(line) } else { argv };
+            let words = if i == 0 { shell_words(&argv[2]) } else { argv };
             if code == "git-force-push" && lease_cleared(&words, cwd) {
                 t = "allow".to_string();
             } else if code == "guard-fault" && repair_line(line) {
