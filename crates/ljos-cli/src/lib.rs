@@ -42834,6 +42834,45 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A file tool names its target whatever it likes: `destination`,
+    /// `target`, `filePath`, a `path` beside `text`, a path inside a list
+    /// of edits. Any string argument that resolves into the runtime ljos
+    /// directory is a target for a tool that does not only read.
+    #[test]
+    fn a_file_tool_aimed_at_the_kept_prompt_by_any_key_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for payload in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"target":"/run/user/1000/ljos/latest-prompt.bind","text":"x"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"edit","tool_input":{"filePath":"/run/user/1000/ljos/latest-prompt","oldString":"a","newString":"b"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"path":"/run/user/1000/ljos/latest-prompt","text":"x"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__symlink","tool_input":{"link":"/run/user/1000/ljos","to":"/tmp/fake"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__apply","tool_input":{"changes":[{"file":"/run/user/1000/ljos/latest-prompt","text":"x"}]}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/x/../latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"x","also":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"preToolUse","tool_name":"mcp_fs_write","tool_input":"{\"dest\":\"/run/user/1000/ljos/latest-prompt\"}"}"#,
+        ] {
+            let call = hook_call(payload);
+            assert!(seat_guard(&call.cue).is_some(), "allowed: {}", call.cue);
+        }
+        let agy = hook_call_as(
+            r#"{"toolCall":{"name":"move_file","args":{"Source":"/tmp/p","Destination":"/run/user/1000/ljos/latest-prompt"}},"conversationId":"c"}"#,
+            Some("PreToolUse"),
+        );
+        assert!(seat_guard(&agy.cue).is_some(), "allowed: {}", agy.cue);
+        for payload in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__read_text_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__search_files","tool_input":{"path":"/run/user/1000/ljos","pattern":"x"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"the prompt lives in /run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/a","destination":"/tmp/b"}}"#,
+        ] {
+            let call = hook_call(payload);
+            assert!(seat_guard(&call.cue).is_none(), "refused: {}", call.cue);
+        }
+    }
+
     /// ljos on another host, or this one through ssh, is not under the
     /// runner, so it takes the words it is given as the person's. A tool
     /// call that runs it there to write a memory, a preference or an
