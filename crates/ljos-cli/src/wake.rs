@@ -575,6 +575,7 @@ fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<Stri
     check_webhook(url)?;
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
+        .redirects(0)
         .build();
     let mut req = agent.post(url).set("Content-Type", "application/json");
     if let Some(key) = webhook_key(wake) {
@@ -588,6 +589,12 @@ fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<Stri
     let resp = req.send_string(&envelope.to_string()).map_err(|e| {
         anyhow::anyhow!("POST {url}: {}", e.to_string().replace(url, "the webhook"))
     })?;
+    if (300..400).contains(&resp.status()) {
+        bail!(
+            "POST the webhook: refused redirect status {}",
+            resp.status()
+        );
+    }
     Ok(format!(
         "posted, {} in {} ms",
         resp.status(),
@@ -886,6 +893,46 @@ mod tests {
             );
         });
         (port, rx)
+    }
+
+    #[test]
+    fn a_webhook_redirect_is_refused_and_not_followed() {
+        let (_lock, _dir) = isolated();
+        let (target_port, target_rx) = serve_one();
+        let redirect = std::net::TcpListener::bind("127.0.0.1:0").expect("redirect bind");
+        let redirect_port = redirect.local_addr().expect("redirect addr").port();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = redirect.accept() else {
+                return;
+            };
+            let req = read_http(&mut sock);
+            let _ = first_tx.send(req);
+            let location = format!("http://127.0.0.1:{target_port}/next");
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = std::io::Write::write_all(&mut sock, reply.as_bytes());
+        });
+        let hook = format!("http://127.0.0.1:{redirect_port}/hook");
+        set_webhook("inky", &hook, None, None).expect("set webhook");
+        let err = fire(&Event {
+            seat: "inky".into(),
+            from: "vm-seat".into(),
+            msg: "m1".into(),
+            ..Event::default()
+        })
+        .expect_err("redirected webhook must fail");
+        let said = format!("{err:#}");
+        assert!(said.contains("302"), "{said}");
+        let first = first_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("redirect request");
+        assert!(first.starts_with("POST /hook"), "{first}");
+        assert!(
+            target_rx.recv_timeout(Duration::from_millis(700)).is_err(),
+            "redirect target was called"
+        );
     }
 
     fn body_of(raw: &str) -> serde_json::Value {
