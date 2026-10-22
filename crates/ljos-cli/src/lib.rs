@@ -18,6 +18,7 @@ pub mod ballot_sig;
 pub mod bookkeep;
 pub mod capture;
 pub mod cloud;
+mod cloud_guard;
 pub mod command_prefs;
 pub mod converge;
 mod deedbag;
@@ -27301,7 +27302,7 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = destructive_delete(line) {
         return Some(rule);
     }
-    if let Some(rule) = cloud::guard_line(line) {
+    if let Some(rule) = cloud::guard_line(line, cwd) {
         return Some(rule);
     }
     if let Some(rule) = user_rules::guard_line(line) {
