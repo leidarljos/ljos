@@ -3208,12 +3208,8 @@ fn legacy_tag(head: &str, tag: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         || !tag.bytes().any(|b| b.is_ascii_digit())
+        || !tag.bytes().any(|b| b.is_ascii_lowercase())
     {
-        return false;
-    }
-    // Old pid tags can be all digits (`inky-10`), but keep one-digit model
-    // suffixes (`gpt-5`) and long build numbers (`ridley-ci-a-555001`) whole.
-    if tag.bytes().all(|b| b.is_ascii_digit()) && (tag.len() == 1 || tag.len() > 5) {
         return false;
     }
     true
@@ -34635,7 +34631,7 @@ mod tests {
             holder_parts("ridley-ci-a-555001"),
             ("ridley-ci-a-555001".to_string(), None)
         );
-        assert_eq!(holder_parts("inky-10"), ("inky".to_string(), None));
+        assert_eq!(holder_parts("inky-10"), ("inky-10".to_string(), None));
         assert_eq!(
             holder_parts("sand-subagent-0e61"),
             ("sand-subagent-0e61".to_string(), None)
@@ -34660,7 +34656,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a digit suffix folded")]
     fn a_last_part_of_digits_alone_stays_in_the_seat() {
         let known = std::collections::BTreeSet::new();
         for (a, b) in [

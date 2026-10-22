@@ -1349,7 +1349,6 @@ mod tests {
             ("alpha/run-101.", "alpha/run-101"),
             ("alpha/run--101", "alpha/run-101"),
             ("alpha/Inky", "alpha/inky"),
-            ("alpha/inky-10", "alpha/inky"),
             ("alpha/inky-39u", "alpha/inky"),
             ("alpha/inky-n9o", "alpha/inky"),
             ("alpha/disk-saver-t4t", "alpha/disk-saver"),
@@ -1823,20 +1822,21 @@ mod tests {
     }
 
     #[test]
-    fn digit_forms_of_one_seat_count_once() {
+    fn a_digit_suffix_is_a_seat_of_its_own() {
         let _home = test_home();
         let entries = [
             sign_as(
                 ballot_entry("alpha/inky", "accept", "2026-10-21T10:00:00Z"),
                 1,
             ),
-            sign_unchecked(
+            sign_as(
                 ballot_entry("beta/inky-10", "accept", "2026-10-21T11:00:00Z"),
                 2,
             ),
         ];
+        check_entries(&entries).expect("two seats");
         let read = tally(&entries).expect("tally");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+        assert_eq!(counted(&read, "accept"), Some(2), "{read:?}");
     }
 
     #[test]
