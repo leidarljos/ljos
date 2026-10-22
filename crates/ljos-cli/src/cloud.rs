@@ -27,6 +27,9 @@ const OPTIONAL_BINS: &[&str] = &[
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
+/// The rule that refuses a push updating a `cursor/*` ref, read from the
+/// push's argv by [`crate::cloud_guard::cursor_push`].
+const CURSOR_PUSH: &str = "cloud-cursor-push";
 
 /// Install binaries, point the harness at them, and clone the shared tracker.
 ///
@@ -219,15 +222,28 @@ pub fn missing_mcp_line() -> Option<String> {
     }
 }
 
-/// Cloud-up refusals over shell commands, in the seat rule format.
+/// The cloud-up refusal `line` meets when it runs in `cwd`. A rule this
+/// ljos names is read from the command's argv; any other rule in the file
+/// is matched as a seat rule.
 #[must_use]
-pub(crate) fn guard_line(line: &str) -> Option<crate::Rule> {
+pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> {
     let path = cloud_guard_rules_path()?;
-    let denies: Vec<crate::Rule> = crate::kept_rules(&path)
+    let denies = crate::kept_rules(&path)
         .into_iter()
-        .filter(|rule| rule.verdict == "deny")
-        .collect();
-    crate::verdict_for(&denies, line).cloned()
+        .filter(|rule| rule.verdict == "deny");
+    for rule in denies {
+        if rule.pattern == CURSOR_PUSH {
+            if let Some(why) = crate::cloud_guard::cursor_push(line, cwd) {
+                return Some(crate::Rule {
+                    reason: format!("{} ({why})", rule.reason),
+                    ..rule
+                });
+            }
+        } else if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
+            return Some(hit.clone());
+        }
+    }
+    None
 }
 
 /// git's org merge driver. The merged text replaces `ours`.
@@ -1169,8 +1185,7 @@ fn cloud_guard_rules_path() -> Option<PathBuf> {
 fn cloud_guard_rules() -> Vec<crate::Rule> {
     vec![
         crate::Rule {
-            pattern: "re:git push(?:\\s+\\S+)*\\s(?:\\S*:)?(?:refs/heads/)?cursor/\\S+(?:\\s|$)"
-                .into(),
+            pattern: CURSOR_PUSH.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never push to cursor/* refs from this machine".into(),
         },
