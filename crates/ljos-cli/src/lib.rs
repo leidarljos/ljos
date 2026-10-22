@@ -7,8 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use packset_client::{Hit, PacksetClient};
+use packset_client::Hit;
 use serde_json::Value;
+
+pub use pack_link::PacksetClient;
 
 pub mod admit;
 pub mod approval;
@@ -35,6 +37,7 @@ pub mod mailbox;
 pub mod memories;
 pub mod note_queue;
 pub mod pack_copy;
+pub mod pack_link;
 pub mod panel_cloud;
 pub mod panel_gate;
 pub mod persona_session;
@@ -11090,46 +11093,6 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
 }
 
-fn search_query(
-    client: &PacksetClient,
-    url: &str,
-    cue: &str,
-    limit: u32,
-    rerank: bool,
-    relevance: bool,
-) -> ureq::Request {
-    let mut req = ureq::get(url)
-        .query("workspace", &client.workspace())
-        .query("q", &recall_query(cue))
-        .query("limit", &limit.to_string());
-    if relevance {
-        req = req.query("rank", "relevance");
-    }
-    if rerank {
-        req = req.query("rerank", "1");
-    }
-    req
-}
-
-/// [`PacksetClient::search_opts`] without this seat's token, for a
-/// listener [`pack_proven`] did not prove. A hit carries no origin here;
-/// [`keep_origins_of`] names each an agent's.
-fn search_without_token(
-    client: &PacksetClient,
-    q: &str,
-    limit: u32,
-    as_of: Option<&str>,
-    rerank: bool,
-) -> Result<Vec<Hit>> {
-    let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let mut req = search_query(client, &url, q, limit, rerank, false).timeout(pack_timeout());
-    if let Some(at) = as_of {
-        req = req.query("as_of", at);
-    }
-    let body: Value = req.call().map_err(Box::new)?.into_json()?;
-    Ok(serde_json::from_value(body["hits"].clone()).unwrap_or_default())
-}
-
 /// Drop origin and basis from search hits. An open listener's body is
 /// not a word for who stored them; the texts stay, so a lesson can still
 /// be shown as an agent's.
@@ -11170,10 +11133,10 @@ fn redact_hit_provenance(body: &mut Value) {
 /// as the atom. A body that does not parse, a NaN from a writer that is
 /// not packset, is an error, so a pool the hook already holds stands.
 ///
-/// The token goes only to a listener [`pack_proven`] proved, before any
-/// read here. Another listener is still read, without the token, and
-/// origin and basis are removed, so a lesson can be shown as an agent's
-/// and nothing is the person's.
+/// The token rides only when the proof on this connection held. Another
+/// listener is still read, without the token, and origin and basis are
+/// removed, so a lesson can be shown as an agent's and nothing is the
+/// person's.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -11181,37 +11144,51 @@ fn search_relevant(
     rerank: bool,
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
-    let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let open = !pack_proven(client);
-    let ranked = ranks_by_relevance(client, timeout, !open);
+    let ranked = ranks_by_relevance(client, timeout, true);
     // The writer's answer, or the status and body of a 4xx it gave.
-    let ask = |rank: bool| -> Result<std::result::Result<ureq::Response, (u16, String)>> {
-        let req = search_query(client, &url, cue, limit, rerank, rank);
-        let req = if open {
-            req
-        } else {
-            packset_client::authorize(req)
-        };
-        let failed = match req.timeout(timeout).call() {
-            Ok(answer) => return Ok(Ok(answer)),
-            Err(ureq::Error::Status(code @ 400..=499, answer)) => {
-                return Ok(Err((code, answer.into_string().unwrap_or_default())));
-            }
-            Err(e @ ureq::Error::Status(..)) => packset_client::Error::Bad(e.to_string()),
-            Err(e) => packset_client::Error::Http(Box::new(e)),
-        };
-        Err(failed).context("search: GET /v1/search failed")
+    // The token rides only when this connection's proof held.
+    let ask = |rank: bool| -> Result<(pack_link::Answer, bool)> {
+        let mut query = vec![
+            ("workspace", client.workspace()),
+            ("q", recall_query(cue)),
+            ("limit", limit.to_string()),
+        ];
+        if rank {
+            query.push(("rank", "relevance".to_string()));
+        }
+        if rerank {
+            query.push(("rerank", "1".to_string()));
+        }
+        let pairs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let answer = client
+            .roundtrip("GET", "/v1/search", &pairs, None, true, timeout)
+            .map_err(anyhow::Error::from)
+            .context("search: GET /v1/search failed")?;
+        let trusted = answer.trusted;
+        if (200..300).contains(&answer.status) {
+            return Ok((answer, trusted));
+        }
+        if (400..500).contains(&answer.status) {
+            return Ok((answer, trusted));
+        }
+        Err(packset_client::Error::Bad(format!(
+            "{}/v1/search: status code {}",
+            client.base(),
+            answer.status
+        )))
+        .context("search: GET /v1/search failed")
     };
-    let mut answer = ask(ranked)?;
-    if matches!(&answer, Err((400, why)) if ranked && names_the_rank(why)) {
+    let mut fetched = ask(ranked)?;
+    if ranked && fetched.0.status == 400 && names_the_rank(&fetched.0.body) {
         refuses_relevance(client);
-        answer = ask(false)?;
+        fetched = ask(false)?;
     }
-    let mut body: Value = match answer {
-        Ok(answer) => answer
-            .into_json()
-            .context("search: the /v1/search answer is not JSON")?,
-        Err(_) => serde_json::json!({ "hits": [] }),
+    let open = !fetched.1;
+    let mut body: Value = if (200..300).contains(&fetched.0.status) {
+        serde_json::from_str(&fetched.0.body)
+            .context("search: the /v1/search answer is not JSON")?
+    } else {
+        serde_json::json!({ "hits": [] })
     };
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
@@ -11269,18 +11246,13 @@ fn ranks_by_relevance(
     {
         return *ranks;
     }
-    let req = ureq::get(&format!("{base}/v1/status"));
-    let req = if with_token {
-        packset_client::authorize(req)
-    } else {
-        req
+    let Ok(answer) = client.roundtrip("GET", "/v1/status", &[], None, with_token, timeout) else {
+        return false;
     };
-    let Some(status) = req
-        .timeout(timeout)
-        .call()
-        .ok()
-        .and_then(|r| r.into_json::<Value>().ok())
-    else {
+    if !(200..300).contains(&answer.status) {
+        return false;
+    }
+    let Some(status) = serde_json::from_str::<Value>(&answer.body).ok() else {
         return false;
     };
     let ranks = status
@@ -13322,7 +13294,12 @@ fn writer_unreachable(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<packset_client::Error>()
-            .is_some_and(|inner| matches!(inner, packset_client::Error::Http(_)))
+            .is_some_and(|inner| {
+                matches!(
+                    inner,
+                    packset_client::Error::Http(_) | packset_client::Error::Io(_)
+                )
+            })
     })
 }
 
@@ -13473,24 +13450,33 @@ pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Resu
 ///
 /// The pack not answering, or an answer that is not atoms.
 pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
-    atoms_listed(client, workspace, true)
+    Ok(atoms_listed(client, workspace, true)?.0)
 }
 
-/// The listing for a reader that names the person: [`atoms_lean`] when
-/// [`pack_proven`], else the same read without the token, with every
-/// atom an agent's.
+/// The listing for a reader that names the person. The token rides only
+/// when the proof on this connection held; otherwise every atom is an
+/// agent's.
 fn atoms_read(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
-    if pack_proven(client) {
-        return atoms_lean(client, workspace);
-    }
-    Ok(atoms_listed(client, workspace, false)?
-        .into_iter()
-        .map(as_agents)
-        .collect())
+    Ok(atoms_with_trust(client, workspace)?.0)
 }
 
-/// [`atoms_lean`], with this seat's token only when `token`.
-fn atoms_listed(client: &PacksetClient, workspace: &str, token: bool) -> Result<Vec<Value>> {
+/// The listing, and whether this connection carried the token. An
+/// unproven listener's atoms are marked an agent's.
+fn atoms_with_trust(client: &PacksetClient, workspace: &str) -> Result<(Vec<Value>, bool)> {
+    let (atoms, trusted) = atoms_listed(client, workspace, true)?;
+    if trusted {
+        return Ok((atoms, true));
+    }
+    Ok((atoms.into_iter().map(as_agents).collect(), false))
+}
+
+/// [`atoms_lean`], with this seat's token only when `token` and the
+/// connection's proof held. The bool is that proof.
+fn atoms_listed(
+    client: &PacksetClient,
+    workspace: &str,
+    token: bool,
+) -> Result<(Vec<Value>, bool)> {
     let url = format!("{}/v1/atoms", client.base());
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
@@ -13502,20 +13488,19 @@ fn atoms_listed(client: &PacksetClient, workspace: &str, token: bool) -> Result<
     let mut tries = 0;
     let answered = loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let req = ureq::get(&url);
-        let req = if token {
-            packset_client::authorize(req)
-        } else {
-            req
-        };
-        let got = req
-            .query("workspace", workspace)
-            .query("embedding", "omit")
-            .timeout(left.max(std::time::Duration::from_millis(1)))
-            .call();
-        match got {
-            Err(ureq::Error::Status(503, _))
-                if tries < BUSY_TRIES && std::time::Instant::now() + wait < deadline =>
+        let answer = client.roundtrip(
+            "GET",
+            "/v1/atoms",
+            &[("workspace", workspace), ("embedding", "omit")],
+            None,
+            token,
+            left.max(std::time::Duration::from_millis(1)),
+        );
+        match answer {
+            Ok(answer)
+                if answer.status == 503
+                    && tries < BUSY_TRIES
+                    && std::time::Instant::now() + wait < deadline =>
             {
                 tries += 1;
                 std::thread::sleep(wait);
@@ -13524,14 +13509,16 @@ fn atoms_listed(client: &PacksetClient, workspace: &str, token: bool) -> Result<
             other => break other,
         }
     };
-    let mut body: Value = answered
-        .map_err(|e| anyhow::anyhow!("{url}: {e}"))?
-        .into_json()?;
+    let answered = answered.map_err(|err| anyhow::Error::from(err).context(url.clone()))?;
+    if !(200..300).contains(&answered.status) {
+        anyhow::bail!("{url}: status code {}", answered.status);
+    }
+    let mut body: Value = serde_json::from_str(&answered.body)?;
     let atoms = body
         .get_mut("atoms")
         .map(Value::take)
         .unwrap_or(Value::Array(Vec::new()));
-    Ok(serde_json::from_value(atoms)?)
+    Ok((serde_json::from_value(atoms)?, answered.trusted))
 }
 
 pub fn pack() -> Result<PacksetClient> {
@@ -18180,8 +18167,8 @@ pub fn rules_of(atoms: &[Value], proven: bool) -> Vec<Rule> {
 /// The rules in the seat's pack.
 pub fn rules_from_pack() -> Result<Vec<Rule>> {
     let client = pack()?;
-    let proven = pack_proven(&client);
-    let atoms = atoms_read(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
+    let (atoms, proven) =
+        atoms_with_trust(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
     Ok(rules_of(&atoms, proven))
 }
 
@@ -18200,10 +18187,7 @@ pub fn rules_for_gate() -> Vec<Rule> {
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
-        let proven = pack_proven(&client);
-        let atoms =
-            atoms_read(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
-        Ok((atoms, proven))
+        atoms_with_trust(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
     });
     match listed {
         Ok((atoms, proven)) => {
@@ -23932,7 +23916,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
             .err()
             .map(|e| format!("{e:#}").contains("401"));
         out.push(pack_token_row(
-            packset_client::token().is_some(),
+            client.has_token(),
             std::env::var_os("PACKSET_TOKEN").is_some_and(|v| !v.is_empty()),
             packset_client::token_path(),
             refused,
@@ -26384,20 +26368,16 @@ pub fn packset_search_as_of(
     let found = with_writer(|| {
         let client = pack()?;
         let workspace = client.workspace();
-        let hits = if pack_proven(&client) {
-            client
-                .search_opts(
-                    &workspace,
-                    &recall_query(q),
-                    limit,
-                    stamp.as_deref(),
-                    rerank,
-                )
-                .map_err(anyhow::Error::from)
-        } else {
-            search_without_token(&client, q, limit, stamp.as_deref(), rerank)
-        }
-        .context("search: GET /v1/search failed")?;
+        let hits = client
+            .search_opts(
+                &workspace,
+                &recall_query(q),
+                limit,
+                stamp.as_deref(),
+                rerank,
+            )
+            .map_err(anyhow::Error::from)
+            .context("search: GET /v1/search failed")?;
         keep_origins_of(&client, &hits);
         Ok(hits)
     })?;
@@ -27604,7 +27584,14 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
             }
         }
     }
+    // An island from a listener that did not take the token is not a
+    // memory. The row would otherwise be the listener's text, dated.
     if let Ok(island) = packset_island(&title, false) {
+        if !pack().is_ok_and(|client| client.carried()) {
+            events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
+            let skip = events.len().saturating_sub(limit);
+            return Ok((title, events[skip..].to_vec()));
+        }
         for atom in island["island"]
             .as_array()
             .into_iter()
@@ -30392,24 +30379,28 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
     if ids.is_empty() {
         return;
     }
+    // The last answer on this socket did not carry the token. A listing
+    // now would be another request, and its rows would not name the person.
     if !pack_proven(client) {
         ids.into_iter().for_each(unrecord_person);
         return;
     }
-    match atoms_lean(client, &client.workspace()) {
-        Ok(atoms) => {
-            atoms.iter().for_each(keep_origin);
-            for id in ids {
-                match atoms
-                    .iter()
-                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
-                {
-                    Some(held) => record_held(id, held),
-                    None => record_origin(id, None),
-                }
-            }
+    let atoms = match atoms_listed(client, &client.workspace(), true) {
+        Ok((atoms, true)) => atoms,
+        _ => {
+            ids.into_iter().for_each(unrecord_person);
+            return;
         }
-        Err(_) => ids.into_iter().for_each(unrecord_person),
+    };
+    atoms.iter().for_each(keep_origin);
+    for id in ids {
+        match atoms
+            .iter()
+            .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
+        {
+            Some(held) => record_held(id, held),
+            None => record_origin(id, None),
+        }
     }
 }
 
@@ -30481,101 +30472,21 @@ pub(crate) enum Stored {
 /// How long a read waits for the pack to answer for one atom id.
 const ATOM_NOW_MS: u64 = 400;
 
-/// How long a proof waits. A hook's pack timeout is already short; the
-/// by-id read's bound is the longer the proof may add.
-fn proof_timeout() -> std::time::Duration {
-    pack_timeout().min(std::time::Duration::from_millis(ATOM_NOW_MS))
-}
-
-/// Whether the listener at `client`'s origin (scheme, host and port) is
-/// the writer that holds this seat's token. Every read that names the
-/// person asks this before it sends the token, and one that is not proven
-/// sends none. A proof stands for the rest of the process, per origin and
-/// token; a failed one is asked again next time.
+/// Whether the last answer from `client`'s socket carried this seat's
+/// token. The proof is not kept for a later connection: the next call
+/// proves again before the token is written. A failed proof is asked
+/// again on that call.
 ///
-/// The proof reads an atom id no pack holds, under a fresh nonce, three
-/// times: with no token and with a bogus one of the same shape, which
-/// both have to come back 401, then with this seat's, which must not.
-/// A listener that does not check the bearer cannot pass that, and one
-/// that refuses only some URLs is asked a URL it did not choose. A
-/// listener that already learnt the token, or a process of this user
-/// that reads the token file, passes; only a pack that signs its answers
-/// would tell either apart.
+/// The proof reads an atom id no pack holds, under a fresh nonce, on the
+/// socket the call will use: with no token and with a bogus one of the
+/// same shape, which both have to come back 401, then the call carries
+/// this seat's. A listener that does not check the bearer cannot pass
+/// that, and one that refuses only some URLs is asked a URL it did not
+/// choose. A listener that already learnt the token, or a process of
+/// this user that reads the token file, passes; only a pack that signs
+/// its answers would tell either apart.
 pub(crate) fn pack_proven(client: &PacksetClient) -> bool {
-    listener_proof(client) == Some(true)
-}
-
-/// [`pack_proven`], with `None` for a listener that did not answer.
-fn listener_proof(client: &PacksetClient) -> Option<bool> {
-    static PROVEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
-    let Ok(base) = url::Url::parse(client.base()) else {
-        return Some(false);
-    };
-    let Some(token) = packset_client::token() else {
-        return Some(false);
-    };
-    let key = format!(
-        "{} {}",
-        base.origin().ascii_serialization(),
-        hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes())[..8])
-    );
-    let mut proven = PROVEN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if proven.contains(&key) {
-        return Some(true);
-    }
-    let holds = prove_listener(&base, &client.workspace());
-    if holds == Some(true) {
-        proven.insert(key);
-    }
-    holds
-}
-
-/// The three reads [`pack_proven`] makes of the listener at `base`, or
-/// `None` when one of them had no answer or a busy one.
-fn prove_listener(base: &url::Url, workspace: &str) -> Option<bool> {
-    let (Some(nonce), Some(bogus)) = (proof_nonce(), proof_nonce()) else {
-        return Some(false);
-    };
-    let mut probe = base.clone();
-    match probe.path_segments_mut() {
-        Ok(mut path) => {
-            path.pop_if_empty().extend(["v1", "atoms", &nonce[..32]]);
-        }
-        Err(()) => return Some(false),
-    }
-    probe.query_pairs_mut().append_pair("workspace", workspace);
-    let status = |req: ureq::Request| match req.timeout(proof_timeout()).call() {
-        Ok(answer) => Some(answer.status()),
-        Err(ureq::Error::Status(code, _)) if code < 500 => Some(code),
-        Err(_) => None,
-    };
-    let get = || ureq::get(probe.as_str());
-    if status(get())? != 401 {
-        return Some(false);
-    }
-    if status(get().set("Authorization", &format!("Bearer {bogus}")))? != 401 {
-        return Some(false);
-    }
-    let asked = packset_client::authorize(get());
-    if asked.header("Authorization").is_none() {
-        return Some(false);
-    }
-    Some(status(asked)? != 401)
-}
-
-/// 64 hex digits from `/dev/urandom`, the shape of a packsetd token.
-/// `None` when it cannot be read: the time is not a secret, so a seat
-/// without it proves nothing.
-fn proof_nonce() -> Option<String> {
-    use std::io::Read;
-    let mut raw = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .ok()
-        .map(|()| hex::encode(raw))
+    client.carried()
 }
 
 /// Atom `id` as this seat's pack answers for it now, both requests inside
@@ -30584,11 +30495,10 @@ fn proof_nonce() -> Option<String> {
 /// no answer to stand on.
 ///
 /// Only a listener that asks for this seat's token answers. The read goes
-/// only with the token, which [`packset_client::authorize`] keeps from a
-/// port another user holds, only after the same read without it was
-/// refused with 401, and only to a listener [`pack_proven`] proved. A
-/// stand-in that answers anyone, or a packsetd run with
-/// `PACKSET_AUTH=off`, confirms nothing.
+/// only with the token, and only after the same read without it was
+/// refused with 401. The token stays off a port another user holds, and
+/// off a listener the proof did not pass. A stand-in that answers anyone,
+/// or a packsetd run with `PACKSET_AUTH=off`, confirms nothing.
 pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
     let client = pack().map_err(|err| format!("no pack to ask for {id}: {err:#}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATOM_NOW_MS);
@@ -30597,49 +30507,57 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
             .saturating_duration_since(std::time::Instant::now())
             .max(std::time::Duration::from_millis(1))
     };
-    let mut url = url::Url::parse(client.base())
-        .map_err(|err| format!("the pack URL {} is not a URL: {err}", client.base()))?;
-    url.path_segments_mut()
-        .map_err(|()| format!("the pack URL {} has no path", client.base()))?
-        .pop_if_empty()
-        .extend(["v1", "atoms", id]);
-    url.query_pairs_mut()
-        .append_pair("workspace", &client.workspace());
-    let asked = packset_client::authorize(ureq::get(url.as_str()));
-    if asked.header("Authorization").is_none() {
+    let path = format!("/v1/atoms/{id}");
+    let workspace = client.workspace();
+    if !client.may_carry() {
         return Err(format!(
             "no token for {id}: this seat has none, or another user holds the pack's port"
         ));
     }
-    match ureq::get(url.as_str()).timeout(left()).call() {
-        Err(ureq::Error::Status(401, _)) => {}
-        Err(ureq::Error::Transport(err)) => {
-            return Err(format!("the pack did not answer for {id}: {err}"));
-        }
-        _ => {
+    match client.roundtrip(
+        "GET",
+        &path,
+        &[("workspace", workspace.as_str())],
+        None,
+        false,
+        left(),
+    ) {
+        Err(err) => return Err(format!("the pack did not answer for {id}: {err}")),
+        Ok(answer) if answer.status == 401 => {}
+        Ok(_) => {
             return Err(format!(
                 "the listener at {} answers for {id} without this seat's token",
                 client.base()
             ));
         }
     }
-    match listener_proof(&client) {
-        Some(true) => {}
-        Some(false) => {
-            return Err(format!(
-                "the listener at {} is not proven to hold this seat's token",
-                client.base()
-            ));
-        }
-        None => return Err(format!("the pack did not answer for {id}")),
+    let asked = client
+        .roundtrip(
+            "GET",
+            &path,
+            &[("workspace", workspace.as_str())],
+            None,
+            true,
+            left(),
+        )
+        .map_err(|err| format!("the pack did not answer for {id}: {err}"))?;
+    if !asked.trusted || asked.status == 401 {
+        return Err(format!(
+            "the listener at {} is not proven to hold this seat's token",
+            client.base()
+        ));
     }
-    let atom: Value = match asked.timeout(left()).call() {
-        Ok(answer) => answer
-            .into_json()
-            .map_err(|err| format!("the pack's answer for {id} is not JSON: {err}"))?,
-        Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(err) => return Err(format!("the pack did not answer for {id}: {err}")),
-    };
+    if asked.status == 404 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&asked.status) {
+        return Err(format!(
+            "the pack did not answer for {id}: {}",
+            asked.status
+        ));
+    }
+    let atom: Value = serde_json::from_str(&asked.body)
+        .map_err(|err| format!("the pack's answer for {id} is not JSON: {err}"))?;
     if atom.get("id").and_then(Value::as_str) != Some(id) {
         return Err(format!("the pack answered for {id} with another atom"));
     }
@@ -49738,7 +49656,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
-        let quick = std::time::Duration::from_millis(200);
+        // A fixed 200 ms is shorter than a slow CI spawn, so an allow
+        // was read as a timeout. The budget is the measured spawn, and
+        // at least two seconds; the hang still sleeps longer than that.
+        let spawned = std::time::Instant::now();
+        let _ = tcb_answer_in(
+            &fake_policyd(dir.path(), "baseline", "echo allow"),
+            &argv,
+            std::time::Duration::from_secs(2),
+            None,
+        );
+        let quick = spawned
+            .elapsed()
+            .saturating_mul(8)
+            .max(std::time::Duration::from_secs(2));
         let answer = |name: &str, body: &str| {
             tcb_answer_in(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
@@ -52774,6 +52705,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn a_busy_writer_is_asked_again_for_the_lean_listing() {
         let _env = env_guard();
+        // A seat token turns each try into a probe. While the writer stays
+        // busy the probe is the try, but the first 200 is a probe that
+        // fails the proof and the listing is a second request.
+        unsafe {
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("PACKSET_HOME");
+        }
         let (url, seen) = serve_busy_then(2, r#"{"atoms":[{"id":"a","kind":"rule"}]}"#);
         let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
         assert_eq!(atoms.len(), 1);
@@ -53727,6 +53666,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn remember_posts_v1_atoms() {
+        let _env = env_guard();
+        unsafe {
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("PACKSET_HOME");
+        }
         let (url, captured) = serve_capture();
         let client = PacksetClient::new(&url);
         let body = post_claim(&client, "Remember", "the default fuse is CombMNZ", "ws").unwrap();
@@ -54223,7 +54168,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{lines:?}"
         );
         assert_eq!(
-            lines.iter().filter(|l| l.contains("/v1/atoms")).count(),
+            lines
+                .iter()
+                .filter(|l| l.contains("POST /v1/atoms"))
+                .count(),
             1,
             "filing is the only atom post: {lines:?}"
         );
@@ -54231,7 +54179,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(again.contains("already in the pack"), "{again}");
         let lines = log.lock().unwrap().clone();
         assert_eq!(
-            lines.iter().filter(|l| l.contains("/v1/atoms")).count(),
+            lines
+                .iter()
+                .filter(|l| l.contains("POST /v1/atoms"))
+                .count(),
             1,
             "a second accept does not file another proposal: {lines:?}"
         );
@@ -54385,6 +54336,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     #[test]
     fn forget_posts_the_id_and_workspace() {
+        let _env = env_guard();
+        unsafe {
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("PACKSET_HOME");
+        }
         let (url, captured) = serve_capture();
         let client = PacksetClient::new(&url);
         let body = client.delete_atom("ws", "atom-1", None).unwrap();
@@ -54403,6 +54360,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// tombstone in the same step the atom leaves the live set.
     #[test]
     fn forget_carries_the_deed_that_withdrew_the_claim() {
+        let _env = env_guard();
+        unsafe {
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("PACKSET_HOME");
+        }
         let (url, captured) = serve_capture();
         let client = PacksetClient::new(&url);
         client
@@ -56188,27 +56151,181 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn a_pack_request_carries_the_token_from_the_pack_home() {
         let _env = env_guard();
-        let keys = ["PACKSET_TOKEN", "PACKSET_TOKEN_FILE", "PACKSET_HOME"];
-        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("token"), "abc123\n").unwrap();
         unsafe {
-            for k in keys {
-                std::env::remove_var(k);
-            }
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
             std::env::set_var("PACKSET_HOME", home.path());
         }
-        assert_eq!(packset_client::token().as_deref(), Some("abc123"));
-        let req = packset_client::authorize(ureq::get("http://127.0.0.1:1/v1/atoms"));
-        assert_eq!(req.header("Authorization"), Some("Bearer abc123"));
-        unsafe {
-            for (k, v) in saved {
-                match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+        let (url, seen) = serve_headers(true);
+        let body = PacksetClient::new(&url).status(None).unwrap();
+        assert_eq!(body["live"], 1);
+        let reqs = seen.lock().unwrap().clone();
+        let authed: Vec<_> = reqs
+            .iter()
+            .filter(|req| req.contains("Authorization: Bearer abc123"))
+            .collect();
+        assert_eq!(authed.len(), 1, "{reqs:?}");
+        assert!(authed[0].contains("GET /v1/status"), "{authed:?}");
+        assert!(
+            reqs.iter()
+                .filter(|req| req.contains("GET /v1/atoms/"))
+                .all(|req| !req.contains("Bearer abc123")),
+            "{reqs:?}"
+        );
+    }
+
+    /// Status, activate and the lean listing, the reads that used to send
+    /// the token without a proof. A listener that answers anyone gets none.
+    #[test]
+    fn an_unproven_listener_is_not_shown_the_token() {
+        let _env = env_guard();
+        unsafe { std::env::set_var("PACKSET_TOKEN", "seat-token-not-for-an-open-port") };
+        let (url, seen) = serve_headers(false);
+        let client = PacksetClient::new(&url).with_workspace("seat");
+        let _ = client.status(None);
+        let _ = client.activate_as("seat", "the deploy form", 4, false, None);
+        let _ = atoms_lean(&client, "seat");
+        let reqs = seen.lock().unwrap().clone();
+        assert!(
+            reqs.iter().all(|req| !req.contains("Authorization:")),
+            "{reqs:?}"
+        );
+        assert!(
+            reqs.iter().any(|req| req.contains("GET /v1/status")),
+            "{reqs:?}"
+        );
+        assert!(
+            reqs.iter().any(|req| req.contains("GET /v1/activate")),
+            "{reqs:?}"
+        );
+        assert!(
+            reqs.iter()
+                .any(|req| req.contains("GET /v1/atoms?") || req.contains("GET /v1/atoms ")),
+            "{reqs:?}"
+        );
+    }
+
+    /// A listener that passed the proof and then went away. The next
+    /// connection is a different process on the same port, and it must
+    /// not be handed the token.
+    #[test]
+    fn an_impostor_that_takes_the_port_is_not_handed_the_token() {
+        let _env = env_guard();
+        const TOKEN: &str = "impostor-proof-token";
+        unsafe { std::env::set_var("PACKSET_TOKEN", TOKEN) };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        let real = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let req = read_http(&mut stream);
+                        let ok = req.contains(&format!("Bearer {TOKEN}"));
+                        let (code, body) = if ok {
+                            ("200 OK", r#"{"live":1}"#)
+                        } else {
+                            ("401 Unauthorized", r#"{"error":"token"}"#)
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
                 }
             }
+        });
+        let client = PacksetClient::new(&url);
+        assert_eq!(client.status(None).unwrap()["live"], 1);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        real.join().unwrap();
+        let impostor = bind_again(addr);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        let parked = std::thread::spawn(move || {
+            impostor.set_nonblocking(true).unwrap();
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                match impostor.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let req = read_http(&mut stream);
+                        log.lock().unwrap().push(req);
+                        let body = r#"{"live":9}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let again = client.status(None).unwrap();
+        assert_eq!(again["live"], 9);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        parked.join().unwrap();
+        let reqs = seen.lock().unwrap().clone();
+        assert!(
+            reqs.iter().all(|req| !req.contains("Authorization:")),
+            "{reqs:?}"
+        );
+    }
+
+    fn bind_again(addr: std::net::SocketAddr) -> std::net::TcpListener {
+        for _ in 0..50 {
+            if let Ok(listener) = std::net::TcpListener::bind(addr) {
+                return listener;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        std::net::TcpListener::bind(addr).unwrap()
+    }
+
+    /// Full requests, not just the request line. `asks` refuses every
+    /// request that does not carry `Bearer abc123`.
+    fn serve_headers(asks: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let req = read_http(&mut stream);
+                log.lock().unwrap().push(req.clone());
+                let showed = req.contains("Authorization: Bearer abc123");
+                let (code, body) = if !asks {
+                    ("200 OK", r#"{"atoms":[],"island":[],"fired":0,"live":0}"#)
+                } else if showed && req.contains("GET /v1/status") {
+                    ("200 OK", r#"{"live":1}"#)
+                } else {
+                    ("401 Unauthorized", r#"{"error":"token"}"#)
+                };
+                let resp = format!(
+                    "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), seen)
     }
 
     #[test]
