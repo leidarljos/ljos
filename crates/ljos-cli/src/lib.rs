@@ -96,8 +96,9 @@ pub struct Step {
 /// table each, and `onboard` and `doctor` read it.
 ///
 /// A runner registers MCP servers one of two ways. `register` is a command
-/// that does it (`{server}` is replaced by `ljos-mcp`, resolved on PATH) and
-/// `registered` a command that exits 0 once it is done. Or `config` is a
+/// that does it (`{server}` is `ljos-mcp` when that name on PATH is this
+/// install, and the absolute path otherwise). `registered` is a command
+/// that exits 0 once it is done. Or `config` is a
 /// file the runner reads, `marker` a line that means the entry is present,
 /// and `snippet` what to append when it is not. `skills` is the directory
 /// the runner loads skills from; the protocol goes to `<skills>/ljos/SKILL.md`.
@@ -650,9 +651,10 @@ pub struct Harnesses {
 /// prints it; the two shapes are a registering command and a config file.
 pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners this machine registers by command.
 # Optional: `ljos onboard` alone prints the one entry any runner takes.
-# {server} is replaced by ljos-mcp, resolved on PATH where the runner starts
-# it, and {name} by the runner's name. An absolute path would be the machine
-# that wrote the file.
+# {server} is ljos-mcp when that name on PATH is this install, and the
+# absolute path when it is not. {name} is the runner's name. An absolute
+# path is kept while the file exists here, and rewritten when a synced
+# config names a missing file.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -719,7 +721,7 @@ name = "hermes"
 # `hermes mcp add` asks which tools to enable; the answer is all of them.
 register = ["sh", "-c", "printf 'Y\\n' | hermes mcp add ljos --command {server}"]
 config = "~/.hermes/config.yaml"
-marker = "\n  ljos:\n    command:"
+marker = "  ljos:\n    command:"
 skills = "~/.hermes/skills"
 # A hermes installed without its MCP extra lists ljos and loads nothing.
 probe = ["hermes", "mcp", "test", "ljos"]
@@ -1193,18 +1195,17 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
     out
 }
 
-/// The MCP command a harness config names.
+/// The MCP command a harness config prefers.
 ///
-/// The runner resolves this on `PATH` when it starts the server. Storing
-/// [`server_path`] instead would bake in the machine that wrote the file,
-/// and a config synced onto another home would name a directory that is
-/// not there.
+/// The bare name when `ljos-mcp` on `PATH` is this install. The absolute
+/// [`server_path`] when that name is missing or resolves to a different
+/// binary.
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
 #[derive(Debug, Clone)]
-struct ServerCommandPlan {
-    command: String,
-    note: Option<String>,
+pub(crate) struct ServerCommandPlan {
+    pub(crate) command: String,
+    pub(crate) note: Option<String>,
 }
 
 /// Where `ljos-mcp` is, for this process to exec.
@@ -1235,7 +1236,7 @@ fn same_binary(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn server_command_plan(server: &Path) -> ServerCommandPlan {
+pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
     match which::which(MCP_SERVER_COMMAND) {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
@@ -1244,7 +1245,7 @@ fn server_command_plan(server: &Path) -> ServerCommandPlan {
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH resolves {MCP_SERVER_COMMAND} to {}, so onboard wrote {}",
+                "PATH resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
                 found.display(),
                 server.display()
             )),
@@ -1252,7 +1253,7 @@ fn server_command_plan(server: &Path) -> ServerCommandPlan {
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH does not resolve {MCP_SERVER_COMMAND}, so onboard wrote {}",
+                "PATH does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
                 server.display()
             )),
         },
@@ -1284,7 +1285,12 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
     let server = server_path()?;
-    let plan = server_command_plan(&server);
+    let plan = server_command_plan(&server, "onboard");
+    // `--harness json` prints this value alone on stdout so it parses.
+    // The reason for an absolute path goes to stderr.
+    if let Some(note) = &plan.note {
+        eprintln!("{note}");
+    }
     Ok(serde_json::json!({
         "mcpServers": {
             "ljos": {
@@ -1301,9 +1307,8 @@ fn write_skill(dir: &Path, dry: bool) -> Step {
     runner_skills::install_skill(&dir.join("ljos").join("SKILL.md"), dry)
 }
 
-/// `{server}` is the MCP command, `{name}` the runner's name from the
-/// runners file. A harness config passes [`MCP_SERVER_COMMAND`], not an
-/// absolute path.
+/// `{server}` is the MCP command: the bare name when PATH resolves to this
+/// install, and the absolute path otherwise. `{name}` is the runner's name.
 fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
     argv.iter()
         .map(|a| a.replace("{server}", &server.display().to_string()))
@@ -3583,8 +3588,8 @@ fn heal_detail(base: &str, healed: &Result<Option<String>>) -> String {
     }
 }
 
-/// An absolute path whose file name is the MCP server. That path is the
-/// machine that wrote the config.
+/// An absolute path whose file name is the MCP server. It may name another
+/// machine. A path that is a file here is this install and is left alone.
 fn is_absolute_ljos_mcp(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
@@ -3611,9 +3616,10 @@ fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     }
 }
 
-/// Point an existing JSON entry at [`MCP_SERVER_COMMAND`] when it still
-/// names an absolute `ljos-mcp`. A runner that was onboarded before keeps
-/// that path until the next onboard, and then syncs it again.
+/// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
+/// that is not a file here. The replacement is the bare name, or this
+/// install's path when the bare name would not run it. A path that exists
+/// is left alone.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
@@ -3716,7 +3722,13 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
     let Some(found) = text.find(marker) else {
         return (text.to_string(), false);
     };
-    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    // A marker that begins with a newline already names the next line.
+    // Rewinding once more rewrites the sibling command above it.
+    let start = if marker.starts_with('\n') {
+        found + 1
+    } else {
+        text[..found].rfind('\n').map_or(0, |at| at + 1)
+    };
     let end = marker_section_end(text, start, marker);
     let mut at = start;
     while at < end {
@@ -3819,7 +3831,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan(server);
+    let plan = server_command_plan(server, "onboard");
     match is_registered(h, server) {
         Some(true) => {
             let healed = heal_registered(h, &plan.command, dry);
@@ -29322,6 +29334,10 @@ mod tests {
     #[test]
     fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
         use std::os::unix::fs::PermissionsExt;
+        // The shim inherits this process. Another test's GIT_DIR would
+        // make rev-parse leave the fixture, and a protected branch would
+        // be pushed instead of asked about.
+        let _g = env_guard();
         // A temp home with the explicit guard-on setting, not a directory
         // moved out of /tmp.
         let root = tempfile::tempdir().unwrap();
@@ -36217,6 +36233,21 @@ mod tests {
         assert!(!is_decision(&v(
             r#"{"body":"We weighed the Options: none"}"#
         )));
+    }
+
+    #[test]
+    fn the_harness_example_says_when_the_command_is_bare() {
+        let text = super::HARNESSES_EXAMPLE;
+        assert!(
+            !text.contains("An absolute path would be the machine"),
+            "{text}"
+        );
+        assert!(!text.contains("always bare"), "{text}");
+        assert!(
+            text.contains("ljos-mcp when that name on PATH is this install"),
+            "{text}"
+        );
+        assert!(text.contains("absolute path when it is not"), "{text}");
     }
 
     #[test]
