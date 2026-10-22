@@ -1,20 +1,35 @@
 //! HTML reduced to the text a mail client would show.
 //!
 //! Not a full parser: tags, comments and raw-text elements are skipped,
-//! entities decoded, and block elements become line breaks. Text inside an
-//! element the reducer can tell is concealed is dropped: the `hidden`
-//! attribute, or a style that sets `display:none`, `visibility:hidden`,
-//! `opacity` near 0, a zero `font-size`, a zero width or height, a
-//! transparent color or one equal to the background, a negative offset
-//! or indent, `clip`, `clip-path` or `mso-hide:all`. The style may be
-//! inline or a class or id rule in a `<style>` block seen earlier.
+//! entities decoded, and block elements become line breaks. Attribute
+//! values are entity-decoded before use, and CSS has its comments
+//! removed and its escapes decoded outside strings. As in HTML, `/>`
+//! closes only a void element or one inside `<svg>` or `<math>`; any
+//! other element stays open.
 //!
-//! Any `<style>` block or concealment marks the part as hiding content.
-//! When a stylesheet does what the reducer cannot follow (an `@` rule
-//! such as `@media`, a concealing rule on any selector other than a
-//! class or id, a color in one rule equal to a background in another,
-//! or a linked stylesheet), the text is withheld rather than guessed.
-//! A link keeps its text and gains its target as plain text, so a
+//! Text the reducer can tell is concealed is dropped: inside an element
+//! with the `hidden` attribute, a class or id rule that conceals, or a
+//! style that sets `display:none`, `visibility:hidden` or `collapse`,
+//! `content-visibility:hidden`, `mso-hide:all`, a width or height of
+//! 1px or less, an offset or indent that is negative or 1000px or more,
+//! `clip`, `clip-path`, or any transform; under an opacity (a number or
+//! a percentage, multiplied down the tree) of 0.05 or less or a font
+//! size (resolved down the tree) of 1px or less; or drawn in a color
+//! whose alpha is 0.05 or less, or within 16 of its background in every
+//! channel (black text on white when nothing sets them). A value of one
+//! of those properties the reducer cannot read, or any `var()`, counts
+//! as concealing.
+//!
+//! Every `<style>` block, wherever it sits, is read before the body, and
+//! any block or concealment marks the part as hiding content. When the
+//! HTML does what the reducer cannot follow (an `@` rule such as
+//! `@media`, a concealing rule on any selector other than a class or id,
+//! a stylesheet color within 16 of a background set anywhere, of white
+//! when its rule sets no background, or a stylesheet background within
+//! 16 of black when its rule sets no color, a linked stylesheet, or a
+//! `style`, `class`, `id` or `hidden` attribute holding a reference the
+//! reducer cannot decode), the text is withheld rather than guessed. A
+//! link keeps its text and gains its target as plain text, so a
 //! mismatched link is visible.
 
 /// The visible text and what the HTML hid.
@@ -64,13 +79,54 @@ struct Open {
     name: String,
     hidden: bool,
     href: Option<String>,
-    background: Option<String>,
+    paint: Paint,
 }
+
+/// How the text inside an element is drawn, from it and its ancestors.
+#[derive(Clone)]
+struct Paint {
+    fg: Color,
+    bg: Color,
+    opacity: f32,
+    font_px: f32,
+}
+
+impl Default for Paint {
+    fn default() -> Self {
+        Self {
+            fg: BLACK,
+            bg: WHITE,
+            opacity: 1.0,
+            font_px: 16.0,
+        }
+    }
+}
+
+/// What one element's declarations and color attributes set; `None`
+/// for each part left to the parent.
+struct Own {
+    fg: Option<Color>,
+    bg: Option<Color>,
+    opacity: Option<f32>,
+    font_px: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Color {
+    Rgb([u8; 3], f32),
+    /// A name the reducer has no value for, compared by name.
+    Named(String),
+}
+
+const BLACK: Color = Color::Rgb([0, 0, 0], 1.0);
+const WHITE: Color = Color::Rgb([255, 255, 255], 1.0);
 
 #[derive(Default)]
 struct HiddenRules {
     classes: Vec<String>,
     ids: Vec<String>,
+    colors: Vec<Color>,
+    backgrounds: Vec<Color>,
     styled: bool,
     withheld: bool,
 }
@@ -81,7 +137,8 @@ pub fn visible_text(html: &str) -> Visible {
     let mut dropped = false;
     let mut concealed = false;
     let mut stack: Vec<Open> = Vec::new();
-    let mut rules = HiddenRules::default();
+    let mut rules = HiddenRules::of(html);
+    let (mut seen_fg, mut seen_bg) = (Vec::new(), Vec::new());
     let mut rest = html;
     while !rest.is_empty() {
         let Some(lt) = rest.find('<') else {
@@ -100,6 +157,9 @@ pub fn visible_text(html: &str) -> Visible {
             continue;
         };
         rest = after;
+        if tag.odd && !tag.closing {
+            rules.withheld = true;
+        }
         if tag.closing {
             if let Some(at) = stack.iter().rposition(|o| o.name == tag.name) {
                 for open in stack.drain(at..).rev() {
@@ -116,13 +176,9 @@ pub fn visible_text(html: &str) -> Visible {
         if BLOCK.contains(&tag.name.as_str()) {
             out.push('\n');
         }
-        if RAW.contains(&tag.name.as_str()) && !tag.self_closing {
+        if RAW.contains(&tag.name.as_str()) {
             let close = format!("</{}", tag.name);
-            let end = find_ascii_ci(rest, &close).unwrap_or(rest.len());
-            if tag.name == "style" {
-                rules.read(&rest[..end]);
-            }
-            rest = &rest[end..];
+            rest = &rest[find_ascii_ci(rest, &close).unwrap_or(rest.len())..];
             continue;
         }
         if tag.name == "link"
@@ -132,27 +188,37 @@ pub fn visible_text(html: &str) -> Visible {
         {
             rules.withheld = true;
         }
-        if VOID.contains(&tag.name.as_str()) || tag.self_closing {
+        let foreign = ["svg", "math"].contains(&tag.name.as_str())
+            || stack.iter().any(|o| o.name == "svg" || o.name == "math");
+        if VOID.contains(&tag.name.as_str()) || (tag.self_closing && foreign) {
             continue;
         }
-        let style = declarations(tag.attr("style").unwrap_or(""));
-        let background = value(&style, "background-color")
-            .or_else(|| value(&style, "background"))
-            .or_else(|| tag.attr("bgcolor"))
-            .map(color)
-            .or_else(|| stack.last().and_then(|o| o.background.clone()));
-        let fg = value(&style, "color")
-            .or_else(|| (tag.name == "font").then(|| tag.attr("color")).flatten())
-            .map(color);
+        let style = declarations(&css_text(tag.attr("style").unwrap_or("")));
+        let parent = stack
+            .last()
+            .map_or_else(Paint::default, |o| o.paint.clone());
+        let set = own(&style, Some(&tag), parent.font_px);
+        if let Some(set) = &set {
+            seen_fg.extend(set.fg.clone());
+            seen_bg.extend(set.bg.clone());
+        }
+        let paint = set.as_ref().map(|set| Paint {
+            fg: set.fg.clone().unwrap_or_else(|| parent.fg.clone()),
+            bg: set.bg.clone().unwrap_or_else(|| parent.bg.clone()),
+            opacity: parent.opacity * set.opacity.unwrap_or(1.0),
+            font_px: set.font_px.unwrap_or(parent.font_px),
+        });
         let hidden = tag.attr("hidden").is_some()
-            || conceals(&style)
-            || fg.is_some_and(|c| background.as_deref() == Some(c.as_str()))
+            || hides(&style)
+            || paint
+                .as_ref()
+                .is_none_or(|p| p.opacity <= 0.05 || p.font_px <= 1.0)
             || tag
                 .attr("class")
                 .is_some_and(|c| c.split_whitespace().any(|c| rules.has_class(c)))
             || tag.attr("id").is_some_and(|id| rules.has_id(id));
         let href = (tag.name == "a")
-            .then(|| tag.attr("href").map(|h| decode(h).trim().to_string()))
+            .then(|| tag.attr("href").map(|h| h.trim().to_string()))
             .flatten()
             .filter(|h| !h.is_empty());
         concealed |= hidden;
@@ -160,13 +226,24 @@ pub fn visible_text(html: &str) -> Visible {
             name: tag.name,
             hidden,
             href,
-            background,
+            paint: paint.unwrap_or(parent),
         });
     }
+    let clash = rules.colors.iter().any(|c| {
+        rules
+            .backgrounds
+            .iter()
+            .chain(&seen_bg)
+            .any(|b| close(c, b))
+    }) || rules
+        .backgrounds
+        .iter()
+        .any(|b| seen_fg.iter().any(|c| close(c, b)));
+    let withheld = rules.withheld || clash;
     Visible {
         text: tidy(&out),
-        hidden_content: dropped || concealed || rules.styled || rules.withheld,
-        withheld: rules.withheld,
+        hidden_content: dropped || concealed || rules.styled || withheld,
+        withheld,
     }
 }
 
@@ -175,26 +252,73 @@ fn text(raw: &str, stack: &[Open], out: &mut String, dropped: &mut bool) {
         return;
     }
     let decoded = decode(raw);
-    if stack.iter().any(|o| o.hidden) {
+    if stack.iter().any(|o| o.hidden) || stack.last().is_some_and(|o| invisible(&o.paint)) {
         *dropped |= !decoded.trim().is_empty();
         return;
     }
     out.push_str(&decoded);
 }
 
-/// `property: value` pairs, lower case, whitespace and `!important`
-/// removed.
+/// CSS as a client reads it: comments removed and escapes such as `\3a`
+/// decoded, both outside strings.
+fn css_text(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), _) => {
+                out.push(c);
+                if c == '\\' {
+                    out.extend(chars.next());
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                out.push(c);
+            }
+            (None, '/') if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut star = false;
+                for c in chars.by_ref() {
+                    if star && c == '/' {
+                        break;
+                    }
+                    star = c == '*';
+                }
+            }
+            (None, '\\') => {
+                let mut hex = String::new();
+                while hex.len() < 6 && chars.peek().is_some_and(char::is_ascii_hexdigit) {
+                    hex.extend(chars.next());
+                }
+                if hex.is_empty() {
+                    out.push(chars.next().unwrap_or('\u{FFFD}'));
+                } else {
+                    chars.next_if(|c| c.is_whitespace());
+                    let code = u32::from_str_radix(&hex, 16).ok().filter(|&c| c != 0);
+                    out.push(code.and_then(char::from_u32).unwrap_or('\u{FFFD}'));
+                }
+            }
+            (None, _) => out.push(c),
+        }
+    }
+    out
+}
+
+/// `property: value` pairs in lower case, runs of whitespace as one
+/// space, `!important` removed.
 fn declarations(css: &str) -> Vec<(String, String)> {
     css.split(';')
         .filter_map(|d| d.split_once(':'))
         .map(|(k, v)| {
-            let squash = |s: &str| {
-                s.chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect::<String>()
-                    .to_ascii_lowercase()
-            };
-            (squash(k), squash(v).replace("!important", ""))
+            let mut v = v.split_whitespace().collect::<Vec<_>>().join(" ");
+            if let Some(bang) = v.find('!') {
+                v.truncate(bang);
+            }
+            (k.trim().to_ascii_lowercase(), v.trim().to_ascii_lowercase())
         })
         .collect()
 }
@@ -207,93 +331,340 @@ fn value<'a>(decls: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// The leading number of a CSS length, `0` for `0px`, `-12` for `-12em`.
-fn number(v: &str) -> Option<f32> {
-    let end = v
-        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+/// A CSS number and the unit after it: `(-12.0, "em")` for `-12em`,
+/// `(0.001, "%")` for `1e-3%`.
+fn number(v: &str) -> Option<(f32, &str)> {
+    let mut end = v
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '+' | '-')))
         .unwrap_or(v.len());
-    v[..end].parse().ok()
+    if let Some(exp) = v[end..].strip_prefix(['e', 'E']) {
+        let digits = exp.trim_start_matches(['+', '-']);
+        let run = digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+        if run > 0 {
+            end += 1 + exp.len() - digits.len() + run;
+        }
+    }
+    let n: f32 = v[..end].parse().ok().filter(|n: &f32| n.is_finite())?;
+    Some((n, &v[end..]))
 }
 
-/// Declarations that hide the element's text on their own.
-fn conceals(decls: &[(String, String)]) -> bool {
-    decls.iter().any(|(k, v)| match k.as_str() {
-        "display" => v == "none",
-        "visibility" => v == "hidden" || v == "collapse",
-        "opacity" => number(v).is_some_and(|n| n <= 0.05),
-        "font-size" => number(v)
-            .is_some_and(|n| n <= 0.0 || (n <= 1.0 && (v.ends_with("px") || v.ends_with("pt")))),
-        "width" | "height" | "max-width" | "max-height" => number(v) == Some(0.0),
-        "left" | "top" | "right" | "bottom" | "text-indent" | "margin-left" | "margin-top" => {
-            v.starts_with('-')
-        }
-        "clip" => v.starts_with("rect("),
-        "clip-path" => v != "none",
-        "transform" => v.contains("scale(0"),
-        "mso-hide" => v == "all",
-        "color" => v == "transparent" || v.ends_with(",0)") || v.ends_with(",0.0)"),
-        _ => false,
+/// A length in px, `em` against `em` px and `%` against `percent` px.
+fn px(v: &str, em: f32, percent: f32) -> Option<f32> {
+    let (n, unit) = number(v)?;
+    let scale = match unit {
+        "" | "px" => 1.0,
+        "pt" => 4.0 / 3.0,
+        "pc" => 16.0,
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "q" => 96.0 / 101.6,
+        "em" => em,
+        "rem" => 16.0,
+        "ex" | "ch" => em / 2.0,
+        "%" => percent,
+        "vw" | "vh" | "vmin" | "vmax" => 3.2,
+        _ => return None,
+    };
+    Some(n * scale)
+}
+
+/// A keyword that leaves the value to the parent or the default.
+fn inherits(v: &str) -> bool {
+    matches!(
+        v,
+        "inherit" | "initial" | "unset" | "revert" | "revert-layer" | "currentcolor"
+    )
+}
+
+/// Declarations that hide the element's text whatever its parent is.
+fn hides(decls: &[(String, String)]) -> bool {
+    decls.iter().any(|(k, v)| {
+        let keyword = inherits(v)
+            || matches!(
+                v.as_str(),
+                "auto" | "none" | "normal" | "fit-content" | "max-content" | "min-content"
+            );
+        let len = || px(v, 16.0, 6.0);
+        v.contains("var(")
+            || match k.as_str() {
+                "display" => v == "none",
+                "visibility" => v == "hidden" || v == "collapse",
+                "content-visibility" => v == "hidden",
+                "width" | "height" | "max-width" | "max-height" => {
+                    !keyword && len().is_none_or(|n| n <= 1.0)
+                }
+                "left" | "top" | "right" | "bottom" | "text-indent" | "margin-left"
+                | "margin-top" => !keyword && len().is_none_or(|n| !(0.0..1000.0).contains(&n)),
+                "clip" => v.starts_with("rect("),
+                "clip-path" => v != "none",
+                "transform" | "translate" | "scale" | "rotate" => v != "none",
+                "mso-hide" => v == "all",
+                _ => false,
+            }
     })
 }
 
-/// A color in one spelling, so `#FFF`, `#ffffff`, `white` and
-/// `rgb(255,255,255)` compare equal.
-fn color(v: &str) -> String {
-    let v = v.to_ascii_lowercase().replace(' ', "");
-    let hex = |r: u8, g: u8, b: u8| format!("#{r:02x}{g:02x}{b:02x}");
-    if let Some(h) = v.strip_prefix('#') {
-        let digits: Vec<u8> = h
-            .chars()
-            .filter_map(|c| c.to_digit(16).and_then(|d| u8::try_from(d).ok()))
-            .collect();
-        match digits.as_slice() {
-            [r, g, b] if h.len() == 3 => return hex(r * 17, g * 17, b * 17),
-            [r1, r2, g1, g2, b1, b2] if h.len() == 6 => {
-                return hex(r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2)
+/// What `decls` and, for an element, its color attributes set. `None`
+/// when a color, opacity or font size cannot be read.
+fn own(decls: &[(String, String)], tag: Option<&Tag>, parent_font: f32) -> Option<Own> {
+    let attr =
+        |element: &str, name: &str| tag.filter(|t| t.name == element).and_then(|t| t.attr(name));
+    let fg = value(decls, "-webkit-text-fill-color")
+        .filter(|v| !inherits(v))
+        .or_else(|| value(decls, "color"))
+        .or_else(|| attr("font", "color"))
+        .or_else(|| attr("body", "text"))
+        .filter(|v| !inherits(v));
+    let fg = match fg {
+        Some(v) => Some(color(v)?),
+        None => None,
+    };
+    let bg = decls
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "background" || k == "background-color");
+    let bg = match bg {
+        Some((_, v)) => background(v)?,
+        None => tag.and_then(|t| t.attr("bgcolor")).and_then(color),
+    };
+    let opacity = match value(decls, "opacity").filter(|v| !inherits(v)) {
+        Some(v) => Some(match number(v)? {
+            (n, "") => n,
+            (n, "%") => n / 100.0,
+            _ => return None,
+        }),
+        None => None,
+    };
+    let size = value(decls, "font-size").or_else(|| value(decls, "font").and_then(font_size));
+    let font_px = match size {
+        Some(v) => Some(font_px(v, parent_font)?),
+        None => None,
+    };
+    Some(Own {
+        fg,
+        bg: bg.filter(|c| alpha(c) > 0.05),
+        opacity,
+        font_px,
+    })
+}
+
+/// The color a `background` value paints: `Some(None)` for none the
+/// reducer can see (an image, a gradient, `none`), `None` when a part
+/// cannot be read.
+fn background(v: &str) -> Option<Option<Color>> {
+    const WORDS: &str = "none repeat no-repeat repeat-x repeat-y space round scroll fixed local \
+        center top bottom left right cover contain auto border-box padding-box content-box text";
+    let mut paint = None;
+    for part in parts(v) {
+        if part.starts_with("url(")
+            || part.contains("gradient(")
+            || part.contains('/')
+            || number(part).is_some()
+            || WORDS.split(' ').any(|w| w == part)
+            || (inherits(part) && part != "currentcolor")
+        {
+            continue;
+        }
+        paint = Some(color(part).filter(|_| part != "currentcolor")?);
+    }
+    Some(paint)
+}
+
+/// The space-separated parts of a value, a function call kept whole.
+fn parts(v: &str) -> Vec<&str> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0usize, 0);
+    for (i, c) in v.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ' ' if depth == 0 => {
+                out.extend((i > start).then(|| &v[start..i]));
+                start = i + 1;
             }
             _ => {}
         }
     }
-    if let Some(args) = v.strip_prefix("rgb(").and_then(|a| a.strip_suffix(')')) {
-        let parts: Vec<u8> = args.split(',').filter_map(|p| p.parse().ok()).collect();
-        if let [r, g, b] = parts.as_slice() {
-            return hex(*r, *g, *b);
-        }
-    }
-    match v.as_str() {
-        "white" => hex(255, 255, 255),
-        "black" => hex(0, 0, 0),
-        _ => v,
+    out.extend((start < v.len()).then(|| &v[start..]));
+    out
+}
+
+/// The size in a `font` shorthand: the first part, before any `/`, that
+/// is a keyword size or a length with a unit or zero.
+fn font_size(v: &str) -> Option<&str> {
+    parts(v).into_iter().find_map(|part| {
+        let size = part.split('/').next().unwrap_or("");
+        let length = number(size).is_some_and(|(n, unit)| !unit.is_empty() || n == 0.0);
+        let keyword = number(size).is_none() && font_px(size, 16.0).is_some();
+        (length || keyword).then_some(size)
+    })
+}
+
+/// A `font-size` in px against the parent's.
+fn font_px(v: &str, parent: f32) -> Option<f32> {
+    Some(match v {
+        "xx-small" => 9.0,
+        "x-small" => 10.0,
+        "small" => 13.0,
+        "medium" => 16.0,
+        "large" => 18.0,
+        "x-large" => 24.0,
+        "xx-large" => 32.0,
+        "xxx-large" => 48.0,
+        "smaller" => parent / 1.2,
+        "larger" => parent * 1.2,
+        _ if inherits(v) || v == "math" => parent,
+        _ => px(v, parent, parent / 100.0)?,
+    })
+}
+
+fn alpha(c: &Color) -> f32 {
+    match c {
+        Color::Rgb(_, a) => *a,
+        Color::Named(_) => 1.0,
     }
 }
 
+fn close(a: &Color, b: &Color) -> bool {
+    match (a, b) {
+        (Color::Rgb(x, _), Color::Rgb(y, _)) => x.iter().zip(y).all(|(p, q)| p.abs_diff(*q) <= 16),
+        (Color::Named(x), Color::Named(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Text in `paint` cannot be seen.
+fn invisible(paint: &Paint) -> bool {
+    alpha(&paint.fg) <= 0.05 || close(&paint.fg, &paint.bg)
+}
+
+/// A CSS color: hex with or without `#` and with an optional alpha,
+/// `rgb()` or `rgba()` with commas or spaces and an optional alpha,
+/// `transparent`, or a name. `None` for a function the reducer does not
+/// read, such as `hsl()` or `var()`.
+fn color(v: &str) -> Option<Color> {
+    let v = v.trim().to_ascii_lowercase();
+    let bare = matches!(v.len(), 3 | 6) && v.bytes().all(|b| b.is_ascii_hexdigit());
+    if let Some(h) = v.strip_prefix('#').or(bare.then_some(v.as_str())) {
+        let d: Vec<u8> = h
+            .chars()
+            .map(|c| c.to_digit(16).and_then(|d| u8::try_from(d).ok()))
+            .collect::<Option<_>>()?;
+        let ([r, g, b], a) = match d.as_slice() {
+            [r, g, b] => ([r * 17, g * 17, b * 17], 255),
+            [r, g, b, a] => ([r * 17, g * 17, b * 17], a * 17),
+            [r1, r2, g1, g2, b1, b2] => ([r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2], 255),
+            [r1, r2, g1, g2, b1, b2, a1, a2] => {
+                ([r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2], a1 * 16 + a2)
+            }
+            _ => return None,
+        };
+        return Some(Color::Rgb([r, g, b], f32::from(a) / 255.0));
+    }
+    if let Some(args) = v
+        .strip_prefix("rgba(")
+        .or_else(|| v.strip_prefix("rgb("))
+        .and_then(|a| a.strip_suffix(')'))
+    {
+        let fraction = |p: &str| match number(p)? {
+            (n, "") => Some(n),
+            (n, "%") => Some(n / 100.0),
+            _ => None,
+        };
+        let channel = |p: &str| match number(p)? {
+            (n, "") => Some(n.clamp(0.0, 255.0) as u8),
+            (n, "%") => Some((n * 2.55).clamp(0.0, 255.0) as u8),
+            _ => None,
+        };
+        let parts: Vec<&str> = args
+            .split(|c: char| c == ',' || c == '/' || c.is_whitespace())
+            .filter(|p| !p.is_empty())
+            .collect();
+        let (rgb, a) = match parts.as_slice() {
+            [r, g, b] => ([*r, *g, *b], 1.0),
+            [r, g, b, a] => ([*r, *g, *b], fraction(a)?),
+            _ => return None,
+        };
+        let [r, g, b] = rgb.map(channel);
+        return Some(Color::Rgb([r?, g?, b?], a.clamp(0.0, 1.0)));
+    }
+    if v.contains('(') {
+        return None;
+    }
+    let rgb = match v.as_str() {
+        "transparent" => return Some(Color::Rgb([0, 0, 0], 0.0)),
+        "white" | "canvas" | "window" => [255, 255, 255],
+        "black" | "canvastext" | "windowtext" => [0, 0, 0],
+        "snow" => [255, 250, 250],
+        "ghostwhite" => [248, 248, 255],
+        "whitesmoke" => [245, 245, 245],
+        "ivory" => [255, 255, 240],
+        "azure" => [240, 255, 255],
+        "mintcream" => [245, 255, 250],
+        "floralwhite" => [255, 250, 240],
+        "honeydew" => [240, 255, 240],
+        "aliceblue" => [240, 248, 255],
+        "lavenderblush" => [255, 240, 245],
+        "seashell" => [255, 245, 238],
+        _ => return Some(Color::Named(v)),
+    };
+    Some(Color::Rgb(rgb, 1.0))
+}
+
 impl HiddenRules {
-    /// Class and id selectors whose rule hides, from one `<style>` block.
-    /// What cannot be followed sets `withheld`.
+    /// Every `<style>` block in `html`, wherever it sits: a client
+    /// applies a sheet to the whole document.
+    fn of(html: &str) -> Self {
+        let mut rules = Self::default();
+        let mut rest = html;
+        while let Some(at) = find_ascii_ci(rest, "<style") {
+            rest = &rest[at..];
+            match parse_tag(rest) {
+                Some((tag, after)) if tag.name == "style" && !tag.closing => {
+                    let end = find_ascii_ci(after, "</style").unwrap_or(after.len());
+                    rules.read(&after[..end]);
+                    rest = &after[end..];
+                }
+                _ => rest = &rest[1..],
+            }
+        }
+        rules
+    }
+
+    /// Class and id selectors whose rule hides, and the colors and
+    /// backgrounds, from one `<style>` block. What cannot be followed
+    /// sets `withheld`.
     fn read(&mut self, css: &str) {
         self.styled = true;
-        let mut css = css.to_ascii_lowercase();
-        while let Some(start) = css.find("/*") {
-            let end = css[start..].find("*/").map_or(css.len(), |e| start + e + 2);
-            css.replace_range(start..end, "");
-        }
+        let css = css_text(&css.to_ascii_lowercase());
         if css.contains('@') {
             self.withheld = true;
         }
-        let (mut colors, mut backgrounds) = (Vec::new(), Vec::new());
         for rule in css.split('}') {
             let Some((selectors, body)) = rule.split_once('{') else {
                 continue;
             };
             let decls = declarations(body);
-            colors.extend(value(&decls, "color").map(color));
-            backgrounds.extend(
-                ["background", "background-color"]
-                    .iter()
-                    .filter_map(|k| value(&decls, k))
-                    .map(color),
-            );
-            if !conceals(&decls) {
+            let set = own(&decls, None, 16.0);
+            if let Some(set) = &set {
+                if let Some(fg) = &set.fg {
+                    self.withheld |= set.bg.is_none() && close(fg, &WHITE);
+                    self.colors.push(fg.clone());
+                }
+                if let Some(bg) = &set.bg {
+                    self.withheld |= set.fg.is_none() && close(bg, &BLACK);
+                    self.backgrounds.push(bg.clone());
+                }
+            }
+            let conceals = hides(&decls)
+                || set.is_none_or(|set| {
+                    set.opacity.is_some_and(|n| n <= 0.05)
+                        || set.font_px.is_some_and(|n| n <= 1.0)
+                        || set.fg.is_some_and(|c| alpha(&c) <= 0.05)
+                });
+            if !conceals {
                 continue;
             }
             for selector in selectors.split(',') {
@@ -308,9 +679,6 @@ impl HiddenRules {
                     _ => self.withheld = true,
                 }
             }
-        }
-        if colors.iter().any(|c| backgrounds.contains(c)) {
-            self.withheld = true;
         }
     }
 
@@ -334,6 +702,10 @@ struct Tag {
     name: String,
     closing: bool,
     self_closing: bool,
+    /// `style`, `class`, `id` or `hidden` held a reference `decode` does
+    /// not know, so a client may read it otherwise.
+    odd: bool,
+    /// Values entity-decoded.
     attrs: Vec<(String, String)>,
 }
 
@@ -363,6 +735,7 @@ fn parse_tag(s: &str) -> Option<(Tag, &str)> {
                     name: String::new(),
                     closing: true,
                     self_closing: true,
+                    odd: false,
                     attrs: Vec::new(),
                 },
                 &s[end + 1..],
@@ -382,15 +755,24 @@ fn parse_tag(s: &str) -> Option<(Tag, &str)> {
         return None;
     }
     let mut attrs = Vec::new();
-    let mut self_closing = false;
+    let (mut self_closing, mut odd) = (false, false);
     loop {
         while chars.peek().is_some_and(|(_, c)| c.is_whitespace()) {
             chars.next();
         }
         let (at, c) = chars.next()?;
         match c {
-            '>' => return Some((tag(name, closing, self_closing, attrs), &s[1 + at + 1..])),
-            '/' => self_closing = true,
+            '>' => {
+                let tag = Tag {
+                    name,
+                    closing,
+                    self_closing,
+                    odd,
+                    attrs,
+                };
+                return Some((tag, &s[1 + at + 1..]));
+            }
+            '/' => self_closing = matches!(chars.peek(), Some((_, '>'))),
             _ => {
                 let mut key = c.to_ascii_lowercase().to_string();
                 while let Some((_, c)) = chars.peek() {
@@ -430,18 +812,11 @@ fn parse_tag(s: &str) -> Option<(Tag, &str)> {
                         }
                     }
                 }
+                let (value, unknown) = decode_all(&value);
+                odd |= unknown && matches!(key.as_str(), "style" | "class" | "id" | "hidden");
                 attrs.push((key, value));
             }
         }
-    }
-}
-
-fn tag(name: String, closing: bool, self_closing: bool, attrs: Vec<(String, String)>) -> Tag {
-    Tag {
-        name,
-        closing,
-        self_closing,
-        attrs,
     }
 }
 
@@ -453,12 +828,21 @@ fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
 
 /// The common named entities and every numeric one.
 fn decode(s: &str) -> String {
+    decode_all(s).0
+}
+
+/// `s` decoded, and whether an `&` that starts some other reference was
+/// left as it is.
+fn decode_all(s: &str) -> (String, bool) {
     let mut out = String::with_capacity(s.len());
+    let mut unknown = false;
     let mut rest = s;
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
+        let reference = rest[1..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '#');
         let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+            unknown |= reference;
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -485,13 +869,14 @@ fn decode(s: &str) -> String {
                 rest = &rest[semi + 1..];
             }
             None => {
+                unknown |= reference;
                 out.push('&');
                 rest = &rest[1..];
             }
         }
     }
     out.push_str(rest);
-    out
+    (out, unknown)
 }
 
 /// Runs of spaces become one, lines are trimmed, and no more than one
@@ -560,9 +945,78 @@ mod tests {
             assert!(got.hidden_content && !got.withheld, "{style}");
         }
         let inherited = visible_text(
-            "<div bgcolor=\"#000\"><p>Shown <font color=black>secret</font> end</p></div>",
+            "<td bgcolor=\"#000\" style=\"color:#fff\">Shown <font color=black>secret</font> end</td>",
         );
         assert_eq!(inherited.text, "Shown end");
+    }
+
+    #[test]
+    fn the_concealment_the_review_found_is_dropped() {
+        for span in [
+            "<span style=\"display&#58;none\">",
+            "<span style=\"display&#x3a;none\">",
+            "<span/style=\"display:none\">",
+            "<span style=\"display:none\"/>",
+            "<span style=\"display:/**/none\">",
+            "<span style=\"display:n\\6f ne\">",
+            "<span style=\"opacity:1%\">",
+            "<span style=\"opacity:1e-3\">",
+            "<span style=\"font-size:0.01em\">",
+            "<span style=\"font:0/0 a\">",
+            "<span style=\"color:rgba(255,255,255,.0)\">",
+            "<span style=\"color:#fff0\">",
+            "<span style=\"color:#fefefe\">",
+            "<span style=\"-webkit-text-fill-color:transparent\">",
+            "<span style=\"transform:translateX(-9999px)\">",
+            "<span style=\"position:absolute;left:9999px\">",
+            "<span style=\"display:var(--h)\">",
+            "<span style=\"color:hsl(0,0%,100%)\">",
+            "<span style=\"opacity:.2\"><span style=\"opacity:.2\">",
+            "<span style=\"font-size:10%\"><span style=\"font-size:10%\">",
+        ] {
+            let got = visible_text(&format!("<p>Shown {span}SECRET</span></span> end</p>"));
+            assert_eq!(got.text, "Shown end", "{span}");
+            assert!(got.hidden_content && !got.withheld, "{span}");
+        }
+        let got = visible_text("<p>Shown<div/hidden>SECRET</div>end</p>");
+        assert!(
+            !got.text.contains("SECRET") && got.hidden_content,
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn styling_that_hides_nothing_keeps_its_text() {
+        for span in [
+            "<span style=\"color:#333;opacity:.5;font-size:.8em;transform:none\">",
+            "<span style=\"background:url(x.png) #06c no-repeat;color:#fff\">",
+            "<span style=\"left:-0px;width:auto\">",
+        ] {
+            let got = visible_text(&format!("<p>Shown {span}text</span> end</p>"));
+            assert_eq!(got.text, "Shown text end", "{span}");
+            assert!(!got.hidden_content, "{span}");
+        }
+        let svg = visible_text("<svg><rect style=\"display:none\"/></svg><p>Shown<br/>end</p>");
+        assert_eq!(svg.text, "Shown\nend");
+    }
+
+    #[test]
+    fn what_the_reducer_cannot_decode_or_place_is_withheld() {
+        for html in [
+            "<p><span style=\"display&colon;none\">SECRET</span></p>",
+            "<p><span class=\"&#x78\">SECRET</span></p>",
+            "<style>.t{color:#fff;background:#000}</style>\
+             <div style=\"background:#fff\"><p class=t>SECRET</p></div>",
+            "<style>.b{background:#fff;color:#000}</style>\
+             <div class=b><p style=\"color:#fff\">SECRET</p></div>",
+            "<style>.t{color:#fff}</style><p class=t>SECRET</p>",
+            "<p class=t>SECRET</p><style>.x{color:#000}</style><td bgcolor=black>",
+        ] {
+            let got = visible_text(html);
+            assert!(got.hidden_content && got.withheld, "{html}");
+        }
+        let late = visible_text("<p class=x>SECRET</p><p>Shown</p><style>.x{display:none}</style>");
+        assert_eq!(late.text, "Shown");
     }
 
     #[test]
