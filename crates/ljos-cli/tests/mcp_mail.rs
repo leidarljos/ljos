@@ -169,7 +169,7 @@ fn search_and_show_read_the_configured_mailbox() {
     let shown = &ran.by_id(3)["result"];
     assert_ne!(shown["isError"], true, "{shown}");
     let msg = &shown["structuredContent"]["messages"][0];
-    assert_eq!(msg["hidden_text_dropped"], true, "{shown}");
+    assert_eq!(msg["hidden_content"], true, "{shown}");
     assert!(!msg["body"]
         .as_str()
         .unwrap()
