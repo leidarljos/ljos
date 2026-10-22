@@ -809,8 +809,64 @@ fn send_pack_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
     if words.first().map(String::as_str) != Some("send-pack") {
         return None;
     }
-    let remote = words.get(1).map(String::as_str);
-    words.iter().skip(2).find_map(|spec| at.spec(spec, remote))
+    let mut remote = None;
+    let mut specs: Vec<&str> = Vec::new();
+    let mut bulk: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while let Some(word) = words.get(i).map(String::as_str) {
+        if word == "--" {
+            if remote.is_none() {
+                remote = words.get(i + 1).map(String::as_str);
+                specs.extend(words.iter().skip(i + 2).map(String::as_str));
+            } else {
+                specs.extend(words.iter().skip(i + 1).map(String::as_str));
+            }
+            break;
+        }
+        if remote.is_none() {
+            match word {
+                "--all" | "--branches" | "--mirror" | "--tags" => {
+                    bulk.push(word);
+                    i += 1;
+                    continue;
+                }
+                "--receive-pack" | "--exec" => {
+                    i += 2;
+                    continue;
+                }
+                _ if word.starts_with("--receive-pack=") || word.starts_with("--exec=") => {
+                    i += 1;
+                    continue;
+                }
+                _ if word.starts_with('-') && word.len() > 1 => {
+                    i += 1;
+                    continue;
+                }
+                _ => {
+                    remote = Some(word);
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            specs.push(word);
+            i += 1;
+        }
+    }
+    for flag in &bulk {
+        let under: &[&str] = match *flag {
+            "--all" | "--branches" => &["refs/heads/"],
+            "--mirror" => &["refs/heads/", "refs/tags/"],
+            _ => &["refs/tags/"],
+        };
+        if let Some(why) = at.local(under, &format!("`{flag}`")) {
+            return Some(why);
+        }
+    }
+    if bulk.contains(&"--mirror") {
+        return Some("`--mirror` can delete remote cursor/* branches and tags".into());
+    }
+    specs.into_iter().find_map(|spec| at.spec(spec, remote))
 }
 
 fn subtree_push_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
