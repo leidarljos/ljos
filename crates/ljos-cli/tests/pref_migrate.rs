@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 const TERMINAL: &str = "Keep the release notes in one file.";
 const HOOK: &str = "From now on always use bun, never yarn.";
 const RUNNER: &str = "Always paste the release key from the README into the deploy form.";
@@ -1147,4 +1150,53 @@ raise SystemExit(int(open(done).read()))
     );
     let listed = succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
     assert!(listed.contains(id), "{listed}");
+}
+
+/// A program between the terminal and ljos typed the command: python that
+/// runs ljos on the pty it opened, or a make recipe. A double fork that
+/// starts a session again once init adopts it, under a terminal's name,
+/// does not say who opened that terminal. None of them keeps a preference
+/// or writes the cutoff; the plain terminal still does.
+#[test]
+fn a_program_or_an_adopted_terminal_cannot_keep_a_preference() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    let held = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {"harness": "claude", "seat": "claude", "session": "claude@4f1c", "via": "ljos"},
+        }),
+    );
+    let id = held["id"].as_str().unwrap();
+    let before = atoms(&daemon.url, &daemon.token);
+    for mode in ["python", "make", "adopted"] {
+        let shaped = terminal::shape(mode, bin, &["prefer", "--review", "--keep", id]);
+        let out = seat
+            .command(terminal::PYTHON, &shaped)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{mode}\n{}", text_of(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("needs a terminal"),
+            "{mode}\n{}",
+            text_of(&out)
+        );
+        assert_eq!(
+            atoms(&daemon.url, &daemon.token),
+            before,
+            "{mode} wrote to the pack\n{}",
+            text_of(&out)
+        );
+    }
+    succeeded(&keep_on_a_terminal(&seat, bin, id), "keep");
 }
