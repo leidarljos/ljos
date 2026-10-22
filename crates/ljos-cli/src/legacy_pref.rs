@@ -1422,6 +1422,9 @@ mod tests {
             pack.gather = 2;
         }
         let state = tempfile::tempdir().unwrap();
+        // Each child starts from the environment another test is not
+        // halfway through changing.
+        let env = crate::test_env_lock();
         let runs: Vec<std::process::Child> = olds
             .iter()
             .zip(texts)
@@ -1444,6 +1447,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
+        drop(env);
         for run in runs {
             let out = run.wait_with_output().unwrap();
             let said = String::from_utf8_lossy(&out.stdout).into_owned()
@@ -1565,6 +1569,9 @@ mod tests {
     }
 
     fn with_pack(url: &str, f: impl FnOnce()) {
+        // A test that reads XDG_STATE_HOME holds this lock, not only the
+        // mutation gate, so the state directory set here is not theirs.
+        let _env = crate::test_env_lock();
         crate::with_env_mutation(|| {
             let keys = [
                 "PACKSET_URL",
