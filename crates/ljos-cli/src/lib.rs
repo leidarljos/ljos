@@ -12177,6 +12177,53 @@ pub fn format_steps(steps: &[Step]) -> String {
 }
 
 /// The runner rows for `doctor`, one pair per runner the file names.
+/// The runner-hook row for a Cursor hooks file. The exec-daemon reads that
+/// file only as it starts, so a newer file is not the one it is running.
+#[must_use]
+pub fn cursor_runner_hook_row(name: &str, path: &Path) -> Habitat {
+    let installed = cursor_hooks_satisfy(path, &expand("~/.claude/settings.json"));
+    if !installed {
+        return Habitat {
+            name: "runner hook",
+            state: format!("{name}: no memory hook; ljos onboard --harness {name}"),
+            ok: false,
+        };
+    }
+    if hooks_changed_since_daemon(path) {
+        return Habitat {
+            name: "runner hook",
+            state: format!(
+                "{name}: memory hook on {} changed after exec-daemon started, so the daemon is still running the hooks it read at start. Restart the daemon",
+                path.display()
+            ),
+            ok: false,
+        };
+    }
+    Habitat {
+        name: "runner hook",
+        state: format!("{name}: memory hook on {}", path.display()),
+        ok: true,
+    }
+}
+
+/// The hooks file was written after the exec-daemon started. Equal seconds
+/// stay current: the daemon may have read the file in that same second.
+fn hooks_changed_since_daemon(path: &Path) -> bool {
+    let Some(started) = cloud::exec_daemon_started() else {
+        return false;
+    };
+    let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    match (
+        modified.duration_since(std::time::UNIX_EPOCH),
+        started.duration_since(std::time::UNIX_EPOCH),
+    ) {
+        (Ok(modified), Ok(started)) => modified.as_secs() > started.as_secs(),
+        _ => false,
+    }
+}
+
 fn harness_rows() -> Vec<Habitat> {
     let path = harnesses_path();
     let all = match harnesses_with_shipped(&path) {
@@ -12249,36 +12296,39 @@ fn harness_rows() -> Vec<Habitat> {
             });
             if let Some(file) = &h.hooks {
                 let path = expand(file);
-                let installed = match &h.hooks_named {
-                    Some(name) => named_hook_installed(&path, name),
-                    None if h.hooks_format.as_deref() == Some("cursor") => {
-                        cursor_hooks_satisfy(&path, &expand("~/.claude/settings.json"))
-                    }
-                    None => hook_installed(&path, &hook_events_of(h)),
-                };
-                rows.push(Habitat {
-                    name: "runner hook",
-                    state: if installed {
-                        format!("{}: memory hook on {}", h.name, path.display())
-                    } else {
-                        format!(
-                            "{}: no memory hook; ljos onboard --harness {}",
-                            h.name, h.name
-                        )
-                    },
-                    ok: installed,
-                });
-                if let (true, Some(trust)) = (installed, &h.hooks_trust) {
-                    let trusted = hook_trusted(&expand(trust), &path);
+                // The exec-daemon reads this file only as it starts. A newer
+                // file is not the hook that process is running.
+                if h.hooks_named.is_none() && h.hooks_format.as_deref() == Some("cursor") {
+                    rows.push(cursor_runner_hook_row(&h.name, &path));
+                } else {
+                    let installed = match &h.hooks_named {
+                        Some(name) => named_hook_installed(&path, name),
+                        None => hook_installed(&path, &hook_events_of(h)),
+                    };
                     rows.push(Habitat {
-                        name: "runner hook trust",
-                        state: if trusted {
-                            format!("{}: trust recorded in {}", h.name, expand(trust).display())
+                        name: "runner hook",
+                        state: if installed {
+                            format!("{}: memory hook on {}", h.name, path.display())
                         } else {
-                            format!("{}: {}", h.name, untrusted_hook_note(&h.name))
+                            format!(
+                                "{}: no memory hook; ljos onboard --harness {}",
+                                h.name, h.name
+                            )
                         },
-                        ok: trusted,
+                        ok: installed,
                     });
+                    if let (true, Some(trust)) = (installed, &h.hooks_trust) {
+                        let trusted = hook_trusted(&expand(trust), &path);
+                        rows.push(Habitat {
+                            name: "runner hook trust",
+                            state: if trusted {
+                                format!("{}: trust recorded in {}", h.name, expand(trust).display())
+                            } else {
+                                format!("{}: {}", h.name, untrusted_hook_note(&h.name))
+                            },
+                            ok: trusted,
+                        });
+                    }
                 }
             } else if h.plugin.is_none() {
                 if let Some(cfg) = &h.config {

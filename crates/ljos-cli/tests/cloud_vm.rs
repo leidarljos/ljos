@@ -4044,6 +4044,126 @@ fn doctor_expands_env_path_the_way_each_client_does() {
     );
 }
 
+fn write_cursor_hooks(path: &Path) {
+    let mut hooks = serde_json::Map::new();
+    for (event, timeout) in ljos_cli::CURSOR_HOOK_EVENTS {
+        let mut entry = serde_json::json!({
+            "command": "ljos hook",
+            "timeout": timeout,
+        });
+        if matches!(
+            *event,
+            "beforeShellExecution" | "preToolUse" | "beforeMCPExecution" | "beforeReadFile"
+        ) {
+            entry["failClosed"] = serde_json::json!(true);
+        }
+        hooks.insert((*event).to_string(), serde_json::json!([entry]));
+    }
+    let doc = serde_json::json!({"version": 1, "hooks": hooks});
+    fs::write(path, serde_json::to_string(&doc).unwrap()).unwrap();
+}
+
+#[test]
+fn a_hooks_file_newer_than_the_daemon_is_not_what_it_runs() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let hooks = root.path().join("hooks.json");
+    write_cursor_hooks(&hooks);
+    std::env::set_var("LJOS_EXEC_DAEMON_START", "1");
+    let stale = ljos_cli::cursor_runner_hook_row("cursor", &hooks);
+    assert!(!stale.ok, "{}", stale.state);
+    assert!(stale.state.contains("exec-daemon"), "{}", stale.state);
+    assert!(
+        stale.state.to_lowercase().contains("restart"),
+        "{}",
+        stale.state
+    );
+    std::env::set_var("LJOS_EXEC_DAEMON_START", "20000000000");
+    let current = ljos_cli::cursor_runner_hook_row("cursor", &hooks);
+    assert!(current.ok, "{}", current.state);
+    std::env::set_var("LJOS_EXEC_DAEMON_START", "off");
+    let off = ljos_cli::cursor_runner_hook_row("cursor", &hooks);
+    assert!(off.ok, "{}", off.state);
+    let missing = root.path().join("missing.json");
+    std::env::set_var("LJOS_EXEC_DAEMON_START", "1");
+    let absent = ljos_cli::cursor_runner_hook_row("cursor", &missing);
+    assert!(!absent.ok, "{}", absent.state);
+    assert!(absent.state.contains("no memory hook"), "{}", absent.state);
+}
+
+#[test]
+fn doctor_reads_the_daemon_mcp_config() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let file = home.join(".cursor/mcp.json");
+    fs::write(
+        &file,
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/bin/true\"}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::set_var(
+        "LJOS_EXEC_DAEMON_MCP",
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\"}}}",
+    );
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(!row.ok, "{}", row.state);
+    assert!(
+        row.state.contains("exec-daemon --mcp-config"),
+        "{}",
+        row.state
+    );
+    assert!(row.state.contains("/no/such/ljos-mcp"), "{}", row.state);
+    assert!(
+        !row.state.contains(&file.display().to_string()),
+        "{}",
+        row.state
+    );
+
+    fs::write(
+        &file,
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/from-file\"}}}\n",
+    )
+    .unwrap();
+    std::env::set_var(
+        "LJOS_EXEC_DAEMON_MCP",
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/bin/true\"}}}",
+    );
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(row.ok, "{}", row.state);
+    assert!(
+        row.state.contains("exec-daemon --mcp-config"),
+        "{}",
+        row.state
+    );
+    assert!(row.state.contains("/bin/true"), "{}", row.state);
+    assert!(!row.state.contains("/no/such/from-file"), "{}", row.state);
+
+    std::env::set_var("LJOS_EXEC_DAEMON_MCP", "{}");
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(!row.ok, "{}", row.state);
+    assert!(
+        row.state.contains("exec-daemon --mcp-config"),
+        "{}",
+        row.state
+    );
+    assert!(row.state.contains("no ljos server"), "{}", row.state);
+
+    std::env::set_var("LJOS_EXEC_DAEMON_MCP", "off");
+    let row = ljos_cli::cloud::mcp_row();
+    assert!(!row.ok, "{}", row.state);
+    assert!(row.state.contains("/no/such/from-file"), "{}", row.state);
+    assert!(
+        !row.state.contains("exec-daemon --mcp-config"),
+        "{}",
+        row.state
+    );
+}
+
 #[test]
 fn install_sh_cloud_reuses_binaries_that_already_answer() {
     let root = tempfile::tempdir().unwrap();

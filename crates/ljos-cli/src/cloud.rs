@@ -19,7 +19,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
@@ -538,7 +538,16 @@ fn mcp_problem() -> McpProblem {
     let mut missing = Vec::new();
     let mut warned = Vec::new();
     let mut ready = Vec::new();
+    // The exec-daemon loaded `--mcp-config` at start. That JSON is the
+    // config it uses; `~/.cursor/mcp.json` can be a different file.
+    let daemon = exec_daemon_mcp_json();
+    if let Some(json) = &daemon {
+        judge_daemon_mcp(json, &mut missing, &mut warned, &mut ready);
+    }
     for file in mcp_files() {
+        if daemon.is_some() && file.path.ends_with(".cursor/mcp.json") {
+            continue;
+        }
         if !file.path.is_file() {
             continue;
         }
@@ -560,21 +569,7 @@ fn mcp_problem() -> McpProblem {
         let Some(launch) = launch else {
             continue;
         };
-        match launch_check(&file, &launch) {
-            LaunchCheck::Ready => {
-                ready.push(format!("{} starts {}", file.path.display(), launch.command))
-            }
-            LaunchCheck::Warn(why) => warned.push(format!(
-                "ljos-mcp: {why} ({}). Run `{}`.",
-                file.path.display(),
-                file.advice
-            )),
-            LaunchCheck::Missing(why) => missing.push(format!(
-                "ljos-mcp: {why} ({}), so the MCP client has no tools. Run `{}`.",
-                file.path.display(),
-                file.advice
-            )),
-        }
+        record_launch(&file, &launch, &mut missing, &mut warned, &mut ready);
     }
     if !missing.is_empty() {
         return McpProblem::Missing(missing.join("; "));
@@ -586,6 +581,269 @@ fn mcp_problem() -> McpProblem {
         return McpProblem::Ready(ready.join("; "));
     }
     McpProblem::None
+}
+
+fn record_launch(
+    file: &McpFile,
+    launch: &LaunchSpec,
+    missing: &mut Vec<String>,
+    warned: &mut Vec<String>,
+    ready: &mut Vec<String>,
+) {
+    match launch_check(file, launch) {
+        LaunchCheck::Ready => {
+            ready.push(format!("{} starts {}", file.path.display(), launch.command))
+        }
+        LaunchCheck::Warn(why) => warned.push(format!(
+            "ljos-mcp: {why} ({}). Run `{}`.",
+            file.path.display(),
+            file.advice
+        )),
+        LaunchCheck::Missing(why) => missing.push(format!(
+            "ljos-mcp: {why} ({}), so the MCP client has no tools. Run `{}`.",
+            file.path.display(),
+            file.advice
+        )),
+    }
+}
+
+fn judge_daemon_mcp(
+    json: &str,
+    missing: &mut Vec<String>,
+    warned: &mut Vec<String>,
+    ready: &mut Vec<String>,
+) {
+    let file = McpFile {
+        path: PathBuf::from("exec-daemon --mcp-config"),
+        probe: McpProbe::Json("/mcpServers/ljos".into()),
+        advice: "ljos cloud up".into(),
+        expand: Expand::Cursor,
+        launch_path: None,
+        strict: true,
+    };
+    let launch = match daemon_launch(json) {
+        Ok(launch) => launch,
+        Err(e) => {
+            missing.push(format!(
+                "ljos-mcp: {} is not readable ({e}), so the MCP client has no tools. Run `{}`.",
+                file.path.display(),
+                file.advice
+            ));
+            return;
+        }
+    };
+    record_launch(&file, &launch, missing, warned, ready);
+}
+
+fn daemon_launch(json: &str) -> Result<LaunchSpec> {
+    if json.trim().is_empty() {
+        bail!("empty");
+    }
+    let doc: serde_json::Value = serde_json::from_str(json).context("not JSON")?;
+    let entry = doc.pointer("/mcpServers/ljos").context("no ljos server")?;
+    command_and_args(entry).context("no command")
+}
+
+/// When the exec-daemon process started, if this machine is that cloud VM.
+///
+/// `LJOS_EXEC_DAEMON_START=off` or empty skips the check. A decimal unix
+/// time is that start. Otherwise the start is read from the daemon
+/// process when `HOME` is this user's own home on a cloud VM.
+#[must_use]
+pub fn exec_daemon_started() -> Option<SystemTime> {
+    if let Ok(value) = std::env::var("LJOS_EXEC_DAEMON_START") {
+        let value = value.trim();
+        if value.is_empty() || value == "off" {
+            return None;
+        }
+        let secs: u64 = value.parse().ok()?;
+        return Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+    }
+    live_exec_daemon_started()
+}
+
+/// The `--mcp-config` JSON the exec-daemon was started with.
+///
+/// `LJOS_EXEC_DAEMON_MCP=off` leaves the files on disk to be read. Any
+/// other value, including empty, is that JSON. Otherwise it is taken from
+/// the daemon's command line on a cloud VM whose `HOME` is this user's.
+#[must_use]
+pub fn exec_daemon_mcp_json() -> Option<String> {
+    match std::env::var("LJOS_EXEC_DAEMON_MCP") {
+        Ok(value) if value.trim() == "off" => None,
+        Ok(value) => Some(value),
+        Err(_) => live_exec_daemon_mcp(),
+    }
+}
+
+fn live_exec_daemon_started() -> Option<SystemTime> {
+    if !daemon_scan_applies() {
+        return None;
+    }
+    let ticks = pick_daemon_start(&live_daemons())?;
+    ticks_to_unix(ticks)
+}
+
+fn live_exec_daemon_mcp() -> Option<String> {
+    if !daemon_scan_applies() {
+        return None;
+    }
+    pick_daemon_mcp(&live_daemons())
+}
+
+/// A cloud VM running the exec-daemon, and `HOME` is the passwd home, so a
+/// doctor aimed at another home does not read this machine's daemon.
+fn daemon_scan_applies() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if !cursor_cloud_vm() {
+            return false;
+        }
+        let Ok(home) = crate::home() else {
+            return false;
+        };
+        let Some(own) = crate::proc_tree::own_home() else {
+            return false;
+        };
+        same_dir(&home, &own)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+fn cursor_cloud_vm() -> bool {
+    let rt = runtime();
+    rt.cloud_agent && !rt.ci
+}
+
+fn same_dir(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    matches!(
+        (fs::canonicalize(left), fs::canonicalize(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
+}
+
+struct DaemonProc {
+    ticks: u64,
+    args: Vec<String>,
+    binary: bool,
+}
+
+fn live_daemons() -> Vec<DaemonProc> {
+    let mut out = Vec::new();
+    let Ok(dir) = fs::read_dir("/proc") else {
+        return out;
+    };
+    for ent in dir.flatten() {
+        let Some(name) = ent.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Some(proc) = crate::proc_tree::of(pid) else {
+            continue;
+        };
+        let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let args = split_cmdline(&raw);
+        let binary = proc.comm == "exec-daemon" || args.iter().any(|arg| is_daemon_bin(arg));
+        let node = args
+            .iter()
+            .any(|arg| arg.ends_with("/exec-daemon/index.js"));
+        if !binary && !node {
+            continue;
+        }
+        out.push(DaemonProc {
+            ticks: proc.start,
+            args,
+            binary,
+        });
+    }
+    out
+}
+
+fn is_daemon_bin(arg: &str) -> bool {
+    arg == "exec-daemon" || arg.ends_with("/exec-daemon")
+}
+
+/// The binary's start when one is running, else the earliest index.js.
+fn pick_daemon_start(procs: &[DaemonProc]) -> Option<u64> {
+    if procs.iter().any(|proc| proc.binary) {
+        procs
+            .iter()
+            .filter(|proc| proc.binary)
+            .map(|proc| proc.ticks)
+            .min()
+    } else {
+        procs.iter().map(|proc| proc.ticks).min()
+    }
+}
+
+fn pick_daemon_mcp(procs: &[DaemonProc]) -> Option<String> {
+    let mut from_node = None;
+    for proc in procs {
+        let Some(json) = mcp_json_from_args(&proc.args) else {
+            continue;
+        };
+        if proc.binary {
+            return Some(json);
+        }
+        from_node = Some(json);
+    }
+    from_node
+}
+
+fn split_cmdline(raw: &[u8]) -> Vec<String> {
+    raw.split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect()
+}
+
+/// `--mcp-config JSON` or `--mcp-config=JSON`, as its own argument.
+fn mcp_json_from_args(args: &[String]) -> Option<String> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--mcp-config" {
+            return args.next().cloned().filter(|json| !json.is_empty());
+        }
+        if let Some(json) = arg.strip_prefix("--mcp-config=") {
+            if !json.is_empty() {
+                return Some(json.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn ticks_to_unix(ticks: u64) -> Option<SystemTime> {
+    let hz = clk_tck()?;
+    let boot = boot_time()?;
+    let secs = boot.saturating_add(ticks / hz);
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+fn clk_tck() -> Option<u64> {
+    // SAFETY: sysconf reads a process-wide constant and writes nothing.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (hz > 0).then_some(hz as u64)
+}
+
+fn boot_time() -> Option<u64> {
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    for line in stat.lines() {
+        if let Some(rest) = line.strip_prefix("btime ") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
 }
 
 /// Cursor's `mcp.json`, `LJOS_MCP_CONFIG`, and every harness file ljos
@@ -3326,5 +3584,31 @@ mod tests {
             0o600,
             "a direct path is still mode 0600"
         );
+    }
+
+    #[test]
+    fn mcp_config_is_the_argument_after_the_flag() {
+        let args = vec![
+            "/exec-daemon/node".to_string(),
+            "/exec-daemon/index.js".to_string(),
+            "serve".to_string(),
+            "--mcp-config".to_string(),
+            r#"{"mcpServers":{"ljos":{"command":"/usr/bin/ljos-mcp"}}}"#.to_string(),
+        ];
+        let json = mcp_json_from_args(&args).unwrap();
+        assert!(json.contains("/usr/bin/ljos-mcp"), "{json}");
+        let attached = vec![
+            "exec-daemon".to_string(),
+            r#"--mcp-config={"mcpServers":{"ljos":{"command":"/bin/ljos-mcp"}}}"#.to_string(),
+        ];
+        assert!(mcp_json_from_args(&attached)
+            .unwrap()
+            .contains("/bin/ljos-mcp"));
+        let script = vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "run --mcp-config {\"mcpServers\":{}}".to_string(),
+        ];
+        assert!(mcp_json_from_args(&script).is_none());
     }
 }
