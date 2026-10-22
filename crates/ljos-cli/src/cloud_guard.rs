@@ -10,6 +10,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use serde_json::Value;
+
 /// The branch and tag prefix a cloud seat never pushes to.
 const CURSOR: &str = "cursor/";
 
@@ -73,6 +75,13 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
                     if let Some(why) =
                         git_push(&words[1..], run.dir, &line_aliases, &run.env, run.via_xargs)
                             .and_then(|p| p.cursor_ref())
+                    {
+                        return Some(why);
+                    }
+                }
+                Some("gh") => {
+                    if let Some(why) =
+                        gh_command_cursor_ref(&words, &prefix_env(seg), here.as_deref(), 0)
                     {
                         return Some(why);
                     }
@@ -189,6 +198,27 @@ fn gh_command(
     }
 }
 
+fn gh_command_cursor_ref(
+    words: &[String],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    depth: usize,
+) -> Option<String> {
+    if depth > ALIAS_DEPTH {
+        return Some("gh alias expansion could not be read".into());
+    }
+    let mut rest = words.iter().map(String::as_str).skip(1);
+    let noun = gh_word(&mut rest)?;
+    match noun {
+        "api" => gh_api_cursor_ref(rest, cwd),
+        other => {
+            let exp = alias_expansion(env, other)?;
+            let extra: Vec<&str> = rest.collect();
+            expand_alias_cursor_ref(&exp, &extra, env, cwd, depth)
+        }
+    }
+}
+
 fn pr_verb(verb: Option<&str>) -> GhActs {
     match verb {
         Some("create" | "new" | "ready" | "reopen") => GhActs {
@@ -227,6 +257,27 @@ fn expand_alias(
     gh_command(&words, env, cwd, depth + 1)
 }
 
+fn expand_alias_cursor_ref(
+    exp: &str,
+    extra: &[&str],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    depth: usize,
+) -> Option<String> {
+    if let Some(script) = exp.strip_prefix('!') {
+        let mut line = script.trim().to_string();
+        if !extra.is_empty() {
+            line.push(' ');
+            line.push_str(&extra.join(" "));
+        }
+        return gh_script_cursor_ref(&line, env, cwd, depth + 1);
+    }
+    let mut words = vec!["gh".to_string()];
+    words.extend(crate::shell_words(exp));
+    words.extend(extra.iter().map(|word| (*word).to_string()));
+    gh_command_cursor_ref(&words, env, cwd, depth + 1)
+}
+
 fn gh_script(line: &str, env: &[(String, String)], cwd: Option<&Path>, depth: usize) -> GhActs {
     let mut acts = GhActs::default();
     for l in crate::nested_lines(line, 0) {
@@ -238,6 +289,26 @@ fn gh_script(line: &str, env: &[(String, String)], cwd: Option<&Path>, depth: us
         }
     }
     acts
+}
+
+fn gh_script_cursor_ref(
+    line: &str,
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    depth: usize,
+) -> Option<String> {
+    for l in crate::nested_lines(line, 0) {
+        for seg in crate::raw_segments(&l) {
+            let words = argv(&seg);
+            if words.first().map(String::as_str) != Some("gh") {
+                continue;
+            }
+            if let Some(why) = gh_command_cursor_ref(&words, env, cwd, depth) {
+                return Some(why);
+            }
+        }
+    }
+    None
 }
 
 /// `NAME=value` words in front of `gh`, so `gh alias list` sees the config
@@ -326,7 +397,41 @@ const OPEN_MUTATIONS: &[&str] = &[
 
 const MERGE_MUTATIONS: &[&str] = &["mergePullRequest", "enablePullRequestAutoMerge"];
 
+struct ApiCall {
+    method: Option<String>,
+    endpoint: String,
+    fields: Vec<(String, String)>,
+    input: Option<String>,
+}
+
 fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> GhActs {
+    let Some(call) = parse_api_call(words) else {
+        return GhActs::default();
+    };
+    classify_api(
+        &call.endpoint,
+        call.method.as_deref(),
+        &call.fields,
+        call.input.as_deref(),
+        cwd,
+    )
+}
+
+fn gh_api_cursor_ref<'a>(
+    words: impl Iterator<Item = &'a str>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let call = parse_api_call(words)?;
+    classify_api_cursor_ref(
+        &call.endpoint,
+        call.method.as_deref(),
+        &call.fields,
+        call.input.as_deref(),
+        cwd,
+    )
+}
+
+fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>) -> Option<ApiCall> {
     let mut method: Option<String> = None;
     let mut endpoint: Option<String> = None;
     let mut fields: Vec<(String, String)> = Vec::new();
@@ -379,10 +484,13 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> GhAct
             endpoint = Some(word.to_string());
         }
     }
-    let Some(endpoint) = endpoint else {
-        return GhActs::default();
-    };
-    classify_api(&endpoint, method.as_deref(), &fields, input.as_deref(), cwd)
+    let endpoint = endpoint?;
+    Some(ApiCall {
+        method,
+        endpoint,
+        fields,
+        input,
+    })
 }
 
 fn field_pair(raw: &str) -> (String, String) {
@@ -407,6 +515,24 @@ fn classify_api(
         return GhActs::default();
     }
     rest_acts(&path)
+}
+
+fn classify_api_cursor_ref(
+    endpoint: &str,
+    method: Option<&str>,
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let has_body = !fields.is_empty() || input.is_some();
+    if !api_writes(method, has_body) {
+        return None;
+    }
+    let path = api_path(endpoint);
+    if graphql_path(&path) {
+        return graphql_cursor_ref(fields, input, cwd);
+    }
+    rest_cursor_ref(&path, method, fields, input, cwd)
 }
 
 /// gh's default is GET, and POST when a field or a body was given. An
@@ -457,7 +583,189 @@ fn rest_acts(path: &str) -> GhActs {
     GhActs::default()
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum ForceFlag {
+    #[default]
+    Absent,
+    False,
+    True,
+    Unknown,
+}
+
+fn merge_force(left: ForceFlag, right: ForceFlag) -> ForceFlag {
+    use ForceFlag::{Absent, False, True, Unknown};
+    match (left, right) {
+        (True, _) | (_, True) => True,
+        (Unknown, _) | (_, Unknown) => Unknown,
+        (False, _) | (_, False) => False,
+        (Absent, Absent) => Absent,
+    }
+}
+
+fn force_literal(value: &str) -> ForceFlag {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+        || value == "1"
+    {
+        ForceFlag::True
+    } else if value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
+        || value == "0"
+    {
+        ForceFlag::False
+    } else if value.is_empty() {
+        ForceFlag::Absent
+    } else {
+        ForceFlag::Unknown
+    }
+}
+
+#[derive(Default)]
+struct RefBody {
+    refs: Vec<String>,
+    force: ForceFlag,
+    opaque: bool,
+}
+
+fn collect_ref_body_from_json(value: &Value, body: &mut RefBody) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if key == "ref" {
+                    if let Some(name) = value.as_str() {
+                        body.refs.push(name.to_string());
+                    } else {
+                        body.opaque = true;
+                    }
+                } else if key == "force" {
+                    let next = match value {
+                        Value::Bool(v) => {
+                            if *v {
+                                ForceFlag::True
+                            } else {
+                                ForceFlag::False
+                            }
+                        }
+                        Value::String(v) => force_literal(v),
+                        _ => ForceFlag::Unknown,
+                    };
+                    body.force = merge_force(body.force, next);
+                }
+                collect_ref_body_from_json(value, body);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_ref_body_from_json(item, body);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn read_ref_body(fields: &[(String, String)], input: Option<&str>, cwd: Option<&Path>) -> RefBody {
+    let mut body = RefBody::default();
+    for (key, value) in fields {
+        if key == "ref" {
+            body.refs.push(value.clone());
+        } else if key == "force" {
+            body.force = merge_force(body.force, force_literal(value));
+        }
+    }
+    let Some(path) = input else {
+        return body;
+    };
+    if path == "-" {
+        body.opaque = true;
+        return body;
+    }
+    let Some(text) = read_query(cwd, path) else {
+        body.opaque = true;
+        return body;
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => collect_ref_body_from_json(&value, &mut body),
+        Err(_) => body.opaque = true,
+    }
+    body
+}
+
+fn git_refs_tail(path: &str) -> Option<Vec<&str>> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let at = parts
+        .windows(2)
+        .position(|window| window[0] == "git" && window[1] == "refs")?;
+    Some(parts[at + 2..].to_vec())
+}
+
+fn rest_cursor_ref(
+    path: &str,
+    method: Option<&str>,
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let tail = git_refs_tail(path)?;
+    let has_body = !fields.is_empty() || input.is_some();
+    let method = method.map(|m| m.to_ascii_uppercase()).unwrap_or_else(|| {
+        if has_body {
+            "POST".into()
+        } else {
+            "GET".into()
+        }
+    });
+    match method.as_str() {
+        "DELETE" => Some("`gh api` can delete refs through /git/refs".into()),
+        "POST" if tail.is_empty() => {
+            let body = read_ref_body(fields, input, cwd);
+            if body.opaque {
+                return Some(
+                    "`gh api` can create refs through /git/refs with an unread request body".into(),
+                );
+            }
+            body.refs
+                .into_iter()
+                .find(|name| under_cursor(name))
+                .map(|name| format!("`gh api` can create {name} through /git/refs"))
+        }
+        "PATCH" if !tail.is_empty() => {
+            let body = read_ref_body(fields, input, cwd);
+            match body.force {
+                ForceFlag::True => Some("`gh api` can force-update refs through /git/refs".into()),
+                ForceFlag::Unknown => Some(
+                    "`gh api` can force-update refs through /git/refs with an unread force value"
+                        .into(),
+                ),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn graphql_acts(fields: &[(String, String)], input: Option<&str>, cwd: Option<&Path>) -> GhActs {
+    let (texts, opaque) = graphql_texts(fields, input, cwd);
+    let mut acts = GhActs::default();
+    for text in &texts {
+        acts = acts.either(mutation_acts(text));
+    }
+    // The body is not on the line and could not be read. It may be any of
+    // the mutations below, so it is not treated as a query.
+    if opaque && !acts.any() {
+        acts.open = true;
+        acts.merge = true;
+    }
+    acts
+}
+
+fn graphql_texts(
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+) -> (Vec<String>, bool) {
     let mut texts = Vec::new();
     let mut opaque = false;
     for (key, value) in fields {
@@ -483,17 +791,135 @@ fn graphql_acts(fields: &[(String, String)], input: Option<&str>, cwd: Option<&P
             }
         }
     }
-    let mut acts = GhActs::default();
+    (texts, opaque)
+}
+
+fn quoted_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '"' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut value = String::new();
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' {
+                i += 1;
+                if i < chars.len() {
+                    value.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '"' {
+                i += 1;
+                break;
+            }
+            value.push(c);
+            i += 1;
+        }
+        out.push(value);
+    }
+    out
+}
+
+fn quoted_ref_names(text: &str) -> Vec<String> {
+    quoted_strings(text)
+        .into_iter()
+        .filter(|value| {
+            value.starts_with("refs/")
+                || value.starts_with("heads/")
+                || value.starts_with("tags/")
+                || value.starts_with("cursor/")
+        })
+        .collect()
+}
+
+fn force_in_text(text: &str) -> ForceFlag {
+    let mut force = ForceFlag::Absent;
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut at = 0usize;
+    while let Some(found) = text[at..].find("force") {
+        let start = at + found;
+        let before = text[..start].chars().next_back();
+        let end = start + "force".len();
+        let after = text[end..].chars().next();
+        if before.is_some_and(ident) || after.is_some_and(ident) {
+            at = end;
+            continue;
+        }
+        let mut rest = text[end..].chars().peekable();
+        while rest.peek().is_some_and(|c| c.is_whitespace()) {
+            rest.next();
+        }
+        if rest.peek() != Some(&':') {
+            at = end;
+            continue;
+        }
+        rest.next();
+        while rest.peek().is_some_and(|c| c.is_whitespace()) {
+            rest.next();
+        }
+        let mut literal = String::new();
+        while rest
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        {
+            literal.push(rest.next().unwrap_or_default());
+        }
+        let next = force_literal(&literal);
+        force = merge_force(force, next);
+        at = end;
+    }
+    force
+}
+
+fn graphql_cursor_ref(
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+) -> Option<String> {
+    let (texts, opaque) = graphql_texts(fields, input, cwd);
+    let mut saw_ref_mutation = false;
     for text in &texts {
-        acts = acts.either(mutation_acts(text));
+        if has_ident(text, "deleteRef") {
+            return Some("`gh api graphql` can delete refs with deleteRef".into());
+        }
+        if has_ident(text, "createRef") {
+            saw_ref_mutation = true;
+            let refs = quoted_ref_names(text);
+            if refs.is_empty() {
+                return Some(
+                    "`gh api graphql` can create refs with createRef and an unread ref name".into(),
+                );
+            }
+            if let Some(name) = refs.into_iter().find(|name| under_cursor(name)) {
+                return Some(format!("`gh api graphql` can create {name} with createRef"));
+            }
+        }
+        if has_ident(text, "updateRef") || has_ident(text, "updateRefs") {
+            saw_ref_mutation = true;
+            match force_in_text(text) {
+                ForceFlag::True => {
+                    return Some("`gh api graphql` can force-update refs with force: true".into());
+                }
+                ForceFlag::Unknown => {
+                    return Some(
+                        "`gh api graphql` can force-update refs with an unread force value".into(),
+                    );
+                }
+                _ => {}
+            }
+        }
     }
-    // The body is not on the line and could not be read. It may be any of
-    // the mutations below, so it is not treated as a query.
-    if opaque && !acts.any() {
-        acts.open = true;
-        acts.merge = true;
+    if opaque && saw_ref_mutation {
+        return Some("`gh api graphql` body could write refs and could not be read".into());
     }
-    acts
+    None
 }
 
 fn read_query(cwd: Option<&Path>, path: &str) -> Option<String> {
