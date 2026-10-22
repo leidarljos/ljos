@@ -26762,6 +26762,11 @@ pub fn policy_line(argv: &[String]) -> Result<String> {
 /// policy layer injects beside its verdict. The line prints even when the
 /// pack is down; the memory is the part that may be empty.
 pub fn policy_with_memory(argv: &[String]) -> Result<String> {
+    policy_with_memory_in(argv, None)
+}
+
+/// [`policy_with_memory`] for a command that runs in `cwd`.
+pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<String> {
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -26775,17 +26780,30 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // already judged does not wait on policyd, which can hang. A guard that
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
-    let fast = if off { None } else { static_guard(&line) };
+    let fast = if off {
+        None
+    } else {
+        static_guard_in(&line, cwd)
+    };
     let judged = fast.is_some();
     let rules = if off { Vec::new() } else { rules_for_gate() };
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|d| d.display().to_string());
+    let cwd_text = cwd
+        .filter(|path| path.is_dir())
+        .map(|d| d.display().to_string())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.display().to_string())
+        });
     let gated = if off {
         None
     } else {
         redirect_seat_verb(
-            gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
+            gate_push(
+                ruled_verdict(&rules, &line).as_ref(),
+                &line,
+                cwd_text.as_deref(),
+            ),
             &line,
         )
     };
@@ -26801,7 +26819,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let tcb = if judged || off {
         None
     } else {
-        match tcb_check(argv) {
+        match tcb_check_in(argv, cwd) {
             // `git-force-push` asks, the same way the push gate does. The raw
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
@@ -26907,13 +26925,22 @@ pub struct GuardReport {
 ///
 /// The command is empty, or the rules deny it.
 pub fn guard_report(line: &str) -> Result<GuardReport> {
+    guard_report_in(line, None)
+}
+
+/// [`guard_report`] for a command that would run in `cwd`.
+///
+/// # Errors
+///
+/// The command is empty, or the rules deny it.
+pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
     let line = line.trim();
     if line.is_empty() {
         bail!("guard: pass the command to check");
     }
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
-    if let Some(rule) = static_guard(line) {
+    if let Some(rule) = static_guard_in(line, cwd) {
         // The push ran into an ask or a deny. Drop the evidence warning so
         // the next allowed command does not inherit it.
         let _ = gates::take_push_warning();
@@ -26934,7 +26961,7 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_with_memory(&argv)?;
+    let mut text = policy_with_memory_in(&argv, cwd)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
