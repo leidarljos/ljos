@@ -1,0 +1,1 @@
+The user-rule preface no longer states a rule promoted from a lesson the pack stored as agent-derived; a promote records the lesson's stored origin so a seat whose pack does not hold the lesson decides the same way.

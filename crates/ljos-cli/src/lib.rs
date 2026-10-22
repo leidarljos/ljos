@@ -27668,14 +27668,32 @@ fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
 /// Whether the pack stored `h` as the person's. A hit whose origin no
 /// reader recorded is not.
 fn person_origin(h: &Hit) -> bool {
-    h.id.as_deref().is_some_and(|id| {
-        stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id)
-            .copied()
-            .unwrap_or(false)
-    })
+    h.id.as_deref()
+        .is_some_and(|id| recorded_origin(id).unwrap_or(false))
+}
+
+fn recorded_origin(id: &str) -> Option<bool> {
+    stored_origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(id)
+        .copied()
+}
+
+/// [`person_stored`] for atom `id` in this seat's pack. When no reader has
+/// recorded it, the pack is listed once a process, inside a short bound.
+/// `None` when the pack does not answer or does not hold the atom.
+pub(crate) fn stored_origin_of(id: &str) -> Option<bool> {
+    if let Some(known) = recorded_origin(id) {
+        return Some(known);
+    }
+    static LISTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LISTED.get_or_init(|| {
+        if let Ok(atoms) = session_atoms(400) {
+            atoms.iter().for_each(keep_origin);
+        }
+    });
+    recorded_origin(id)
 }
 
 /// Whether a recalled hit is an unverified working note. Any claim the
