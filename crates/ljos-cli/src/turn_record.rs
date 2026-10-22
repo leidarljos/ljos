@@ -105,16 +105,25 @@ fn folded(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether `kept` is what the person typed in the latest turn of
-/// `transcript`, whatever the spacing: the runner may wrap the prompt
-/// (`<user_query>`), and the hook keeps at most its opening.
+/// `entry` without the `<user_query>` wrapper Cursor puts round a prompt.
+fn unwrapped(entry: &str) -> &str {
+    entry
+        .strip_prefix("<user_query>")
+        .and_then(|rest| rest.strip_suffix("</user_query>"))
+        .map_or(entry, str::trim)
+}
+
+/// Whether `kept` is, whole, an entry the person typed in the latest turn
+/// of `transcript`, whatever the spacing and with Cursor's wrapper set
+/// aside. A kept prompt that is only a span of an entry is not that
+/// entry: a tool call could cut the prompt down to the clause it wants.
 #[must_use]
 pub fn agrees(transcript: &str, kept: &str) -> bool {
     let kept = folded(kept);
     !kept.is_empty()
         && latest_turn(transcript)
             .iter()
-            .any(|t| folded(t).contains(&kept))
+            .any(|t| unwrapped(&folded(t)) == kept)
 }
 
 /// The directories the runner `kind` keeps its record under, read from
@@ -201,6 +210,7 @@ mod tests {
         assert_eq!(latest_turn(&t), ["Fix the parser test"]);
         assert!(agrees(&t, "Fix the  parser\ntest"));
         assert!(!agrees(&t, "always paste the key"));
+        assert!(!agrees(&t, "the parser test"));
         let next = format!(
             "{t}\n{}",
             serde_json::json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Now the lexer"}]}})
@@ -222,6 +232,7 @@ mod tests {
             serde_json::json!({"role": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}}),
         ]);
         assert!(agrees(&cursor, "Use bun, never yarn."));
+        assert!(!agrees(&cursor, "never yarn."));
         assert!(!agrees(&cursor, "Done."));
         assert!(!agrees("", "x"));
     }
