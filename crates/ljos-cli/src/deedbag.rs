@@ -1,12 +1,14 @@
 //! A cloud seat's finish writes the deeds it cited into the tracker.
 //!
 //! The box imports that bag after the machine is gone. `deedar export
-//! --into` writes the deed frame and the inclusion receipt. It has no flag
-//! for the write-once file bytes or the supersedes sidecar, and a bag
-//! without them is not enough to import. Finish copies both into the deed's
-//! own folder after export. A sibling directory would be another deed to
-//! `deedar check`, which requires `proof.txt` in every folder.
+//! --into` writes the deed frame and the inclusion receipt. Import also
+//! requires the product bytes under `bytes/` and, when a deed supersedes
+//! another or was made from one, a sidecar that names that deed and its
+//! digest. Finish writes those beside the export. A sibling directory
+//! would be another deed to `deedar check`, which requires `proof.txt`
+//! in every folder.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -59,6 +61,7 @@ fn export_cited(issue: &str) -> Result<(String, Vec<String>)> {
 struct Row {
     id: String,
     hexes: Vec<String>,
+    sources: String,
 }
 
 fn rows_for(cited: &[String]) -> Result<Vec<Row>> {
@@ -78,6 +81,7 @@ fn rows_for(cited: &[String]) -> Result<Vec<Row>> {
         rows.push(Row {
             id: id.clone(),
             hexes: hexes_of(field(&text, "paths").unwrap_or(""))?,
+            sources: field(&text, "sources").unwrap_or("").to_string(),
         });
     }
     Ok(rows)
@@ -170,32 +174,124 @@ fn export_into(dir: &Path, rows: &[Row]) -> Result<()> {
 }
 
 fn seam(store: &Path, bag: &Path, rows: &[Row]) -> Result<()> {
+    let mut digests = HashMap::new();
     for row in rows {
         let folder = bag.join(&row.id);
         if !folder.is_dir() {
             bail!("export wrote no folder for {}", row.id);
         }
         for hex in &row.hexes {
-            let src = store.join("bytes").join(hex);
-            if !src.is_file() {
-                bail!("file bytes sha256:{hex} are not in the store");
-            }
-            std::fs::copy(&src, folder.join(hex))
-                .with_context(|| format!("copying sha256:{hex}"))?;
+            copy_payload(store, hex, &folder)?;
         }
-        copy_link(store, &row.id, "supersedes", &folder)?;
-        copy_link(store, &row.id, "successor", &folder)?;
+        write_link(store, &row.id, "supersedes", &folder, &mut digests)?;
+        write_link(store, &row.id, "successor", &folder, &mut digests)?;
+        write_sources(&row.sources, &folder, &mut digests)?;
     }
     Ok(())
 }
 
-fn copy_link(store: &Path, id: &str, name: &str, folder: &Path) -> Result<()> {
+/// Product bytes live at `<deed>/bytes/<hex>`. The importer hashes the file
+/// and requires the name to be that digest.
+fn copy_payload(store: &Path, hex: &str, folder: &Path) -> Result<()> {
+    let src = store.join("bytes").join(hex);
+    if !src.is_file() {
+        bail!("file bytes sha256:{hex} are not in the store");
+    }
+    let dir = folder.join("bytes");
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    std::fs::copy(&src, dir.join(hex)).with_context(|| format!("copying sha256:{hex}"))?;
+    Ok(())
+}
+
+/// A link sidecar is the deed id and the digest `deedar log prove` records
+/// for it. The store file names the id only, which import will not take.
+fn write_link(
+    store: &Path,
+    id: &str,
+    name: &str,
+    folder: &Path,
+    digests: &mut HashMap<String, String>,
+) -> Result<()> {
     let src = store.join("deeds").join(format!("{id}.{name}"));
     if !src.is_file() {
         return Ok(());
     }
-    std::fs::copy(&src, folder.join(name)).with_context(|| format!("copying {id}.{name}"))?;
+    let raw = std::fs::read_to_string(&src).with_context(|| format!("reading {id}.{name}"))?;
+    let linked = raw.trim();
+    if linked.is_empty() {
+        return Ok(());
+    }
+    one_component(linked).with_context(|| format!("{id}.{name} is not a deed id"))?;
+    let digest = deed_digest(digests, linked)?;
+    let body = format!("{linked}\n{digest}\n");
+    std::fs::write(folder.join(name), body).with_context(|| format!("writing {id} {name}"))?;
     Ok(())
+}
+
+/// `sources=` lines from `deedar get`: `deed:<id>`, one digest a line.
+/// Path and url sources are not deeds, so they have no sidecar line.
+fn write_sources(
+    sources: &str,
+    folder: &Path,
+    digests: &mut HashMap<String, String>,
+) -> Result<()> {
+    let mut lines = BTreeMap::new();
+    for part in sources.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some(id) = part.strip_prefix("deed:") else {
+            continue;
+        };
+        one_component(id).with_context(|| format!("source {part} is not a deed id"))?;
+        let digest = deed_digest(digests, id)?;
+        lines.insert(id.to_string(), digest);
+    }
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut body = String::new();
+    for (id, digest) in lines {
+        body.push_str(&id);
+        body.push('\t');
+        body.push_str(&digest);
+        body.push('\n');
+    }
+    std::fs::write(folder.join("sources"), body).context("writing sources")?;
+    Ok(())
+}
+
+fn deed_digest(cache: &mut HashMap<String, String>, id: &str) -> Result<String> {
+    if let Some(have) = cache.get(id) {
+        return Ok(have.clone());
+    }
+    let said = crate::run_captured("deedar", &["log", "prove", id])
+        .with_context(|| format!("deedar log prove {id}"))?;
+    let digest = said
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("digest="))
+        .map(str::trim)
+        .filter(|text| is_sha256_addr(text))
+        .with_context(|| format!("deedar log prove {id} did not report a sha256 digest"))?
+        .to_string();
+    cache.insert(id.to_string(), digest.clone());
+    Ok(digest)
+}
+
+fn is_sha256_addr(text: &str) -> bool {
+    let Some(hex) = text.strip_prefix("sha256:") else {
+        return false;
+    };
+    is_sha256_hex(hex)
+}
+
+fn is_sha256_hex(hex: &str) -> bool {
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn store_dir() -> Result<PathBuf> {
