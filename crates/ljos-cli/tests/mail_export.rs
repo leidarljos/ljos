@@ -107,7 +107,7 @@ fn crlf_is_refused_because_the_stored_form_is_lf() {
 }
 
 #[test]
-fn control_and_bidirectional_characters_are_refused_anywhere() {
+fn characters_that_hide_reorder_or_break_text_are_refused_anywhere() {
     for (bad, what) in [
         (MESSAGE.replace("noon", "no\u{1b}[8mon"), "escape"),
         (MESSAGE.replace('\n', "\r\n"), "carriage return"),
@@ -123,6 +123,40 @@ fn control_and_bidirectional_characters_are_refused_anywhere() {
             "isolate",
         ),
         (MESSAGE.replace("noon", "no\u{0c}on"), "form feed"),
+        (MESSAGE.replace("Friday", "Fri\u{ad}day"), "soft hyphen"),
+        (
+            MESSAGE.replace("Friday", "Fri\u{180e}day"),
+            "mongolian vowel separator",
+        ),
+        (
+            MESSAGE.replace("Friday", "Fri\u{200b}day"),
+            "zero width space",
+        ),
+        (
+            MESSAGE.replace("Friday", "Fri\u{200d}day"),
+            "zero width joiner",
+        ),
+        (
+            MESSAGE.replace("Friday", "\u{200f}Friday"),
+            "right-to-left mark",
+        ),
+        (MESSAGE.replace("Friday", "Fri\u{2060}day"), "word joiner"),
+        (
+            MESSAGE.replace("Friday", "Fri\u{2064}day"),
+            "invisible plus",
+        ),
+        (
+            MESSAGE.replace("Friday", "\u{feff}Friday"),
+            "byte order mark",
+        ),
+        (
+            MESSAGE.replace("friend@", "x@example.test\u{2028} friend@"),
+            "line separator",
+        ),
+        (
+            MESSAGE.replace("noon", "no\u{2029}on"),
+            "paragraph separator",
+        ),
     ] {
         let err = export(&draft(&bad), now() + Duration::hours(1), now());
         assert!(err.is_err(), "{what} was exported");
@@ -211,14 +245,28 @@ fn date_and_message_id_must_be_valid_not_only_present() {
 #[test]
 fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
     let later = now() + Duration::hours(1);
-    for bcc in [
-        "Bcc: hidden@example.test\n",
-        "bcc:\n hidden@example.test\n",
-        "Resent-Bcc: x@example.test\n",
-    ] {
+    for bcc in ["Bcc: hidden@example.test\n", "bcc:\n hidden@example.test\n"] {
         let message = MESSAGE.replace("Subject:", &format!("{bcc}Subject:"));
         let err = export(&draft(&message), later, now()).unwrap_err();
         assert!(err.to_string().contains("Bcc"), "{bcc}: {err}");
+    }
+}
+
+#[test]
+fn every_resent_header_is_refused_because_sendmail_t_follows_it() {
+    let later = now() + Duration::hours(1);
+    for resent in [
+        "Resent-To: other@example.test\n",
+        "Resent-Cc: other@example.test\n",
+        "Resent-Bcc: x@example.test\n",
+        "RESENT-FROM: owner@example.test\n",
+        "Resent-Date: Thu, 22 Oct 2026 12:00:00 +0000\n",
+        "Resent-Message-ID: <r@example.test>\n",
+        "resent-sender:\n owner@example.test\n",
+    ] {
+        let message = MESSAGE.replace("Subject:", &format!("{resent}Subject:"));
+        let err = export(&draft(&message), later, now()).unwrap_err();
+        assert!(err.to_string().contains("Resent-"), "{resent}: {err}");
     }
 }
 

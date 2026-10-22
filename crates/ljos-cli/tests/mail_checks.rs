@@ -1,5 +1,6 @@
 //! Identity, term and attribution checks only ever refuse.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use ljos_cli::mailbox::checks::refusals;
@@ -157,7 +158,9 @@ fn text_the_checks_cannot_read_is_refused() {
         cte("\n base64"),
         cte("\n\tQuoted-Printable"),
         cte(" binary"),
-        cte(" 7bit").replace("Subject:", "Content-Transfer-Encoding: 8bit\nSubject:"),
+        cte("\t8BIT"),
+        cte("\n 8bit"),
+        cte(" 7bit").replace("Subject:", "Content-Transfer-Encoding: 7bit\nSubject:"),
         word,
         body_word,
     ] {
@@ -167,10 +170,29 @@ fn text_the_checks_cannot_read_is_refused() {
             "{draft}: {got:?}"
         );
     }
-    for ok in [" 7bit", "\t8BIT", "\n 8bit"] {
+    for ok in [" 7bit", "\t7BIT", "\n 7bit"] {
         assert!(refused(&cte(ok), &s.config).is_empty(), "{ok:?}");
     }
     assert!(!refusals(b"From: owner@example.test\n\ncaf\xe9", &s.config).is_empty());
+}
+
+#[test]
+fn what_the_mta_would_rewrite_is_refused() {
+    let s = setup(DENY);
+    let body = |n: usize| CLEAN.replace("See you at noon about topic-a.", &"a".repeat(n));
+    assert_eq!(refused(&body(998), &s.config), Vec::<String>::new());
+    let subject = CLEAN.replace("Subject: Friday", &format!("Subject: {}", "b".repeat(990)));
+    for draft in [body(999), subject] {
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("998 octets")), "{got:?}");
+    }
+    for draft in [
+        CLEAN.replace("noon", "midi, caf\u{e9}"),
+        CLEAN.replace("Friday", "Fr\u{e9}d\u{e9}ric"),
+    ] {
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("not ASCII")), "{got:?}");
+    }
 }
 
 #[test]
@@ -218,6 +240,31 @@ fn markup_in_the_body_is_refused_so_a_term_cannot_hide_in_it() {
     for body in ["1 < 2 & 3 > 2", "AT&T at 5", "a <= b"] {
         let draft = CLEAN.replace("See you at noon about topic-a.", body);
         assert!(refused(&draft, &s.config).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_bracketed_link_passes_and_a_term_joined_by_tags_or_references_does_not() {
+    let s = setup(DENY);
+    for body in [
+        "See <https://example.test/a> and <mailto:jo@example.test>.",
+        "Press <Enter> when 1 <2.",
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        assert_eq!(refused(&draft, &s.config), Vec::<String>::new(), "{body}");
+    }
+    for (body, kind) in [
+        ("Status of pro<span>ject-x.", "term"),
+        ("Status of pro<https://example.test/a>ject-x.", "term"),
+        ("Status of proj&#101ct-x.", "term"),
+        ("Status of pr&#X6Fject-x.", "term"),
+        ("Ask @blocked<i>handle.", "term"),
+        ("About topic-a and top<b>ic-b.", "pair"),
+        ("Gener<b>ated by a tool.", "attribution"),
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains(kind)), "{body}: {got:?}");
     }
 }
 
@@ -273,6 +320,27 @@ fn a_broken_setup_refuses_everything() {
     ] {
         let b = setup(bad);
         assert!(!refused(CLEAN, &b.config).is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_deny_file_others_could_change_refuses_everything() {
+    let s = setup(DENY);
+    let real = s.config.deny_file.clone().unwrap();
+    let dir = real.parent().unwrap();
+    let link = dir.join("linked.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let shared = dir.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::write(shared.join("deny.txt"), DENY).unwrap();
+    std::fs::set_permissions(&shared, PermissionsExt::from_mode(0o775)).unwrap();
+    for (path, why) in [(link, "symlink"), (shared.join("deny.txt"), "writable")] {
+        let config = MailConfig {
+            deny_file: Some(path),
+            ..s.config.clone()
+        };
+        let got = refused(CLEAN, &config);
+        assert!(got.iter().any(|r| r.contains(why)), "{why}: {got:?}");
     }
 }
 

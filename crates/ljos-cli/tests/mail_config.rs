@@ -114,6 +114,33 @@ fn a_user_file_others_can_write_is_an_error() {
 }
 
 #[test]
+fn a_symlinked_user_file_or_one_under_a_directory_others_can_write_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = layer(&dir, "real.toml", "[mail]\nnotmuch = \"notmuch\"\n");
+    let link = dir.path().join("mail.toml");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let err = user(&[link]).unwrap_err().to_string();
+    assert!(err.contains("symlink"), "{err}");
+    let shared = dir.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    let inside = layer(&dir, "shared/mail.toml", "[mail]\nnotmuch = \"notmuch\"\n");
+    for mode in [0o770, 0o707, 0o777] {
+        fs::set_permissions(&shared, fs::Permissions::from_mode(mode)).unwrap();
+        let err = user(std::slice::from_ref(&inside)).unwrap_err().to_string();
+        assert!(
+            err.contains("shared is group or world writable"),
+            "{mode:o}: {err}"
+        );
+    }
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+    assert!(user(std::slice::from_ref(&inside)).unwrap().is_some());
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    let linked = dir.path().join("linked");
+    std::os::unix::fs::symlink(&shared, &linked).unwrap();
+    assert!(user(&[linked.join("mail.toml")]).unwrap().is_some());
+}
+
+#[test]
 fn identity_without_a_deny_file_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let only = layer(
