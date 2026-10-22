@@ -482,6 +482,43 @@ fn the_hook_claims_on_the_first_write_and_on_a_redirect() {
     assert_eq!(creates, 6, "{log}");
 }
 
+#[test]
+fn a_hook_books_nothing_for_a_seat_nobody_named_or_the_seats_file_omits() {
+    let (_dir, hab) = habitat();
+    let write = |session: &str, extra: &[(&str, &str)]| {
+        let payload = claude(
+            "PreToolUse",
+            session,
+            &hab.repo,
+            serde_json::json!({"tool_name": "Write", "tool_input": {"file_path": "README.md"}}),
+        );
+        let out = hook_in(&hab, &payload, &hab.repo, false, extra);
+        assert!(out.status.success(), "{out:?}");
+    };
+    let log = || std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap_or_default();
+    // An empty LJOS_SEAT is no seat. The session id puts the shell under a
+    // runner, so the seat left is derived whatever process ran this test.
+    write(
+        "unseated",
+        &[
+            ("LJOS_SEAT", ""),
+            ("LJOS_HOLD", ""),
+            ("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000"),
+        ],
+    );
+    assert!(!log().contains("create"), "{}", log());
+
+    let seats = hab.home.join(".config/ljos/seats.toml");
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, "seats = [\"saddle\"]\n").unwrap();
+    write("unlisted", &[]);
+    assert!(!log().contains("create"), "{}", log());
+
+    std::fs::write(&seats, "seats = [\"probe-seat\"]\n").unwrap();
+    write("listed", &[]);
+    assert!(log().contains("create"), "a listed seat claims: {}", log());
+}
+
 fn context(stdout: &[u8]) -> String {
     let text = String::from_utf8_lossy(stdout);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
