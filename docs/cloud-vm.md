@@ -99,7 +99,7 @@ A run's seat is new, and the tracker pins its key the first time it signs. Any w
 ljos slot ISSUE ridley-review --model grok-4 --run "$AGENT_ID"
 ```
 
-`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a seat pinned before slots began. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and the run's key was pinned after it. A seat pinned before slots began needs no slot. On a tracker that is not a git repository, no seat needs one.
+`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. A seat that already ends with the run id is refused, because `ridley-review` on that run boots as the same seat. The slot is signed under the launcher's pinned key, and the launcher has to be a seat pinned before slots began. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and the run's key was pinned after it. A seat pinned before slots began needs no slot. On a tracker that is not a git repository, no seat needs one.
 
 ## A panel
 
