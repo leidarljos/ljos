@@ -114,6 +114,18 @@ fn a_user_file_others_can_write_is_an_error() {
 }
 
 #[test]
+fn identity_without_a_deny_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let only = layer(
+        &dir,
+        "mail.toml",
+        "[mail]\nidentity = \"owner@example.test\"\n",
+    );
+    let err = user(&[only]).unwrap_err().to_string();
+    assert!(err.contains("deny_file"), "{err}");
+}
+
+#[test]
 fn an_empty_mail_table_is_a_config_with_nothing_set() {
     let dir = tempfile::tempdir().unwrap();
     let only = layer(&dir, "mail.toml", "[mail]\n");

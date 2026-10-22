@@ -109,8 +109,11 @@ pub fn refusals(message: &[u8], config: &MailConfig) -> Vec<String> {
     let Some(identity) = config.identity.as_deref() else {
         return vec!["checks: no [mail] identity is configured".into()];
     };
-    let deny = match config.deny_file.as_deref().map(DenyList::read).transpose() {
-        Ok(deny) => deny.unwrap_or_default(),
+    let Some(deny_file) = config.deny_file.as_deref() else {
+        return vec!["checks: no [mail] deny_file is configured".into()];
+    };
+    let deny = match DenyList::read(deny_file) {
+        Ok(deny) => deny,
         Err(e) => return vec![format!("{e:#}")],
     };
     let attribution: Vec<String> = ATTRIBUTION

@@ -23,7 +23,8 @@ group or world writable. Any other layer of ljos config (`./ljos.toml`,
 empty one, is an error, so a seat that can write its working directory
 cannot swap the identity or the deny list. A file that cannot be read
 or does not parse, or a `[mail]` key ljos does not know, is an error
-rather than a silent default.
+rather than a silent default. `identity` without `deny_file` is an
+error too, and the checks refuse every draft when either is unset.
 
 ```toml
 [mail]

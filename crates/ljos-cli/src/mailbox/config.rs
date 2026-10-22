@@ -23,7 +23,7 @@ pub struct MailConfig {
     pub notmuch_config: Option<PathBuf>,
     /// The notmuch binary: an absolute path, or a bare name found on PATH.
     pub notmuch: Option<PathBuf>,
-    /// The one address a draft's From may carry.
+    /// The one address a draft's From may carry. Needs `deny_file`.
     pub identity: Option<String>,
     /// The deny list the content checks read.
     pub deny_file: Option<PathBuf>,
@@ -105,6 +105,12 @@ pub fn load_from(user: &[PathBuf], shared: &[PathBuf]) -> Result<Option<MailConf
         if let Some(extra) = table.attribution {
             merged.attribution = extra;
         }
+    }
+    if config
+        .as_ref()
+        .is_some_and(|c| c.identity.is_some() && c.deny_file.is_none())
+    {
+        bail!("mail config: identity is set without deny_file, which would deny nothing");
     }
     Ok(config)
 }
