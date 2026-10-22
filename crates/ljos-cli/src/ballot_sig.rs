@@ -463,14 +463,83 @@ pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
 pub fn recorded_at_in(root: &Path, issue: &str, voter: &str, choice: &str) -> Option<i64> {
     let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
     let files = git_in(root, &["grep", "-l", "-E", &pattern])?;
-    let file = files.lines().next()?.to_string();
     let needle = format!("] {}: {}", voter.trim(), choice.trim());
+    for file in files.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let file_path = root.join(file);
+        let Ok(text) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Some((start, end)) = issue_range(&text, issue) else {
+            continue;
+        };
+        let Some(line) = ballot_line_in(&text, start, end, &needle) else {
+            continue;
+        };
+        if let Some(epoch) = line_epoch(root, file, line) {
+            return Some(epoch);
+        }
+    }
+    None
+}
+
+fn line_epoch(root: &Path, file: &str, line: usize) -> Option<i64> {
+    let line = line.to_string();
+    let range = format!("{line},{line}");
     git_in(
         root,
-        &["log", "-1", "--format=%ct", "-S", &needle, "--", &file],
+        &["blame", "--porcelain", "-L", &range, "--", file.trim()],
     )?
-    .parse()
-    .ok()
+    .lines()
+    .find_map(|row| {
+        row.trim_start()
+            .strip_prefix("committer-time ")?
+            .parse()
+            .ok()
+    })
+}
+
+fn ballot_line_in(text: &str, start: usize, end: usize, needle: &str) -> Option<usize> {
+    text.lines().enumerate().find_map(|(idx, line)| {
+        let line_no = idx + 1;
+        (start <= line_no && line_no <= end && line.contains(needle)).then_some(line_no)
+    })
+}
+
+fn issue_range(text: &str, issue: &str) -> Option<(usize, usize)> {
+    let mut start = None;
+    let mut matched = false;
+    let mut in_entry = false;
+    let mut line_no = 0usize;
+    for line in text.lines() {
+        line_no += 1;
+        if is_heading(line) {
+            if matched {
+                return Some((start?, line_no.saturating_sub(1)));
+            }
+            start = Some(line_no);
+            matched = false;
+            in_entry = true;
+        }
+        if in_entry && id_line(line, issue) {
+            matched = true;
+        }
+    }
+    matched.then_some((start?, line_no))
+}
+
+fn is_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('*') else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(['*', ' ', '\t'])
+}
+
+fn id_line(line: &str, issue: &str) -> bool {
+    let Some(rest) = line.trim().strip_prefix(":ID:") else {
+        return false;
+    };
+    rest.trim() == issue
 }
 
 fn env_root() -> Option<PathBuf> {
