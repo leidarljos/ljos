@@ -7919,8 +7919,9 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let hits: Vec<Hit>;
     let mut rows: Vec<&Hit> = if let Some((candidates, j)) = &judged {
         // Jev read the prompt and each claim together. What it says bears
-        // goes in when Jev alone is sure, or when the claim names the
-        // subject and clears the lexical floor. The two scorers still
+        // goes in when Jev is sure and the claim shares a word with the
+        // prompt, or when the claim names the subject and clears the
+        // lexical floor. The two scorers still
         // have to agree. The fused score is not a gate: the pack decays
         // it by age, and Jev's probability orders this path.
         let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
@@ -8217,15 +8218,17 @@ pub fn recall_note(issue: &str, memories: &str) -> String {
     }
 }
 
-/// How sure Jev must be that a claim bears on a prompt it shares no
-/// content word with.
+/// How sure Jev must be that a claim bears on a prompt when the claim
+/// shares a word with it but does not name its subject.
 pub const JEV_ALONE_AT: f64 = 0.75;
 
 /// Whether a judged claim reaches the prompt. Jev says it bears and the
-/// two scorers agreed. A claim Jev is sure of needs nothing else: that
-/// probability carries no age. Otherwise the claim has to name the
-/// subject and clear [`HOOK_SCORE_FLOOR`] of `best_lexical`. The fused
-/// score is not read. The pack decays it by age, and age only ranks.
+/// two scorers agreed. A claim Jev is sure of needs one word or alias in
+/// common with the prompt, or to name its subject: a check that is not
+/// Jev's and, like that probability, carries no age. Otherwise the claim
+/// has to name the subject and clear [`HOOK_SCORE_FLOOR`] of
+/// `best_lexical`. The fused score is not read. The pack decays it by
+/// age, and age only ranks.
 #[must_use]
 pub fn admits_judged(
     h: &Hit,
@@ -8239,7 +8242,7 @@ pub fn admits_judged(
         return false;
     }
     if p >= JEV_ALONE_AT {
-        return true;
+        return names_the_cue(&h.text, cue) || names_the_subject(&h.text, cue);
     }
     names_the_subject(&h.text, cue)
         && best_lexical > 0.0
@@ -35414,6 +35417,65 @@ mod tests {
         assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
+    /// Jev is sure of a claim that shares no word with the prompt. Beside
+    /// it sits a claim that names the subject. Only that one gets in:
+    /// Jev's probability alone is not the gate.
+    #[test]
+    fn the_judge_alone_does_not_admit_a_claim_with_no_word_in_common() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let answers = config.path().join("judge-answers.json");
+        std::fs::write(
+            &answers,
+            r#"{"answers":{"bears_0":{"noul":0.95},"bears_1":{"noul":0.6},"correction":{"noul":0.0},"choice":{"noul":0.0},"injection":{"noul":0.0}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(config.path().join("ljos")).unwrap();
+        std::fs::write(
+            config.path().join("ljos/jev.toml"),
+            format!(
+                "enabled = true\nbackend = \"command\"\ncache_days = 0\nmin_words = 1\n\
+                 min_candidates = 2\nbudget_ms = 5000\n\
+                 command = [\"sh\", \"-c\", \"cat >/dev/null; cat {}\"]\n",
+                answers.display()
+            ),
+        )
+        .unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3, "dense_rank": 2, "cosine": 0.40
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit("pager", "Rotate the on-call pager every Monday morning"),
+            hit(
+                "vite",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime"
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the API base URL is wrong after deploying".into(),
+            session: Some("judged-alone".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("VITE_API_URL"), "{note}");
+        assert!(!note.contains("pager"), "{note}");
+    }
+
     /// A cold encoder and a paraphrase share no word, so the atom list
     /// recalls nothing. The prompt waits until status says the encoder
     /// has answered, then the search is what the prompt hears.
@@ -37696,8 +37758,8 @@ mod tests {
             !admits_judged(&hit(1.0, Some(1), Some(3)), true, 0.95, cue, 1.0, 1.0),
             "one scorer of three does not admit"
         );
-        // Jev is sure, so a fused score under the old floor does not keep
-        // the claim out. The probability carries no age.
+        // Jev is sure and the claim shares a word, so a fused score under
+        // the old floor does not keep it out. Neither carries age.
         assert!(admits_judged(
             &hit(0.5, Some(2), Some(2)),
             true,
@@ -37706,6 +37768,13 @@ mod tests {
             0.0,
             1.0
         ));
+        // However sure Jev is, a claim that shares no word or alias with
+        // the prompt is Jev's word alone.
+        let unrelated = Hit {
+            text: "rotate the on-call pager every Monday".into(),
+            ..hit(1.0, Some(2), Some(2))
+        };
+        assert!(!admits_judged(&unrelated, true, 0.95, cue, 0.0, 1.0));
         assert!(
             !admits_judged(&hit(1.0, Some(2), Some(2)), true, 0.6, cue, 0.4, 1.0),
             "under the lexical floor"
