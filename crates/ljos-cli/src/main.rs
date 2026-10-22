@@ -1459,7 +1459,7 @@ fn run_command() -> Result<()> {
                     if !text.is_empty() {
                         bail!("prefer: pass the lesson id with --promote, or the words, not both");
                     }
-                    ljos_cli::user_rules::promote_lesson(&id, why, &mention, &reply)?
+                    ljos_cli::user_rules::promote_lesson(&id, why, &mention, &reply, false)?
                 } else {
                     ljos_cli::user_rules::write_preference(&join(&text), why, &mention, &reply)?
                 };
