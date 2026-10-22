@@ -15,6 +15,7 @@ const CURSOR: &str = "cursor/";
 const GIT_VALUED: &[&str] = &[
     "-C",
     "-c",
+    "--attr-source",
     "--git-dir",
     "--work-tree",
     "--namespace",

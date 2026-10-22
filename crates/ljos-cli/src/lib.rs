@@ -17796,7 +17796,14 @@ pub(crate) fn push_forces(args: &[String], dir: Option<&str>) -> bool {
 }
 
 /// `git push` options that take the next word as their value.
-const PUSH_VALUED: &[&str] = &["-o", "--push-option", "--receive-pack", "--exec", "--repo"];
+const PUSH_VALUED: &[&str] = &[
+    "-o",
+    "--push-option",
+    "--receive-pack",
+    "--exec",
+    "--repo",
+    "--recurse-submodules",
+];
 
 /// Where a `--force-with-lease` push goes on the remote, read from its
 /// words alone. The same reading is `lease_push_guarded` in ljos-policyd
