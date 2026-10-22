@@ -8656,7 +8656,7 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
                 Some((hit, signal))
             })
             .collect::<Option<_>>()?;
-        keep_search_origins(&client, &body, found.iter().map(|(h, _)| h));
+        keep_search_origins(&client, found.iter().map(|(h, _)| h));
         Some(found)
     })();
     match raw {
@@ -10405,7 +10405,7 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
         let client = pack()?;
         let (body, _) = search_relevant(&client, q, limit, false, pack_timeout())?;
         let hits: Vec<Hit> = serde_json::from_value(body["hits"].clone()).unwrap_or_default();
-        keep_search_origins(&client, &body, &hits);
+        keep_search_origins(&client, &hits);
         Ok(hits)
     })?;
     count_recall(&hits);
@@ -10471,7 +10471,7 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
             let extra = hits.split_off(chosen);
             hits = merge_by_lexical(hits, extra, q);
         }
-        keep_search_origins(&client, &body, &hits);
+        keep_search_origins(&client, &hits);
         Ok((hits, ran))
     })?;
     count_recall(&hits);
@@ -29051,22 +29051,15 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
     }
 }
 
-/// Record the origin each hit of search answer `body` carries, and read
-/// the listing ([`keep_origins_of`]) for `hits`, parsed from it, only when
-/// a hit carries none.
-fn keep_search_origins<'a>(
-    client: &PacksetClient,
-    body: &Value,
-    hits: impl IntoIterator<Item = &'a Hit>,
-) {
-    let raw = body["hits"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    raw.iter().for_each(keep_origin);
-    if raw.iter().any(|v| carried_origin(v).is_none()) {
-        keep_origins_of(client, hits);
-    }
+/// Record the origin of each search hit from the pack's listing
+/// ([`keep_origins_of`]), never from the hit. A search answer names its
+/// own origin, and a listener can stamp `user-declared` on a hit the
+/// listing holds as an agent's. The listing is the record the pack
+/// stored. A hit it does not hold, or a listing that does not answer,
+/// is not the person's: [`keep_origins_of`] records the first as not
+/// held and clears the person for the second.
+fn keep_search_origins<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
+    keep_origins_of(client, hits);
 }
 
 /// Whether the pack stored `h` as the person's. A hit whose origin no
@@ -49536,9 +49529,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     /// A record or a hit with no origin, a null one or an empty one is no
     /// one's word for the claim, whatever basis it carries. A search hit
-    /// without one, as a milli document comes back, takes what the
-    /// pack's listing holds now, and none when the listing does not hold
-    /// it, never what this process recorded before.
+    /// takes what the pack's listing holds now, including one that names
+    /// its own origin, and none when the listing does not hold it, never
+    /// what this process recorded before.
     #[test]
     fn a_claim_without_an_origin_is_not_the_persons() {
         let _g = env_guard();
