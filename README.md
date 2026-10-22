@@ -13,19 +13,26 @@ Nothing leaves the machine unless you turn on a remote judge.
 
 It blocks denied commands in Claude Code, Codex, Cursor, GitHub Copilot CLI,
 Gemini CLI, Windsurf, Factory's Droid, Kiro, Qwen Code, Crush, Auggie, Amp,
-goose, OpenHands, Grok Build, opencode, omp, hermes and Antigravity's `agy`.
+goose, OpenHands, Grok Build, opencode, omp and Antigravity's `agy`.
 Cline hooks are installed too, but upstream docs do not yet document whether a
 hook failure blocks the command.
 It serves memory, skills and tools over MCP in Zed, VS Code, Claude Desktop,
-Continue, Roo Code and Kilo Code.
+Continue, Roo Code, Kilo Code, hermes and Amazon Q.
 
 ## Five minutes
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
+
+The programs land in `~/.local/bin`, and the `export` line puts it on PATH
+in the shell you pasted into. From the next release on, when `~/.local/bin`
+is not on PATH, the installer also adds that line to `~/.profile` and
+`~/.bashrc`, and to `~/.zshrc` when there is one, so a new shell finds
+`ljos`; `--no-modify-path` leaves them alone.
 
 The installer downloads each program from its GitHub release, checks it
 against the published SHA-256 sum, and builds from source with `cargo` where a
@@ -65,6 +72,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 A fresh machine runs `ljos cloud up`, or `sh scripts/install.sh --cloud`.
+Both arrive in the next release; the release the install line above fetches has neither.
+Until then they work from `develop`: run `sh scripts/install.sh --cloud` in a checkout of it, and the script builds that tree's `ljos` with `cargo` when the installed one has no `cloud up`.
 The binaries land in `~/.local/bin`, `~/.cursor/mcp.json` names `ljos-mcp` on PATH, and `LJOS_TRACKER_REMOTE` is cloned as the shared tracker. `docs/cloud-vm.md` has the environment file, the push mode, and a job step.
 Codex runs a hook only once you trust it. After `ljos onboard`, open
 `/hooks` in Codex and trust each ljos hook before the guard runs, and
@@ -424,8 +433,8 @@ guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
-Every listed tool costs its description and schema on every session: 8,081
-tokens for the core set against 16,677 for all fifty (o200k_base
+Every listed tool costs its description and schema on every session: 8,062
+tokens for the core set against 16,658 for all fifty (o200k_base
 count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads
