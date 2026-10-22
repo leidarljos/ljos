@@ -1,0 +1,1 @@
+The guard and `ljos rules` take a rule's person basis as the person's only from a pack that asks for the seat's token. From any other listener every rule's reason is labelled an unverified agent note, as preferences already were.

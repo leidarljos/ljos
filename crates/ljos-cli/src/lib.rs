@@ -17476,15 +17476,16 @@ pub fn format_rules(rules: &[Rule], json: bool) -> String {
 }
 
 /// The live rules in a set of atoms. A reason the pack does not say the
-/// person stands behind is labelled an unverified agent note, so no gate
-/// states it as the person's.
-pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
+/// person stands behind, or any reason when `proven` is false because the
+/// listing did not ask for this seat's token, is labelled an unverified
+/// agent note, so no gate states it as the person's.
+pub fn rules_of(atoms: &[Value], proven: bool) -> Vec<Rule> {
     atoms
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("rule"))
         .filter_map(|a| {
             let text = a.get("text").and_then(Value::as_str).unwrap_or("");
-            let reason = if text.is_empty() || person_stored(a) {
+            let reason = if text.is_empty() || (proven && person_stored(a)) {
                 text.to_string()
             } else {
                 format!("unverified agent note: {text}")
@@ -17502,7 +17503,7 @@ pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
 pub fn rules_from_pack() -> Result<Vec<Rule>> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
-    Ok(rules_of(&atoms))
+    Ok(rules_of(&atoms, listing_asks(&client)))
 }
 
 /// The rules a gate judges by. A read from the pack is kept on disk, and
@@ -17527,7 +17528,7 @@ pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     });
     match listed {
         Ok((atoms, asks)) => {
-            let rules = rules_of(&atoms);
+            let rules = rules_of(&atoms, asks);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
@@ -17614,7 +17615,7 @@ fn preferences_row() -> Habitat {
         Ok(atoms) => {
             let held = legacy_pref::awaiting(&atoms).len();
             let (enforced, could, total) =
-                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
+                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms, true));
             let mut line = preferences_line(enforced, could, total);
             if held > 0 {
                 line.push_str(&format!("; {}", legacy_pref::review_sentence(held)));
