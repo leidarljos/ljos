@@ -554,6 +554,23 @@ pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
     git_in(&env_root()?, args)
 }
 
+/// Whether `VISSUE_ROOT` names a git checkout. `None` when no tracker root is
+/// configured or git could not run.
+#[must_use]
+pub fn tracker_is_git_checkout() -> Option<bool> {
+    let root = env_root()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(false);
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "true")
+}
+
 fn git_in(root: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
