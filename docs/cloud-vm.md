@@ -95,13 +95,13 @@ A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos
 
 ## Slots
 
-A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, and can set the author date on that commit, so the date is not what decides. The seats that stood when slots began are a list in ljos: `disk-saver`, `inky`, and `ljosbot`. A seat on the list needs no slot and may sign one. Every other seat counts toward a push cite only under a slot. The seat that launches a cloud agent or a job writes one on the issue it hands over, before the run's first ballot:
+A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, and can set the author date on that commit, so the date is not what decides. A seat stands when its key was pinned in this tracker before slots began: the pin is in the parents of the commit that brought the first slot note, by commit order. Until a slot is committed, every committed pin stands. The names `disk-saver`, `inky`, and `ljosbot` are a list in ljos and stand too. A standing seat needs no slot and may sign one. Any other seat's ballot is left out of a push cite, and named, unless it is under a slot. The seat that launches a cloud agent or a job writes one on the issue it hands over, before the run's first ballot:
 
 ```sh
 ljos slot ISSUE ridley-review --model grok-4 --run "$AGENT_ID"
 ```
 
-`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a standing seat. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and that issue's own entry already held the line in the commit that introduced the run seat's pin. A copy of the line on another issue does not count, and an author date is not read. The push gate counts the same ballots `ljos consensus` counts: one session is one ballot. A standing seat needs no slot. The same list applies on a tracker that is not a git repository, where that order is not checked.
+`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a standing seat. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and that issue's own entry already held the line in the commit that introduced the run seat's pin. A copy of the line on another issue does not count, and an author date is not read. The push gate counts the same ballots `ljos consensus` counts: one session is one ballot. A standing seat needs no slot. On a tracker that is not a git repository only the list stands, and that order is not checked.
 
 ## A panel
 
