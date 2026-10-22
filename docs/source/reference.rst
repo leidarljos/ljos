@@ -221,8 +221,10 @@ receipt is written when the note is delivered, on ``postToolUse`` as
 
 ``send`` and ``reply`` start the recipient's wake, when it has one, after the message is written.
 ``ljos wake --command CMD`` runs ``CMD`` under ``sh -c`` with ``LJOS_SEAT`` set to the seat, so ``ljos inbox`` in it reads that seat's mail.
+With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
 ``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message.
-``ljos wake --webhook URL --key-file FILE`` posts the envelope (seat, sender, id, issue, interrupt) to an https URL with the key in that file as a bearer token, and never the body.
+``ljos wake --webhook URL --key-file FILE`` posts the envelope (seat, sender, id, issue, interrupt, and ``via`` when a prefix matched) to an https URL with the key in that file as a bearer token, and never the body.
+A key is a prefix only when it ends in one trailing ``-`` after a non-empty stem; names such as ``-``, ``--`` and ``a--`` are exact names.
 The sender waits on neither, and a wake that fails or runs past its timeout is a line in ``~/.local/state/ljos/mail/wake.log``.
 On ``Stop``, unread interrupt mail holds the turn once and is receipted, so a running session reads it before it goes idle.
 A seat the pack has never heard from is refused with the known seat it most likely meant.
