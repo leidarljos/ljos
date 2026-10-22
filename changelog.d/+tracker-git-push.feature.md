@@ -1,1 +1,0 @@
-`LJOS_TRACKER_GIT=push` commits a tracker write, rebases with the per-issue field merge, and pushes. A failed push stays queued for the next write and the end of the session, and `ljos doctor` names unpushed commits.

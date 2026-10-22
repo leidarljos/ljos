@@ -1,1 +1,0 @@
-`ljos prefer --user` under a runner, and MCP `ljos_prefer` with `user` set, now refuse text that is not in the person's latest prompt. A user rule reaches every prompt and every seat, so a planted sentence is not stored.

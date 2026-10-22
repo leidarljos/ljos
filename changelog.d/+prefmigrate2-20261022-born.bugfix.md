@@ -1,1 +1,0 @@
-The pack will not raise `source.basis` on an update, so an old preference cannot be stamped `person` in place. A person-side run closes that atom and writes a new one born with basis `person`. The closed atom keeps the basis it had. The cutoff notes the write before the close, and the next run finishes it. A runner still does neither.
