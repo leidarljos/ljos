@@ -1,1 +1,0 @@
-The prompt hook drops the kept prompt on every prompt before it keeps the new one, so a prompt it skips, such as a pasted block, or does not take as the person's no longer leaves the previous turn's words in place for up to an hour to be quoted as the person's.

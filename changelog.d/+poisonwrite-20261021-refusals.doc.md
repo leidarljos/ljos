@@ -1,1 +1,0 @@
-The seat protocol now names the writes that are refused: a runner with no prompt hook, `LJOS_CAPTURE=off`, a paraphrase, and a prompt older than an hour. The four-word match is unchanged, and the docs say so.

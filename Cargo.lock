@@ -2718,7 +2718,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "ljos"
-version = "0.32.1"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "ljos-hud"
-version = "0.32.1"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "claimdag",
@@ -3572,9 +3572,9 @@ dependencies = [
 
 [[package]]
 name = "packset-client"
-version = "0.15.2"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fb6d77dca23d033182ff2876bfb0bdbbd0f98a90ae0fb38c98a13243b510c5f"
+checksum = "0843ea3f6a4c6932bf55780db6cdca0c4c43fd2b578196c0eb0ec3ba12ba26cb"
 dependencies = [
  "packset-core",
  "serde",
@@ -3585,9 +3585,9 @@ dependencies = [
 
 [[package]]
 name = "packset-core"
-version = "0.15.2"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f1438c02220b62ea7b6205b00205cb03c5b79aa9b1786cfe365d7df8a3eac6"
+checksum = "0dc7fd655897822365b09fe7dce94973f51df6cfff89970c65372d7cd7e372b2"
 dependencies = [
  "rust-stemmers",
  "serde",

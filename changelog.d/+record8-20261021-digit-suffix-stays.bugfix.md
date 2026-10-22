@@ -1,1 +1,0 @@
-A last part of digits alone stays part of a holder or a seat again: `node-01` and `node-02` are two holders, `qwen-72` is not `qwen`, and `inky-10` is its own seat. Only an old pid tag with both a letter and a digit, such as `inky-39u`, folds to its seat.
