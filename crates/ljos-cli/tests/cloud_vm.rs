@@ -2027,6 +2027,93 @@ fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
     assert_eq!(refused(&prefixed, here).pattern, "cloud-gh-pr-create");
 }
 
+#[test]
+fn cloud_guard_refuses_gh_api_ref_writes() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    let rest_cursor = root.path().join("rest-cursor.json");
+    let rest_force = root.path().join("rest-force.json");
+    fs::write(
+        &rest_cursor,
+        "{\"ref\":\"refs/heads/cursor/from-input\",\"sha\":\"0123456789012345678901234567890123456789\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &rest_force,
+        "{\"sha\":\"0123456789012345678901234567890123456789\",\"force\":true}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.path().join("create-cursor.graphql"),
+        "mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/cursor/from-graphql\", oid: \"O\"}) { clientMutationId } }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("delete-ref.graphql"),
+        "mutation { deleteRef(input: {refId: \"R\"}) { clientMutationId } }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("force-update.graphql"),
+        "mutation { updateRef(input: {refId: \"R\", oid: \"O\", force: true}) { clientMutationId } }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("update-refs.graphql"),
+        "mutation { updateRefs(input: {repositoryId: \"R\", refUpdates: [{name: \"refs/heads/main\", afterOid: \"A\", beforeOid: \"B\", force: true}]}) { clientMutationId } }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("safe-create.graphql"),
+        "mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/feature/safe\", oid: \"O\"}) { clientMutationId } }\n",
+    )
+    .unwrap();
+
+    let rest_cursor_input = format!(
+        "gh api -X POST repos/acme/widgets/git/refs --input {}",
+        rest_cursor.display()
+    );
+    let rest_force_input = format!(
+        "gh api --method PATCH repos/acme/widgets/git/refs/heads/main --input {}",
+        rest_force.display()
+    );
+    for line in [
+        "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/cursor/new -f sha=0123456789012345678901234567890123456789",
+        "gh api -XPATCH repos/acme/widgets/git/refs/heads/main -f sha=0123456789012345678901234567890123456789 -f force=true",
+        "gh api --method DELETE repos/acme/widgets/git/refs/heads/main",
+        rest_cursor_input.as_str(),
+        rest_force_input.as_str(),
+        "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/cursor/new\", oid: \"O\"}) { clientMutationId } }'",
+        "gh api graphql -f query='mutation { deleteRef(input: {refId: \"R\"}) { clientMutationId } }'",
+        "gh api graphql -f query='mutation { updateRef(input: {refId: \"R\", oid: \"O\", force: true}) { clientMutationId } }'",
+        "gh api graphql -f query='mutation { updateRefs(input: {repositoryId: \"R\", refUpdates: [{name: \"refs/heads/main\", afterOid: \"A\", beforeOid: \"B\", force: true}]}) { clientMutationId } }'",
+        "gh api graphql -F query=@create-cursor.graphql",
+        "gh api graphql -F query=@delete-ref.graphql",
+        "gh api graphql -F query=@force-update.graphql",
+        "gh api graphql -F query=@update-refs.graphql",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+
+    for line in [
+        "gh api repos/acme/widgets/git/refs/heads/main",
+        "gh api --method GET repos/acme/widgets/git/refs/heads/main",
+        "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/feature/safe -f sha=0123456789012345678901234567890123456789",
+        "gh api --method PATCH repos/acme/widgets/git/refs/heads/main -f sha=0123456789012345678901234567890123456789",
+        "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/feature/safe\", oid: \"O\"}) { clientMutationId } }'",
+        "gh api graphql -f query='query { viewer { login } }'",
+        "gh api graphql -F query=@safe-create.graphql",
+    ] {
+        allowed(line, here);
+    }
+}
+
 fn gh_bin_dir() -> PathBuf {
     let out = Command::new("sh")
         .arg("-c")
