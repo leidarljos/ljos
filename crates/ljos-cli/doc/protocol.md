@@ -514,6 +514,9 @@ travels in the machine's default scope, the same way an unscoped lesson does.
 receipt. `ljos read ID` writes one, kind `receipt`, and the sender sees it
 on a later `ljos inbox`. `ljos reply ID TEXT` writes back to the sender,
 keeps the issue, and carries `reply:ID`, so the thread stays on the work.
+`ljos inbox --sync [COMMIT]` fetches until that commit is present, or
+the remote head when it is not, imports the sealed logs, and then
+lists. With no remote the flag changes nothing.
 
 `ljos group NAME --add SEAT` records a member. `--remove SEAT` records the
 drop. Membership is atoms of kind `group`, so it travels in the same log.
@@ -527,6 +530,8 @@ and does not block the prompt. A shell seat has no hook. It polls
 An idle agent has no next prompt, so a seat can name how to wake it.
 `ljos wake --command CMD` runs `CMD` with `LJOS_SEAT` set to the seat, and `ljos wake --webhook URL --key-file FILE` posts the envelope (never the body) to a URL such as a Grok Bot routine's webhook.
 `ljos send` and `ljos reply` start the recipient's wake after the message is written and do not wait on it.
+When `LJOS_TRACKER_GIT=push`, that wake pushes this machine's sealed log before the command runs or the webhook is posted, so a seat on another machine does not read an empty inbox. The push is in the detached wake, and the send does not wait on it. A push that fails is a line in the wake log; the wake still runs and the send still stands.
+The envelope names the tracker commit that holds that log: a command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is left out when no log commit was made.
 The guard judges a wake command when it is set and on every run, and a `deny` or an `ask` keeps it from running.
 A wake name that ends in `-` matches every longer seat that starts with it. An exact name wins, and the longest prefix wins when several match. Mail to a run whose seat is that prefix plus the run id wakes the launcher, and the envelope still names the run's seat.
 A session still at work needs no wake: its `Stop` hook holds the turn once for unread interrupt mail, so send `--interrupt` when the work cannot wait for the next prompt.
