@@ -30,6 +30,11 @@ const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 /// The rule that refuses a push updating a `cursor/*` ref, read from the
 /// push's argv by [`crate::cloud_guard::cursor_push`].
 const CURSOR_PUSH: &str = "cloud-cursor-push";
+/// The rule that refuses `gh pr create` and its alias `gh pr new`, read
+/// from gh's argv by [`crate::cloud_guard::gh_pr`].
+const GH_PR_CREATE: &str = "cloud-gh-pr-create";
+/// The rule that refuses `gh pr merge`, read the same way.
+const GH_PR_MERGE: &str = "cloud-gh-pr-merge";
 
 /// Install binaries, point the harness at them, and clone the shared tracker.
 ///
@@ -232,15 +237,30 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
         .into_iter()
         .filter(|rule| rule.verdict == "deny");
     for rule in denies {
-        if rule.pattern == CURSOR_PUSH {
-            if let Some(why) = crate::cloud_guard::cursor_push(line, cwd) {
-                return Some(crate::Rule {
-                    reason: format!("{} ({why})", rule.reason),
-                    ..rule
-                });
+        match rule.pattern.as_str() {
+            CURSOR_PUSH => {
+                if let Some(why) = crate::cloud_guard::cursor_push(line, cwd) {
+                    return Some(crate::Rule {
+                        reason: format!("{} ({why})", rule.reason),
+                        ..rule
+                    });
+                }
             }
-        } else if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
-            return Some(hit.clone());
+            GH_PR_CREATE | GH_PR_MERGE => {
+                let verbs: &[&str] = if rule.pattern == GH_PR_CREATE {
+                    &["create", "new"]
+                } else {
+                    &["merge"]
+                };
+                if crate::cloud_guard::gh_pr(line, verbs) {
+                    return Some(rule);
+                }
+            }
+            _ => {
+                if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
+                    return Some(hit.clone());
+                }
+            }
         }
     }
     None
@@ -1190,12 +1210,12 @@ fn cloud_guard_rules() -> Vec<crate::Rule> {
             reason: "cloud seat rule: never push to cursor/* refs from this machine".into(),
         },
         crate::Rule {
-            pattern: "gh* pr create*".into(),
+            pattern: GH_PR_CREATE.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never open pull requests from this machine".into(),
         },
         crate::Rule {
-            pattern: "gh* pr merge*".into(),
+            pattern: GH_PR_MERGE.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never merge pull requests from this machine".into(),
         },
