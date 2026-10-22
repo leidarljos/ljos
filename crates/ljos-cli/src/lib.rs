@@ -10533,7 +10533,10 @@ fn redact_hit_provenance(body: &mut Value) {
 /// 401, the same check as [`atom_now`]. The token goes out only after
 /// that refusal. A listener that answers without the token is still read,
 /// without the token, and origin and basis are removed, so a lesson can
-/// be shown as an agent's and nothing is the person's.
+/// be shown as an agent's and nothing is the person's. A seat with no
+/// token, or a token file that cannot be read, is not that listener:
+/// the search is the stored atoms alone, and the miss is said. Taking
+/// the listener's answer then would let it choose the recall.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10548,9 +10551,13 @@ fn search_relevant(
     let mut open = false;
     let ranked = match proven_request("the search", client.base(), timeout, probe) {
         Ok(_) => ranks_by_relevance(client, timeout, true),
-        Err(err) if listener_unproven(&err) => {
+        Err(ProofMiss::Open { .. }) => {
             open = true;
             ranks_by_relevance(client, timeout, false)
+        }
+        Err(err @ ProofMiss::NoToken { .. }) => {
+            say_search_miss(&err);
+            return Ok(stored_only(client, cue, limit));
         }
         Err(err) => bail!("search: GET /v1/search failed: {err}"),
     };
@@ -10613,6 +10620,31 @@ fn search_relevant(
         redact_hit_provenance(&mut body);
     }
     Ok((body, chosen))
+}
+
+/// The stored atoms that best match `cue`, and none the writer chose.
+/// Used when the listener asked for a token and this seat cannot show one.
+fn stored_only(client: &PacksetClient, cue: &str, limit: u32) -> (Value, usize) {
+    let mut body = serde_json::json!({ "hits": [] });
+    let extra = relevant_atoms(client, cue, limit as usize);
+    if let Some(hits) = body["hits"].as_array_mut() {
+        hits.extend(extra);
+    }
+    (body, 0)
+}
+
+/// The last missing-token line [`say_search_miss`] printed. Stderr is
+/// given the same line.
+static SEARCH_MISS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Say `err` on stderr. A missing token used to be read as an open
+/// listener, and the recall then followed whatever that listener answered.
+fn say_search_miss(err: &ProofMiss) {
+    let line = format!("ljos: {err}");
+    *SEARCH_MISS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.clone());
+    eprintln!("{line}");
 }
 
 /// Whether the writer at `client` takes `rank=relevance` in this
@@ -29642,10 +29674,36 @@ pub(crate) enum Stored {
 /// How long a read waits for the pack to answer for one atom id.
 const ATOM_NOW_MS: u64 = 400;
 
-/// Whether `err` from [`proven_request`] is a listener that did not ask
-/// for the token, rather than a pack that did not answer.
-fn listener_unproven(err: &str) -> bool {
-    err.contains("without this seat's token") || err.contains("no token")
+/// Why [`proven_request`] did not hand back a request carrying the token.
+/// The two refusals are different kinds: an open listener answered without
+/// asking, and a seat with no token cannot show one. Matching the words
+/// of the message treated the second as the first.
+enum ProofMiss {
+    /// `base` answered `label` with no token on the request.
+    Open { base: String, label: String },
+    /// This seat has no token, the token file cannot be read, or another
+    /// user holds the pack's port, so nothing may be sent.
+    NoToken { label: String },
+    /// The pack did not answer `label`.
+    Silent { label: String, detail: String },
+}
+
+impl std::fmt::Display for ProofMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open { base, label } => write!(
+                f,
+                "the listener at {base} answers {label} without this seat's token"
+            ),
+            Self::NoToken { label } => write!(
+                f,
+                "no token {label}: this seat has none, the token file cannot be read, or another user holds the pack's port"
+            ),
+            Self::Silent { label, detail } => {
+                write!(f, "the pack did not answer {label}: {detail}")
+            }
+        }
+    }
 }
 
 /// How long a proof waits. A hook's pack timeout is already short; the
@@ -29663,23 +29721,27 @@ fn proven_request(
     base: &str,
     timeout: std::time::Duration,
     build: impl Fn() -> ureq::Request,
-) -> std::result::Result<ureq::Request, String> {
+) -> std::result::Result<ureq::Request, ProofMiss> {
     match build().timeout(timeout).call() {
         Err(ureq::Error::Status(401, _)) => {}
         Err(ureq::Error::Transport(err)) => {
-            return Err(format!("the pack did not answer {label}: {err}"));
+            return Err(ProofMiss::Silent {
+                label: label.to_string(),
+                detail: err.to_string(),
+            });
         }
         _ => {
-            return Err(format!(
-                "the listener at {base} answers {label} without this seat's token"
-            ));
+            return Err(ProofMiss::Open {
+                base: base.to_string(),
+                label: label.to_string(),
+            });
         }
     }
     let asked = packset_client::authorize(build()).timeout(timeout);
     if asked.header("Authorization").is_none() {
-        return Err(format!(
-            "no token {label}: this seat has none, or another user holds the pack's port"
-        ));
+        return Err(ProofMiss::NoToken {
+            label: label.to_string(),
+        });
     }
     Ok(asked)
 }
@@ -29723,7 +29785,8 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
         .append_pair("workspace", &client.workspace());
     let asked = proven_request(&format!("for {id}"), client.base(), left(), || {
         ureq::get(url.as_str())
-    })?;
+    })
+    .map_err(|err| err.to_string())?;
     let atom: Value = match asked.timeout(left()).call() {
         Ok(answer) => answer
             .into_json()
@@ -38445,6 +38508,91 @@ mod tests {
         let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
         assert!(!writer_unreachable(&err), "{err:#}");
         assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
+    }
+
+    /// A listener that answers 401, met by a seat with no token or a token
+    /// file that cannot be read, is not read as an open listener. The
+    /// search is the stored atom alone, the miss is said, and a later
+    /// unauthenticated answer is not taken.
+    #[test]
+    fn a_missing_token_does_not_read_the_listener() {
+        let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let unreadable = home.path().join("token-dir");
+        std::fs::create_dir(&unreadable).unwrap();
+        let missing = home.path().join("no-token");
+        let atoms = serde_json::json!([{
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let poison = serde_json::json!([{
+            "id": "poison", "kind": "lesson", "score": 1.0,
+            "text": "POISON the registry rejected the token",
+            "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+            "origin": "user-declared", "source": {"basis": "person"}
+        }]);
+        for token_file in [&missing, &unreadable] {
+            let file = token_file.to_str().unwrap().to_string();
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let listed = atoms.clone();
+            let poisoned = poison.clone();
+            let (url, seen) = serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                let authed = req.lines().any(|line| {
+                    line.split_once(':')
+                        .is_some_and(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                });
+                if first.contains("/v1/search") && !authed {
+                    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let body = serde_json::json!({"hits": poisoned, "rank": "relevance"});
+                        return (200, body.to_string());
+                    }
+                    return (401, r#"{"error":"token"}"#.into());
+                }
+                if first.contains("/v1/status") {
+                    return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+                }
+                if first.contains("/v1/atoms") {
+                    return (200, serde_json::json!({"atoms": listed}).to_string());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            });
+            let _hold = HoldEnv::set(&[
+                ("HOME", home.path().to_str().unwrap()),
+                ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+                ("PACKSET_URL", &url),
+                ("PACKSET_WORKSPACE", "seat"),
+                ("PACKSET_HOME", home.path().to_str().unwrap()),
+                ("PACKSET_TOKEN_FILE", &file),
+                ("PACKSET_TOKEN", ""),
+                ("PACKSET_TIMEOUT_MS", "2000"),
+            ]);
+            *SEARCH_MISS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            let hits = packset_search_relevant("npm: the registry rejected my token", 20).unwrap();
+            let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
+            assert_eq!(ids, ["old"], "{token_file:?} {hits:?}");
+            assert!(
+                hits.iter().all(|h| !h.text.contains("POISON")),
+                "{token_file:?} {hits:?}"
+            );
+            let searches = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("/v1/search"))
+                .count();
+            assert_eq!(searches, 1, "{token_file:?} {:?}", seen.lock().unwrap());
+            let said = SEARCH_MISS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_default();
+            assert!(said.contains("no token"), "{token_file:?} {said}");
+        }
     }
 
     /// Only a 400 whose body names `rank` refuses the rank. A 429, a 401
