@@ -621,6 +621,10 @@ fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>
         .stdin(Stdio::null())
         .output()
         .context("age not on PATH; install age")?;
+    age_opened(&out, &path.display().to_string())
+}
+
+fn age_opened(out: &std::process::Output, label: &str) -> Result<Option<String>> {
     let decrypt_miss = {
         let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
         stderr.contains("no identity matched") || stderr.contains("no matching keys found")
@@ -631,8 +635,7 @@ fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>
         Ok(None)
     } else {
         bail!(
-            "age -d {}: {}",
-            path.display(),
+            "age -d {label}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )
     }
@@ -1560,6 +1563,9 @@ enum GoneLog {
     Untracked,
     /// Neither in HEAD nor on disk.
     Absent,
+    /// A symlink, hard link, fifo, or other non-regular git mode. Adopting
+    /// it would read some other file and reseal that plaintext.
+    Refused,
 }
 
 fn in_head(root: &Path, rel: &str) -> bool {
@@ -1567,8 +1573,67 @@ fn in_head(root: &Path, rel: &str) -> bool {
     git(root, &["cat-file", "-e", &spec]).is_ok_and(|out| out.status.success())
 }
 
+/// What the worktree path is, without following a symlink.
+enum WorktreeKind {
+    Missing,
+    /// A regular file with link count 1.
+    Regular,
+    /// Symlink, fifo, directory, hard link, or unreadable.
+    Unsafe,
+}
+
+fn worktree_kind(path: &Path) -> WorktreeKind {
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => WorktreeKind::Missing,
+        Err(_) => WorktreeKind::Unsafe,
+        Ok(meta) => {
+            use std::os::unix::fs::MetadataExt;
+            if meta.file_type().is_file() && meta.nlink() == 1 {
+                WorktreeKind::Regular
+            } else {
+                WorktreeKind::Unsafe
+            }
+        }
+    }
+}
+
+/// Modes git reports for `rel` in the index and in HEAD. Empty when the
+/// path is absent from that place. Anything other than `100644` is refused:
+/// `120000` is a symlink, and following it reads a different file.
+fn git_modes(root: &Path, args: &[&str]) -> Option<Vec<u32>> {
+    let out = git(root, args).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let modes: Vec<u32> = text
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|mode| u32::from_str_radix(mode, 8).ok())
+        .collect();
+    if modes.is_empty() {
+        None
+    } else {
+        Some(modes)
+    }
+}
+
+fn tracked_modes_are_regular(root: &Path, rel: &str) -> bool {
+    let regular = |modes: &Option<Vec<u32>>| {
+        modes
+            .as_ref()
+            .is_none_or(|modes| modes.iter().all(|mode| *mode == 0o100644))
+    };
+    regular(&git_modes(root, &["ls-files", "--stage", "--", rel]))
+        && regular(&git_modes(root, &["ls-tree", "HEAD", "--", rel]))
+}
+
 fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
-    let on_disk = root.join(rel).is_file();
+    let kind = worktree_kind(&root.join(rel));
+    if matches!(kind, WorktreeKind::Unsafe) || !tracked_modes_are_regular(root, rel) {
+        return GoneLog::Refused;
+    }
+    let on_disk = matches!(kind, WorktreeKind::Regular);
     let tracked = in_head(root, rel);
     if tracked && !on_disk {
         return GoneLog::Resume;
@@ -1644,40 +1709,77 @@ fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-/// Decrypt `bytes` with `identities`. The bytes are a sealed log, which
-/// `age` reads from a path, so they go to a temporary file that is removed
-/// before this returns.
-/// A sealed blob `age` will only read from a path. Removed when dropped,
-/// including when decrypt fails.
-struct SealedTemp(PathBuf);
-
-impl Drop for SealedTemp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+/// Decrypt `bytes` with `identities`. The ciphertext is written to `age`
+/// on stdin. A path under the system temp directory would be predictable
+/// and, when the log was a symlink, would hold the followed file.
+fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<String>> {
+    if identities.is_empty() {
+        return Ok(None);
     }
+    let mut cmd = age_cmd();
+    cmd.arg("-d");
+    for identity in identities {
+        cmd.arg("-i").arg(identity);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("age not on PATH; install age")?;
+    use std::io::Write;
+    let wrote = child
+        .stdin
+        .take()
+        .context("age: no stdin")?
+        .write_all(bytes);
+    let out = child.wait_with_output().context("age -d")?;
+    if wrote.is_err() && out.status.success() {
+        wrote?;
+    }
+    age_opened(&out, "sealed log")
 }
 
-fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<String>> {
-    static TEMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "ljos-adopt-{}-{}.age",
-        std::process::id(),
-        TEMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp, bytes)?;
-    let _remove = SealedTemp(tmp.clone());
-    open_identities(&tmp, identities)
+/// Read a regular file without following a symlink at the last component.
+fn read_regular_nofollow(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("sync: {}", path.display()))?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 {
+        bail!("sync: {} is not a regular file", path.display());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option<String>> {
-    let bytes = if root.join(rel).is_file() {
-        std::fs::read(root.join(rel))?
-    } else if in_head(root, rel) {
-        head_blob(root, rel)?
-    } else {
-        return Ok(None);
-    };
-    open_sealed_bytes(&bytes, identities)
+    if !tracked_modes_are_regular(root, rel) {
+        bail!("sync: {rel} is not a regular file; the log was kept");
+    }
+    let path = root.join(rel);
+    match worktree_kind(&path) {
+        WorktreeKind::Unsafe => {
+            bail!("sync: {rel} is not a regular file; the log was kept");
+        }
+        WorktreeKind::Regular => {
+            let bytes = read_regular_nofollow(&path)?;
+            open_sealed_bytes(&bytes, identities)
+        }
+        WorktreeKind::Missing => {
+            if in_head(root, rel) {
+                let bytes = head_blob(root, rel)?;
+                open_sealed_bytes(&bytes, identities)
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 /// Memories in `before` (the keys [`read_taken`] returned) that `plain` no
@@ -2041,12 +2143,21 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
                 "sync: {gone}'s {} log differs from the committed file; it was left in place",
                 log.scope_name
             ),
+            GoneLog::Refused => bail!(
+                "sync: {gone}'s {} log is not a regular file; it was left in place",
+                log.scope_name
+            ),
             GoneLog::Clean | GoneLog::Resume => {
-                if matches!(gone_log_state(root, &log.digest), GoneLog::Dirty) {
-                    bail!(
+                match gone_log_state(root, &log.digest) {
+                    GoneLog::Dirty => bail!(
                         "sync: {gone}'s {} digest differs from the committed file; the log was left in place",
                         log.scope_name
-                    );
+                    ),
+                    GoneLog::Refused => bail!(
+                        "sync: {gone}'s {} digest is not a regular file; the log was left in place",
+                        log.scope_name
+                    ),
+                    _ => {}
                 }
                 present.push(log);
             }
