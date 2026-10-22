@@ -12142,8 +12142,7 @@ pub fn mcp_claim_atom(
 /// words from their latest prompt.
 ///
 /// A claim read in a file, a tool's output or a web page is not the
-/// person's words and is refused here; the caller should record it with
-/// `ljos_note` as the agent's own working note.
+/// person's words and is refused here.
 ///
 /// # Errors
 ///
@@ -12158,7 +12157,7 @@ pub fn packset_write_mcp(
     let _ = atom_kind(label)?;
     if basis == Basis::Agent {
         bail!(
-            "{label}: the text is not in the person's latest prompt; call ljos_note for your own working note"
+            "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
         );
     }
     let client = pack()?;
@@ -44487,10 +44486,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         packset_write_mcp("Remember", person, None, None).unwrap();
         let read_err = packset_write_mcp("Remember", read, None, Some(false)).unwrap_err();
         let read_top = format!("{read_err:#}");
-        assert!(read_top.contains("call ljos_note"), "{read_top}");
+        assert!(
+            read_top.contains("only the person's own words can be stored here"),
+            "{read_top}"
+        );
         let rule_err = packset_write_mcp("Prefer", rule, None, Some(false)).unwrap_err();
         let rule_top = format!("{rule_err:#}");
-        assert!(rule_top.contains("call ljos_note"), "{rule_top}");
+        assert!(
+            rule_top.contains("only the person's own words can be stored here"),
+            "{rule_top}"
+        );
         let live = stored.lock().unwrap().clone();
         assert_eq!(live.len(), 1, "{live:?}");
         let tags = live[0]["entities"].to_string();
