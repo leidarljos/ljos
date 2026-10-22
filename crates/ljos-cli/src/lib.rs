@@ -18924,22 +18924,20 @@ fn cite_ballots(
     Ok((ballots, cite_roster(cite)?))
 }
 
-/// The persona names a push cite leaves out: the pack's roster. A seat
-/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+/// The persona names a push cite leaves out: the pack's roster. An empty
+/// roster is an answer from the pack. `PACKSET_URL=off` is not an answer.
 ///
 /// # Errors
 ///
-/// The pack is on and its roster does not answer: a persona's ballot
-/// cannot be told from a seat's, so no cite stands until it does.
+/// The roster cannot be read, including when the pack is off. A persona's
+/// ballot cannot be told from a seat's, so no cite stands until the pack
+/// answers.
 pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
     match personas_from_pack() {
         Ok(personas) => Ok(personas
             .into_iter()
             .map(|p| p.name.trim().to_string())
             .collect()),
-        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
-            Ok(std::collections::BTreeSet::new())
-        }
         Err(e) => Err(format!(
             "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
         )),
