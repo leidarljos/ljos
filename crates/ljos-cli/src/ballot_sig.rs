@@ -913,6 +913,61 @@ pub fn harness_session() -> String {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+static RUNNER_SESSIONS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Stand in for the runner a unit test runs without, until the value
+/// returned is dropped.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn fake_runner_sessions(ids: &[&str]) -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            *RUNNER_SESSIONS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+    *RUNNER_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(ids.iter().map(|s| (*s).to_string()).collect());
+    Reset
+}
+
+/// The sessions the runner above this process gave the process it
+/// started, read from that process's environment and never from this
+/// one's: `LJOS_HARNESS_SESSION=forged ljos ...` sets ours, not that.
+/// Every id there is the runner's, so a bind may name any of them. An
+/// MCP server the runner started with none of them is its connection.
+/// Empty when no runner is above this process.
+#[must_use]
+pub fn runner_sessions() -> Vec<String> {
+    #[cfg(test)]
+    if let Some(ids) = RUNNER_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return ids;
+    }
+    let Some(started) = crate::proc_tree::started_by_runner() else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = crate::proc_tree::environ(started)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(k, v)| k == "LJOS_HARNESS_SESSION" || crate::runner_session_var(k, v))
+        .map(|(_, v)| field(v.trim()))
+        .filter(|v| !v.is_empty() && v != "-")
+        .collect();
+    if ids.is_empty() {
+        ids.extend(connection_session());
+    }
+    ids
+}
+
 /// The run this process belongs to, when no conversation id was stamped:
 /// a GitHub Actions run, else a cloud agent. Every process of one run is
 /// one session, as `ljos cloud up` gives the run one seat.
