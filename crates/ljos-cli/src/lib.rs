@@ -13563,7 +13563,7 @@ pub(crate) fn queue_memory(
 }
 
 /// Queue the memory copy of a note the pack did not take, for the next
-/// note, finish, doctor or session start to send. `false` when it was
+/// note, finish or session start to send. `false` when it was
 /// already queued, or when the pack would refuse the text.
 ///
 /// # Errors
@@ -13659,31 +13659,32 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
     with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
-/// The doctor row for the note queue. It sends what waits first, so a
-/// doctor run after the pack comes back empties the queue.
+/// The doctor row for the note queue: how many memory copies wait for the
+/// pack. It only reads the queue, without its lock: sending would rewrite
+/// the queue, and wait on a lock another ljos may hold. The next note or
+/// finish that reaches the pack, or a session start, sends them.
 fn note_queue_row() -> Habitat {
     let queue = note_queue::state_dir().join("note-queue.jsonl");
-    if let Err(state) = doctor_state_log("note queue", &queue) {
-        return Habitat {
-            name: "note queue",
-            ok: false,
-            state,
-        };
-    }
-    let (ok, state) = match flush_note_queue() {
-        Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
-        Ok(done) => (
-            done.left == 0,
-            note_queue::drained_lines(&done)
-                .trim_end()
-                .replace('\n', "; "),
+    let bytes = match doctor_state_log("note queue", &queue) {
+        Ok(bytes) => bytes,
+        Err(state) => {
+            return Habitat {
+                name: "note queue",
+                ok: false,
+                state,
+            }
+        }
+    };
+    let state = match complete_rows::<note_queue::Queued>(&bytes).len() {
+        0 => "empty".to_string(),
+        waiting => format!(
+            "{waiting} note(s) wait for the pack; the next `ljos note` or `ljos finish` that reaches it, or a session start, sends them"
         ),
-        Err(e) => (false, format!("could not read or rewrite the queue: {e:#}")),
     };
     Habitat {
         name: "note queue",
         state,
-        ok,
+        ok: true,
     }
 }
 

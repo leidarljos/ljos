@@ -4,8 +4,9 @@
 //! `ljos note` writes the logbook line first, then a `note` atom to the
 //! pack. When the pack is off, not answering, or answers 401, the fitted
 //! copy waits here, one JSON line per copy, and the next note that reaches
-//! the pack, `ljos finish`, `ljos doctor`, or the next session start sends
-//! it. A refusal is not queued: the pack would refuse it again. A line left
+//! the pack, `ljos finish`, or the next session start sends it. `ljos
+//! doctor` only counts it. A refusal is not queued: the pack would refuse
+//! it again. A line left
 //! from before that rule is cut to what the pack takes, or dropped, on the
 //! next send. The queue holds one entry per issue, text, workspace, kind
 //! and, for a lesson, the atoms it closes. packsetd answers an identical
