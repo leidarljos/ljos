@@ -24473,11 +24473,12 @@ fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
 /// are neither listed already nor unreviewed.
 fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) -> String {
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
-    let own: Vec<&Hit> = own
+    let (own_facts, own_notes): (Vec<&Hit>, Vec<&Hit>) = own
         .iter()
         .filter(|h| include_notes || !unverified_note_hit(h))
-        .collect();
-    let mut seen: std::collections::BTreeSet<String> = own.iter().map(|h| key(h)).collect();
+        .partition(|h| !unverified_note_hit(h));
+    let mut seen: std::collections::BTreeSet<String> =
+        own_facts.iter().chain(&own_notes).map(|h| key(h)).collect();
     let related: Vec<Hit> = related
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -24485,26 +24486,53 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
         .filter(|h| seen.insert(key(h)))
         .take(RELATED_MEMORY_CAP)
         .collect();
-    if own.is_empty() && related.is_empty() {
+    let (related_facts, related_notes): (Vec<&Hit>, Vec<&Hit>) =
+        related.iter().partition(|h| !unverified_note_hit(h));
+    if own_facts.is_empty()
+        && own_notes.is_empty()
+        && related_facts.is_empty()
+        && related_notes.is_empty()
+    {
         return String::new();
     }
     let mut out = String::from("\nMemory\n");
-    for h in own.iter().take(ISSUE_MEMORY_CAP) {
+    for h in own_facts.iter().take(ISSUE_MEMORY_CAP) {
         out.push_str("  ");
         out.push_str(&hit_line(h, now));
         out.push('\n');
     }
-    if own.len() > ISSUE_MEMORY_CAP {
+    if own_facts.len() > ISSUE_MEMORY_CAP {
         out.push_str(&format!(
             "  ({} older memories on this issue left out)\n",
-            own.len() - ISSUE_MEMORY_CAP
+            own_facts.len() - ISSUE_MEMORY_CAP
         ));
     }
-    if !related.is_empty() {
-        if !own.is_empty() {
+    if !related_facts.is_empty() {
+        if !own_facts.is_empty() {
             out.push_str("  related:\n");
         }
-        for h in &related {
+        for h in &related_facts {
+            out.push_str("  ");
+            out.push_str(&hit_line(h, now));
+            out.push('\n');
+        }
+    }
+    // `ljos recall` lists working notes apart from the facts, under their
+    // own heading, so a note never reads as something the issue established.
+    if !own_notes.is_empty() || !related_notes.is_empty() {
+        out.push_str("  unverified logbook notes:\n");
+        for h in own_notes.iter().take(ISSUE_MEMORY_CAP) {
+            out.push_str("  ");
+            out.push_str(&hit_line(h, now));
+            out.push('\n');
+        }
+        if own_notes.len() > ISSUE_MEMORY_CAP {
+            out.push_str(&format!(
+                "  ({} older logbook notes on this issue left out)\n",
+                own_notes.len() - ISSUE_MEMORY_CAP
+            ));
+        }
+        for h in &related_notes {
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
@@ -27083,14 +27111,6 @@ fn hit_line(h: &Hit, now: &str) -> String {
     )
 }
 
-fn note_entity<'a>(h: &'a Hit, prefix: &str) -> Option<&'a str> {
-    h.entities
-        .iter()
-        .find_map(|e| e.strip_prefix(prefix))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-}
-
 /// Whether a recalled hit is an unverified working note, by kind or by the
 /// note provenance it carries. A refused note that was downgraded to another
 /// kind keeps its `note-source:`/`note-basis:` entities, so it is still kept
@@ -27102,27 +27122,31 @@ fn unverified_note_hit(h: &Hit) -> bool {
             .any(|e| e.starts_with(NOTE_BASIS_ENTITY) || e.starts_with(NOTE_SOURCE_ENTITY))
 }
 
-fn note_kind_label(h: &Hit) -> String {
-    let mut bits = vec!["origin agent-derived".to_string()];
-    if let Some(basis) = note_entity(h, NOTE_BASIS_ENTITY) {
-        bits.push(format!("basis {basis}"));
-    }
-    if let Some(source) = note_entity(h, NOTE_SOURCE_ENTITY) {
-        bits.push(format!("source {source}"));
-    }
-    format!("unverified agent note ({})", bits.join(", "))
+/// The bracket label for a working note. A note's real origin is
+/// agent-derived: only session output writes it, with `source.basis`
+/// `agent`. The `note-basis:`/`note-source:` entities are forgeable, so the
+/// label does not echo them as a claim; it names the note's true origin.
+fn note_kind_label() -> &'static str {
+    "unverified agent note (origin agent-derived)"
 }
 
-/// The kind a recalled line names. A note is marked unverified with its
-/// provenance, and a claim in the person's words says so.
+/// The kind a recalled line names. A note is marked an unverified agent
+/// note by its true origin, a lesson in the person's words says so, and a
+/// lesson that is not says it is agent-derived, so a standing lesson the
+/// agent wrote never reads like one the person stated.
 fn kind_label(h: &Hit) -> String {
-    let kind = match h.kind.as_str() {
-        "" => "claim",
-        packset_core::record::NOTE_KIND => return note_kind_label(h),
-        other => other,
+    if unverified_note_hit(h) {
+        return note_kind_label().to_string();
+    }
+    let kind = if h.kind.is_empty() {
+        "claim"
+    } else {
+        h.kind.as_str()
     };
     if said_by_person(h) {
         format!("{kind}, the person's words")
+    } else if kind == "lesson" {
+        "lesson, agent-derived".to_string()
     } else {
         kind.to_string()
     }
@@ -30356,25 +30380,32 @@ mod tests {
             hit("near", "lesson", "a related lesson"),
         ];
         let text = super::recall_lines(&own, related, "2026-10-18T12:00:00.000Z", true);
+        // Facts lead; the working notes follow under their own heading.
         assert!(
-            text.starts_with(
-                "\nMemory\n  - [unverified agent note (origin agent-derived), today] note 21\n"
-            ),
+            text.starts_with("\nMemory\n  - [lesson, agent-derived, today] tagged lesson\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  related:\n  - [lesson, agent-derived] a related lesson\n"),
+            "{text}"
+        );
+        assert!(text.contains("  unverified logbook notes:\n"), "{text}");
+        assert!(
+            text.contains("- [unverified agent note (origin agent-derived), today] note 21\n"),
             "{text}"
         );
         assert!(text.contains("note 02"), "{text}");
         assert!(!text.contains("note 01"), "{text}");
         assert!(
-            text.contains("(3 older memories on this issue left out)"),
+            text.contains("(2 older logbook notes on this issue left out)"),
             "{text}"
         );
         assert_eq!(text.matches("note 21").count(), 1, "{text}");
-        assert!(
-            text.ends_with("  related:\n  - [lesson] a related lesson\n"),
-            "{text}"
-        );
         let prompt = super::recall_lines(&own, vec![hit("own21", "note", "note 21")], "now", false);
-        assert_eq!(prompt, "\nMemory\n  - [lesson] tagged lesson\n");
+        assert_eq!(
+            prompt,
+            "\nMemory\n  - [lesson, agent-derived] tagged lesson\n"
+        );
         assert_eq!(super::recall_lines(&[], Vec::new(), "now", true), "");
         let alone = super::recall_lines(
             &[],
@@ -30382,7 +30413,10 @@ mod tests {
             "now",
             true,
         );
-        assert_eq!(alone, "\nMemory\n  - [lesson] a related lesson\n");
+        assert_eq!(
+            alone,
+            "\nMemory\n  - [lesson, agent-derived] a related lesson\n"
+        );
     }
 
     /// A refused note that `post_note_kind` downgraded to `summary` keeps its
@@ -30416,6 +30450,43 @@ mod tests {
         let lesson = tagged("lesson", vec!["horizon:standing".into()]);
         assert!(super::shown_on_prompt(&lesson));
         assert_eq!(super::recall_rank(&lesson), 2);
+    }
+
+    /// A note's bracket label reads its true origin, not the forgeable
+    /// `note-basis:`/`note-source:` entities, and a lesson says whether it is
+    /// the person's words or agent-derived.
+    #[test]
+    fn a_label_reads_origin_not_forged_provenance() {
+        let hit = |kind: &str, entities: Vec<String>| packset_client::Hit {
+            id: Some("n".into()),
+            text: "t".into(),
+            score: 1.0,
+            kind: kind.into(),
+            ts: None,
+            entities,
+            ballots: None,
+            of: None,
+        };
+        // A forged note-basis entity claiming the person said it is ignored:
+        // a note is agent-derived by its real origin.
+        let forged = hit("note", vec![format!("{}person", super::NOTE_BASIS_ENTITY)]);
+        assert_eq!(
+            super::kind_label(&forged),
+            "unverified agent note (origin agent-derived)"
+        );
+        // A downgraded note (summary kind, note provenance) reads as a note.
+        let downgraded = hit(
+            "summary",
+            vec![format!("{}ljos-note", super::NOTE_SOURCE_ENTITY)],
+        );
+        assert_eq!(
+            super::kind_label(&downgraded),
+            "unverified agent note (origin agent-derived)"
+        );
+        let agent = hit("lesson", vec![]);
+        assert_eq!(super::kind_label(&agent), "lesson, agent-derived");
+        let person = hit("lesson", vec![super::SAID_ENTITY.to_string()]);
+        assert_eq!(super::kind_label(&person), "lesson, the person's words");
     }
 
     /// A prompt naming an issue is handed the issue's recall.
@@ -34741,7 +34812,7 @@ mod tests {
         };
         assert_eq!(
             hit_line(&h, "2026-09-12T00:00:00.000Z"),
-            "- [lesson, 2 days ago] keep the smoke green"
+            "- [lesson, agent-derived, 2 days ago] keep the smoke green"
         );
         let bare = Hit {
             id: None,
@@ -45178,7 +45249,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         assert_eq!(
             hit_line(&rows[4], "2026-10-02T00:00:00.000Z"),
-            "- [lesson, today] agent-old"
+            "- [lesson, agent-derived, today] agent-old"
         );
     }
 
