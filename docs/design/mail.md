@@ -60,7 +60,9 @@ stays on the machine that holds it.
   show: `display:none`, `visibility:hidden` and the `hidden` attribute drop
   their text, and the message is flagged when they did. Links are shown as
   text with their target, never followed. Attachments are listed by name,
-  type, size and sha256, with no content and no path.
+  type, size and sha256, with no content and no path. Hashing reads at
+  most 64 MiB of one attachment; past that notmuch is stopped, `sha256`
+  is null and `size` is a lower bound.
 
 Every notmuch run has a 30 s deadline. At the deadline notmuch and its
 process group are killed and the tool refuses, so a hung database or a
