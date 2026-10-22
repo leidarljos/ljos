@@ -1,2 +1,2 @@
-MCP `remember` and `prefer` now refuse text that is not in the person's latest prompt and tell the agent to use `ljos_note` for its own findings.
-The MCP tool descriptions now match that behavior, so non-person claims are no longer described as memory writes.
+MCP `remember` and `prefer` refuse a claim that is not in the person's latest prompt and point the agent to `ljos_note` for its own findings.
+Recall, session start and a persona brief now keep those notes out of the prompt fact block, and `ljos recall` lists them apart from the facts, so an agent's own note no longer returns as a fact.
