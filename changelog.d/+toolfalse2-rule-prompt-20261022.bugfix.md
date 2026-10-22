@@ -1,0 +1,1 @@
+A rule written through MCP `ljos_rule`, or by `ljos rule` and `ljos prefer --deny`/`--ask` anywhere but a terminal the person is at, is always stored with basis `agent`. Before, a reason clause found in the person's latest prompt raised the whole rule, pattern and verdict included, to the person's, and the kept prompt it was read from is a file the agent's login can rewrite.
