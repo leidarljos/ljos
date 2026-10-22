@@ -330,7 +330,12 @@ and that only when the group bears the person's name and holds no one
 else. A store entry counts only when Nix alone keeps it: a root-owned
 store the person cannot write, sticky if its group may, holding a
 root-owned entry, or on a single-user install a store the person owns
-and no one else may write. Each directory is opened beneath the one
+and no one else may write. The home roots and a single-user store are
+trusted because the person owns them, and that is the limit of this
+check: a tool call runs with the person's uid and can write them too,
+so it can replace an installed runner there. The check keeps out other
+users and copies placed anywhere else, not the person's own account.
+Each directory is opened beneath the one
 before without following a link, and the file opened must be the one
 the process runs, so a directory swapped after the path was resolved
 is not walked through. A runtime named exactly =node=, =nodejs=,
