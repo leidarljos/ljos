@@ -44,8 +44,8 @@ so git needs an identity (``git config --global user.email``).
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    $ ljos prefer "CombMNZ over RRF for fusing two ballots."
    $ ljos search "which fusion"
-   2.0000  1/3 lesson  ... today   The lexical default is BM25+. It beat BM25 by two points on turns.
-   1.0000  1/3 preference  ... today   CombMNZ over RRF for fusing two ballots.
+   2.0000  1/3 lesson  1fe4b916d956798196df680ade594ac5    today   The lexical default is BM25+. It beat BM25 by two points on turns.
+   1.0000  1/3 preference  85dde12b553372dafb3d50e3b4b63fec    today   CombMNZ over RRF for fusing two ballots.
 
 A claim is two sentences at most, stored as written. The pack never mines a
 transcript. A lesson you type takes effect at once, like the preference, so the

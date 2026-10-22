@@ -389,7 +389,7 @@ ljos panel vissue-xxxx --jev                   # with Jev on: cast when every se
 ljos learn vissue-xxxx --outcome ship
 ljos due
 ljos hud                                       # execs sibling ljos-hud (overlay; P pops out)
-ljos habit mab-cr-all 0.579 --unit acc --every 7d --source 11793   # a reading; the one before closes and is kept as what it was
+ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001   # an example reading; the one before closes and is kept as what it was
 ljos habit                                     # every habit as it stands, the change since the last reading, when the next is due
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
@@ -418,13 +418,13 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 ## MCP
 
 `ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which runs
-the `ljos-mcp` installed beside it. By default it lists twenty core tools,
+the `ljos-mcp` installed beside it. By default it lists twenty-one core tools,
 guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
-`search`, `start`, `guard_check`, `file`, `note`, `recall`, `sitting`,
+`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
-Every listed tool costs its description and schema on every session: 7,702
-tokens for the core set against 16,298 for all forty-nine (o200k_base
+Every listed tool costs its description and schema on every session: 8,081
+tokens for the core set against 16,677 for all fifty (o200k_base
 count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads
@@ -483,7 +483,8 @@ The ballot gets recorded as `judge:<model>`, not as the persona.
 `ljos due --judge` names a claim the judges find still true; `ljos graded`
 marks it recalled. `ljos judge-score` reads the judge log against outcomes.
 The local answer stays as the fallback, and a machine without the file runs
-as before. A prompt costs about $0.00004, and `ljos doctor` prints the
+as before. A prompt costs about $0.00004, the arithmetic of about 900
+input tokens at $0.042 per million with output free, and `ljos doctor` prints the
 month's spend. A chat backend has to name `usd_per_mtok_in`. The section on
 judgment in the explanation says how Jev fits with what the seat already
 does; the how-to has the setup.
