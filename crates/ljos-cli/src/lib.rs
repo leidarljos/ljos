@@ -20692,6 +20692,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
     });
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
+    // Scope cloud is readable here when cloud up wrote its age identity.
+    // The key is not in the tracker.
+    out.push(cloud::cloud_age_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
     wake_writer();
@@ -21399,7 +21402,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                 && (REQUIRED.contains(&h.name)
                     || h.name == "pack"
                     || h.name == "pack token"
-                    || h.name == "mcp")
+                    || h.name == "mcp"
+                    || h.name == "cloud age")
         })
         .map(|h| h.name)
         .collect()
@@ -21469,6 +21473,9 @@ fn optional_bin(name: &str) -> bool {
 /// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
+    if cloud::cloud_age_is_unset(row.name, &row.state) {
+        return "info";
+    }
     if row.name == "tracker" && names_unpushed(&row.state) {
         return "warn";
     }
