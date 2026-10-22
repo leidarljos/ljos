@@ -36,6 +36,9 @@ pub const WAKE_TIMEOUT_SECS: u64 = 30;
 /// How long a webhook post may take, in seconds.
 const WEBHOOK_TIMEOUT_SECS: u64 = 10;
 
+/// `source` on a wake `ljos cloud up` wrote from `LJOS_WAKE_<SEAT>_URL`.
+pub(crate) const ENV_SOURCE: &str = "env";
+
 /// One seat's wake: a command or a webhook.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Wake {
@@ -55,6 +58,10 @@ pub struct Wake {
     /// Seconds before a command is stopped. Absent: [`WAKE_TIMEOUT_SECS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Who wrote this entry. [`ENV_SOURCE`] is `ljos cloud up`. Absent means
+    /// a person set it, and a later `cloud up` leaves it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// The message a wake is about.
@@ -114,14 +121,35 @@ fn refusal(command: &str, rule: &super::Rule) -> String {
     )
 }
 
+/// `https`, or `http` whose host is exactly `localhost`, an IPv4 loopback
+/// address, or `::1`. The host is parsed, so a name that only begins with
+/// one of those (such as `localhost.attacker.invalid`) is not loopback.
 pub(crate) fn check_webhook(url: &str) -> Result<()> {
-    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-        .iter()
-        .any(|p| url.starts_with(p));
-    if !url.starts_with("https://") && !loopback {
+    if !webhook_host_allowed(url) {
         bail!("wake: {url} is not https, nor http on this machine");
     }
     Ok(())
+}
+
+fn webhook_host_allowed(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host().is_some(),
+        "http" => http_host_is_loopback(parsed.host()),
+        _ => false,
+    }
+}
+
+fn http_host_is_loopback(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        // `Ipv6Addr::is_loopback` is `::1` only, not an IPv4-mapped address.
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        None => false,
+    }
 }
 
 /// Set a seat's wake command, after the guard passes it.
@@ -154,7 +182,8 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
 ///
 /// # Errors
 ///
-/// The URL is not https or loopback, or `wake.toml` cannot be written.
+/// The URL is not https, and not http on localhost or a loopback
+/// address, or `wake.toml` cannot be written.
 pub fn set_webhook(
     seat: &str,
     url: &str,
@@ -175,6 +204,32 @@ pub fn set_webhook(
     );
     save(&table)?;
     Ok(format!("wake {seat}: posts to {url} {}\n", reaches(seat)))
+}
+
+/// Write the webhook `ljos cloud up` owns for `seat`.
+///
+/// A later run may replace it. [`set_webhook`] leaves `source` empty, so
+/// a wake set by hand is not this one.
+///
+/// # Errors
+///
+/// The URL is not https, and not http on localhost or a loopback
+/// address, or `wake.toml` cannot be written.
+pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<()> {
+    let url = url.trim();
+    check_webhook(url)?;
+    let mut table = load();
+    table.insert(
+        seat.to_string(),
+        Wake {
+            webhook: Some(url.to_string()),
+            key_env: Some(key_env.to_string()),
+            source: Some(ENV_SOURCE.to_string()),
+            ..Wake::default()
+        },
+    );
+    save(&table)?;
+    Ok(())
 }
 
 /// Remove a seat's wake.
@@ -566,6 +621,37 @@ mod tests {
         assert!(check_webhook("http://example.com/hook").is_err());
         assert!(check_webhook("https://api2.cursor.sh/automations/webhook/x").is_ok());
         assert!(check_webhook("http://127.0.0.1:9/hook").is_ok());
+    }
+
+    #[test]
+    fn http_is_loopback_only_and_an_attacker_suffix_is_refused() {
+        for url in [
+            "http://localhost.attacker.invalid/hook",
+            "http://127.0.0.1.attacker.invalid/hook",
+            "http://localhost@attacker.invalid/hook",
+            "http://127.0.0.1@attacker.invalid/hook",
+            "http://example.com/hook",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0/hook",
+            "http://[::2]/hook",
+        ] {
+            assert!(check_webhook(url).is_err(), "{url}");
+        }
+        for url in [
+            "https://api2.cursor.sh/automations/webhook/x",
+            "https://localhost.attacker.invalid/hook",
+            "http://127.0.0.1:9/hook",
+            "http://127.0.0.2/hook",
+            "http://2130706433/hook",
+            "http://localhost/hook",
+            "http://localhost:9/hook",
+            "http://[::1]/hook",
+            "http://[::1]:9/hook",
+            "http://[0:0:0:0:0:0:0:1]/hook",
+            "http://user:secret@127.0.0.1/hook",
+        ] {
+            assert!(check_webhook(url).is_ok(), "{url}");
+        }
     }
 
     #[test]
