@@ -8609,6 +8609,54 @@ mod tests {
         assert_eq!(taken.lines().count(), 3, "{taken}");
     }
 
+    /// A peer commits this host's log as a symlink to a file outside the
+    /// tracker. Export finds its digest current and writes nothing, and the
+    /// merge driver read the link and handed its target to git as the
+    /// merge result.
+    #[test]
+    fn the_merge_driver_does_not_copy_a_symlinked_log_into_the_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        fix.pull();
+        let client = crate::pack().unwrap();
+        crate::admit::post_kept(
+            &client,
+            &serde_json::json!({
+                "kind": "lesson",
+                "level": "explicit",
+                "text": "This host's own note.",
+                "workspace": client.workspace(),
+                "entities": ["scope:grokbot"],
+            }),
+        )
+        .unwrap();
+        let atoms = crate::atoms_lean(&client, &client.workspace()).unwrap();
+        let scope = fix.scope();
+        export_named(&fix.root, &scope, "grokbot", &atoms).unwrap();
+        let [rel, digest] = host_log_rels(&host());
+        git_ok(&fix.root, &["add", &rel, &digest]);
+        git_ok(&fix.root, &["commit", "-q", "-m", "this host's log"]);
+        git_ok(&fix.root, &["push", "-q"]);
+        let canary = fix.dir.join("canary");
+        std::fs::write(&canary, "CANARY outside the tracker\n").unwrap();
+        git_ok(&fix.peer, &["pull", "-q", "--ff-only"]);
+        std::fs::remove_file(fix.peer.join(&rel)).unwrap();
+        std::os::unix::fs::symlink(&canary, fix.peer.join(&rel)).unwrap();
+        fix.push(&[]);
+        fix.pull();
+        assert!(std::fs::symlink_metadata(fix.root.join(&rel))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let current = fix.root.join(".merge_file_ours");
+        std::fs::write(&current, "ours\n").unwrap();
+        let driven = crate::tracker_push::merge_atoms_driver(&current, &rel);
+        let merged = std::fs::read_to_string(&current).unwrap();
+        assert!(!merged.contains("CANARY"), "{driven:?}: {merged}");
+        let err = driven.unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
     /// Headed logs still import through a symlinked `$HOME`, a checkout
     /// reached through a symlinked parent, and a git worktree.
     #[test]
