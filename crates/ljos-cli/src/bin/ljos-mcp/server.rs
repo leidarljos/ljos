@@ -3341,9 +3341,9 @@ async fn acquire_call_order(order: Order, id: &RequestId) -> OrderPermit {
     }
 }
 
-/// One JSON-RPC line from the client. A tool call that reads or writes the
-/// seat's notes joins the queue here, on the task that reads stdin, before
-/// rmcp spawns the call.
+/// One JSON-RPC line from the client. Every tool call counts as in flight
+/// from here, and one that reads or writes the seat's notes joins the
+/// queue, on the task that reads stdin, before rmcp spawns the call.
 fn register_inbound_line(line: &[u8]) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
@@ -3358,10 +3358,6 @@ fn register_inbound_line(line: &[u8]) {
     else {
         return;
     };
-    let order = call_order(name);
-    if order == Order::Free {
-        return;
-    }
     let Some(id) = value
         .get("id")
         .cloned()
@@ -3369,7 +3365,11 @@ fn register_inbound_line(line: &[u8]) {
     else {
         return;
     };
-    ensure_queued(&id, order);
+    crate::lifetime::call_read(&id);
+    let order = call_order(name);
+    if order != Order::Free {
+        ensure_queued(&id, order);
+    }
 }
 
 /// Stdin, with ordered tool calls queued as each line arrives. Its end
@@ -3521,7 +3521,7 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
-        let _in_flight = crate::lifetime::call_in_flight();
+        let _in_flight = crate::lifetime::call_in_flight(&context.id);
         // Queued when the line was read. This waits for the ordered calls
         // ahead of it and holds the place until the answer is built. A free
         // tool, the guard and approval included, waits for nothing.
@@ -4197,6 +4197,45 @@ mod tests {
             );
         });
         clear_call_queue();
+    }
+
+    /// The client writes a search and closes stdin at once. rmcp has the
+    /// line but its handler has not run yet; the end of input still waits
+    /// for the answer.
+    #[test]
+    fn the_end_of_input_waits_for_a_call_whose_handler_has_not_started() {
+        use tokio::io::AsyncRead as _;
+
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        clear_call_queue();
+        crate::lifetime::forget_calls();
+        let line = tool_line(21, "ljos_search");
+        let mut inbound = InboundOrder::new(line.as_bytes());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut storage = [0u8; 256];
+            let mut read = || {
+                let mut buf = tokio::io::ReadBuf::new(&mut storage);
+                let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::pin::Pin::new(&mut inbound).poll_read(&mut cx, &mut buf) {
+                    std::task::Poll::Ready(read) => Some(read.map(|()| buf.filled().len())),
+                    std::task::Poll::Pending => None,
+                }
+            };
+            assert_eq!(read().expect("the line").expect("read"), line.len());
+            assert!(read().is_none(), "the end reached rmcp before the call ran");
+            let call = crate::lifetime::call_in_flight(&RequestId::Number(21));
+            assert!(read().is_none(), "the end reached rmcp during the call");
+            drop(call);
+            assert_eq!(read().expect("the end").expect("read"), 0);
+        });
+        clear_call_queue();
+        crate::lifetime::forget_calls();
     }
 
     /// A tool that runs with no seat only reads, or is the consent form
