@@ -2742,9 +2742,10 @@ fn run_command() -> Result<()> {
             let dir = cwd.as_deref();
             // LJOS_OFF and a temporary HOME switch the guard off. The push
             // gate and the pack's rules stay out too, as the shim does.
+            // The sitting gate does not.
             let suspended = on_tool && ljos_cli::bookkeep::guard_suspended();
             let fast = if suspended {
-                None
+                ljos_cli::sitting_gate::guard_line(&call.cue, dir)
             } else {
                 on_tool
                     .then(|| ljos_cli::static_guard_in(&call.cue, dir))

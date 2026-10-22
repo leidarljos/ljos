@@ -48,6 +48,7 @@ pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod sitting_gate;
 pub mod slot;
 pub mod subagent;
 pub mod sync;
@@ -30890,7 +30891,7 @@ fn policy_reading_in(
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
     let fast = if off {
-        None
+        sitting_gate::guard_line(&line, cwd)
     } else {
         static_guard_in(&line, cwd)
     };
@@ -31220,7 +31221,7 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
     if bookkeep::guard_suspended() {
-        return None;
+        return sitting_gate::guard_line(line, cwd);
     }
     let start = match guard_start_directory(cwd) {
         Ok(dir) => dir,
@@ -31716,7 +31717,9 @@ pub fn unhealthy_note(why: &str) -> String {
 /// `None` means the slow check may run. A timeout there denies the line
 /// unless `LJOS_GUARD_FAIL_OPEN` is set.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
-/// `None` there too. A temp working directory is still judged.
+/// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
+/// which judges a runner's history writes under any home and with
+/// `LJOS_OFF` set. A temp working directory is still judged.
 ///
 /// `cwd` is the directory the command would run in. Absent, the process
 /// directory. The gates read that checkout's `.ljos/gates.toml` and tip.
@@ -31729,7 +31732,13 @@ pub fn static_guard(line: &str) -> Option<Rule> {
 #[must_use]
 pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let line = line.trim();
-    if line.is_empty() || bookkeep::guard_suspended() {
+    if line.is_empty() {
+        return None;
+    }
+    if let Some(rule) = sitting_gate::guard_line(line, cwd) {
+        return Some(rule);
+    }
+    if bookkeep::guard_suspended() {
         return None;
     }
     if let Some(rule) = seat_guard_in(line, cwd) {

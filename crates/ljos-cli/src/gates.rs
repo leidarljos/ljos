@@ -1316,7 +1316,7 @@ fn reuse_messages(cwd: &Path, revs: &[String]) -> Option<String> {
     Some(out)
 }
 
-fn is_dry(args: &[String]) -> bool {
+pub(crate) fn is_dry(args: &[String]) -> bool {
     args.iter().any(|a| {
         a == "--dry-run"
             || a == "-n"
