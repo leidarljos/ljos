@@ -194,6 +194,28 @@ fn no_mail_table_is_a_refusal() {
 }
 
 #[test]
+fn an_empty_mail_table_does_not_open_the_default_database() {
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    std::fs::write(
+        home.path().join(".notmuch-config"),
+        std::fs::read(&mailbox.config).unwrap(),
+    )
+    .unwrap();
+    let dir = home.path().join("config/ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mail.toml"), "[mail]\n").unwrap();
+    let ran = session(
+        home.path(),
+        Some("mail_search"),
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    assert_eq!(ran.by_id(2)["result"]["isError"], true);
+    assert!(ran.text(2).contains("notmuch_config"), "{}", ran.text(2));
+    assert!(!ran.text(2).contains("Lunch"), "{}", ran.text(2));
+}
+
+#[test]
 fn a_workspace_ljos_toml_cannot_set_the_mail_table() {
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();

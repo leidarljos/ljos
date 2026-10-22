@@ -1,7 +1,7 @@
 //! A read-only notmuch reader for search and show.
 //!
 //! notmuch runs with a fixed argv and a cleared environment: PATH, HOME
-//! and the configured `NOTMUCH_CONFIG` only. The query is one argv
+//! and the configured `NOTMUCH_CONFIG` only, which is required. The query is one argv
 //! element after `--`, so it is never an option. Everything a message
 //! supplies (subject, authors, addresses, text, attachment names) comes
 //! back between markers that carry a random nonce the message cannot
@@ -95,19 +95,25 @@ pub struct Attachment {
 
 pub struct Reader {
     bin: PathBuf,
-    config: Option<PathBuf>,
+    config: PathBuf,
     nonce: String,
 }
 
 impl Reader {
+    /// A reader over the database `notmuch_config` names. Without it the
+    /// reader refuses rather than open notmuch's default database.
     pub fn new(config: &MailConfig) -> Result<Self> {
+        let notmuch_config = config
+            .notmuch_config
+            .clone()
+            .context("mail: [mail] notmuch_config is not set, so there is no mailbox to read")?;
         let mut seed = [0u8; 8];
         std::fs::File::open("/dev/urandom")
             .and_then(|mut f| f.read_exact(&mut seed))
             .context("mail: no randomness for the untrusted markers")?;
         Ok(Self {
             bin: config.notmuch_bin().to_path_buf(),
-            config: config.notmuch_config.clone(),
+            config: notmuch_config,
             nonce: hex::encode(seed),
         })
     }
@@ -347,9 +353,7 @@ impl Reader {
                 cmd.env(key, value);
             }
         }
-        if let Some(config) = &self.config {
-            cmd.env("NOTMUCH_CONFIG", config);
-        }
+        cmd.env("NOTMUCH_CONFIG", &self.config);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped());
         cmd
     }

@@ -146,3 +146,11 @@ fn show_refuses_anything_but_a_thread_id() {
     assert!(shown.messages[0].body.contains("lunch on Friday at noon"));
     assert!(!shown.messages[0].hidden_text_dropped);
 }
+
+#[test]
+fn no_notmuch_config_is_a_refusal_not_the_default_database() {
+    let err = Reader::new(&MailConfig::default())
+        .err()
+        .expect("a refusal");
+    assert!(err.to_string().contains("notmuch_config"), "{err}");
+}
