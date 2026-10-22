@@ -490,3 +490,128 @@ impl Drop for Scratch {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uppercase_and_short_hex_are_refused() {
+        let good = "ab".repeat(32);
+        assert_eq!(
+            hexes_of(&format!("sha256:{good}")).unwrap(),
+            vec![good.clone()]
+        );
+        let upper = hexes_of(&format!("sha256:{}", "AB".repeat(32)));
+        assert!(upper.is_err(), "uppercase hex was accepted");
+        let short = hexes_of("sha256:abcd");
+        assert!(short.is_err(), "short hex was accepted");
+        let long = hexes_of(&format!("sha256:{good}aa"));
+        assert!(long.is_err(), "a 66 digit hex was accepted");
+    }
+
+    #[test]
+    fn a_symlinked_store_entry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let bag = dir.path().join("bag");
+        let id = "deed-file-note";
+        let hex = "cd".repeat(32);
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, b"secret outside the store").unwrap();
+        std::fs::create_dir_all(store.join("bytes")).unwrap();
+        std::os::unix::fs::symlink(&outside, store.join("bytes").join(&hex)).unwrap();
+        std::fs::create_dir_all(bag.join(id)).unwrap();
+        let err = seam(
+            &store,
+            &bag,
+            &[Row {
+                id: id.to_string(),
+                hexes: vec![hex.clone()],
+                sources: String::new(),
+            }],
+        )
+        .expect_err("a symlinked store entry was copied");
+        let text = format!("{err:#}");
+        assert!(text.contains("symlink"), "{text}");
+        assert!(
+            std::fs::symlink_metadata(bag.join(id).join("bytes").join(&hex)).is_err(),
+            "{text}"
+        );
+        assert!(
+            std::fs::symlink_metadata(bag.join(id).join(&hex)).is_err(),
+            "{text}"
+        );
+        assert!(
+            !bag_holds(&bag, b"secret outside the store"),
+            "symlink target was copied into the bag"
+        );
+    }
+
+    #[test]
+    fn a_failed_publish_keeps_the_old_bag() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("seat");
+        std::fs::create_dir_all(dest.join("kept")).unwrap();
+        std::fs::write(dest.join("kept").join("marker"), b"old bag").unwrap();
+        let here = std::fs::metadata(dir.path()).unwrap().dev();
+        let shm = std::fs::metadata("/dev/shm")
+            .unwrap_or_else(|e| panic!("/dev/shm: {e}"))
+            .dev();
+        assert_ne!(
+            here, shm,
+            "/dev/shm is not a separate filesystem, so the copy path cannot fail on its own"
+        );
+        // SAFETY: geteuid only reads this process's credentials.
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "root can read a mode 000 file, so the copy would not fail"
+        );
+        let scratch = tempfile::tempdir_in("/dev/shm").unwrap();
+        std::fs::create_dir_all(scratch.path().join("fresh")).unwrap();
+        let blocked = scratch.path().join("fresh").join("blocked");
+        std::fs::write(&blocked, b"new").unwrap();
+        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&blocked, perms).unwrap();
+        let err = publish(scratch.path(), &dest);
+        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&blocked, perms).unwrap();
+        let err = err.expect_err("publish of an unreadable tree succeeded");
+        let text = format!("{err:#}");
+        assert_eq!(
+            std::fs::read(dest.join("kept").join("marker")).unwrap(),
+            b"old bag",
+            "{text}"
+        );
+        assert!(!dest.join("fresh").exists(), "{text}");
+        assert!(
+            !dir.path().join(".seat.incoming").exists(),
+            "staged tree left behind: {text}"
+        );
+        assert!(
+            !dir.path().join(".seat.previous").exists(),
+            "old bag was moved aside: {text}"
+        );
+    }
+
+    fn bag_holds(dir: &Path, secret: &[u8]) -> bool {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let kind = entry.file_type();
+            if kind.as_ref().is_ok_and(|k| k.is_dir()) && bag_holds(&path, secret) {
+                return true;
+            }
+            if std::fs::read(&path).ok().as_deref() == Some(secret) {
+                return true;
+            }
+        }
+        false
+    }
+}
