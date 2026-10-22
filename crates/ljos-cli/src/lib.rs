@@ -7804,9 +7804,34 @@ fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
     scored
 }
 
+/// The share of what the cue names that `text` names too, from 0 to 1:
+/// its content words, alias groups and phrase abbreviations, each worth
+/// the same. A lesson that carries the whole prompt beats one that
+/// shares two of its words, however rare those are.
+fn cue_coverage(text: &str, cue: &str) -> f64 {
+    let terms = |t: &str, claim: bool| {
+        let mut words = cue_terms(t, claim);
+        words.extend(phrase_acronyms(t));
+        words.sort_unstable();
+        words.dedup();
+        words
+    };
+    let want = terms(cue, false);
+    if want.is_empty() {
+        return 0.0;
+    }
+    let have = terms(text, true);
+    let shared = want
+        .iter()
+        .filter(|w| have.binary_search(w).is_ok())
+        .count();
+    shared as f64 / want.len() as f64
+}
+
 /// Lexical match of each text against `cue`, in the same order, on one
-/// scale from 0 to 1. A text that names the subject scores 1. Any other
-/// text scores its BM25 squashed under 1, so one rare word cannot outrank
+/// scale from 0 to 1. A text that names the subject scores over 0.5, by
+/// how much of the cue it covers, see [`cue_coverage`]. Any other text
+/// scores its BM25 squashed under 0.5, so one rare word cannot outrank
 /// naming the subject. Zero when that text matches nothing. The pack's
 /// fused score adds recency on each ballot and then multiplies by
 /// retrievability, so this is the score that does not read the clock.
@@ -7818,10 +7843,10 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
         .enumerate()
         .map(|(i, text)| {
             if names_the_subject(text, cue) {
-                1.0
+                0.5 + 0.5 * cue_coverage(text, cue)
             } else {
                 let bm25 = bm25_distinctive(&docs, &df, i, cue);
-                bm25 / (1.0 + bm25)
+                0.5 * bm25 / (1.0 + bm25)
             }
         })
         .collect()
@@ -7833,8 +7858,9 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
 pub const POOL_PER_SHOWN: usize = 4;
 
 /// Indices of `rows`, most relevant to `cue` first: the lexical match,
-/// then BM25 among rows that match as well, then the fused score, which
-/// carries age, only to break a tie.
+/// which grades how much of the cue each row covers, then BM25 among rows
+/// that cover as much, then the fused score, which carries age, only to
+/// break an exact tie.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
     let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
@@ -8105,14 +8131,15 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
-            let found = match (reranked, pool) {
+            let (found, cross_encoded) = match (reranked, pool) {
                 (Ok(found), _) => found,
-                (Err(_), Some(pool)) => pool,
+                (Err(_), Some(pool)) => (pool, false),
                 (Err(_), None) => return (nudge, pending),
             };
             hits = found;
-            // Age is in the fused score twice, so the floor and the order
-            // are the lexical match. The fused score only breaks a tie.
+            // Age is in the fused score twice, so the floor is the lexical
+            // match, and so is the order unless the cross-encoder ran: it
+            // read the prompt and each claim together, and its order stands.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
             let eligible: Vec<bool> = hits.iter().map(could).collect();
@@ -8123,7 +8150,9 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 .filter(|(_, ok)| *ok)
                 .map(|(h, _)| h)
                 .collect();
-            sort_by_relevance(&mut rows, cue);
+            if !cross_encoded {
+                sort_by_relevance(&mut rows, cue);
+            }
             rows
         }
     };
@@ -10029,22 +10058,67 @@ pub const HOOK_RERANK_BUDGET_MS: u64 = 1000;
 /// rerank.
 const RERANK_POOL: u32 = 20;
 
-/// The reranked search, or an error once `ms` has passed. The request
-/// runs on its own thread: the pack client gives a reranked search at
-/// least a minute whatever `PACKSET_TIMEOUT_MS` says, and a hook cannot
-/// wait that long. A thread left waiting ends with the hook's process.
+/// The reranked search, and whether the cross-encoder ordered it, or an
+/// error once `ms` has passed. The request runs on its own thread: the
+/// pack client gives a reranked search at least a minute whatever
+/// `PACKSET_TIMEOUT_MS` says, and a hook cannot wait that long. A thread
+/// left waiting ends with the hook's process.
 ///
 /// # Errors
 ///
 /// The search's own error, or the budget running out first.
-pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<Vec<Hit>> {
+pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let cue = cue.to_string();
     std::thread::spawn(move || {
-        let _ = tx.send(packset_search_opts(&cue, limit, true));
+        let _ = tx.send(packset_search_reranked(&cue, limit));
     });
     rx.recv_timeout(std::time::Duration::from_millis(ms))
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
+}
+
+/// The search with the cross-encoder asked for, and whether it ordered
+/// the hits. A writer without one says `absent` and returns the fused
+/// order, which carries age. Hits that carry a `rerank_score` are read
+/// by it.
+fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
+    let q = query.trim();
+    if q.is_empty() {
+        bail!("search: empty query");
+    }
+    let (hits, ran) = with_writer(|| {
+        let client = pack()?;
+        let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
+        let body: Value = packset_client::authorize(ureq::get(&url))
+            .query("workspace", &client.workspace())
+            .query("q", &recall_query(q))
+            .query("limit", &limit.to_string())
+            .query("rerank", "1")
+            .call()
+            .map_err(|e| packset_client::Error::Http(Box::new(e)))
+            .context("search: GET /v1/search failed")?
+            .into_json()?;
+        let mut scored: Vec<(Hit, Option<f64>)> = body["hits"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| {
+                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
+                Some((hit, v["rerank_score"].as_f64()))
+            })
+            .collect();
+        let scored_all = !scored.is_empty() && scored.iter().all(|(_, s)| s.is_some());
+        if scored_all {
+            scored.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        }
+        let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
+        let hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
+        keep_origins_of(&client, &hits);
+        Ok((hits, ran))
+    })?;
+    count_recall(&hits);
+    Ok((hits, ran))
 }
 
 thread_local! {
@@ -36020,6 +36094,85 @@ mod tests {
         let (note, _) = failure_note(&failed, "E401: the registry rejected the token", 3);
         let first = note.lines().nth(1).unwrap_or("");
         assert!(first.contains("acme scope needs"), "{note}");
+    }
+
+    /// A pack whose reranked search answers with `reranked` and says which
+    /// stage ordered it; any other search answers with `fused`.
+    fn serve_reranking_pack(fused: Vec<Value>, reranked: Vec<Value>, stage: &str) -> String {
+        let stage = stage.to_string();
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let body = if first.contains("rerank=1") {
+                serde_json::json!({ "hits": reranked, "rerank": stage })
+            } else {
+                serde_json::json!({ "hits": fused, "rerank": "off" })
+            };
+            (200, body.to_string())
+        });
+        url
+    }
+
+    /// Every hit names the subject. The one that covers the whole prompt
+    /// leads the hook's own order, but when the cross-encoder ran and
+    /// put it fourth, the cross-encoder's order is the one the cap reads.
+    /// A writer whose cross-encoder is absent leaves the hook's order.
+    #[test]
+    fn the_cross_encoder_order_stands_when_it_ran() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 2
+            })
+        };
+        let full = hit(
+            "full",
+            "The registry rejected the token because the CI secret expired",
+            3.0,
+        );
+        let others: Vec<Value> = ["Figma", "quokka", "host13"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                hit(
+                    name,
+                    &format!("{name} rejected the token after the move"),
+                    2.0 - i as f64 * 0.1,
+                )
+            })
+            .collect();
+        let mut fused = vec![full.clone()];
+        fused.extend(others.iter().cloned());
+        let mut reranked = others.clone();
+        reranked.push(full);
+        let cue = "the registry rejected my token";
+        for (stage, shows_full) in [("cross-encoder", false), ("absent", true)] {
+            let url = serve_reranking_pack(fused.clone(), reranked.clone(), stage);
+            let _url = PackUrl::set(&url);
+            let prompt = HookCall {
+                event: "UserPromptSubmit".into(),
+                cue: cue.into(),
+                session: Some(format!("rerank-{stage}")),
+                shape: HookShape::default(),
+            };
+            let (note, _) = hook_note(&prompt, 5);
+            assert_eq!(
+                note.contains("CI secret expired"),
+                shows_full,
+                "{stage}: {note}"
+            );
+            assert_eq!(note.contains("host13"), !shows_full, "{stage}: {note}");
+        }
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
