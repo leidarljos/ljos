@@ -2110,7 +2110,9 @@ fn cloud_guard_rules() -> Vec<crate::Rule> {
         crate::Rule {
             pattern: CURSOR_PUSH.into(),
             verdict: "deny".into(),
-            reason: "cloud seat rule: never push to cursor/* refs from this machine".into(),
+            reason:
+                "cloud seat rule: outside the seat allowlist, or the pre-push hook would not run"
+                    .into(),
         },
         crate::Rule {
             pattern: GH_PR_CREATE.into(),

@@ -458,6 +458,33 @@ fn shell_guard_refuses_disarming_the_hook() {
         no_verify.reason
     );
     assert!(
+        no_verify.reason.contains("outside the seat allowlist"),
+        "{}",
+        no_verify.reason
+    );
+    assert!(
+        !no_verify.reason.contains("never push to cursor"),
+        "{}",
+        no_verify.reason
+    );
+    for line in [
+        "git push origin main",
+        "git push origin :develop",
+        "git push origin v9",
+    ] {
+        let hit = refused(line, &repo);
+        assert!(
+            hit.reason.contains("outside the seat allowlist"),
+            "{line}: {}",
+            hit.reason
+        );
+        assert!(
+            !hit.reason.contains("never push to cursor"),
+            "{line}: {}",
+            hit.reason
+        );
+    }
+    assert!(
         no_verify
             .reason
             .contains("a cloud seat may push only its named branches and develop"),
