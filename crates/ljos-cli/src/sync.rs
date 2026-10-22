@@ -6294,6 +6294,33 @@ mod tests {
         }
     }
 
+    /// The `.taken` files live under `sync/<tracker>/<scope>`, and once
+    /// under `sync/<scope>`. A symlink at any of those is not followed to
+    /// read what was taken or to write it.
+    #[test]
+    fn a_symlinked_state_directory_is_not_read_or_written() {
+        for linked in ["sync", "sync/{id}", "sync/{id}/cloud", "sync/cloud"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = begin(dir.path());
+            let (root, scope) = peer_log(dir.path(), &[same_words("proj-a")]);
+            let rel = linked.replace("{id}", &crate::work_id(&root.display().to_string()));
+            let outside = dir.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let link = state_dir().parent().unwrap().join(&rel);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+            point_pack(&url);
+            let err = import(&root, &scope).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            assert_eq!(
+                std::fs::read_dir(&outside).unwrap().count(),
+                0,
+                "{linked}: written through the symlink"
+            );
+        }
+    }
+
     const OLD_COMMIT: &str = "100000000 +0000";
 
     fn begin(dir: &Path) -> crate::EnvLock {
