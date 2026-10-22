@@ -1,0 +1,1 @@
+`ljos doctor` tries the note-queue lock once instead of waiting on it, and when another process holds it the note queue row is a `warn` that says the queue is busy and names the lock, so a stuck holder shows in the short doctor rather than hanging it.

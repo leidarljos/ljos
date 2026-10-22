@@ -8343,10 +8343,12 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // fused score. Reordering cannot change which of the twenty
             // pass. When none does, no memory can reach the prompt, and
             // the second stage, a few hundred milliseconds a prompt, is not
-            // run.
+            // run. The count of the pack's ballots that named a hit is not
+            // read: where many lessons tie on the words the pack scores,
+            // which of them a ballot keeps at its cut is arbitrary. The
+            // subject test and the lexical floor are the second scorer.
             let could = |h: &Hit| {
                 !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                    && agreed(h)
                     && names_the_subject(&h.text, cue)
                     && shown_on_prompt(h)
                     && h.id.as_ref().is_none_or(|id| !seen.contains(id))
@@ -10350,14 +10352,20 @@ fn redact_hit_provenance(body: &mut Value) {
 /// by relevance alone, and how many of them the writer chose. A writer
 /// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
 /// picks them by lexical, BM25 and cosine with no half-life, and echoes
-/// the rank; an answer without the echo is read as fused. An older writer
-/// is not asked, and cuts its
+/// the rank; an answer without the echo is read as fused. One that lists
+/// it and answers it with a 4xx is asked again as an older writer. An
+/// older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
 /// do when a relevance cut comes back full, since the pack does not read
 /// the alias groups: to it `pnpm` does not match `npm`, and twenty-four
-/// lookalikes tie the lesson that says it.
+/// lookalikes tie the lesson that says it. A hit the cut kept on fewer
+/// ballots than [`agreed`] asks, whose stored atom is among them, takes
+/// that atom's count, which is none: which of the tied lessons a ballot
+/// keeps at its cut is arbitrary, and one it dropped would have come in
+/// as the atom. A body that does not parse, a NaN from a writer that is
+/// not packset, has no hits and no echo, so the stored atoms answer.
 ///
 /// The read is sent first without this seat's token and has to come back
 /// 401, the same check as [`atom_now`]. The token goes out only after
@@ -10376,36 +10384,63 @@ fn search_relevant(
     // and that read would carry the token before the listener is proven.
     let probe = || search_query(client, &url, cue, limit, rerank, false);
     let mut open = false;
-    let req = match proven_request("the search", client.base(), timeout, probe) {
-        Ok(_) => {
-            let relevance = ranks_by_relevance(client, timeout, true);
-            packset_client::authorize(search_query(client, &url, cue, limit, rerank, relevance))
-                .timeout(timeout)
-        }
+    let ranked = match proven_request("the search", client.base(), timeout, probe) {
+        Ok(_) => ranks_by_relevance(client, timeout, true),
         Err(err) if listener_unproven(&err) => {
             open = true;
-            let relevance = ranks_by_relevance(client, timeout, false);
-            search_query(client, &url, cue, limit, rerank, relevance).timeout(timeout)
+            ranks_by_relevance(client, timeout, false)
         }
         Err(err) => bail!("search: GET /v1/search failed: {err}"),
     };
-    let mut body: Value = req
-        .call()
-        .map_err(|e| packset_client::Error::Http(Box::new(e)))
+    let ask = |rank: bool| {
+        let req = search_query(client, &url, cue, limit, rerank, rank);
+        let req = if open {
+            req
+        } else {
+            packset_client::authorize(req)
+        };
+        req.timeout(timeout).call().map_err(Box::new)
+    };
+    // A writer that lists the rank and answers it with a 4xx is an older
+    // writer for the rest of the process. The probe already separated a
+    // listener that does not ask from one that does.
+    let answer = match ask(ranked) {
+        Err(e) if ranked && matches!(*e, ureq::Error::Status(400..=499, _)) => {
+            refuses_relevance(client);
+            ask(false)
+        }
+        other => other,
+    };
+    let mut body: Value = answer
+        .map_err(|e| match *e {
+            ureq::Error::Status(..) => packset_client::Error::Bad(e.to_string()),
+            _ => packset_client::Error::Http(e),
+        })
         .context("search: GET /v1/search failed")?
-        .into_json()?;
+        .into_json()
+        .unwrap_or_else(|_| serde_json::json!({ "hits": [] }));
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
-        let have: std::collections::HashSet<String> = body["hits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|h| h["id"].as_str().map(str::to_string))
-            .collect();
-        let extra: Vec<Value> = relevant_atoms(client, cue, limit as usize)
-            .into_iter()
-            .filter(|a| a["id"].as_str().is_none_or(|id| !have.contains(id)))
-            .collect();
+        let mut extra = Vec::new();
+        for atom in relevant_atoms(client, cue, limit as usize) {
+            let kept = atom["id"].as_str().and_then(|id| {
+                body["hits"]
+                    .as_array_mut()?
+                    .iter_mut()
+                    .find(|h| h["id"].as_str() == Some(id))
+            });
+            match kept {
+                Some(hit) => {
+                    let short =
+                        serde_json::from_value::<Hit>(hit.clone()).is_ok_and(|h| !agreed(&h));
+                    if let Some(fields) = hit.as_object_mut().filter(|_| short) {
+                        fields.remove("ballots");
+                        fields.remove("of");
+                    }
+                }
+                None => extra.push(atom),
+            }
+        }
         if let Some(hits) = body["hits"].as_array_mut() {
             hits.extend(extra);
         }
@@ -10427,9 +10462,8 @@ fn ranks_by_relevance(
     timeout: std::time::Duration,
     with_token: bool,
 ) -> bool {
-    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
     let base = client.base().trim_end_matches('/').to_string();
-    let mut known = KNOWN
+    let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, ranks)) = known.as_ref() {
@@ -10457,6 +10491,19 @@ fn ranks_by_relevance(
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
     *known = Some((base, ranks));
     ranks
+}
+
+/// The last writer [`ranks_by_relevance`] asked, and its answer.
+static RANKS_KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
+/// The writer at `client` answered a ranked search with a 4xx though its
+/// status lists the rank: for the rest of the process it is asked as an
+/// older writer.
+fn refuses_relevance(client: &PacksetClient) {
+    let base = client.base().trim_end_matches('/').to_string();
+    *RANKS_KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((base, false));
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -10534,10 +10581,13 @@ fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit
 
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
-/// order, which carries age. When every hit the writer chose carries a
-/// `rerank_score`, which is null on a hit it did not rerank, they are read
-/// by it. An atom [`search_relevant`] added, which the cross-encoder did
-/// not read, goes in ahead of the first hit its lexical match beats.
+/// order, which carries age. The hits the writer chose that carry a
+/// finite `rerank_score` are read by it. One whose score is null, which
+/// the writer did not rerank, or is not a number, goes in ahead of the
+/// first scored hit its lexical match beats, and so does an atom
+/// [`search_relevant`] added, which the cross-encoder did not read. A
+/// writer that says the cross-encoder ran and scores no hit keeps its
+/// order.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
     let q = query.trim();
     if q.is_empty() {
@@ -10546,27 +10596,31 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
     let (hits, ran) = with_writer(|| {
         let client = pack()?;
         let (body, chosen) = search_relevant(&client, q, limit, true, pack_timeout())?;
-        let mut scored: Vec<(Hit, Option<f64>)> = body["hits"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|v| {
-                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
-                Some((hit, v["rerank_score"].as_f64()))
-            })
-            .collect();
-        let chosen = chosen.min(scored.len());
-        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
-        if scored_all {
-            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        let mut scored: Vec<(Hit, f64)> = Vec::new();
+        let mut unscored: Vec<Hit> = Vec::new();
+        let mut extra: Vec<Hit> = Vec::new();
+        for (i, v) in body["hits"].as_array().into_iter().flatten().enumerate() {
+            let Ok(hit) = serde_json::from_value::<Hit>(v.clone()) else {
+                continue;
+            };
+            match v["rerank_score"].as_f64().filter(|s| s.is_finite()) {
+                _ if i >= chosen => extra.push(hit),
+                Some(score) => scored.push((hit, score)),
+                None => unscored.push(hit),
+            }
         }
-        let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
-        let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
-        if ran && hits.len() > chosen {
-            let extra = hits.split_off(chosen);
-            hits = merge_by_lexical(hits, extra, q);
-        }
+        let ran = !scored.is_empty() || body["rerank"].as_str() == Some("cross-encoder");
+        let hits = if scored.is_empty() {
+            if ran {
+                merge_by_lexical(unscored, extra, q)
+            } else {
+                unscored.into_iter().chain(extra).collect()
+            }
+        } else {
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            unscored.extend(extra);
+            merge_by_lexical(scored.into_iter().map(|(h, _)| h).collect(), unscored, q)
+        };
         keep_search_origins(&client, &hits);
         Ok((hits, ran))
     })?;
@@ -13129,12 +13183,17 @@ impl Basis {
 ///
 /// `text` is not in the person's latest prompt.
 pub fn refuse_unless_person_words(label: &str, text: &str) -> Result<()> {
-    if Basis::of(text) != Basis::Person {
+    if Basis::of(text) == Basis::Person {
+        return Ok(());
+    }
+    if capture::unverified_latest_prompt(text) {
         bail!(
-            "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+            "{label}: the runner's record of this prompt is unverified; only the person's own words can be stored here"
         );
     }
-    Ok(())
+    bail!(
+        "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+    );
 }
 
 /// The atom an MCP `ljos_remember` or `ljos_prefer` posts, with its basis.
@@ -13698,7 +13757,7 @@ pub(crate) fn queue_memory(
 }
 
 /// Queue the memory copy of a note the pack did not take, for the next
-/// note, finish, doctor or session start to send. `false` when it was
+/// note, finish or session start to send. `false` when it was
 /// already queued, or when the pack would refuse the text.
 ///
 /// # Errors
@@ -13714,7 +13773,9 @@ pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
 
 /// Send the memories queued while the pack was off or not answering. A
 /// copy the pack would refuse is dropped. A pack that still cannot be
-/// reached leaves the fitted copies queued.
+/// reached leaves the fitted copies queued. Queue bytes that are not a
+/// memory move to a dated `.damaged` file beside the queue, and the
+/// drain names it.
 ///
 /// # Errors
 ///
@@ -13741,19 +13802,15 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
 }
 
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
-    let pending = note_queue::pending_in(dir);
-    if pending.is_empty() {
-        return Ok(note_queue::Drained::default());
-    }
-    let fitted = fit_queued(pending.clone());
-    if fitted != pending {
-        note_queue::replace_in(dir, fitted)?;
-    }
+    let set_aside = note_queue::tidy_in(dir, fit_queued)?;
     if note_queue::pending_in(dir).is_empty() {
-        return Ok(note_queue::Drained::default());
+        return Ok(note_queue::Drained {
+            set_aside: set_aside.into_iter().collect(),
+            ..Default::default()
+        });
     }
     let client = pack();
-    note_queue::drain_in(dir, |note| {
+    let mut done = note_queue::drain_in(dir, |note| {
         let client = match &client {
             Ok(client) => client.clone().with_workspace(note.workspace.clone()),
             Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
@@ -13779,7 +13836,9 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
         }
-    })
+    })?;
+    done.set_aside.splice(0..0, set_aside);
+    Ok(done)
 }
 
 fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
@@ -13794,31 +13853,70 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
     with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
-/// The doctor row for the note queue. It sends what waits first, so a
-/// doctor run after the pack comes back empties the queue.
+/// How the note queue row opens while another process holds the queue
+/// lock. The row is `warn`: a lock held for good stops every send too.
+const QUEUE_BUSY: &str = "busy: ";
+
+/// How the note queue row opens while a damaged file a send left beside
+/// the queue is there. The row is `warn` until the person reads and
+/// deletes it: a send that ran from a hook said so to nobody.
+const QUEUE_SET_ASIDE: &str = "set aside: ";
+
+/// The doctor row for the note queue: how many memory copies wait for the
+/// pack. It only reads the queue, without its lock: sending would rewrite
+/// the queue, and wait on a lock another ljos may hold. The next note or
+/// finish that reaches the pack, or a session start, sends them. A lock
+/// another process holds is tried once, not waited on, and the row says
+/// the queue is busy. A whole line that is not a note is damage, as a
+/// torn last row is: a send moves it out of the queue, and the row names
+/// the file it went to.
 fn note_queue_row() -> Habitat {
-    let queue = note_queue::state_dir().join("note-queue.jsonl");
-    if let Err(state) = doctor_state_log("note queue", &queue) {
-        return Habitat {
-            name: "note queue",
-            ok: false,
-            state,
-        };
+    let dir = note_queue::state_dir();
+    let queue = dir.join("note-queue.jsonl");
+    let damaged = |state| Habitat {
+        name: "note queue",
+        ok: false,
+        state,
+    };
+    let bytes = match doctor_state_log("note queue", &queue) {
+        Ok(bytes) => bytes,
+        Err(state) => return damaged(state),
+    };
+    let (notes, unread): (Vec<note_queue::Queued>, usize) = complete_rows_counted(&bytes);
+    let waiting = notes.len();
+    if unread > 0 {
+        return damaged(format!(
+            "the note queue at {} is damaged: {unread} row(s) are not a note; {waiting} note(s) wait. `ljos finish` or the next session start moves those rows to a dated `.damaged` file beside it",
+            queue.display()
+        ));
     }
-    let (ok, state) = match flush_note_queue() {
-        Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
-        Ok(done) => (
-            done.left == 0,
-            note_queue::drained_lines(&done)
-                .trim_end()
-                .replace('\n', "; "),
-        ),
-        Err(e) => (false, format!("could not read or rewrite the queue: {e:#}")),
+    let set_aside = note_queue::set_aside_in(&dir);
+    let state = if let Some(lock) = note_queue::busy_in(&dir) {
+        format!(
+            "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
+            lock.display()
+        )
+    } else if !set_aside.is_empty() {
+        let bytes: u64 = set_aside.iter().map(|(_, len)| len).sum();
+        let files: Vec<String> = set_aside
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        format!(
+            "{QUEUE_SET_ASIDE}a send moved {bytes} byte(s) of the queue that are not a note to {}; they were not sent. Read them for a note worth keeping, then delete the file. {waiting} note(s) wait",
+            files.join(", ")
+        )
+    } else if waiting == 0 {
+        "empty".to_string()
+    } else {
+        format!(
+            "{waiting} note(s) wait for the pack; the next `ljos note` or `ljos finish` that reaches it, or a session start, sends them"
+        )
     };
     Habitat {
         name: "note queue",
         state,
-        ok,
+        ok: true,
     }
 }
 
@@ -22151,13 +22249,18 @@ fn clear_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
 /// `O_NONBLOCK` would wait, and reading a device such as `/dev/zero`
 /// would not end.
 pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    read_state_file_dated(path).map(|(bytes, _)| bytes)
+    read_state_file_dated(path, u64::MAX).map(|(bytes, _)| bytes)
 }
 
 /// [`read_state_file`] with the log's mtime, taken from the same
 /// descriptor once the read is done, so a row appended during the read
-/// leaves the time no older than its bytes. A missing log has none.
-fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
+/// leaves the time no older than its bytes. A missing log has none. A
+/// log longer than `limit` bytes is an error of kind `FileTooLarge`, and
+/// no more than one byte past `limit` is read to find that out.
+fn read_state_file_dated(
+    path: &Path,
+    limit: u64,
+) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
     use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
     let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
@@ -22165,10 +22268,25 @@ fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::t
         Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
     };
+    let too_large = |size: u64| {
+        std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("it is {size} bytes, past the {limit}-byte limit, so it was not read"),
+        )
+    };
+    let size = file.metadata()?.len();
+    if size > limit {
+        return Err(too_large(size));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    let modified = file.metadata()?.modified().ok();
-    Ok((bytes, modified))
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let meta = file.metadata()?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large(meta.len()));
+    }
+    Ok((bytes, meta.modified().ok()))
 }
 
 /// Replace `path` with `bytes` through the directory ljos made, refusing a
@@ -22243,6 +22361,14 @@ pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<(
         unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
         return Err(err);
     }
+    dir.sync_all()
+}
+
+/// Put a state file [`append_locked_row`] wrote, and its directory entry,
+/// on disk, opening it the way every state-log open does.
+pub(crate) fn sync_state_file(path: &Path) -> std::io::Result<()> {
+    let (dir, name) = open_state_dir(path)?;
+    open_regular_at(&dir, &name, path, libc::O_RDONLY, 0)?.sync_all()?;
     dir.sync_all()
 }
 
@@ -22457,21 +22583,49 @@ fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
-/// guard, and the last one. Passing over the guard is allowed, so the row
-/// stays green; it is there to be read.
+/// guard, and the last one. Passing over the guard is allowed, so a whole
+/// log is green; it is there to be read. A damaged one is not `ok`, and
+/// [`doctor_word`] makes it a `warn`: the guard still judges every
+/// command, and what is hurt is the record of those that ran past it.
 fn bypass_row() -> Habitat {
-    let state = match bypass_log_path() {
-        None => "no command has run past the guard".to_string(),
+    let (state, ok) = match bypass_log_path() {
+        None => ("no command has run past the guard".to_string(), true),
         Some(path) => match doctor_state_log("guard bypass log", &path) {
-            Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
-            Err(state) => state,
+            Ok(bytes) => {
+                let (_, dropped): (Vec<Value>, usize) = complete_rows_counted(&bytes);
+                (
+                    bypass_summary(&bytes, &path.display().to_string()),
+                    dropped == 0,
+                )
+            }
+            Err(state) => (state, false),
         },
     };
     Habitat {
         name: "guard bypass",
         state,
-        ok: true,
+        ok,
     }
+}
+
+/// The doctor rows that read a state log ljos keeps, with the log as the
+/// summary line names it. Each row is `ok` unless its log is damaged, and
+/// a damaged log keeps the summary from calling ljos ready. A damaged
+/// guard bypass log is a `warn` that leaves the exit at 0 (see
+/// [`bypass_row`]). A damaged note queue is `no` and fails doctor: its
+/// rows are memory copies the pack has not taken, and a queue that cannot
+/// be read or added to loses them. An empty or missing log is whole.
+const STATE_LOG_ROWS: &[(&str, &str)] = &[
+    ("guard bypass", "the guard bypass log"),
+    ("note queue", "the note queue"),
+];
+
+/// How the summary line names the log a [`STATE_LOG_ROWS`] row reads.
+fn state_log_named(row: &str) -> Option<&'static str> {
+    STATE_LOG_ROWS
+        .iter()
+        .find(|(name, _)| *name == row)
+        .map(|(_, log)| *log)
 }
 
 /// How long a state log's last row may sit without its newline before
@@ -22479,32 +22633,41 @@ fn bypass_row() -> Habitat {
 /// `write_all` under the lock, so a live append ends well inside this.
 const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The longest state log the doctor reads. A row is a few hundred bytes,
+/// so this is over a hundred thousand rows. A log past it is a runaway
+/// writer or a file put in its place, and reading all of it would hold
+/// doctor and its memory for as long as the file goes on.
+const DOCTOR_READ_LIMIT: u64 = 32 << 20;
+
 /// A state log's bytes for a doctor row, or the row's text when the log
 /// is damaged. A missing log is empty. Any other refusal from
 /// [`read_state_file`], a symlink, a fifo, a socket, a directory or a log
 /// ljos may not read, is damaged, since calling it empty would hide the
-/// swap. So is a last row without its newline that has not been written
+/// swap. So is a log past [`DOCTOR_READ_LIMIT`], left unread, and a last
+/// row without its newline that has not been written
 /// to for [`UNFINISHED_ROW_GRACE`]: [`complete_rows`] leaves it for a
-/// live writer to finish, and nobody is finishing it.
+/// live writer to finish, and nobody is finishing it. An mtime further
+/// ahead of the clock than the grace is no live write either, since the
+/// kernel dates a write by the clock: it is a touch or a clock set back.
 fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
     let damaged =
         |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
-    let (bytes, modified) = match read_state_file_dated(path) {
+    let (bytes, modified) = match read_state_file_dated(path, DOCTOR_READ_LIMIT) {
         Ok(read) => read,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(damaged(&err)),
     };
     let unfinished = bytes.last().is_some_and(|&b| b != b'\n');
-    let idle = modified
-        .and_then(|at| at.elapsed().ok())
-        .is_some_and(|age| age >= UNFINISHED_ROW_GRACE);
-    if unfinished && idle {
-        return Err(damaged(&format_args!(
-            "an unfinished last row, unchanged for over {}s",
-            UNFINISHED_ROW_GRACE.as_secs()
-        )));
+    let grace = UNFINISHED_ROW_GRACE.as_secs();
+    match modified.map(|at| at.elapsed()) {
+        Some(Ok(age)) if unfinished && age >= UNFINISHED_ROW_GRACE => Err(damaged(&format_args!(
+            "an unfinished last row, unchanged for over {grace}s"
+        ))),
+        Some(Err(ahead)) if unfinished && ahead.duration() >= UNFINISHED_ROW_GRACE => Err(damaged(
+            &format_args!("an unfinished last row, dated over {grace}s ahead of the clock"),
+        )),
+        _ => Ok(bytes),
     }
-    Ok(bytes)
 }
 
 /// [`bypass_row`]'s text from the log's rows.
@@ -22522,7 +22685,7 @@ pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
     };
     let damaged = if dropped > 0 {
         format!(
-            "; {dropped} row{} could not be read",
+            "; the log is damaged: {dropped} row{} could not be read",
             if dropped == 1 { "" } else { "s" }
         )
     } else {
@@ -23447,7 +23610,8 @@ pub fn pack_token_row(
     }
 }
 
-/// The required rows that do not answer, by name.
+/// The required rows that do not answer, and a damaged note queue (see
+/// [`STATE_LOG_ROWS`]), by name.
 #[must_use]
 pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
@@ -23457,7 +23621,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                     || h.name == "pack"
                     || h.name == "pack token"
                     || h.name == "mcp"
-                    || h.name == "cloud age")
+                    || h.name == "cloud age"
+                    || h.name == "note queue")
         })
         .map(|h| h.name)
         .collect()
@@ -23522,8 +23687,10 @@ fn optional_bin(name: &str) -> bool {
 
 /// `ok` when the row answers, `warn` when the policy row names an
 /// `ljos-policyd` without phronesis, a runner skill or runner env ljos
-/// wrote is stale or edited by hand, or the cloud guard file is a known
-/// older version or differs from the seat refusals, `info` when the row
+/// wrote is stale or edited by hand, the note queue is busy or has bytes
+/// set aside beside it, the guard bypass log is damaged, or the cloud
+/// guard file is a known older
+/// version or differs from the seat refusals, `info` when the row
 /// is optional and absent, `no` when a required row failed. A stale skill,
 /// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
 /// rewrites, not a failure. A cloud guard file that differs is a warning
@@ -23546,6 +23713,15 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
+        return "warn";
+    }
+    if row.ok
+        && row.name == "note queue"
+        && (row.state.starts_with(QUEUE_BUSY) || row.state.starts_with(QUEUE_SET_ASIDE))
+    {
+        return "warn";
+    }
+    if row.name == "guard bypass" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -23596,14 +23772,19 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
 }
 
 /// The line `ljos doctor` opens with: whether the seat is ready, which
-/// parts work or which required parts do not answer, and how many
-/// optional parts are off.
+/// parts work or which required parts do not answer, which state logs are
+/// damaged, and how many optional parts are off.
 #[must_use]
 pub fn doctor_summary(rows: &[Habitat]) -> String {
     let down = failing(rows);
+    let damaged: Vec<&str> = rows
+        .iter()
+        .filter(|h| !h.ok)
+        .filter_map(|h| state_log_named(h.name))
+        .collect();
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
     let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
-    summary_line(&down, &working_parts(&words), off)
+    summary_line(&down, &damaged, &working_parts(&words), off)
 }
 
 /// The parts a ready line can name, each with the rows that answer for
@@ -23636,20 +23817,37 @@ fn and_list(names: &[&str]) -> String {
     }
 }
 
-fn summary_line(down: &[&str], working: &[&str], off: usize) -> String {
-    let mut line = if down.is_empty() {
+/// `down` are failing rows by name; `damaged` are the state logs, as
+/// [`STATE_LOG_ROWS`] names them, whose rows are not `ok`. A failing row
+/// whose log is in `damaged` is said once, as damaged. A damaged log
+/// whose row does not fail still keeps the line from saying ready.
+fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -> String {
+    let silent: Vec<&str> = down
+        .iter()
+        .copied()
+        .filter(|name| state_log_named(name).is_none_or(|log| !damaged.contains(&log)))
+        .map(plain_part)
+        .collect();
+    let mut why = Vec::new();
+    if !silent.is_empty() {
+        let verb = if silent.len() == 1 { "does" } else { "do" };
+        why.push(format!("{} {verb} not answer", and_list(&silent)));
+    }
+    if !damaged.is_empty() {
+        let verb = if damaged.len() == 1 { "is" } else { "are" };
+        why.push(format!("{} {verb} damaged", and_list(damaged)));
+    }
+    let why = why.join(", and ");
+    let mut line = if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
             [one] => format!("ljos is ready: {one} works."),
             parts => format!("ljos is ready: {} work.", and_list(parts)),
         }
+    } else if down.is_empty() {
+        format!("ljos runs, but {why}.")
     } else {
-        let names: Vec<&str> = down.iter().copied().map(plain_part).collect();
-        format!(
-            "ljos is not ready: {} {} not answer.",
-            and_list(&names),
-            if down.len() == 1 { "does" } else { "do" }
-        )
+        format!("ljos is not ready: {why}.")
     };
     if off > 0 {
         line.push_str(" Optional extras: `ljos doctor --all`.\n");
@@ -23726,7 +23924,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     _ => {}
                 }
             }
-            out.push_str(&summary_line(&down, &working_parts(&words), off));
+            out.push_str(&summary_line(&down, &[], &working_parts(&words), off));
             out.push_str(&act);
         }
         "island" => {
@@ -27777,6 +27975,24 @@ impl CommitLock {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Whether another process holds the private lock at `path` now. It
+    /// does not wait and does not create the file: a missing lock is not
+    /// held, and one that cannot be opened is no lock to
+    /// [`Self::acquire_private`] either.
+    pub(crate) fn is_held_private(path: &std::path::Path) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let Ok((dir, name)) = open_state_dir(path) else {
+            return false;
+        };
+        let Ok(file) = open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) else {
+            return false;
+        };
+        // SAFETY: flock on a descriptor this function owns. A shared lock
+        // taken here goes when `file` closes, at the end of this call.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0;
+        !taken && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
     }
 }
 
@@ -37782,6 +37998,354 @@ mod tests {
         }
     }
 
+    /// The relevance cut kept the old lesson on one ballot of two: where
+    /// lessons tie on every word the pack scores, which of them a ballot
+    /// keeps at its cut is arbitrary. It names the prompt's subject and
+    /// covers the most of it, so the prompt gets it. A line that shares
+    /// one rare word with a longer prompt does not name its subject, and
+    /// one ballot does not let it in.
+    #[test]
+    fn a_lesson_one_ballot_kept_still_reaches_the_prompt() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 2
+            })
+        };
+        let mut hits: Vec<Value> = ["Figma", "Grafana", "Sentry"]
+            .iter()
+            .map(|who| {
+                hit(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                    2,
+                )
+            })
+            .collect();
+        hits.push(hit(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+            1,
+        ));
+        hits.push(hit("case", "Name pytest fixtures by their case", 2));
+        hits.push(hit(
+            "kebab",
+            "kebab kebab kebab: the kebab stand shuts at nine",
+            1,
+        ));
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") {
+                let body = serde_json::json!({"hits": hits, "rank": "relevance"});
+                return (200, body.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = |session: &str, cue: &str| HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: cue.into(),
+            session: Some(session.into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(
+            &prompt("one-ballot", "npm: the registry rejected my token"),
+            5,
+        );
+        assert!(note.contains("CI secret expired"), "{note}");
+        let (note, _) = hook_note(
+            &prompt("rare-word", "kebab case for the pytest fixtures"),
+            5,
+        );
+        assert!(note.contains("Name pytest fixtures"), "{note}");
+        assert!(!note.contains("kebab stand"), "{note}");
+    }
+
+    /// A full relevance cut kept the old lesson on one ballot of two, and
+    /// it is among the stored atoms that best match. It takes that atom's
+    /// count, which is none, as it would have had the cut left it out. A
+    /// hit both ballots named keeps its count, and no atom comes twice.
+    #[test]
+    fn a_hit_kept_on_one_ballot_reads_as_its_stored_atom() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let atom = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "kind": "lesson",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+            })
+        };
+        let mut atoms: Vec<Value> = ["Figma", "Grafana", "Sentry"]
+            .iter()
+            .map(|who| {
+                atom(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                )
+            })
+            .collect();
+        atoms.push(atom(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+        ));
+        let hits: Vec<Value> = atoms
+            .iter()
+            .map(|a| {
+                let mut hit = a.clone();
+                let ballots = if a["id"] == "old" { 1 } else { 2 };
+                hit["score"] = 1.0.into();
+                hit["ballots"] = ballots.into();
+                hit["of"] = 2.into();
+                hit
+            })
+            .collect();
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") {
+                let body = serde_json::json!({"hits": hits, "rank": "relevance"});
+                return (200, body.to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let found = packset_search_relevant("npm: the registry rejected my token", 4).unwrap();
+        let old: Vec<&Hit> = found
+            .iter()
+            .filter(|h| h.id.as_deref() == Some("old"))
+            .collect();
+        assert_eq!(old.len(), 1, "{found:?}");
+        assert_eq!((old[0].ballots, old[0].of), (None, None), "{found:?}");
+        let figma = found.iter().find(|h| h.id.as_deref() == Some("Figma"));
+        assert_eq!(figma.and_then(|h| h.ballots), Some(2), "{found:?}");
+        assert_eq!(found.len(), 4, "{found:?}");
+    }
+
+    /// A writer whose status lists `relevance` but answers a ranked search
+    /// with 400 is asked again as an older writer, so the stored lesson its
+    /// fused cut of fresh lookalikes leaves out still reaches the prompt,
+    /// with `PACKSET_URL` set.
+    #[test]
+    fn a_writer_that_refuses_the_rank_it_lists_is_read_as_older() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let lookalikes: Vec<Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("fresh{i}"), "kind": "lesson",
+                    "text": format!(
+                        "Operator op{i} recorded that the registry rejected the token"
+                    ),
+                    "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+                })
+            })
+            .collect();
+        let mut atoms = lookalikes.clone();
+        atoms.push(serde_json::json!({
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }));
+        let hits: Vec<Value> = lookalikes
+            .into_iter()
+            .map(|mut hit| {
+                hit["score"] = 1.0.into();
+                hit["ballots"] = 2.into();
+                hit["of"] = 2.into();
+                hit
+            })
+            .collect();
+        let (url, seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                return (400, r#"{"error":"unknown rank"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": hits}).to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm: the registry rejected my token".into(),
+            session: Some("refused-rank".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("CI secret expired"), "{note}");
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+        assert!(asked, "{:?}", seen.lock().unwrap());
+        let (refusing, _) = serve_http(|req| {
+            if req.lines().next().unwrap_or("").contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (400, r#"{"error":"q required"}"#.into())
+        });
+        let _url = PackUrl::set(&refusing);
+        let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
+        assert!(!writer_unreachable(&err), "{err:#}");
+        assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
+    }
+
+    /// The hits the writer chose are read by their `rerank_score`, highest
+    /// first. One it did not score, null on the wire, goes in ahead of the
+    /// first scored hit its lexical match beats, so a lesson the writer put
+    /// last unscored behind three scored lookalikes still reaches the
+    /// prompt.
+    #[test]
+    fn the_rerank_score_orders_the_hits_and_a_null_one_merges_by_match() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, rerank: Value| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 2, "rerank_score": rerank
+            })
+        };
+        let scored: Vec<Value> = [("Figma", 0.1), ("Grafana", 0.9), ("Sentry", 0.5)]
+            .iter()
+            .map(|(who, score)| {
+                hit(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                    (*score).into(),
+                )
+            })
+            .collect();
+        let mut with_null = scored.clone();
+        with_null.push(hit(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+            Value::Null,
+        ));
+        let cue = "npm: the registry rejected my token";
+        for (hits, want) in [
+            (scored, vec!["Grafana", "Sentry", "Figma"]),
+            (with_null, vec!["old", "Grafana", "Sentry", "Figma"]),
+        ] {
+            let (url, _) = serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                    return (200, status.to_string());
+                }
+                if first.contains("/v1/search") {
+                    let body = serde_json::json!({
+                        "hits": hits, "rank": "relevance", "rerank": "cross-encoder"
+                    });
+                    return (200, body.to_string());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            });
+            let _url = PackUrl::set(&url);
+            let (found, ran) = packset_search_reranked(cue, 20).unwrap();
+            let ids: Vec<&str> = found.iter().filter_map(|h| h.id.as_deref()).collect();
+            assert_eq!(ids, want);
+            assert!(ran);
+            let prompt = HookCall {
+                event: "UserPromptSubmit".into(),
+                cue: cue.into(),
+                session: Some(format!("rerank-score-{}", want.len())),
+                shape: HookShape::default(),
+            };
+            let (note, _) = hook_note(&prompt, 5);
+            assert_eq!(
+                note.contains("CI secret expired"),
+                want[0] == "old",
+                "{note}"
+            );
+        }
+    }
+
+    /// A writer whose every search body carries a NaN, which is not JSON,
+    /// is read as one that found nothing: the stored atoms that best match
+    /// answer, and the old lesson still reaches the prompt.
+    #[test]
+    fn a_search_body_that_does_not_parse_leaves_the_stored_atoms() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let atoms = serde_json::json!([
+            {
+                "id": "fresh", "kind": "lesson",
+                "text": "Operator Figma recorded that the registry rejected the token",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+            },
+            {
+                "id": "old", "kind": "lesson",
+                "text": "With pnpm the registry rejected the token because the CI secret expired",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+            }
+        ]);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/search") {
+                let body = r#"{"hits":[{"id":"fresh","kind":"lesson","score":NaN,
+                    "text":"Operator Figma recorded that the registry rejected the token"}]}"#;
+                return (200, body.into());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm: the registry rejected my token".into(),
+            session: Some("nan-body".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("CI secret expired"), "{note}");
+    }
+
     /// The prompt hook hands over a paraphrase the encoder ranked first
     /// with no word in common, leaves out what the encoder barely named,
     /// and hands over three memories at most.
@@ -42465,6 +43029,22 @@ mod tests {
         );
     }
 
+    /// A log up to the limit is read whole; one byte past it is refused
+    /// with its size, and the plain read has no limit.
+    #[test]
+    fn a_state_log_past_the_limit_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("ljos/bypass.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, b"0123456789").unwrap();
+        let (bytes, _) = read_state_file_dated(&log, 10).unwrap();
+        assert_eq!(bytes, b"0123456789");
+        let err = read_state_file_dated(&log, 9).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(err.to_string().contains("10 bytes"), "{err}");
+        assert_eq!(read_state_file(&log).unwrap(), b"0123456789");
+    }
+
     /// A row torn in the middle of the log, bytes that are not UTF-8 among
     /// them, is one the doctor reports as unreadable, not one it passes
     /// over to call the log healthy and empty.
@@ -42481,7 +43061,7 @@ mod tests {
         let said = bypass_summary(&mixed, "LOG");
         assert!(
             said.starts_with("1 command ran past the guard")
-                && said.contains("1 row could not be read"),
+                && said.contains("damaged: 1 row could not be read"),
             "{said}"
         );
     }
@@ -42504,28 +43084,45 @@ mod tests {
             r#"{"issue":"ljos-abc","text":"kept","workspace":"w","at":1792573200}"#,
             "\n",
         );
-        let cases: [(&str, &[u8], bool, bool); 6] = [
-            ("stale unfinished", &torn, true, true),
-            ("fresh unfinished", &torn, false, false),
-            ("healthy", row, true, false),
-            ("empty", b"", true, false),
-            ("v0.32.1", v0_32_1.as_bytes(), true, false),
-            ("missing", b"", true, false),
+        let year = 365 * 24 * 3600;
+        let cases: [(&str, &[u8], i64, Option<&str>); 9] = [
+            (
+                "stale unfinished",
+                &torn,
+                -60,
+                Some("unchanged for over 5s"),
+            ),
+            ("fresh unfinished", &torn, 0, None),
+            (
+                "unfinished, a year ahead",
+                &torn,
+                year,
+                Some("ahead of the clock"),
+            ),
+            ("unfinished, a second ahead", &torn, 1, None),
+            ("healthy", row, -60, None),
+            ("healthy, a year ahead", row, year, None),
+            ("empty", b"", -60, None),
+            ("v0.32.1", v0_32_1.as_bytes(), -60, None),
+            ("missing", b"", 0, None),
         ];
-        for (case, bytes, stale, damaged) in cases {
+        for (case, bytes, shift, damaged) in cases {
             let _ = std::fs::remove_file(&log);
             if case != "missing" {
                 std::fs::write(&log, bytes).unwrap();
-                if stale {
-                    age_by(&log, std::time::Duration::from_secs(60));
-                }
+                let by = std::time::Duration::from_secs(shift.unsigned_abs());
+                let now = std::time::SystemTime::now();
+                let at = if shift < 0 { now - by } else { now + by };
+                let file = std::fs::File::options().write(true).open(&log).unwrap();
+                file.set_modified(at).unwrap();
             }
             let said = doctor_state_log("guard bypass log", &log);
-            if damaged {
+            if let Some(why) = damaged {
                 let said = said.expect_err(case);
                 assert!(
                     said.contains(&log.display().to_string())
-                        && said.contains("an unfinished last row"),
+                        && said.contains("an unfinished last row")
+                        && said.contains(why),
                     "{case}: {said}"
                 );
             } else {
@@ -42821,9 +43418,13 @@ mod tests {
                     "{kind} {name}: {}",
                     habitat.state
                 );
-                if std::ptr::eq(log, &queue) {
-                    assert!(!habitat.ok, "{kind}: {}", habitat.state);
-                }
+                assert!(!habitat.ok, "{kind} {name}: {}", habitat.state);
+                let word = if std::ptr::eq(log, &queue) {
+                    "no"
+                } else {
+                    "warn"
+                };
+                assert_eq!(doctor_word(&habitat), word, "{kind} {name}");
                 let _ = std::fs::remove_file(log);
                 let _ = std::fs::remove_dir(log);
             }
@@ -42831,6 +43432,131 @@ mod tests {
 
         let missing = bounded("missing bypass", bypass_row);
         assert_eq!(missing.state, "no command has run past the guard");
+        assert!(missing.ok);
+    }
+
+    /// A damaged state log is a row the short doctor shows, and the
+    /// summary does not call ljos ready. A damaged bypass log warns and
+    /// passes; a damaged note queue fails. An empty or a missing log is
+    /// neither, so a seat that never bypassed or queued stays ready.
+    #[test]
+    fn a_damaged_state_log_keeps_doctor_from_saying_ready() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&data.join("ljos"), &state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bypass_log_path().unwrap();
+        let queue = note_queue::state_dir().join("note-queue.jsonl");
+        let torn_bypass: &[u8] = b"{\"kind\":\"switch\",\"command\":\"to";
+        let torn_queue: &[u8] = b"{\"issue\":\"ljos-abc\",\"te";
+        let cases = [
+            ("missing", "missing", "ljos is ready."),
+            ("empty", "empty", "ljos is ready."),
+            (
+                "torn",
+                "missing",
+                "ljos runs, but the guard bypass log is damaged.",
+            ),
+            (
+                "missing",
+                "torn",
+                "ljos is not ready: the note queue is damaged.",
+            ),
+            (
+                "torn",
+                "torn",
+                "ljos is not ready: the guard bypass log and the note queue are damaged.",
+            ),
+        ];
+        for (bypass_is, queue_is, summary) in cases {
+            let mut shown = Vec::new();
+            if bypass_is == "torn" {
+                shown.push("warn\tguard bypass\t");
+            }
+            if queue_is == "torn" {
+                shown.push("no\tnote queue\t");
+            }
+            for (log, is, torn) in [
+                (&bypass, bypass_is, torn_bypass),
+                (&queue, queue_is, torn_queue),
+            ] {
+                let _ = std::fs::remove_file(log);
+                if is != "missing" {
+                    std::fs::write(log, if is == "torn" { torn } else { b"" }).unwrap();
+                    age_by(log, std::time::Duration::from_secs(60));
+                }
+            }
+            let rows = vec![
+                bounded("doctor bypass", bypass_row),
+                bounded("doctor note queue", note_queue_row),
+            ];
+            let short = format_doctor_short(&rows);
+            assert!(short.starts_with(summary), "{short}");
+            for line in &shown {
+                assert!(
+                    short.lines().any(|l| l.starts_with(line)),
+                    "{line}: {short}"
+                );
+            }
+            assert_eq!(short.lines().count(), 1 + shown.len(), "{short}");
+            let fails = if queue_is == "torn" {
+                vec!["note queue"]
+            } else {
+                vec![]
+            };
+            assert_eq!(failing(&rows), fails);
+        }
+        let line = summary_line(&["note queue"], &[], &[], 0);
+        assert!(line.starts_with("ljos is not ready: note queue does not answer."));
+    }
+
+    /// A row that is not a note fails the queue row until a send moves it
+    /// aside. The row then warns and names the file, so a send from a hook,
+    /// whose report nobody reads, still gets said; once the person deletes
+    /// the file the row is plain again.
+    #[test]
+    fn the_queue_row_names_what_a_send_set_aside() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", dir.path().to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+        ]);
+        let queue_dir = note_queue::state_dir();
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let old = r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#;
+        let cut = "{\"issue\":\"ljos-new\",\"te\n";
+        std::fs::write(queue_dir.join("note-queue.jsonl"), format!("{old}\n{cut}")).unwrap();
+        assert_eq!(doctor_word(&bounded("damaged", note_queue_row)), "no");
+
+        let done = flush_note_queue().unwrap();
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        let row = bounded("set aside", note_queue_row);
+        assert!(row.ok, "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn", "{}", row.state);
+        assert!(
+            row.state.starts_with(QUEUE_SET_ASIDE)
+                && row.state.contains(&aside.path.display().to_string())
+                && row.state.contains(&format!("{} byte(s)", cut.len())),
+            "{}",
+            row.state
+        );
+
+        std::fs::remove_file(&aside.path).unwrap();
+        let row = bounded("cleared", note_queue_row);
+        assert_eq!(doctor_word(&row), "ok", "{}", row.state);
+        assert!(row.state.starts_with("1 note(s) wait"), "{}", row.state);
     }
 
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
@@ -44118,6 +44844,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
     }
 
+    /// A flush with the pack off loses no byte of the queue: the note
+    /// that parses stays queued, and the last one, missing its newline,
+    /// is in the damaged file beside the queue.
+    #[test]
+    fn a_flush_keeps_every_byte_of_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#;
+        let new =
+            r#"{"issue":"ljos-new","text":"just written","workspace":"w","at":2,"kind":"note"}"#;
+        let queue = tmp.path().join("note-queue.jsonl");
+        std::fs::write(&queue, format!("{old}\n{new}")).unwrap();
+        let _env = crate::test_env_lock();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert_eq!(done.left, 1, "{done:?}");
+        assert_eq!(std::fs::read_to_string(&queue).unwrap(), format!("{old}\n"));
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&aside.path).unwrap(), new);
+    }
+
     /// A lesson queued while the pack is down still names the atom it closes.
     #[test]
     fn a_queued_lesson_keeps_the_atom_it_supersedes() {
@@ -44525,14 +45274,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(line.chars().count() <= 100, "{line}");
         }
         let all: &[&str] = &["memory", "tracker", "command guard"];
-        let cases: [(&[&str], usize); 4] = [
-            (&[], 0),
-            (&[], 6),
-            (&["pack"], 6),
-            (&["pack", "ljos-policyd"], 1),
+        let cases: [(&[&str], &[&str], usize); 6] = [
+            (&[], &[], 0),
+            (&[], &[], 6),
+            (&["pack"], &[], 6),
+            (&["pack", "ljos-policyd"], &[], 1),
+            (&[], &["the guard bypass log"], 6),
+            (&["note queue"], &["the note queue"], 6),
         ];
-        for (down, off) in cases {
-            let line = summary_line(down, all, off);
+        for (down, damaged, off) in cases {
+            let line = summary_line(down, damaged, all, off);
             assert!(line.trim_end().chars().count() <= 100, "{line}");
             assert!(!line.contains("pack"), "{line}");
         }
