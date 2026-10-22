@@ -1,0 +1,136 @@
+#!/usr/bin/python3
+"""Move a Linux test process out of a runner cgroup, then exec it.
+
+`cargo test` starts each test binary through this program. The library
+unit tests stay where they were started: two of them read the host
+cgroup, and the rest stand in for a login scope. Anything `cargo run`
+starts lives outside `deps/` and is left alone, so a release binary
+still reads the cgroup it was started in. There is no switch for that.
+"""
+
+import os
+import subprocess
+import sys
+
+# Names a cgroup word is matched against. A shorter name is ignored, as
+# it is in the binary. One word, so a hyphenated harness matches its
+# first word.
+RUNNERS = {
+    "opencode",
+    "hermes",
+    "claude",
+    "codex",
+    "antigravity",
+    "cursor",
+    "grok",
+    "grokbot",
+    "shell",
+    "windsurf",
+    "vscode",
+    "gemini",
+    "amazonq",
+    "kiro",
+    "copilot",
+    "factory",
+    "qwen",
+    "crush",
+    "cline",
+    "auggie",
+    "goose",
+    "openhands",
+    "continue",
+    "kilo",
+}
+
+
+def names_runner(text):
+    word = []
+    words = []
+    for ch in text:
+        if ch.isalnum():
+            word.append(ch)
+        elif word:
+            words.append("".join(word).lower())
+            word = []
+    if word:
+        words.append("".join(word).lower())
+    return any(len(w) >= 4 and w in RUNNERS for w in words)
+
+
+def cgroup():
+    with open("/proc/self/cgroup", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def mkdir(path):
+    if os.path.isdir(path):
+        return
+    try:
+        os.makedirs(path)
+    except OSError:
+        subprocess.check_call(["sudo", "-n", "mkdir", "-p", path])
+
+
+def write_pid(procs):
+    pid = str(os.getpid()).encode()
+    try:
+        fd = os.open(procs, os.O_WRONLY)
+        try:
+            os.write(fd, pid)
+            return
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+    done = subprocess.run(
+        ["sudo", "-n", "tee", procs], input=pid, stdout=subprocess.DEVNULL
+    )
+    if done.returncode != 0:
+        sys.stderr.write("could not enter %s\n" % procs)
+        raise SystemExit(97)
+
+
+def leave():
+    try:
+        text = cgroup()
+    except OSError as err:
+        sys.stderr.write("cgroup: %s\n" % err)
+        raise SystemExit(97)
+    if not names_runner(text):
+        return
+    path = ""
+    for line in text.splitlines():
+        path = line.rsplit(":", 1)[-1]
+        if path:
+            break
+    parts = [part for part in path.split("/") if part]
+    keep = len(parts)
+    while keep > 0 and names_runner("/".join(parts[:keep])):
+        keep -= 1
+    parent = "/sys/fs/cgroup"
+    if keep:
+        parent = parent + "/" + "/".join(parts[:keep])
+    dest = parent + "/ljos-person"
+    mkdir(dest)
+    write_pid(dest + "/cgroup.procs")
+    now = cgroup()
+    if names_runner(now):
+        sys.stderr.write("still in a runner cgroup: %s\n" % now)
+        raise SystemExit(97)
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("missing test binary\n")
+        raise SystemExit(97)
+    exe = sys.argv[1]
+    base = os.path.basename(exe)
+    # The library unit-test binary keeps the host cgroup.
+    if "/deps/" not in exe or base.startswith("ljos_cli-"):
+        os.execv(exe, sys.argv[1:])
+    leave()
+    os.execv(exe, sys.argv[1:])
+
+
+if __name__ == "__main__":
+    main()

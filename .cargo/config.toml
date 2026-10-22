@@ -1,0 +1,5 @@
+# Linux test binaries leave a runner cgroup before they run. The program
+# under test reads the cgroup it was started in, and has no switch for
+# this. `cargo run` is outside deps/ and is not moved.
+[target.'cfg(target_os = "linux")']
+runner = "crates/ljos-cli/tests/common/neutral-cgroup"
