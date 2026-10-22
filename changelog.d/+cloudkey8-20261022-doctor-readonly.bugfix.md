@@ -1,0 +1,1 @@
+`ljos doctor` opened each log through the import path, which records that a host writes headers, and it still named a scope that had been removed. Looking is not recording, and a scope that is no longer configured is left out.
