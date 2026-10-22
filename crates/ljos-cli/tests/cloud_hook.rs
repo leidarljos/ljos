@@ -649,6 +649,10 @@ fn github_clients_allow_only_a_resolved_get() {
         "gh api --method PATCH repos/acme/widgets -f default_branch=develop",
         "gh api --method POST repos/acme/widgets/actions/workflows/ci.yml/dispatches -f ref=main",
         "gh api repos/acme/widgets/pulls/7/update-branch -X POST",
+        "gh api repos/acme/widgets/git/refs -fref=refs/heads/x -fsha=0123456789012345678901234567890123456789",
+        "gh api repos/acme/widgets/issues -ftitle=t",
+        "gh api repos/acme/widgets/issues -if title=x",
+        "gh api graphql -fquery='mutation { deleteRef(input: {refId: \"R\"}) { clientMutationId } }'",
     ] {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
