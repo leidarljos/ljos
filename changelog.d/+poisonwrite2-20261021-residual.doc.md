@@ -1,0 +1,1 @@
+The explanation now says plainly what the kept prompt does not stop: a process of the same user that runs outside the seat guard, not as a tool call, can still forge the person's words. A person basis is strong only against writes made through tool calls the guard sees.

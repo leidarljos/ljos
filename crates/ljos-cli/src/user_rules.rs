@@ -432,16 +432,20 @@ pub fn forget(id: &str) -> Result<UserRule> {
 }
 
 /// Read lesson `id` from this seat's pack and copy it into a user rule.
-/// The lesson stays in the pack.
+/// The lesson stays in the pack. Under a runner, or with `person_words`
+/// (the MCP path), the lesson's text must be in the person's latest
+/// prompt, as [`write_preference`] asks of the words.
 ///
 /// # Errors
 ///
-/// The pack does not answer, no such lesson, or [`promote_atom`] refuses it.
+/// The pack does not answer, no such lesson, the text is not the
+/// person's words when they are required, or [`promote_atom`] refuses it.
 pub fn promote_lesson(
     id: &str,
     reason: &str,
     deny_mention: &People,
     deny_reply_to: &People,
+    person_words: bool,
 ) -> Result<UserRule> {
     let id = id.trim();
     if id.is_empty() {
@@ -454,6 +458,10 @@ pub fn promote_lesson(
         .into_iter()
         .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id))
         .with_context(|| format!("prefer: no atom {id} in this seat's pack"))?;
+    if person_words || super::under_a_runner() {
+        let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+        super::refuse_unless_person_words("prefer", text)?;
+    }
     promote_atom(&atom, reason, deny_mention, deny_reply_to)
 }
 
@@ -1126,6 +1134,39 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    /// These tests write a user rule as the person at a terminal. A
+    /// runner's variables on the shell that runs `cargo test` must not make
+    /// them an agent's, so each is run again in a child that carries them.
+    #[test]
+    fn the_user_rule_tests_pass_under_a_runner_environment() {
+        let runner: &[(&str, &str)] = &[
+            ("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-runner"),
+            ("CURSOR_AGENT", "1"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_SESSION_ID", "0199a1b2-claude-session"),
+            ("CODEX_THREAD_ID", "0199a1b2-codex-thread"),
+        ];
+        for test in [
+            "a_user_rule_is_surfaced_in_a_second_seat",
+            "the_guard_denies_a_mention_and_a_reply_and_allows_another_comment",
+            "two_homes_with_different_rules_converge",
+        ] {
+            let test = format!("user_rules::tests::{test}");
+            for env in [runner, &[("CURSOR_CONVERSATION_ID", "x")]] {
+                let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+                cmd.args(["--exact", &test, "--test-threads=1"]);
+                for (key, value) in env {
+                    cmd.env(key, value);
+                }
+                let out = cmd.output().unwrap();
+                let said = String::from_utf8_lossy(&out.stdout).into_owned()
+                    + &String::from_utf8_lossy(&out.stderr);
+                assert!(out.status.success(), "{test} under {env:?}:\n{said}");
+                assert!(said.contains("1 passed"), "{test} under {env:?}:\n{said}");
+            }
+        }
     }
 
     #[test]
