@@ -2293,6 +2293,55 @@ fn doctor_warns_when_shell_path_finds_ljos_mcp() {
     assert!(row.state.contains("warning:"), "{row:?}");
 }
 
+/// An absolute `ljos-mcp` that exists is not proof it is this install. A
+/// stale copy left in another directory is what the client starts.
+#[test]
+fn doctor_warns_on_an_absolute_ljos_mcp_from_another_install() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    let old = home.join("old/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&old).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    executable(&old.join("ljos-mcp"), "#!/bin/sh\nexit 1\n");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let write = |command: &Path| {
+        let doc = serde_json::json!({
+            "mcpServers": { "ljos": { "command": command, "args": [] } }
+        });
+        fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
+    };
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+
+    write(&old.join("ljos-mcp"));
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "warn", "{row:?}");
+    assert!(
+        row.state
+            .contains(&old.join("ljos-mcp").display().to_string()),
+        "{row:?}"
+    );
+    assert!(
+        row.state
+            .contains(&bin.join("ljos-mcp").display().to_string()),
+        "{row:?}"
+    );
+    assert!(
+        row.state.contains("ljos onboard --harness cursor"),
+        "{row:?}"
+    );
+
+    write(&bin.join("ljos-mcp"));
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "ok", "{row:?}");
+}
+
 #[test]
 fn doctor_respects_env_path_in_the_entry() {
     let _g = Guard::new();
