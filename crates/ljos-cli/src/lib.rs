@@ -47885,11 +47885,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "kind": "lesson",
             "entities": []
         });
-        let plain = sync::log_plaintext(std::slice::from_ref(&atom), "surf", "surf");
+        let host = sync::host();
+        let header = serde_json::json!({ "ljos_log": 1, "host": host, "scope": "surf" });
+        let plain = format!(
+            "{header}\n{}",
+            sync::log_plaintext(std::slice::from_ref(&atom), "surf", "surf")
+        );
         let digest = format!("{} {}\n", work_id(&plain), work_id("age1test"));
         let atoms = root.join(".ljos/atoms");
         std::fs::create_dir_all(&atoms).unwrap();
-        let host = sync::host();
         std::fs::write(atoms.join(format!("{host}.jsonl.age")), "sealed\n").unwrap();
         std::fs::write(atoms.join(format!("{host}.digest")), digest).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
