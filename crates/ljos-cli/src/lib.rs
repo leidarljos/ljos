@@ -34703,6 +34703,35 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "an all-letter pid tag did not fold")]
+    fn an_all_letter_pid_tag_folds_to_a_known_seat() {
+        let known: std::collections::BTreeSet<String> = ["free-agy", "eessi", "eessi-bot"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for (held, holder) in [
+            ("free-agy-aak", "free-agy@q4s23e2cxd"),
+            ("free-opencode-nrv", "free-opencode"),
+            ("free-opencode", "free-opencode-nrv"),
+        ] {
+            assert!(
+                same_seat(held, holder, &known),
+                "an all-letter pid tag did not fold: {held} {holder}"
+            );
+        }
+        for (held, holder) in [
+            ("eessi-bot", "eessi"),
+            ("qwen-72", "qwen"),
+            ("node-01", "node"),
+            ("judge-qwen-ab", "judge-qwen"),
+            ("run-pr-abc", "run-pr"),
+            ("free-claude-sandbox", "free-claude"),
+        ] {
+            assert!(!same_seat(held, holder, &known), "{held} {holder}");
+        }
+    }
+
+    #[test]
     fn a_claim_under_a_legacy_holder_is_held_as_the_seat() {
         assert_eq!(claim_holder("inky-n9o").unwrap(), "inky");
         assert_eq!(claim_holder("disk-saver-t4t").unwrap(), "disk-saver");
