@@ -731,18 +731,28 @@ pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(
 pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String> {
     let root = work_tree_of(current).or_else(|_| work_tree_cwd())?;
     let bytes = reexport_local(&root, rel.trim())?;
-    // `%A` is a path in the work tree. Opening it by name follows a parent
-    // that was swapped for a symlink after the log was read. Write through
-    // the directory fd instead, the same way the rebase path does.
-    let rel_current = current.strip_prefix(&root).map_err(|_| {
+    // git's cwd is the work tree and `%A` is relative (`.merge_file_XXXX`).
+    // `strip_prefix` on that relative path never matches the absolute root,
+    // so the driver errors and the merge aborts. Resolve it against the cwd
+    // first. Opening the result by name would follow a parent swapped for a
+    // symlink; the beneath check stays, and the write goes through the
+    // directory fd, the same way the rebase path does.
+    let resolved = if current.is_relative() {
+        std::env::current_dir()
+            .map_err(|e| format!("atoms merge: cwd: {e}"))?
+            .join(current)
+    } else {
+        current.to_path_buf()
+    };
+    let rel_current = resolved.strip_prefix(&root).map_err(|_| {
         format!(
             "atoms merge: {} is outside the work tree",
-            current.display()
+            resolved.display()
         )
     })?;
     let rel_current = rel_current
         .to_str()
-        .ok_or_else(|| format!("atoms merge: {} is not a path", current.display()))?;
+        .ok_or_else(|| format!("atoms merge: {} is not a path", resolved.display()))?;
     crate::sync::write_beneath(&root, rel_current, &bytes).map_err(|e| format!("atoms merge: {e}"))
 }
 
@@ -2022,5 +2032,246 @@ body b
             calls.trim().parse::<u32>().unwrap_or(0) >= 2,
             "driver calls: {calls}"
         );
+    }
+
+    /// The built `ljos`. `cargo test` compiles the bin next to this harness.
+    fn ljos_bin() -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let bin = exe
+            .parent()
+            .and_then(|deps| deps.parent())
+            .map(|debug| debug.join("ljos"))
+            .unwrap();
+        assert!(bin.is_file(), "ljos binary at {}", bin.display());
+        bin
+    }
+
+    /// git passes `%A` relative to the work tree. A driver that only accepts
+    /// an absolute path errors, and catch-up's merge aborts on the conflict.
+    #[test]
+    fn a_real_merge_reexports_a_conflicted_log_from_a_relative_temp() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let pack_home = dir.path().join("pack");
+        std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+        std::fs::create_dir_all(&pack_home).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let packsetd = std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("packsetd"))
+                    .find(|candidate| candidate.is_file())
+            })
+            .expect("packsetd on PATH; CI builds it from packset develop");
+        let mut daemon = std::process::Command::new(packsetd)
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(&pack_home)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &pack_home)
+            .env("PACKSET_HOME", &pack_home)
+            .env("PACKSET_AUTH", "off")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("packsetd on PATH");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(daemon.try_wait().unwrap().is_none(), "packsetd exited");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "packsetd did not listen"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let key = home.join(".config/ljos/age.key");
+        let made = std::process::Command::new("age-keygen")
+            .arg("-o")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let public = std::process::Command::new("age-keygen")
+            .arg("-y")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PACKSET_WORKSPACE", "merge-relative");
+            std::env::remove_var("LJOS_WRITE_SCOPE");
+        }
+        let client = crate::pack().unwrap();
+        crate::admit::post_kept(
+            &client,
+            &serde_json::json!({
+                "kind": "lesson",
+                "level": "explicit",
+                "text": "Re-exported by the atoms driver.",
+                "workspace": client.workspace(),
+                "entities": ["scope:grokbot"],
+            }),
+        )
+        .unwrap();
+        let record = dir.path().join("percent-a");
+        let wrapper = dir.path().join("atoms-driver");
+        let ljos = ljos_bin();
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" > {}\nexec {} merge-atoms \"$1\" \"$2\"\n",
+                crate::tools::sh_quote(&record.display().to_string()),
+                crate::tools::sh_quote(&ljos.display().to_string()),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let driver = format!("{} %A %P", wrapper.display());
+        let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
+        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        let origin = dir.path().join("origin.git");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let host = crate::sync::host();
+        let rel = format!(".ljos/atoms/{host}.jsonl.age");
+        let run = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        run(
+            dir.path(),
+            &["clone", "-q", origin.to_str().unwrap(), a.to_str().unwrap()],
+        );
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&a, &["config", key, value]);
+        }
+        std::fs::create_dir_all(a.join(".ljos/atoms")).unwrap();
+        std::fs::write(
+            a.join(".ljos/sync.toml"),
+            format!("name = \"grokbot\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(a.join(&rel), "base\n").unwrap();
+        prepare_tracker(&a, false, false).unwrap();
+        run(&a, &["add", ".gitattributes", ".ljos"]);
+        run(&a, &["commit", "-q", "-m", "seed"]);
+        run(&a, &["push", "-q", "-u", "origin", "HEAD"]);
+        run(
+            dir.path(),
+            &["clone", "-q", origin.to_str().unwrap(), b.to_str().unwrap()],
+        );
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&b, &["config", key, value]);
+        }
+        prepare_tracker(&b, false, false).unwrap();
+        std::fs::write(a.join(&rel), "side-a\n").unwrap();
+        run(&a, &["add", ".ljos/atoms"]);
+        run(&a, &["commit", "-q", "-m", "from a"]);
+        run(&a, &["push", "-q"]);
+        std::fs::write(b.join(&rel), "side-b\n").unwrap();
+        run(&b, &["add", ".ljos/atoms"]);
+        run(&b, &["commit", "-q", "-m", "from b"]);
+        run(&b, &["fetch", "-q", "origin"]);
+        let merged = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&b)
+            .args(["merge", "--no-edit", "origin/main"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
+                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+            }
+        }
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        assert!(
+            merged.status.success(),
+            "merge: {}\n{}",
+            String::from_utf8_lossy(&merged.stdout),
+            String::from_utf8_lossy(&merged.stderr)
+        );
+        let passed = std::fs::read_to_string(&record).unwrap();
+        let passed = passed.trim();
+        assert!(
+            !passed.starts_with('/'),
+            "git passed an absolute %A, so this did not exercise the relative temp: {passed}"
+        );
+        assert!(
+            passed.contains("merge_file"),
+            "git %A was not its merge temp: {passed}"
+        );
+        let opened = std::process::Command::new("age")
+            .args(["-d", "-i"])
+            .arg(&key)
+            .arg(b.join(&rel))
+            .output()
+            .unwrap();
+        assert!(
+            opened.status.success(),
+            "age -d: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        let plain = String::from_utf8_lossy(&opened.stdout);
+        assert!(
+            plain.contains("Re-exported by the atoms driver."),
+            "{plain}"
+        );
+        assert!(
+            !plain.contains("side-a") && !plain.contains("side-b"),
+            "{plain}"
+        );
+        assert!(!plain.contains("<<<<<<<"), "{plain}");
     }
 }

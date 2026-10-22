@@ -1994,12 +1994,17 @@ fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
         "gh pr comment --body 'please pr create a follow-up'",
         "gh pr comment -b 'do not pr merge yet'",
         "gh pr review 5 --comment 'LGTM, pr merge when green'",
+        "gh issue create --title 'pr create'",
+        "FOO=1 gh pr comment 7 --body \"pr merge\"",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+    for line in [
         "gh help pr create",
         "gh pr list",
         "gh pr view 7 --repo owner/name",
         "gh pr -R owner/name checks 7",
-        "gh issue create --title 'pr create'",
-        "FOO=1 gh pr comment 7 --body \"pr merge\"",
         "echo gh pr create",
     ] {
         allowed(line, here);
@@ -2103,14 +2108,19 @@ fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
     );
 
     for line in [
-        "gh api repos/acme/widgets/pulls",
-        "gh api repos/acme/widgets/pulls/7",
-        "gh api --method GET repos/acme/widgets/pulls/7/merge",
-        "gh api -X GET repos/acme/widgets/pulls -f per_page=5",
         "gh api repos/acme/widgets/issues -f title=t -f body=b",
         "gh api graphql -f query='query { viewer { login } }'",
         "gh api graphql -F query=@read.graphql",
         "gh pr comment --body 'please pr create a follow-up'",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+    for line in [
+        "gh api repos/acme/widgets/pulls",
+        "gh api repos/acme/widgets/pulls/7",
+        "gh api --method GET repos/acme/widgets/pulls/7/merge",
+        "gh api -X GET repos/acme/widgets/pulls -f per_page=5",
         "gh pr list",
         "gh pr checkout 7",
     ] {
@@ -2118,9 +2128,15 @@ fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
     }
 
     // The alias is in `cfg`, not in the process config. The guard has to
-    // read the directory the command itself names.
+    // read the directory the command itself names. A name with no alias
+    // there is not a read, so it is refused, and it is not the open rule.
     std::env::set_var("GH_CONFIG_DIR", &empty);
-    allowed("gh pc --fill", here);
+    let unseen = refused("gh pc --fill", here);
+    assert_eq!(unseen.pattern, "cloud-cursor-push", "{unseen:?}");
+    assert!(
+        !unseen.reason.contains("never open pull requests"),
+        "{unseen:?}"
+    );
     let prefixed = format!("GH_CONFIG_DIR={} gh pc --fill", cfg.display());
     assert_eq!(refused(&prefixed, here).pattern, "cloud-gh-pr-create");
 }
@@ -2204,14 +2220,19 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
     }
 
     for line in [
-        "gh api repos/acme/widgets/git/refs/heads/main",
-        "gh api --method GET repos/acme/widgets/git/refs/heads/main",
-        "gh api --paginate repos/acme/widgets/git/matching-refs/heads/develop",
         "gh api --method PATCH repos/acme/widgets/git/refs/heads/develop -f sha=0123456789012345678901234567890123456789",
         "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/develop -f sha=0123456789012345678901234567890123456789",
         "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/develop\", oid: \"O\"}) { clientMutationId } }'",
         "gh api graphql -f query='query { viewer { login } }'",
         "gh api graphql -f query='mutation { addComment(input: {body: \"deleteRef\"}) { clientMutationId } }'",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+    for line in [
+        "gh api repos/acme/widgets/git/refs/heads/main",
+        "gh api --method GET repos/acme/widgets/git/refs/heads/main",
+        "gh api --paginate repos/acme/widgets/git/matching-refs/heads/develop",
     ] {
         allowed(line, here);
     }
@@ -2274,8 +2295,6 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
         "gh pr view 7",
         "gh pr list",
         "git send-pack --dry-run origin develop",
-        "gh repo sync -b develop",
-        "gh repo sync -b feature-x",
     ] {
         allowed(line, here);
     }
@@ -2335,6 +2354,8 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
         "gh api graphql -f query='mutation { mergeBranch(input: {base: \"main\", head: \"feature-x\"}) { clientMutationId } }'",
         "gh repo sync",
         "gh repo sync -b main",
+        "gh repo sync -b develop",
+        "gh repo sync -b feature-x",
         source_main.as_str(),
         source_unread.as_str(),
         bash_env.as_str(),
@@ -2343,26 +2364,26 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
     }
-    allowed(&develop_at, here);
+    refused(&develop_at, here);
     allowed(&source_dev, here);
     allowed(&source_missing, here);
     allowed(
         "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
         here,
     );
-    allowed(
+    refused(
         "gh api --method POST repos/acme/widgets/merges -f base=develop -f head=feature-x",
         here,
     );
-    allowed(
+    refused(
         "gh api --method PUT repos/acme/widgets/contents/README.md -f message=m -f content=eQ== -f branch=develop",
         here,
     );
-    allowed(
+    refused(
         "gh api graphql -f query='mutation { createCommitOnBranch(input: {branch: {branchName: \"develop\"}}) { clientMutationId } }'",
         here,
     );
-    allowed(
+    refused(
         "gh api graphql -f query='mutation { mergeBranch(input: {base: \"develop\", head: \"feature-x\"}) { clientMutationId } }'",
         here,
     );
@@ -2622,7 +2643,12 @@ fn cloud_guard_reads_an_older_rule_file_as_the_current_refusals() {
     sh_ok(&repo, "git push origin cursor/probe:develop");
     assert!(!git(&origin, &["show-ref"]).contains("refs/heads/cursor/probe"));
     allowed("git push git@github.com:cursor/ljos.git develop", &repo);
-    allowed("gh pr comment --body 'please pr create a follow-up'", &repo);
+    let comment = refused("gh pr comment --body 'please pr create a follow-up'", &repo);
+    assert!(
+        comment.reason.contains("not a GitHub read"),
+        "{}",
+        comment.reason
+    );
     let opened = refused("gh pr -R owner/name create", &repo);
     assert_eq!(opened.pattern, "gh* pr create*");
     assert!(opened.reason.contains("older wording"), "{opened:?}");
