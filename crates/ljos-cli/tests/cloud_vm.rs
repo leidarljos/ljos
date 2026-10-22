@@ -1741,6 +1741,35 @@ fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
 }
 
 #[test]
+fn cloud_guard_refuses_shell_aliases_that_hide_git_push() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-shell-alias", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-shell-alias");
+
+    git(
+        &repo,
+        &[
+            "config",
+            "alias.cx",
+            "!sh -c 'git push origin HEAD:refs/heads/cursor/pwned'",
+        ],
+    );
+
+    for line in [
+        "git cx",
+        "git -c 'alias.cx=!sh -c \"git push origin HEAD:refs/heads/cursor/inline\"' cx",
+    ] {
+        let hit = refused(line, &repo);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+}
+
+#[test]
 fn cloud_guard_reads_git_env_and_env_chdir_context() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
