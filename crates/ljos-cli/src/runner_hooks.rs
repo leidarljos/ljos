@@ -1356,8 +1356,10 @@ mod tests {
     fn runner_denied(runner: &str, stdout: &str, _stderr: &str, code: i32) -> bool {
         match runner {
             "copilot" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
-            "gemini" | "crush" => code == 0 && stdout.contains(r#""decision":"deny""#),
-            "windsurf" | "factory" | "kiro" | "qwen" | "goose" | "amp" | "openhands" => code == 2,
+            "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
+            "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp" | "openhands" => {
+                code == 2
+            }
             "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
             "auggie" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
             _ => false,
