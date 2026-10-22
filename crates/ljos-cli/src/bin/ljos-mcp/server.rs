@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 
 use ljos_cli::{
-    age_of, announce_seat, brief, bump_plan, calibrate, cards, claim, complete, conflicts,
-    consensus_steps_for, copy_playbook, doctor, due_page, finish, forecasts_from_json,
+    age_of, announce_seat, atom_label, brief, bump_plan, calibrate, cards, claim, complete,
+    conflicts, consensus_steps_for, copy_playbook, doctor, due_page, finish, forecasts_from_json,
     format_change, format_consolidation, graded, habit, habits, handover, identity_or_seat,
-    island_entities, learn_and_write, learn_reading, now_utc, on_path, other_seat, pack,
-    packset_consolidate, packset_forget, packset_island_as, packset_search_as_of, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, predictions_of,
-    protocol_text, read_campaign, receive, release, remember_findings, resolve_assignee,
-    rows_about, run_captured, runner_pid, search_reading, seat_name, settle_discount,
-    sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack, with_discount,
-    write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust, CARD_NAMES,
-    LEARN_BETA, POLICY_TCB,
+    island_entities, kind_label, learn_and_write, learn_reading, now_utc, on_path, other_seat,
+    pack, packset_consolidate, packset_forget, packset_island_as, packset_search_as_of,
+    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
+    predictions_of, protocol_text, read_campaign, receive, release, remember_findings,
+    resolve_assignee, rows_about, run_captured, runner_pid, search_reading, seat_name,
+    settle_discount, sitting_gated, timeline, topic_words, tracker_show_json, trust_from_pack,
+    with_discount, write_persona, write_prediction, write_rule, write_trust, Persona, Rule, Trust,
+    CARD_NAMES, LEARN_BETA, POLICY_TCB,
 };
 use rmcp::{
     handler::server::wrapper::Json, handler::server::wrapper::Parameters,
@@ -1011,6 +1011,8 @@ pub struct CueArgs {
 pub struct IslandRow {
     pub id: Option<String>,
     pub kind: String,
+    /// Who stands behind it, as `ljos recall` labels it.
+    pub label: String,
     pub text: String,
     /// Relative to the strongest, so the top is 1.
     pub activation: f64,
@@ -1101,6 +1103,8 @@ pub struct HitRow {
     pub id: Option<String>,
     /// `lesson` or `preference`, or another kind the pack holds.
     pub kind: String,
+    /// Who stands behind it, as `ljos recall` labels it.
+    pub label: String,
     /// The claim as it was stored.
     pub text: String,
     /// The pack's score for it.
@@ -1525,6 +1529,7 @@ impl LjosServer {
             rows: hits
                 .into_iter()
                 .map(|h| HitRow {
+                    label: kind_label(&h),
                     id: h.id,
                     kind: h.kind,
                     text: h.text,
@@ -2590,6 +2595,7 @@ impl LjosServer {
                 .map(|a| IslandRow {
                     id: a["id"].as_str().map(str::to_string),
                     kind: a["kind"].as_str().unwrap_or("").to_string(),
+                    label: atom_label(a),
                     text: a["text"].as_str().unwrap_or("").to_string(),
                     activation: a["activation"].as_f64().unwrap_or(0.0),
                     seed: a["seed"].as_bool().unwrap_or(false),
