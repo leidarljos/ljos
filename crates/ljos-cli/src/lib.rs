@@ -36692,9 +36692,15 @@ mod tests {
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
         let lines = seen.lock().unwrap().clone();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("rerank=1"), "{lines:?}");
-        assert!(lines[0].contains("as_of="), "{lines:?}");
+        // The upgrade lists the pack once before the query, so a legacy
+        // preference is stamped before this search reads it.
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains("/v1/atoms") && lines[0].contains("embedding=omit"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("rerank=1"), "{lines:?}");
+        assert!(lines[1].contains("as_of="), "{lines:?}");
     }
 
     /// A pack whose search sends the encoder's rank and cosine on each hit.
