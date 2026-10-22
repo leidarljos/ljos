@@ -1126,6 +1126,23 @@ mod tests {
     }
 
     #[test]
+    fn a_version_suffix_stays_part_of_the_seat() {
+        let _home = test_home();
+        let at = "2026-10-21T10:00:00Z";
+        let entries = ["alpha/gpt-5", "alpha/gpt"].map(|voter| {
+            sign_entry(ballot_entry(voter, "accept", at), voter)
+                .unwrap_or_else(|err| panic!("{voter}: {err:#}"))
+        });
+        check_entries(&entries).expect("two seats");
+        let read = tally(&entries).expect("tally");
+        assert_eq!(counted(&read, "accept"), Some(2), "{read:?}");
+        let err = sign_entry(ballot_entry("alpha/gpt-39u", "accept", at), "alpha/gpt-39u")
+            .expect_err("a pid tag folds");
+        let text = err_chain(&err);
+        assert!(text.contains("must be written `alpha/gpt`"), "{text}");
+    }
+
+    #[test]
     fn a_stored_ballot_in_another_spelling_names_its_voter_id() {
         let _home = test_home();
         // One seed stands in for the key file `Alpha/seat-a` and
