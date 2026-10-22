@@ -1,1 +1,0 @@
-An optional `[mail]` table (`notmuch_config`, `notmuch`, `identity`, `deny_file`, `attribution`) is read from the usual config layers and from `~/.config/ljos/mail.toml`. Without it nothing changes; a layer that does not parse or names an unknown key is an error.

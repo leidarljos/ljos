@@ -1,1 +1,0 @@
-`record-v1.md` now says, under "What the check cannot see", that a ballot is not bound to a tracker and that a new identity signed with a newly minted key is a new voter, so only the pin file limits how many voters one party can cast.

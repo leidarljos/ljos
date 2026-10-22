@@ -1,1 +1,0 @@
-The cloud VM docs no longer say `ljos consensus` counts a run's ballot only under its slot. The push gate, and the push cite line `ljos consensus` prints, count a ballot the run casts as its own seat when its slot verifies; a ballot cast `--as` a persona is left out before any slot is read, and the settle reads no slot.

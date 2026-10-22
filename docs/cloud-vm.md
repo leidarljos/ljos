@@ -36,7 +36,7 @@ A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`
 
 ## The encoder
 
-`packset-embed` gives a VM dense search and bulk encoding. The release workflow builds the Open Neural Network Exchange (ONNX) Runtime 1.28.3 from source with telemetry off and Debian's protoc, links `packset-embed` 0.15.3 to it with the rpath `$ORIGIN/../lib/onnxruntime`, and attaches `onnxruntime-TARGET.tar.gz` and `packset-embed-TARGET.tar.gz`, each with a `.sha256` beside it. Nothing comes from cdn.pyke.io. x86_64 Linux is the one target built.
+`packset-embed` gives a VM dense search and bulk encoding. The release workflow builds the Open Neural Network Exchange (ONNX) Runtime 1.28.3 from source with telemetry off and Debian's protoc, links `packset-embed` 0.16.0 to it with the rpath `$ORIGIN/../lib/onnxruntime`, and attaches `onnxruntime-TARGET.tar.gz` and `packset-embed-TARGET.tar.gz`, each with a `.sha256` beside it. Nothing comes from cdn.pyke.io. x86_64 Linux is the one target built.
 
 `cloud up` fetches both archives from the release of its own version and checks both sums before it unpacks either. A sum that does not match installs nothing and stops `cloud up`. The runtime goes to `~/.local/lib/onnxruntime`, beside the binary directory. A release without the archives leaves search lexical.
 

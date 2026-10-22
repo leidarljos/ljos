@@ -1,1 +1,0 @@
-A send of the note queue at session start moved the bytes it could not read to the dated `.damaged` file without a word, since the hook prints nothing of it. `ljos doctor` now makes the note queue row a `warn` while such a file sits beside the queue, naming it and how many bytes it holds, until the file is read and deleted.

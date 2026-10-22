@@ -1,1 +1,0 @@
-A quote of the person's prompt is read in NFKC with the typographic apostrophes `’`, `ʼ` and `＇` as `'`, so "Don’t do this: always ..." keeps its negation and an excerpt that drops it is no longer taken as the person's words. A quote typed with a plain apostrophe still matches a prompt typed with a curly one.
