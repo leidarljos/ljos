@@ -69,19 +69,30 @@ here.
   when a message file notmuch names is a symlink or resolves outside
   notmuch's mail root (`database.mail_root`, else `database.path`).
   Text parts are wrapped as untrusted. HTML is reduced to the text a mail
-  client would
-  show. Text the reducer can tell is concealed is dropped: the `hidden`
-  attribute, or a style that sets `display:none`, `visibility:hidden`,
-  `opacity` near 0, a zero `font-size`, a zero width or height, a
-  transparent color or one equal to the background, a negative offset or
-  indent, `clip`, `clip-path` or `mso-hide:all`, inline or through a
-  class or id rule in a `<style>` block. Any `<style>` block or
-  concealment sets `hidden_content: true` on the message. When a
-  stylesheet does what the reducer cannot follow (an `@` rule such as
-  `@media`, a concealing rule on an element or other selector, a color
-  in one rule equal to a background in another, or a linked
-  stylesheet), the part's text is replaced by a note that it was
-  withheld. Links are shown as text with their target, never followed.
+  client would show. Attribute values are entity-decoded before use, and
+  CSS has its comments removed and its escapes decoded. As in HTML, `/>`
+  closes only a void element or one inside `<svg>` or `<math>`. Text the
+  reducer can tell is concealed is dropped: inside an element with the
+  `hidden` attribute, a class or id rule in a `<style>` block that
+  conceals, or a style that sets `display:none`, `visibility:hidden` or
+  `collapse`, `content-visibility:hidden`, `mso-hide:all`, a width or
+  height of 1px or less, an offset or indent that is negative or 1000px
+  or more, `clip`, `clip-path` or any transform; under an opacity (a
+  number or a percentage, multiplied down the tree) of 0.05 or less or a
+  font size (resolved down the tree) of 1px or less; or drawn in a color
+  whose alpha is 0.05 or less, or within 16 of its background in every
+  channel (black on white when nothing sets them). A value of one of
+  those properties the reducer cannot read, or any `var()`, counts as
+  concealing. Any `<style>` block or concealment sets `hidden_content:
+  true` on the message. When the HTML does what the reducer cannot
+  follow (an `@` rule such as `@media`, a concealing rule on an element
+  or other selector, a stylesheet color within 16 of a background set
+  anywhere in the part, or of white when its rule sets no background, a
+  stylesheet background within 16 of black when its rule sets no color,
+  a linked stylesheet, or a `style`, `class`, `id` or `hidden` attribute
+  holding a reference the reducer cannot decode), the part's text is
+  replaced by a note that it was withheld. Links are shown as text with
+  their target, never followed.
   Attachments are listed by name, type, size and sha256, with no content
   and no path. Hashing reads at most 64 MiB of one attachment; past that
   notmuch is stopped, `sha256` is null and `size` is a lower bound.
