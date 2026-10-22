@@ -355,6 +355,12 @@ enum Cmd {
         /// Fold a gone host's atoms into this host's log and drop that host's log file.
         #[arg(long, value_name = "HOST", conflicts_with_all = ["key", "import", "export"])]
         adopt: Option<String>,
+        /// Adopt a host whose log was committed within the last 14 days.
+        #[arg(long, requires = "adopt")]
+        force: bool,
+        /// Print what --adopt would post, retire, and delete, and write nothing.
+        #[arg(long, requires = "adopt")]
+        dry_run: bool,
     },
     /// Re-export this machine's atoms over a conflicted tracker log. git calls
     /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
@@ -535,7 +541,8 @@ enum Cmd {
         #[arg(long)]
         all: bool,
         /// Fetch the tracker and import its sealed logs before listing.
-        /// `COMMIT` waits until that commit is present. Without it, use
+        /// `COMMIT` fetches until the remote has that commit, for up to
+        /// `LJOS_INBOX_SYNC_WAIT` seconds (30). Without it, use
         /// `LJOS_WAKE_COMMIT` when that is set, otherwise the remote head.
         /// A commit the remote does not have imports the remote head. No
         /// remote: list only.
@@ -710,7 +717,7 @@ enum Cmd {
         dry_run: bool,
         /// Write one prompt file per persona for a cloud seat: the seat
         /// environment, the slot and the push rules. Does not spawn.
-        #[arg(long, conflicts_with_all = ["jev", "harness", "dry_run"])]
+        #[arg(long, conflicts_with_all = ["jev", "harness", "designers", "dry_run"])]
         cloud: bool,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
@@ -1522,9 +1529,11 @@ fn run_command() -> Result<()> {
             import,
             export,
             adopt,
+            force,
+            dry_run,
         } => {
             if let Some(host) = adopt {
-                print!("{}", ljos_cli::sync::adopt(&host)?);
+                print!("{}", ljos_cli::sync::adopt(&host, force, dry_run)?);
             } else if key {
                 println!("{}", ljos_cli::sync::public_key()?);
             } else {

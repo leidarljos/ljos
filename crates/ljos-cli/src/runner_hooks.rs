@@ -30,6 +30,109 @@ pub const RUNNERS: &[&str] = &[
     "openhands",
 ];
 
+#[derive(Clone, Copy)]
+struct RunnerContract {
+    asks: bool,
+    deny_by_exit: bool,
+}
+
+const RUNNER_CONTRACTS: &[(&str, RunnerContract)] = &[
+    (
+        "copilot",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "gemini",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "windsurf",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "factory",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "kiro",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "cline",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "qwen",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "crush",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "auggie",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "goose",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "amp",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "openhands",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+];
+
+fn contract(runner: &str) -> RunnerContract {
+    RUNNER_CONTRACTS
+        .iter()
+        .find_map(|(name, contract)| (*name == runner).then_some(*contract))
+        .unwrap_or(RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        })
+}
+
 /// Runners whose hook entry must name one program with no arguments (Amp's
 /// delegate) or a `.sh` file (Auggie): onboard writes this script beside
 /// the settings file, and the entry names it.
@@ -53,7 +156,15 @@ pub fn is_runner(name: &str) -> bool {
 
 /// Whether the runner shows the person a prompt on an `ask`.
 fn asks(runner: &str) -> bool {
-    matches!(runner, "copilot" | "factory" | "qwen" | "amp")
+    contract(runner).asks
+}
+
+fn reason_stderr(reason: &str) -> String {
+    if reason.trim().is_empty() {
+        "ljos denied this command.\n".to_string()
+    } else {
+        format!("{reason}\n")
+    }
 }
 
 /// The event names Gemini CLI uses, as the seat's.
@@ -309,12 +420,14 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
         );
     }
     let line = |v: Value| v.to_string() + "\n";
-    match (runner, said.decision.as_deref()) {
+    let reason = said.reason.clone();
+    let context = said.context.clone();
+    let mut rendered = match (runner, said.decision.as_deref()) {
         ("factory" | "qwen", _) => (out.to_string(), String::new(), 0),
         ("copilot", Some(d)) => (
             line(json!({
                 "permissionDecision": d,
-                "permissionDecisionReason": said.reason,
+                "permissionDecisionReason": reason.clone(),
             })),
             String::new(),
             0,
@@ -324,72 +437,79 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
             let mut v = Map::new();
             if let Some(d) = d {
                 v.insert("decision".into(), json!(d));
-                v.insert("reason".into(), json!(said.reason));
+                v.insert("reason".into(), json!(reason.clone()));
             }
-            if !said.context.is_empty() {
+            if !context.is_empty() {
                 v.insert(
                     "hookSpecificOutput".into(),
-                    json!({ "hookEventName": event, "additionalContext": said.context }),
+                    json!({ "hookEventName": event, "additionalContext": context }),
                 );
             }
             (line(Value::Object(v)), String::new(), 0)
         }
-        ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), reason_stderr(&reason), 2),
         ("goose", None) => (String::new(), String::new(), 0),
         ("openhands", Some(_)) => (
-            line(json!({ "decision": "deny", "reason": said.reason })),
-            said.reason + "\n",
+            line(json!({ "decision": "deny", "reason": reason.clone() })),
+            reason_stderr(&reason),
             2,
         ),
-        ("openhands", None) if !said.context.is_empty() => (
-            line(json!({ "additionalContext": said.context })),
+        ("openhands", None) if !context.is_empty() => (
+            line(json!({ "additionalContext": context })),
             String::new(),
             0,
         ),
-        ("amp", Some("ask")) => (String::new(), said.reason + "\n", 1),
-        ("amp", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("amp", Some("ask")) => (String::new(), reason_stderr(&reason), 1),
+        ("amp", Some(_)) => (String::new(), reason_stderr(&reason), 2),
         ("amp", None) => (String::new(), String::new(), 0),
         ("auggie", Some(d)) => (
             line(json!({ "hookSpecificOutput": {
                 "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
                 "permissionDecision": d,
-                "permissionDecisionReason": said.reason,
+                "permissionDecisionReason": reason.clone(),
             }})),
             String::new(),
             0,
         ),
-        ("auggie", None) if !said.context.is_empty() => (
+        ("auggie", None) if !context.is_empty() => (
             line(json!({ "hookSpecificOutput": {
                 "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-                "additionalContext": said.context,
+                "additionalContext": context,
             }})),
             String::new(),
             0,
         ),
-        ("kiro", None) if !said.context.is_empty() => (said.context + "\n", String::new(), 0),
+        ("kiro", None) if !context.is_empty() => (context + "\n", String::new(), 0),
         ("windsurf" | "kiro", None) => (String::new(), String::new(), 0),
         ("cline", Some(_)) => (
-            line(json!({ "cancel": true, "errorMessage": said.reason })),
+            line(json!({ "cancel": true, "errorMessage": reason.clone() })),
             String::new(),
             0,
         ),
         ("cline", None) => {
             let mut v = json!({ "cancel": false });
-            if !said.context.is_empty() {
-                v["contextModification"] = json!(said.context);
+            if !context.is_empty() {
+                v["contextModification"] = json!(context);
             }
             (line(v), String::new(), 0)
         }
         ("crush", Some(d)) => (
-            line(json!({ "decision": d, "reason": said.reason })),
+            line(json!({ "decision": d, "reason": reason.clone() })),
             String::new(),
             0,
         ),
-        ("crush", None) if !said.context.is_empty() => {
-            (line(json!({ "context": said.context })), String::new(), 0)
+        ("crush", None) if !context.is_empty() => {
+            (line(json!({ "context": context })), String::new(), 0)
         }
         _ => (String::new(), String::new(), 0),
+    };
+    if said.decision.as_deref() == Some("deny") && contract(runner).deny_by_exit {
+        rendered.2 = 2;
+        if rendered.1.trim().is_empty() {
+            rendered.1 = reason_stderr(&reason);
+        }
     }
+    rendered
 }
 
 /// The event name in a runner's stdin, as the runner spelled it.
@@ -417,17 +537,38 @@ pub fn raw_event(input: &str) -> String {
 /// when it lapses, so the relay answers first.
 pub const INNER_TIMEOUT: std::time::Duration = crate::GUARD_TIMEOUT;
 
-/// An allow, with a note, for an inner hook that gave no verdict. `what`
-/// says how it failed. A command no rule would refuse is allowed; the
-/// dangerous ones are judged before this runs.
+/// A deny for an inner hook fault. `what` says how it failed. With
+/// `LJOS_GUARD_FAIL_OPEN=1`, this falls back to an allow with a note.
 fn fault_output(event: &str, what: &str) -> String {
+    if crate::guard_fail_open() {
+        return json!({
+            "hookSpecificOutput": {
+                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+                "additionalContext": crate::unhealthy_note(what),
+            }
+        })
+        .to_string();
+    }
+    let reason =
+        format!("the ljos guard failed while checking this command ({what}); run `ljos doctor`");
     json!({
         "hookSpecificOutput": {
             "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-            "additionalContext": crate::unhealthy_note(what),
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
         }
     })
     .to_string()
+}
+
+/// The fault text from [`crate::unhealthy_note`], when this context is one.
+fn unhealthy_fault(context: &str) -> Option<String> {
+    let tail = ") and did not judge this call, so it is allowed. No ljos rule would refuse it. Run `ljos doctor`.";
+    let why = context
+        .trim()
+        .strip_prefix("the ljos guard is unhealthy (")?
+        .strip_suffix(tail)?;
+    Some(why.to_string())
 }
 
 /// The command a normalized payload would run, or empty when it has none.
@@ -475,8 +616,10 @@ fn early_answer(normalized: &str, event: &str) -> Option<String> {
 
 /// Run `cmd` as the inner hook with `stdin` as its input, and give back
 /// what it printed. A spawn error, a kill by signal, a non-zero exit, or
-/// no exit within `timeout` is an allow that says the guard is unhealthy.
-/// A non-zero exit that still printed a deny or an ask keeps it.
+/// no exit within `timeout` is a deny that says how the guard failed.
+/// A non-zero exit that still printed a deny or an ask keeps it. A
+/// successful exit that still says the guard was unhealthy is denied too,
+/// unless `LJOS_GUARD_FAIL_OPEN=1`.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -533,7 +676,17 @@ pub fn run_inner(
         .and_then(|r| r.join().ok())
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    if status.success() || read_answer(&out).decision.is_some() {
+    let said = read_answer(&out);
+    if said.decision.is_some() {
+        return out;
+    }
+    if let Some(why) = unhealthy_fault(&said.context) {
+        if crate::guard_fail_open() {
+            return out;
+        }
+        return fault_output(event, &why);
+    }
+    if status.success() {
         return out;
     }
     let what = match status.code() {
@@ -548,7 +701,7 @@ pub fn run_inner(
 /// code the runner reads. A force push, a seat deny, and an `rm -rf` are
 /// judged here, before the inner hook. An inner hook that crashes, exits
 /// non-zero without a decision, or runs past [`crate::guard_timeout`]
-/// allows the call and says the guard is unhealthy.
+/// denies the call and says the guard failed.
 pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
     let normalized = normalize_input(runner, input);
     let raw = raw_event(input);
@@ -1001,6 +1154,20 @@ mod tests {
     const ASK: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"a push"}}"#;
     const NOTE: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"lesson: run the tests"}}"#;
 
+    #[test]
+    fn each_runner_has_one_contract_row() {
+        for runner in RUNNERS {
+            assert_eq!(
+                RUNNER_CONTRACTS
+                    .iter()
+                    .filter(|(name, _)| name == runner)
+                    .count(),
+                1,
+                "{runner}"
+            );
+        }
+    }
+
     fn payload(runner: &str, input: Value) -> Value {
         serde_json::from_str(&normalize_input(runner, &input.to_string())).unwrap()
     }
@@ -1111,23 +1278,23 @@ mod tests {
             assert!(err.contains("force push"), "{runner}");
         }
 
+        for runner in ["factory", "qwen"] {
+            let (out, err, code) = answer(runner, "PreToolUse", DENY);
+            assert_eq!(out.as_str(), DENY, "{runner}");
+            assert_eq!(code, 2, "{runner}");
+            assert!(err.contains("force push"), "{runner}: {err}");
+        }
+
         let (out, _, _) = answer("cline", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["cancel"], json!(true));
         assert!(v["errorMessage"].as_str().unwrap().contains("force push"));
 
-        let (out, _, _) = answer("crush", "PreToolUse", DENY);
+        let (out, err, code) = answer("crush", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], json!("deny"));
-
-        for runner in ["factory", "qwen"] {
-            let (out, _, code) = answer(runner, "PreToolUse", DENY);
-            assert_eq!(
-                (out.as_str(), code),
-                (DENY, 0),
-                "{runner} takes Claude Code's shape"
-            );
-        }
+        assert_eq!(code, 2);
+        assert!(err.contains("force push"));
     }
 
     #[test]
@@ -1186,8 +1353,34 @@ mod tests {
         )
     }
 
-    /// Runners that show an allow's note. The others drop it and still
-    /// exit 0, which is an allow.
+    fn runner_denied(runner: &str, stdout: &str, _stderr: &str, code: i32) -> bool {
+        match runner {
+            "copilot" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
+            "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
+            "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp" | "openhands" => {
+                code == 2
+            }
+            "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
+            "auggie" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
+            _ => false,
+        }
+    }
+
+    fn denies_fault(out: &str, why: &str) {
+        let said = read_answer(out);
+        assert_eq!(said.decision.as_deref(), Some("deny"), "{out}");
+        assert!(said.reason.contains(why), "{out}");
+        assert!(said.reason.contains("run `ljos doctor`"), "{out}");
+        for runner in RUNNERS {
+            let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
+            let body = format!("{stdout}{stderr}");
+            assert!(
+                runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: {body}"
+            );
+        }
+    }
+
     fn shows_context(runner: &str) -> bool {
         matches!(
             runner,
@@ -1195,18 +1388,17 @@ mod tests {
         )
     }
 
-    fn allows_unhealthy(out: &str, why: &str) {
+    fn allows_fault(out: &str, why: &str) {
         let said = read_answer(out);
         assert!(said.decision.is_none(), "{out}");
-        assert!(out.contains("unhealthy"), "{out}");
-        assert!(out.contains(why), "{out}");
-        assert!(!out.contains("refused unchecked"), "{out}");
+        assert!(said.context.contains("unhealthy"), "{out}");
+        assert!(said.context.contains(why), "{out}");
         for runner in RUNNERS {
             let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
             let body = format!("{stdout}{stderr}");
             assert_eq!(code, 0, "{runner}: {body}");
             assert!(
-                !body.contains("\"deny\"") && !body.contains("\"cancel\":true"),
+                !runner_denied(runner, &stdout, &stderr, code),
                 "{runner}: {body}"
             );
             if shows_context(runner) {
@@ -1218,7 +1410,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_inner_hook_that_fails_allows_and_says_the_guard_is_unhealthy() {
+    fn an_inner_hook_fault_denies_in_every_runner_shape() {
+        let _lock = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
         // the signal.
@@ -1229,22 +1435,45 @@ mod tests {
             "was killed by a signal".to_string(),
         ];
         for why in &injected {
-            allows_unhealthy(&fault_output("PreToolUse", why), why);
+            denies_fault(&fault_output("PreToolUse", why), why);
         }
-        allows_unhealthy(&inner("exit 3", 30_000), "exited with status 3");
+        denies_fault(&inner("exit 3", 30_000), "exited with status 3");
+        let unhealthy = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": crate::unhealthy_note("did not answer in time"),
+            }
+        })
+        .to_string();
+        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
+        denies_fault(&from_policyd, "did not answer in time");
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
             "PreToolUse",
             std::time::Duration::from_secs(1),
         );
-        allows_unhealthy(&missing, "did not start");
+        denies_fault(&missing, "did not start");
         assert_eq!(INNER_TIMEOUT, crate::GUARD_TIMEOUT);
     }
 
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
+        let _lock = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         assert_eq!(inner("true", 30_000), "", "a clean allow");
         assert_eq!(inner(&format!("printf '%s' '{DENY}'"), 30_000), DENY);
         assert_eq!(
@@ -1253,9 +1482,42 @@ mod tests {
             "a deny printed before a non-zero exit stands"
         );
         let note = inner(&format!("printf '%s' '{NOTE}'; exit 1"), 30_000);
-        assert!(read_answer(&note).decision.is_none(), "{note}");
-        assert!(note.contains("unhealthy"), "{note}");
-        assert!(note.contains("exited with status 1"), "{note}");
+        let said = read_answer(&note);
+        assert_eq!(said.decision.as_deref(), Some("deny"), "{note}");
+        assert!(said.reason.contains("exited with status 1"), "{note}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_fail_open_restores_allow_with_note() {
+        let _lock = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
+        unsafe { std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1") };
+        allows_fault(
+            &fault_output("PreToolUse", "exited with status 3"),
+            "exited with status 3",
+        );
+        allows_fault(&inner("exit 3", 30_000), "exited with status 3");
+        let unhealthy = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": crate::unhealthy_note("did not answer in time"),
+            }
+        })
+        .to_string();
+        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
+        allows_fault(&from_policyd, "did not answer in time");
     }
 
     #[test]
