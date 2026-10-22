@@ -2646,7 +2646,12 @@ fn hosted_runner_comm(comm: &str) -> bool {
 /// chain is read whole to pid 1, past any name: no process on it is a
 /// runner by name, program, install path or seat record, and none was
 /// reparented, which a process outside its own session with a parent in
-/// another shows. Names prove nothing here; a tool call picks its own.
+/// another shows. The holder's parent is not init: a double fork and a
+/// second `setsid` leave a session leader there, and so does a
+/// multiplexer server that daemonized, and neither says who opened it.
+/// Between the holder and this process only wrappers and terminals run;
+/// python, node, make, expect or any other program there typed the
+/// command. Names prove nothing here; a tool call picks its own.
 #[cfg(target_os = "linux")]
 fn host_at_terminal() -> bool {
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
@@ -2704,6 +2709,12 @@ fn host_at_terminal() -> bool {
     let Some(holder) = chain.get(leader + 1) else {
         return false;
     };
+    let adopted = holder.ppid <= 1;
+    let programmed = chain
+        .iter()
+        .take(leader + 1)
+        .skip(1)
+        .any(|r| !WRAPPERS.contains(&r.comm.as_str()) && !login_holder(&r.comm));
     let runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.harness.into_iter().map(|h| h.name).collect())
         .unwrap_or_default();
@@ -2712,7 +2723,7 @@ fn host_at_terminal() -> bool {
             || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
             || proc_tree::exe_runner(r.pid).is_some()
     });
-    if reparented || runner || !holds_pty(holder.pid, index) {
+    if reparented || adopted || programmed || runner || !holds_pty(holder.pid, index) {
         return false;
     }
     // The pty is the person's only when a terminal, a multiplexer or a
@@ -18279,8 +18290,8 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
-    // The doctor is a person-side run, so it records the cutoff. Under a
-    // runner the call does nothing and the count below still stands.
+    // The doctor records the cutoff only with the person at a terminal of
+    // their own. Without them the call does nothing and the row reports.
     legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
@@ -20989,6 +21000,47 @@ fn writes_persons_words(line: &str) -> Option<&'static str> {
         })
 }
 
+/// Whether keys typed into a pane spell the person's consent: an
+/// approval, or `ljos prefer` or `ljos remember`, which store words as
+/// the person's at their terminal. Quotes, a path, a `Space` key and one
+/// key per word are read through.
+fn types_consent(keys: &str) -> bool {
+    let spelled: String = keys
+        .split_whitespace()
+        .filter(|w| !w.eq_ignore_ascii_case("space"))
+        .flat_map(str::chars)
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ["approve", "ljosprefer", "ljosremember"]
+        .iter()
+        .any(|word| spelled.contains(word))
+}
+
+/// Whether `wezterm cli send-text` in `words` names its text. Without it
+/// wezterm types what it reads from stdin.
+fn sends_text_argument(words: &[String]) -> bool {
+    let Some(at) = words.iter().position(|w| w == "send-text") else {
+        return false;
+    };
+    let mut rest = words[at + 1..].iter();
+    while let Some(w) = rest.next() {
+        let operator = w.trim_start_matches(|c: char| c.is_ascii_digit());
+        if operator.starts_with(['<', '>']) {
+            if operator.trim_matches(['<', '>', '&']).is_empty() {
+                rest.next();
+            }
+        } else if w == "--pane-id" {
+            rest.next();
+        } else if w == "--" {
+            return rest.next().is_some();
+        } else if !w.starts_with('-') {
+            return true;
+        }
+    }
+    false
+}
+
 /// The seat's own guard, before any rule: a shell command that writes one
 /// of [`SEAT_PATHS`] (anything but a reader, or a redirect into it), or a
 /// file tool aimed at one, is refused. A path is a word of its own: a
@@ -21105,7 +21157,8 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         // Consent given in the chat is what the person submits; keys an
         // agent types into a pane would forge it. Each multiplexer below
         // writes into another pane's input with these verbs; xdotool,
-        // wtype and ydotool type into whatever window has focus.
+        // wtype and ydotool type into whatever window has focus, and
+        // ttyecho and writevt into a terminal's input queue.
         let has = |verbs: &[&str]| words.iter().any(|w| verbs.contains(&w.as_str()));
         let input_flag = words
             .iter()
@@ -21116,7 +21169,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             "zellij" => has(&["write-chars", "write"]),
             "wezterm" | "kitty" | "kitten" => has(&["send-text"]),
             "screen" => has(&["stuff"]),
-            "xdotool" | "wtype" | "ydotool" => true,
+            "xdotool" | "wtype" | "ydotool" | "ttyecho" | "writevt" => true,
             _ => false,
         };
         // Some verbs type what another command produced: herdr's terminal
@@ -21130,24 +21183,34 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             _ => false,
         };
         // A paste writes a buffer into a pane. The buffer can hold an
-        // approval that this segment does not spell.
+        // approval that this segment does not spell. So does a typer fed
+        // from stdin or a file, and a program that pushes bytes into a
+        // terminal with TIOCSTI spells them however it likes.
         let pastes = match first {
             "tmux" => has(&["paste-buffer", "pasteb", "load-buffer", "loadb"]),
             "screen" => has(&["paste"]),
+            "xdotool" | "ydotool" => words.iter().any(|w| w.starts_with("--file")),
+            "wtype" => has(&["-"]),
+            "kitty" | "kitten" => words
+                .iter()
+                .any(|w| w == "--stdin" || w.starts_with("--from-file")),
+            "wezterm" => has(&["send-text"]) && !sends_text_argument(&words),
             _ => false,
         };
+        let code = words.join(" ").to_ascii_lowercase();
+        let pushes = !READERS.contains(&first)
+            && code.contains("ioctl")
+            && (code.contains("tiocsti") || code.contains("0x5412"));
         if pastes
-            || (types_keys
-                && words
-                    .iter()
-                    .any(|w| w.to_ascii_lowercase().contains("approve")))
-            || (streams_keys && line.to_ascii_lowercase().contains("approve"))
+            || pushes
+            || (types_keys && types_consent(&words[1..].join(" ")))
+            || (streams_keys && types_consent(line))
         {
             return Some(Rule {
                 pattern: "seat-guard".into(),
                 verdict: "deny".into(),
-                reason: "Typing an approval into a pane would forge the person's consent. Ask the \
-                         person to approve in the chat themselves."
+                reason: "Typing an approval, `ljos prefer` or `ljos remember` into a pane would \
+                         forge the person's consent. Ask the person to run it themselves."
                     .into(),
             });
         }
@@ -49030,6 +49093,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard("herdr agent prompt reviewer 'Review the current diff' --wait").is_none()
         );
         assert!(seat_guard(&format!("vissue note x \"asked to approve {id}\"")).is_none());
+    }
+
+    /// `ljos prefer` and `ljos remember` typed into the person's pane run
+    /// at their terminal and store the agent's words as theirs, the same
+    /// forgery as a typed approval.
+    #[test]
+    fn an_agent_cannot_type_a_preference_into_a_pane() {
+        let _g = env_guard();
+        for line in [
+            "tmux send-keys -t seat 'ljos prefer --review --keep 0123' Enter",
+            "tmux send-keys -t seat ljos Space prefer Space --review Enter",
+            "/usr/bin/tmux send-keys -t seat -l '~/.cargo/bin/ljos prefer --review'",
+            "tmux send-keys -t seat 'ljos remember \"use tabs\"' Enter",
+            "screen -S seat -X stuff 'ljos prefer --review\\n'",
+            "xdotool type 'ljos prefer --review --keep 0123'",
+            "xdotool key l j o s space p r e f e r",
+            "wtype 'ljos remember use tabs'",
+            "ydotool type 'ljos prefer --review'",
+            "ttyecho -n /dev/pts/3 'ljos prefer --review --keep 0123'",
+            "writevt /dev/tty1 'ljos remember use tabs'",
+            "kitty @ send-text --match title:grok 'ljos prefer --review --keep 0123\\r'",
+            "kitten @ send-text 'ljos prefer \"use tabs\"'",
+            "wezterm cli send-text --no-paste 'ljos remember use tabs'",
+            "herdr pane send-text p-3 'ljos prefer --review --keep 0123'",
+            "zellij action write-chars 'ljos remember use tabs'",
+            "echo 'ljos prefer --review' | wtype -",
+            "printf 'ljos prefer' | xdotool type --file -",
+            "kitty @ send-text --stdin < keys",
+            "wezterm cli send-text < keys",
+            "python3 -c 'import fcntl, termios; [fcntl.ioctl(0, termios.TIOCSTI, c) for c in \"x\"]'",
+            "perl -e 'ioctl(STDIN, 0x5412, $_) for split //, \"x\"'",
+        ] {
+            assert!(seat_guard(line).is_some(), "{line}");
+        }
+        for line in [
+            "tmux send-keys -t seat 'cargo test' Enter",
+            "tmux send-keys -t seat 'ljos search tabs' Enter",
+            "tmux send-keys -t seat 'ljos accept 0123' Enter",
+            "wezterm cli send-text 'cargo test'",
+            "rg -n TIOCSTI src",
+            "git grep TIOCSTI",
+        ] {
+            assert!(seat_guard(line).is_none(), "{line}");
+        }
     }
 
     #[test]

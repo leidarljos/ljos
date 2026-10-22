@@ -3,15 +3,26 @@
 
 /// Runs `argv` on a fresh pty in the shape `mode` names: `terminal`, a
 /// parent renamed (`renamed:NAME`), or below a process left by a double
-/// fork (`double-fork`) or reparented without one (`reparented`). Prints
-/// what the program printed and exits with its status.
-const SHAPE_PY: &str = r#"import ctypes, os, pty, sys, time
+/// fork (`double-fork`) or reparented without one (`reparented`). `adopted`
+/// is a double fork whose survivor starts a session again once init holds
+/// it and takes a terminal's name. `python` and `make` put that program
+/// between the terminal and `argv`. Prints what the program printed and
+/// exits with its status.
+const SHAPE_PY: &str = r#"import ctypes, os, pty, shlex, sys, time
 mode, argv = sys.argv[1], sys.argv[2:]
 
-def run():
+def named(name):
+    libc = ctypes.CDLL(None)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(15, name) != 0:
+        raise SystemExit(91)
+
+def run(cmd=None):
+    cmd = cmd or argv
     pid, fd = pty.fork()
     if pid == 0:
-        os.execv(argv[0], argv)
+        os.execv(cmd[0], cmd)
     out = []
     while True:
         try:
@@ -24,7 +35,7 @@ def run():
     _, status = os.waitpid(pid, 0)
     return b"".join(out), os.waitstatus_to_exitcode(status)
 
-def orphan(setsid):
+def orphan(setsid, again=False):
     r, w = os.pipe()
     if os.fork() == 0:
         os.close(r)
@@ -35,6 +46,9 @@ def orphan(setsid):
             os._exit(0)
         while os.getppid() == parent:
             time.sleep(0.01)
+        if again:
+            os.setsid()
+            named(b"gnome-terminal-")
         said, code = run()
         os.write(w, bytes([code & 0xff]) + said)
         os._exit(0)
@@ -49,24 +63,26 @@ def orphan(setsid):
     return got[1:], (got[0] if got else 99)
 
 if mode.startswith("renamed:"):
-    libc = ctypes.CDLL(None)
-    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
-    libc.prctl.restype = ctypes.c_int
-    if libc.prctl(15, mode.split(":", 1)[1].encode()) != 0:
-        raise SystemExit(91)
+    named(mode.split(":", 1)[1].encode())
     said, code = run()
 elif mode == "double-fork":
     said, code = orphan(True)
 elif mode == "reparented":
     said, code = orphan(False)
+elif mode == "adopted":
+    said, code = orphan(True, again=True)
+elif mode == "python":
+    named(b"gnome-terminal-")
+    said, code = run([sys.executable, "-c",
+        "import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))"] + argv)
+elif mode == "make":
+    named(b"gnome-terminal-")
+    said, code = run(["/usr/bin/make", "-s", "-f", "/dev/null",
+        "--eval", "run: ; @" + shlex.join(argv), "run"])
 else:
     # The person at a terminal has a terminal emulator holding the pty.
     # python's own name is not one, so the default shape takes one.
-    libc = ctypes.CDLL(None)
-    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
-    libc.prctl.restype = ctypes.c_int
-    if libc.prctl(15, b"gnome-terminal-") != 0:
-        raise SystemExit(91)
+    named(b"gnome-terminal-")
     said, code = run()
 sys.stdout.buffer.write(said)
 raise SystemExit(code)
