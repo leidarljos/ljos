@@ -54,6 +54,12 @@ jobs:
           command -v packsetd
       - name: Workspace tests
         run: cargo test --workspace
+      - name: MCP tool list size
+        run: |
+          set -euo pipefail
+          python3 -m venv "${{ runner.temp }}/tok"
+          "${{ runner.temp }}/tok/bin/pip" install --disable-pip-version-check 'tiktoken==0.12.0'
+          PATH="${{ runner.temp }}/tok/bin:${PATH}" scripts/mcp-size.sh --check
 
   # A push that passed the tests keeps a bookworm build for fourteen days.
   # The cargo line is the linux line from release.yml. Debian 12 is the
