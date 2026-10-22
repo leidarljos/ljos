@@ -100,7 +100,12 @@ here.
   a linked stylesheet, or a `style`, `class`, `id` or `hidden` attribute
   holding a reference the reducer cannot decode), the part's text is
   replaced by a note that it was withheld. Links are shown as text with
-  their target, never followed.
+  their target, never followed. A `multipart/alternative` with a
+  `text/plain` part and an HTML part (the last `text/html` or multipart
+  alternative) shows the plain text when both have the same words. When
+  they differ, the body holds both, each under a label that carries the
+  nonce, and `alternatives_differ` is true: a mail client shows the
+  owner the HTML.
   Attachments are listed by name, type, size and sha256, with no content
   and no path. Hashing reads at most 64 MiB of one attachment; past that
   notmuch is stopped, `sha256` is null and `size` is a lower bound.
