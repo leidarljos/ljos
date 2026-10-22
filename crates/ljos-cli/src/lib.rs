@@ -13579,7 +13579,9 @@ pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
 
 /// Send the memories queued while the pack was off or not answering. A
 /// copy the pack would refuse is dropped. A pack that still cannot be
-/// reached leaves the fitted copies queued.
+/// reached leaves the fitted copies queued. Queue bytes that are not a
+/// memory move to a dated `.damaged` file beside the queue, and the
+/// drain names it.
 ///
 /// # Errors
 ///
@@ -13606,19 +13608,15 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
 }
 
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
-    let pending = note_queue::pending_in(dir);
-    if pending.is_empty() {
-        return Ok(note_queue::Drained::default());
-    }
-    let fitted = fit_queued(pending.clone());
-    if fitted != pending {
-        note_queue::replace_in(dir, fitted)?;
-    }
+    let set_aside = note_queue::tidy_in(dir, fit_queued)?;
     if note_queue::pending_in(dir).is_empty() {
-        return Ok(note_queue::Drained::default());
+        return Ok(note_queue::Drained {
+            set_aside: set_aside.into_iter().collect(),
+            ..Default::default()
+        });
     }
     let client = pack();
-    note_queue::drain_in(dir, |note| {
+    let mut done = note_queue::drain_in(dir, |note| {
         let client = match &client {
             Ok(client) => client.clone().with_workspace(note.workspace.clone()),
             Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
@@ -13644,7 +13642,9 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
         }
-    })
+    })?;
+    done.set_aside.splice(0..0, set_aside);
+    Ok(done)
 }
 
 fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
@@ -22103,6 +22103,14 @@ pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<(
         unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
         return Err(err);
     }
+    dir.sync_all()
+}
+
+/// Put a state file [`append_locked_row`] wrote, and its directory entry,
+/// on disk, opening it the way every state-log open does.
+pub(crate) fn sync_state_file(path: &Path) -> std::io::Result<()> {
+    let (dir, name) = open_state_dir(path)?;
+    open_regular_at(&dir, &name, path, libc::O_RDONLY, 0)?.sync_all()?;
     dir.sync_all()
 }
 
@@ -43732,6 +43740,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(done.kept.is_empty(), "{done:?}");
         assert_eq!(done.left, 1, "{done:?}");
         assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
+    }
+
+    /// A flush with the pack off loses no byte of the queue: the note
+    /// that parses stays queued, and the last one, missing its newline,
+    /// is in the damaged file beside the queue.
+    #[test]
+    fn a_flush_keeps_every_byte_of_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#;
+        let new =
+            r#"{"issue":"ljos-new","text":"just written","workspace":"w","at":2,"kind":"note"}"#;
+        let queue = tmp.path().join("note-queue.jsonl");
+        std::fs::write(&queue, format!("{old}\n{new}")).unwrap();
+        let _env = crate::test_env_lock();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert_eq!(done.left, 1, "{done:?}");
+        assert_eq!(std::fs::read_to_string(&queue).unwrap(), format!("{old}\n"));
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&aside.path).unwrap(), new);
     }
 
     /// A lesson queued while the pack is down still names the atom it closes.
