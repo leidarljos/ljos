@@ -50,6 +50,9 @@ person's words, then other claims, and working notes last.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
 tracker. The server also claims on the first write and finishes on
 shutdown or when the session goes idle.
+On a cloud seat, the one `ljos cloud up` marked, finish exports the deeds
+that seat cited on the issue into `.ljos/deeds/<seat>/`, and the tracker
+commit takes the bag.
 
 ## Before the work: a sitting
 
