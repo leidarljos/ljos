@@ -3127,6 +3127,10 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     }
     let (seat_a, tag_a) = holder_parts(a);
     let (seat_b, tag_b) = holder_parts(b);
+    let invalid = |raw: &str, tag: &Option<String>| raw.contains('@') && tag.is_none();
+    if invalid(a, &tag_a) || invalid(b, &tag_b) {
+        return false;
+    }
     let seat_a = seat_slug(&seat_a);
     let seat_b = seat_slug(&seat_b);
     // Two tags of one seat are two conversations, not one holder.
