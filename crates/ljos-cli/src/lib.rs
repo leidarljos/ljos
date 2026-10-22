@@ -6796,9 +6796,9 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     }
     let pool = u32::try_from(limit.max(1) * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let Ok(hits) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-        packset_search_opts(&cue, pool, false)
+        packset_search_relevant(&cue, pool)
     })
-    .or_else(|_| packset_search_opts(&cue, pool, false)) else {
+    .or_else(|_| packset_search_relevant(&cue, pool)) else {
         return (String::new(), Vec::new());
     };
     let subject = without_failure_words(&cue);
@@ -7859,9 +7859,9 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
         .collect()
 }
 
-/// How many hits a search asks the pack for, per hit it may show. The
-/// pack cuts its list by the fused score, which decays with age, so a
-/// relevant old memory has to be asked for before the floors run.
+/// How many hits a search asks the pack for, per hit it may show, so the
+/// floors choose from more than they show. [`search_relevant`] makes
+/// sure the cut is not by age.
 pub const POOL_PER_SHOWN: usize = 4;
 
 /// Indices of `rows`, most relevant to `cue` first: the lexical match,
@@ -8258,10 +8258,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let seen = seen_ids(call.session.as_deref());
-    let hits = hook_timed("judge_search", || {
-        packset_search_opts(cue, RERANK_POOL, false)
-    })
-    .ok()?;
+    let hits = hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?;
     let pool: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -8430,10 +8427,11 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
         && cosine >= best - DENSE_WORD_BEHIND
 }
 
-/// The fused search with what the encoder said about each hit. A pack
-/// that sends `dense_rank` and `cosine` on its hits fills them in; the
-/// pack client does not read those fields yet, so the request is made
-/// here. Any failure falls back to the client's search with no signals.
+/// The search, chosen by relevance (see [`search_relevant`]), with what
+/// the encoder said about each hit. A pack that sends `dense_rank` and
+/// `cosine` on its hits fills them in; the pack client does not read
+/// those fields yet, so the request is made here. Any failure falls back
+/// to the client's search with no signals.
 ///
 /// # Errors
 ///
@@ -8441,22 +8439,13 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
 pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSignal)>> {
     let raw = (|| -> Option<Vec<(Hit, DenseSignal)>> {
         let client = pack().ok()?;
-        let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
         let ms = std::env::var("PACKSET_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
-        let asked = recall_query(cue);
-        let body: Value = packset_client::authorize(ureq::get(&url))
-            .query("workspace", &client.workspace())
-            .query("q", &asked)
-            .query("limit", &limit.to_string())
-            .timeout(std::time::Duration::from_millis(ms))
-            .call()
-            .ok()?
-            .into_json()
-            .ok()?;
+        let timeout = std::time::Duration::from_millis(ms);
+        let (body, _) = search_relevant(&client, cue, limit, false, timeout).ok()?;
         body["hits"]
             .as_array()?
             .iter()
@@ -10084,10 +10073,132 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
 }
 
+/// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
+/// by relevance alone, and how many of them the writer chose. A writer
+/// that honours `rank=relevance` picks them by lexical, BM25 and cosine
+/// with no half-life, and echoes the rank. An older writer cuts its
+/// fused list, which decays with age, so rank 21 of a pack full of fresh
+/// lookalikes never arrives: the stored atoms that best match the cue
+/// then follow its hits, so a relevant old memory still gets in.
+fn search_relevant(
+    client: &PacksetClient,
+    cue: &str,
+    limit: u32,
+    rerank: bool,
+    timeout: std::time::Duration,
+) -> Result<(Value, usize)> {
+    let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
+    let mut req = packset_client::authorize(ureq::get(&url))
+        .query("workspace", &client.workspace())
+        .query("q", &recall_query(cue))
+        .query("limit", &limit.to_string())
+        .query("rank", "relevance")
+        .timeout(timeout);
+    if rerank {
+        req = req.query("rerank", "1");
+    }
+    let mut body: Value = req
+        .call()
+        .map_err(|e| packset_client::Error::Http(Box::new(e)))
+        .context("search: GET /v1/search failed")?
+        .into_json()?;
+    let chosen = body["hits"].as_array().map_or(0, Vec::len);
+    if body["rank"].as_str() != Some("relevance") {
+        let have: std::collections::HashSet<String> = body["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| h["id"].as_str().map(str::to_string))
+            .collect();
+        let extra: Vec<Value> = relevant_atoms(client, cue, limit as usize)
+            .into_iter()
+            .filter(|a| a["id"].as_str().is_none_or(|id| !have.contains(id)))
+            .collect();
+        if let Some(hits) = body["hits"].as_array_mut() {
+            hits.extend(extra);
+        }
+    }
+    Ok((body, chosen))
+}
+
+/// The stored atoms that best match `cue` on [`lexical_match_scores`],
+/// which reads no clock, at most `limit`. They stand in for the pack's
+/// own search, so each shares a word with the cue as the pack splits
+/// words: `ljos-none` is one word there and does not match `ljos-l9qq`.
+/// Empty when the listing fails.
+fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
+    let Ok(atoms) = atoms_lean_shared(client, &client.workspace()) else {
+        return Vec::new();
+    };
+    let pack_words = |text: &str| -> std::collections::HashSet<String> {
+        text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .map(str::to_lowercase)
+            .filter(|w| !is_lesson_filler(w))
+            .map(|w| singular(&w))
+            .collect()
+    };
+    let asked = pack_words(cue);
+    let texts: Vec<&str> = atoms
+        .iter()
+        .map(|a| a["text"].as_str().unwrap_or(""))
+        .collect();
+    let scores = lexical_match_scores(&texts, cue);
+    let mut order: Vec<usize> = (0..atoms.len())
+        .filter(|&i| scores[i] > 0.0 && !pack_words(texts[i]).is_disjoint(&asked))
+        .collect();
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    order.truncate(limit);
+    order.into_iter().map(|i| atoms[i].clone()).collect()
+}
+
+/// [`packset_search_opts`] without the rerank, chosen by relevance, see
+/// [`search_relevant`]. For the hooks, a recall and a brief, which order
+/// what they keep by how well it matches.
+fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        bail!("search: empty query");
+    }
+    let hits = with_writer(|| {
+        let client = pack()?;
+        let (body, _) = search_relevant(&client, q, limit, false, pack_timeout())?;
+        let hits: Vec<Hit> = serde_json::from_value(body["hits"].clone()).unwrap_or_default();
+        keep_origins_of(&client, &hits);
+        Ok(hits)
+    })?;
+    count_recall(&hits);
+    Ok(hits)
+}
+
+/// `judged` in its own order, with `extra` merged in by the lexical
+/// match against `cue`: an extra goes ahead of the first judged hit it
+/// beats, so neither list's order is changed.
+fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit> {
+    sort_by_relevance(&mut extra, cue);
+    let texts: Vec<&str> = judged
+        .iter()
+        .chain(&extra)
+        .map(|h| h.text.as_str())
+        .collect();
+    let lexical = lexical_match_scores(&texts, cue);
+    let (head, tail) = lexical.split_at(judged.len());
+    let mut out = Vec::with_capacity(texts.len());
+    let mut extra = extra.into_iter().zip(tail.iter().copied()).peekable();
+    for (hit, score) in judged.into_iter().zip(head.iter().copied()) {
+        while let Some((x, _)) = extra.next_if(|(_, s)| *s > score) {
+            out.push(x);
+        }
+        out.push(hit);
+    }
+    out.extend(extra.map(|(x, _)| x));
+    out
+}
+
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
 /// order, which carries age. Hits that carry a `rerank_score` are read
-/// by it.
+/// by it. An atom [`search_relevant`] added, which the cross-encoder did
+/// not read, goes in ahead of the first hit its lexical match beats.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
     let q = query.trim();
     if q.is_empty() {
@@ -10095,16 +10206,7 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
     }
     let (hits, ran) = with_writer(|| {
         let client = pack()?;
-        let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-        let body: Value = packset_client::authorize(ureq::get(&url))
-            .query("workspace", &client.workspace())
-            .query("q", &recall_query(q))
-            .query("limit", &limit.to_string())
-            .query("rerank", "1")
-            .call()
-            .map_err(|e| packset_client::Error::Http(Box::new(e)))
-            .context("search: GET /v1/search failed")?
-            .into_json()?;
+        let (body, chosen) = search_relevant(&client, q, limit, true, pack_timeout())?;
         let mut scored: Vec<(Hit, Option<f64>)> = body["hits"]
             .as_array()
             .map(Vec::as_slice)
@@ -10120,7 +10222,11 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
             scored.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
         }
         let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
-        let hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
+        let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
+        if ran && hits.len() > chosen {
+            let extra = hits.split_off(chosen);
+            hits = merge_by_lexical(hits, extra, q);
+        }
         keep_origins_of(&client, &hits);
         Ok((hits, ran))
     })?;
@@ -15686,7 +15792,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     const PER_DOMAIN: usize = 5;
     let pool = u32::try_from(PER_DOMAIN * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     for cue in &cues {
-        let Ok(hits) = packset_search_opts(cue, pool, false) else {
+        let Ok(hits) = packset_search_relevant(cue, pool) else {
             continue;
         };
         let mut hits: Vec<Hit> = hits
@@ -25277,7 +25383,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> String {
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
     for cue in &cues {
-        match ask(&|| packset_search_opts(cue, pool, false)) {
+        match ask(&|| packset_search_relevant(cue, pool)) {
             Ok(hits) => related.extend(hits),
             Err(e) if own.is_empty() && related.is_empty() => return recall_down(&e),
             Err(_) => break,
@@ -36125,6 +36231,41 @@ mod tests {
         let (note, _) = failure_note(&failed, "E401: the registry rejected the token", 3);
         let first = note.lines().nth(1).unwrap_or("");
         assert!(first.contains("acme scope needs"), "{note}");
+    }
+
+    /// An atom the cross-encoder did not read goes in ahead of the first
+    /// hit it covers more of the prompt than, and the cross-encoder's own
+    /// order is left as it was.
+    #[test]
+    fn an_unread_atom_merges_into_the_cross_encoder_order_by_its_match() {
+        let hit = |id: &str, text: &str| Hit {
+            id: Some(id.into()),
+            text: text.into(),
+            score: 0.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: Vec::new(),
+            ballots: None,
+            of: None,
+        };
+        let cue = "the registry rejected my token";
+        let judged = vec![
+            hit("a", "Figma rejected the token after the move"),
+            hit("b", "The registry rejected the token on host 13"),
+            hit("c", "Sentry rejected the token after the move"),
+        ];
+        let extra = vec![
+            hit("weak", "The token lives in the vault"),
+            hit(
+                "full",
+                "The registry rejected the token because the CI secret expired",
+            ),
+        ];
+        let merged: Vec<String> = merge_by_lexical(judged, extra, cue)
+            .into_iter()
+            .filter_map(|h| h.id)
+            .collect();
+        assert_eq!(merged, ["full", "a", "b", "c", "weak"]);
     }
 
     /// A pack whose reranked search answers with `reranked` and says which
