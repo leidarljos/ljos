@@ -384,6 +384,12 @@ pub fn session_start_for(session: Option<&str>) -> String {
             line.push('.');
         }
     }
+    let held_rules = user_rules::held_count();
+    if held_rules > 0 {
+        line.push(' ');
+        line.push_str(&user_rules::review_sentence(held_rules));
+        line.push('.');
+    }
     user_rules::prepend(line)
 }
 
@@ -17851,6 +17857,27 @@ fn preferences_row() -> Habitat {
     }
 }
 
+fn user_rules_row() -> Habitat {
+    // The doctor is a person-side run, so it records the cutoff. Under a
+    // runner the call does nothing and the count below still stands.
+    user_rules::note_cutoff();
+    let held = user_rules::held_count();
+    let state = if held > 0 {
+        user_rules::review_sentence(held)
+    } else {
+        match user_rules::load() {
+            Ok(rules) if rules.is_empty() => "no user rules".to_string(),
+            Ok(_) => "none held from before a basis was kept".to_string(),
+            Err(err) => format!("not counted: {err:#}"),
+        }
+    };
+    Habitat {
+        name: "user rules",
+        state,
+        ok: held == 0 && user_rules::load().is_ok(),
+    }
+}
+
 /// How many preferences one command hears at most.
 pub const COMMAND_PREFERENCES: usize = 2;
 
@@ -23360,6 +23387,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
     // How many stored preferences the hook enforces: a preference with no
     // rule is recalled and never holds the agent to it.
     out.push(preferences_row());
+    // Old user rules with no basis stay visible until the person keeps
+    // them. The count is a warning; the seat still starts.
+    out.push(user_rules_row());
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     out.push(
@@ -24149,6 +24179,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // Older preferences awaiting review are named, not a failed seat.
     if row.name == "preferences" && !row.ok {
+        return "warn";
+    }
+    // Older user rules awaiting confirmation are the same kind of warning.
+    if row.name == "user rules" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {

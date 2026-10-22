@@ -5,6 +5,13 @@
 //! hooks read is the user config, not the pack, so the review clock never
 //! sees them. The tracker carries one file per machine, and a sync merges
 //! those files by id.
+//!
+//! A row written before `basis` was kept has neither `basis` nor `from`.
+//! It stays in the preface, marked not confirmed, until the person runs
+//! `ljos prefer --user --review --keep`. The cutoff is a local receipt
+//! written once by the first person-side command. A row written after
+//! that receipt with no basis stays out. A hook does not write the
+//! receipt: it runs under the runner.
 
 use std::path::PathBuf;
 
@@ -60,7 +67,8 @@ pub struct UserRule {
     /// Who stands behind a rule written as words or an argv law, as
     /// `source.basis` on a seat atom: `person` only when the person typed
     /// it or said it in their latest prompt. A row with neither this nor
-    /// `from` is not the person's.
+    /// `from` was written before that stamp. It stays visible, marked
+    /// held, when it is older than the cutoff receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
     /// [`lesson_hash`] of that lesson's record as the promote read it. A
@@ -588,21 +596,25 @@ pub fn to_value(rule: &UserRule) -> Value {
     serde_json::to_value(rule).unwrap_or(Value::Null)
 }
 
-/// Text lines for `ljos rules`, empty when there are none. A promoted
-/// rule the pack does not confirm as the person's, as the preface would
-/// leave it out, is listed apart as unverified, with why.
+/// Text lines for `ljos rules`, empty when there are none. A row held
+/// from before a basis was kept is listed apart from a promoted rule the
+/// pack does not confirm, which is unverified, with why.
 #[must_use]
 pub fn format_list() -> String {
     let Ok(rules) = load() else {
         return String::new();
     };
-    let (mut persons, mut unverified) = (String::new(), String::new());
+    let (mut persons, mut held, mut unverified) = (String::new(), String::new(), String::new());
     for rule in &rules {
         let law = match (&rule.verdict, &rule.pattern) {
             (Some(verdict), Some(pattern)) => format!("{verdict}\t{pattern}\t"),
             _ => String::new(),
         };
         let line = format!("{law}{}\t{}\t{}", rule.text, rule.author, rule.reason);
+        if is_held(rule) {
+            held.push_str(&format!("held\t{line}\n"));
+            continue;
+        }
         match unconfirmed(rule) {
             None => persons.push_str(&format!("user\t{line}\n")),
             Some(why) => unverified.push_str(&format!("unverified\t{line}\t{why}\n")),
@@ -612,6 +624,10 @@ pub fn format_list() -> String {
     if !persons.is_empty() {
         out.push_str("user rules (shared, never reviewed):\n");
         out.push_str(&persons);
+    }
+    if !held.is_empty() {
+        out.push_str("user rules held from before a basis was kept:\n");
+        out.push_str(&held);
     }
     if !unverified.is_empty() {
         out.push_str("user rules not confirmed as the person's (unverified):\n");
@@ -632,15 +648,19 @@ fn omission(left: usize) -> String {
     }
 }
 
-/// The preface injected ahead of seat memory. Empty when there are no rules.
+/// The preface injected ahead of seat memory. Empty when there are no rules
+/// the preface may show. A held row is shown in its own section, not as a
+/// rule the person confirmed.
 #[must_use]
 pub fn preface() -> String {
-    let rules: Vec<UserRule> = load()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(persons_rule)
+    let rules = load().unwrap_or_default();
+    let standing: Vec<UserRule> = rules
+        .iter()
+        .filter(|rule| persons_rule(rule))
+        .cloned()
         .collect();
-    render(&rules, PREFACE_BUDGET)
+    let held: Vec<UserRule> = rules.iter().filter(|rule| is_held(rule)).cloned().collect();
+    render_preface(&standing, &held, PREFACE_BUDGET)
 }
 
 /// Whether the preface may state `rule` as the person's. A rule written
@@ -682,11 +702,196 @@ fn unconfirmed(rule: &UserRule) -> Option<String> {
     }
 }
 
+/// `$XDG_CONFIG_HOME/ljos/user-rule-basis-cutoff`. One RFC 3339 instant,
+/// written once. Hooks do not read the pack to decide this.
+fn cutoff_path() -> Option<PathBuf> {
+    Some(
+        super::config_base()?
+            .join("ljos")
+            .join("user-rule-basis-cutoff"),
+    )
+}
+
+fn parse_instant(raw: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let raw = raw.trim();
+    (!raw.is_empty())
+        .then(|| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .flatten()
+}
+
+fn cutoff_instant() -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let text = std::fs::read_to_string(cutoff_path()?).ok()?;
+    text.lines().find_map(parse_instant)
+}
+
+/// Record the cutoff for user-rule basis, once, from a person-side command.
+///
+/// The instant is this run's time. A preference cutoff from the earlier
+/// upgrade is not used: user rules written after that receipt still had
+/// no basis, and treating them as new would drop them. Under a runner
+/// this does nothing. A file that is already there is left as it is.
+pub fn note_cutoff() {
+    if super::under_a_runner() {
+        return;
+    }
+    let Some(path) = cutoff_path() else {
+        return;
+    };
+    if path.exists() {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, format!("{}\n", super::now_utc()));
+}
+
+/// A row from before basis was kept: no `basis`, no lesson it was promoted
+/// from, and either no cutoff yet or a `written_at` older than it. A stamp
+/// that does not parse is treated as older, so a row is not dropped because
+/// its time cannot be read. A basis of `agent`, or any other basis, is a
+/// decision already made and is not held.
+fn is_held(rule: &UserRule) -> bool {
+    if rule.from.is_some() || rule.basis.is_some() {
+        return false;
+    }
+    match cutoff_instant() {
+        None => true,
+        Some(cutoff) => parse_instant(&rule.written_at).is_none_or(|ts| ts < cutoff),
+    }
+}
+
+/// How many user rules [`is_held`] counts. Session start and the doctor
+/// report this. Neither path is required to have written the cutoff.
+#[must_use]
+pub fn held_count() -> usize {
+    load()
+        .unwrap_or_default()
+        .iter()
+        .filter(|rule| is_held(rule))
+        .count()
+}
+
+/// The sentence the doctor and `ljos prefer --user --review` share.
+#[must_use]
+pub fn review_sentence(n: usize) -> String {
+    format!(
+        "{n} older user rule{} await{} review (`ljos prefer --user --review`)",
+        if n == 1 { "" } else { "s" },
+        if n == 1 { "s" } else { "" }
+    )
+}
+
+/// List the user rules the upgrade held back.
+///
+/// # Errors
+///
+/// The user-rule file cannot be read.
+pub fn review_list() -> Result<String> {
+    note_cutoff();
+    let rules = load()?;
+    let held: Vec<&UserRule> = rules.iter().filter(|rule| is_held(rule)).collect();
+    if held.is_empty() {
+        return Ok("no older user rules await review\n".to_string());
+    }
+    let mut out = format!("{}\n", review_sentence(held.len()));
+    for rule in held {
+        out.push_str(&format!(
+            "{}  {}  {}\n  ljos prefer --user --review --keep {}\n",
+            rule.id,
+            rule.written_at,
+            one_line(&rule.text),
+            rule.id
+        ));
+    }
+    Ok(out)
+}
+
+/// Keep one held user rule as the person's.
+///
+/// A runner is refused, and so is anything [`super::person_present`] does
+/// not prove. The basis becomes `person` and `updated_at` moves, so a sync
+/// keeps this copy.
+///
+/// # Errors
+///
+/// The id is not a held user rule, this process is under a runner, or the
+/// person is not at its terminal.
+pub fn keep_held(id: &str) -> Result<String> {
+    if super::under_a_runner() {
+        bail!(
+            "prefer: a runner cannot keep a user rule. \
+             Run `ljos prefer --user --review --keep {id}` from a terminal of your own"
+        );
+    }
+    if !super::person_present() {
+        bail!(
+            "prefer: keeping a user rule needs a terminal. \
+             Run `ljos prefer --user --review --keep {id}` from a terminal of your own"
+        );
+    }
+    note_cutoff();
+    let mut rules = read_all()?;
+    let ids: Vec<String> = rules
+        .iter()
+        .filter(|rule| is_held(rule))
+        .map(|rule| rule.id.clone())
+        .collect();
+    let id = super::resolve_short_id("prefer", id.trim(), &ids)?;
+    let Some(rule) = rules.iter_mut().find(|rule| rule.id == id && is_held(rule)) else {
+        bail!("prefer: {id} is not an older user rule awaiting review");
+    };
+    rule.basis = Some(super::Basis::Person.as_str().to_string());
+    rule.updated_at = super::now_utc();
+    let shown = format!("user rule {}\tkept\t{}\n", rule.id, rule.text);
+    store(&rules)?;
+    Ok(shown)
+}
+
+fn render_preface(standing: &[UserRule], held: &[UserRule], budget: usize) -> String {
+    if budget == 0 || (standing.is_empty() && held.is_empty()) {
+        return String::new();
+    }
+    let mut out = if standing.is_empty() {
+        String::new()
+    } else {
+        render(standing, budget)
+    };
+    if held.is_empty() {
+        return out;
+    }
+    let gap = usize::from(!out.is_empty());
+    let room = budget.saturating_sub(out.chars().count() + gap);
+    let rest = render_headed(
+        held,
+        "Older user rules, not confirmed (`ljos prefer --user --review`):\n",
+        room,
+    );
+    if rest.is_empty() {
+        return out;
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&rest);
+    if out.chars().count() > budget {
+        out = out.chars().take(budget).collect();
+    }
+    out.trim_end().to_string()
+}
+
 fn render(rules: &[UserRule], budget: usize) -> String {
+    render_headed(
+        rules,
+        "User rules (standing, shared by every seat on this machine):\n",
+        budget,
+    )
+}
+
+fn render_headed(rules: &[UserRule], header: &str, budget: usize) -> String {
     if rules.is_empty() || budget == 0 {
         return String::new();
     }
-    let header = "User rules (standing, shared by every seat on this machine):\n";
     let mut body = String::new();
     let mut shown = 0usize;
     for rule in rules {
@@ -1814,15 +2019,90 @@ mod tests {
     }
 
     /// A row with no basis and no lesson behind it, as rows were written
-    /// before they carried one, is not stated as the person's.
+    /// before they carried one, stays in the preface marked held. It is
+    /// not stated as a rule the person confirmed. After the cutoff, a row
+    /// written later with no basis stays out.
     #[test]
-    fn a_row_with_no_basis_and_no_lesson_is_unverified() {
+    fn a_row_with_no_basis_and_no_lesson_is_held_until_kept() {
         let (_lock, _dir) = isolated();
         let mut row = alan();
         row.basis = None;
+        row.written_at = "2020-01-01T00:00:00.000Z".into();
+        let path = rules_path().unwrap();
+        std::fs::write(&path, render_rules(&[row.clone()]).unwrap()).unwrap();
+        let head = preface();
+        assert!(head.contains("not confirmed"), "{head}");
+        assert!(head.contains("never post or reply to Alan"), "{head}");
+        assert!(!head.contains("standing"), "{head}");
+        let listed = format_list();
+        assert!(listed.contains("held\t"), "{listed}");
+        assert!(!listed.contains("unverified\t"), "{listed}");
+
+        note_cutoff();
+        assert!(
+            preface().contains("never post or reply to Alan"),
+            "{}",
+            preface()
+        );
+        let id = row.id.clone();
+        let kept = keep_held(&id).unwrap();
+        assert!(kept.contains("kept"), "{kept}");
+        let after = preface();
+        assert!(after.contains("standing"), "{after}");
+        assert!(after.contains("never post or reply to Alan"), "{after}");
+        assert!(!after.contains("not confirmed"), "{after}");
+        assert_eq!(read_all().unwrap()[0].basis.as_deref(), Some("person"));
+
+        let mut later = row;
+        later.id = "ur-later".into();
+        later.basis = None;
+        later.text = "use spaces in new files".into();
+        later.written_at = "2999-01-01T00:00:00.000Z".into();
+        let mut rows = read_all().unwrap();
+        rows.push(later);
+        std::fs::write(&path, render_rules(&rows).unwrap()).unwrap();
+        let head = preface();
+        assert!(head.contains("Alan"), "{head}");
+        assert!(!head.contains("use spaces"), "{head}");
+        let listed = format_list();
+        assert!(listed.contains("unverified\t"), "{listed}");
+        assert!(listed.contains("use spaces"), "{listed}");
+        assert!(!listed.contains("held\t"), "{listed}");
+    }
+
+    /// A runner must not confirm a held rule, and a stamp that does not
+    /// parse is still shown rather than dropped.
+    #[test]
+    fn a_runner_cannot_keep_a_held_user_rule() {
+        let (_lock, _dir) = isolated();
+        let mut row = alan();
+        row.basis = None;
+        row.written_at = "not-a-time".into();
         std::fs::write(rules_path().unwrap(), render_rules(&[row]).unwrap()).unwrap();
-        assert!(preface().is_empty(), "{}", preface());
-        assert!(format_list().contains("unverified\t"), "{}", format_list());
+        note_cutoff();
+        assert!(preface().contains("not confirmed"), "{}", preface());
+        let saved = std::env::var_os("CLAUDECODE");
+        unsafe { std::env::set_var("CLAUDECODE", "1") };
+        let err = keep_held("ur-missing").unwrap_err().to_string();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("CLAUDECODE", value),
+                None => std::env::remove_var("CLAUDECODE"),
+            }
+        }
+        assert!(err.contains("a runner cannot keep"), "{err}");
+    }
+
+    #[test]
+    fn held_user_rules_warn_and_do_not_fail_the_doctor() {
+        let row = super::super::Habitat {
+            name: "user rules",
+            state: review_sentence(1),
+            ok: false,
+        };
+        assert_eq!(super::super::doctor_word(&row), "warn");
+        assert!(super::super::failing(std::slice::from_ref(&row)).is_empty());
+        assert!(super::super::healthy(std::slice::from_ref(&row)));
     }
 
     #[test]
