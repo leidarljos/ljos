@@ -30527,6 +30527,8 @@ mod tests {
         );
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
+        // The shim steps aside under LJOS_OFF or a temporary HOME, and the
+        // suite may run under either.
         let run = |args: &str| {
             std::process::Command::new("sh")
                 .arg("-c")
@@ -30535,6 +30537,8 @@ mod tests {
                     "PATH",
                     format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
                 )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on")
                 .output()
                 .unwrap()
         };
