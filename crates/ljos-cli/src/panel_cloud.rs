@@ -66,10 +66,12 @@ model {family}.
 Push the tracker through ljos with LJOS_TRACKER_GIT=push. Push only this \
 seat's named branches and develop. Do not push a ref under cursor/. Do \
 not run `gh pr create` or `gh pr merge`. Do not force-push. Do not delete \
-a ref. The shell guard filters a command as it is written. The pre-push \
-hook `ljos cloud up` installs is what stops the push. A program that \
-calls the GitHub API with the token is not stopped on this machine; that \
-needs a server-side ruleset.
+a ref. The shell guard filters a command as it is written. It does not \
+see inside a script, make, python, or a library such as dulwich. The \
+pre-push hook `ljos cloud up` installs is what stops a git push. \
+`--no-verify` inside a script skips that hook, and git send-pack does \
+not run it. A program that calls the GitHub API with the token is not \
+stopped on this machine; that needs a server-side ruleset.
 "
     )
 }

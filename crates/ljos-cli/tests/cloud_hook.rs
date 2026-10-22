@@ -162,6 +162,11 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         "GITHUB_ACTIONS",
         "RUNNER_OS",
         "RUNNER_TEMP",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_PAT",
+        "CURL_HOME",
+        "WGETRC",
     ] {
         std::env::remove_var(key);
     }
@@ -453,6 +458,33 @@ fn shell_guard_refuses_disarming_the_hook() {
         no_verify.reason
     );
     assert!(
+        no_verify.reason.contains("outside the seat allowlist"),
+        "{}",
+        no_verify.reason
+    );
+    assert!(
+        !no_verify.reason.contains("never push to cursor"),
+        "{}",
+        no_verify.reason
+    );
+    for line in [
+        "git push origin main",
+        "git push origin :develop",
+        "git push origin v9",
+    ] {
+        let hit = refused(line, &repo);
+        assert!(
+            hit.reason.contains("outside the seat allowlist"),
+            "{line}: {}",
+            hit.reason
+        );
+        assert!(
+            !hit.reason.contains("never push to cursor"),
+            "{line}: {}",
+            hit.reason
+        );
+    }
+    assert!(
         no_verify
             .reason
             .contains("a cloud seat may push only its named branches and develop"),
@@ -463,9 +495,11 @@ fn shell_guard_refuses_disarming_the_hook() {
         "git -c core.hooksPath=/dev/null push origin develop",
         "git -c core.hooksPath=/tmp/keep push origin develop",
         "git --config-env core.hooksPath=HOOK push origin develop",
-        "git config core.hooksPath /dev/null",
+        "git clone --config core.hooksPath=/dev/null https://example.invalid/a.git",
         "git config --global --unset core.hooksPath",
-        "git config --replace-all core.hooksPath /dev/null",
+        "git config --global --replace-all core.hooksPath /dev/null",
+        "git config --global include.path /tmp/evil-hooks.cfg",
+        "git config --global --remove-section core",
         "export GIT_CONFIG_GLOBAL=/tmp/other-gitconfig",
         "export GIT_CONFIG_SYSTEM=/tmp/other-system",
         "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null",
@@ -478,6 +512,11 @@ fn shell_guard_refuses_disarming_the_hook() {
         &format!("chmod 644 {}", hook.display()),
         &format!("cp /etc/hostname {}", hook.display()),
         &format!("tee {} >/dev/null", hooks.join("pre-push").display()),
+        "sed -i 's/a/b/' ~/.gitconfig",
+        "perl -pi -e 's/a/b/' ~/.gitconfig",
+        "printf '[core]\\nhooksPath = /dev/null\\n' >| ~/.gitconfig",
+        "printf '[core]\\nhooksPath = /dev/null\\n' >> .git/config",
+        "dd of=.git/config",
     ] {
         let hit = refused(line, &repo);
         assert!(
@@ -491,6 +530,9 @@ fn shell_guard_refuses_disarming_the_hook() {
 
     allowed("git config core.hooksPath", &repo);
     allowed("git config --get core.hooksPath", &repo);
+    allowed("git config core.hooksPath /dev/null", &repo);
+    allowed("git config --replace-all core.hooksPath /dev/null", &repo);
+    allowed("git -C /tmp config core.hooksPath /dev/null", &repo);
     allowed("git config --list", &repo);
     allowed("git config user.email seat@example.invalid", &repo);
     allowed("git config --global user.name seat", &repo);
@@ -639,6 +681,21 @@ fn github_clients_allow_only_a_resolved_get() {
         "gh api --method PATCH repos/acme/widgets -f default_branch=develop",
         "gh api --method POST repos/acme/widgets/actions/workflows/ci.yml/dispatches -f ref=main",
         "gh api repos/acme/widgets/pulls/7/update-branch -X POST",
+        "gh api repos/acme/widgets/git/refs -fref=refs/heads/x -fsha=0123456789012345678901234567890123456789",
+        "gh api repos/acme/widgets/issues -ftitle=t",
+        "gh api repos/acme/widgets/issues -if title=x",
+        "gh api graphql -fquery='mutation { deleteRef(input: {refId: \"R\"}) { clientMutationId } }'",
+        "curl -X DELETE HTTPS://api.github.com/repos/acme/widgets/git/refs/heads/main",
+        "curl -X DELETE https://x-access-token:$GH_TOKEN@api.github.com/repos/acme/widgets/git/refs/heads/main",
+        "curl -X DELETE https://api.github.com./repos/acme/widgets/git/refs/heads/main",
+        "curl --proto-default https -X DELETE api.github.com/repos/acme/widgets/git/refs/heads/main",
+        "http DELETE api.github.com/repos/acme/widgets/git/refs/heads/main \"Authorization:token $GH_TOKEN\"",
+        "curl -X POST --data-binary @pack https://x:$GH_TOKEN@github.com/acme/widgets.git/git-receive-pack",
+        "curl -X PUT https://ghcr.io/v2/acme/widgets/manifests/latest",
+        "curl -G -T file https://api.github.com/repos/acme/widgets",
+        "curl -G -F a=b https://api.github.com/user",
+        "wget -e method=DELETE https://api.github.com/user",
+        "wget --execute=body_data=abc https://api.github.com/user",
     ] {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
@@ -648,6 +705,18 @@ fn github_clients_allow_only_a_resolved_get() {
         "curl --oauth2-bearer tok https://api.github.com/user",
         "curl -u x:$TOKEN https://api.github.com/user",
         "curl -fsSL https://api.github.com/user",
+        "curl -fsSLO https://api.github.com/user",
+        "curl -LO https://api.github.com/user",
+        "curl -JLO https://api.github.com/user",
+        "curl -C - -O https://api.github.com/user",
+        "curl -i https://api.github.com/user",
+        "curl -4 https://api.github.com/user",
+        "curl --write-out '%{http_code}' https://api.github.com/user",
+        "curl --retry-all-errors https://api.github.com/user",
+        "gh run download 1",
+        "gh label list",
+        "gh cache list",
+        "gh api graphql -f query='query { viewer { login } }'",
         "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
         "curl -sXDELETE https://example.com/build",
         "curl -s --netrc https://example.com/build",
@@ -670,4 +739,198 @@ fn github_clients_allow_only_a_resolved_get() {
     ] {
         allowed(line, here);
     }
+}
+
+#[test]
+fn the_hook_off_switch_does_not_let_a_push_land() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let (other_origin, _other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+    git(
+        &repo,
+        &["remote", "add", "other", other_origin.to_str().unwrap()],
+    );
+    sh_ok(&repo, "LJOS_HOOK_KEY=1 git push -q -u origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
+    push_fails(&repo, "LJOS_HOOK_KEY=1 git push -q other develop");
+    assert!(!has_ref(&other_origin, "refs/heads/develop"));
+}
+
+#[test]
+fn the_hook_ignores_home_xdg_and_path() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let (other_origin, _other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+    sh_ok(&repo, "git push -q -u origin develop");
+    git(
+        &repo,
+        &["remote", "add", "other", other_origin.to_str().unwrap()],
+    );
+
+    let forged = root.path().join("forged");
+    fs::create_dir_all(forged.join("ljos")).unwrap();
+    fs::write(
+        forged.join("ljos/push-allow"),
+        format!("code\t{}\nbranch\tdevelop\n", other_origin.display()),
+    )
+    .unwrap();
+    let fake = root.path().join("fakebin");
+    fs::create_dir_all(&fake).unwrap();
+    executable(&fake.join("readlink"), "#!/bin/sh\necho /no/such\n");
+    executable(&fake.join("tr"), "#!/bin/sh\ncat\n");
+    let empty = root.path().join("emptyhome");
+    fs::create_dir_all(&empty).unwrap();
+    for script in [
+        &format!(
+            "XDG_CONFIG_HOME={} git push -q other develop",
+            forged.display()
+        ),
+        &format!("PATH={}:$PATH git push -q other develop", fake.display()),
+        &format!(
+            "HOME={} git -c user.name=x -c user.email=x@example.invalid push -q other develop",
+            empty.display()
+        ),
+    ] {
+        push_fails(&repo, script);
+    }
+    assert!(!has_ref(&other_origin, "refs/heads/develop"));
+}
+
+#[test]
+fn cloud_up_keeps_the_recorded_repository() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let (_other_origin, other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    let allow = fs::read_to_string(xdg.join("ljos/push-allow")).unwrap();
+    std::env::set_current_dir(&other).unwrap();
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(err.contains("already recorded"), "{err}");
+    std::env::set_current_dir(root.path()).unwrap();
+    let after = fs::read_to_string(xdg.join("ljos/push-allow")).unwrap();
+    assert_eq!(allow, after, "a second cloud up rewrote the allowlist");
+    refused("ljos cloud up --repoint", root.path());
+}
+
+#[test]
+fn doctor_reads_the_hooks_path_git_would_use() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let (_other_origin, other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let row = ljos_cli::cloud::guard_row();
+    assert!(row.ok, "{row:?}");
+
+    refused("git config core.hooksPath /dev/null", &repo);
+    refused("git config include.path /tmp/evil-hooks.cfg", &repo);
+    refused("git config --local --remove-section core", &repo);
+    let other_cfg = format!("git -C {} config core.hooksPath /dev/null", other.display());
+    allowed(&other_cfg, &repo);
+
+    let evil = root.path().join("evil.cfg");
+    fs::write(&evil, "[core]\n\thooksPath = /dev/null\n").unwrap();
+    sh_ok(
+        &repo,
+        &format!("git config --local include.path {}", evil.display()),
+    );
+    let moved = ljos_cli::cloud::guard_row();
+    assert!(!moved.ok, "{moved:?}");
+    assert!(moved.state.contains("core.hooksPath"), "{moved:?}");
+}
+
+#[test]
+fn cloud_up_chains_a_pre_push_already_booked() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let booked = root.path().join("booked-hooks");
+    fs::create_dir_all(&booked).unwrap();
+    executable(
+        &booked.join("pre-push"),
+        "#!/bin/sh\necho booked-hook >&2\nexit 1\n",
+    );
+    git(
+        &repo,
+        &["config", "core.hooksPath", booked.to_str().unwrap()],
+    );
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let now = fs::read_to_string(booked.join("pre-push")).unwrap();
+    assert!(now.contains("# ljos-cloud-chain "), "{now}");
+    let prev = fs::read_to_string(booked.join("pre-push.ljos-previous")).unwrap();
+    assert!(prev.contains("booked-hook"), "{prev}");
+    let configured = git(&repo, &["config", "--local", "--get", "core.hooksPath"]);
+    assert_eq!(configured.trim(), booked.to_str().unwrap());
+    let row = ljos_cli::cloud::guard_row();
+    assert!(row.ok, "{row:?}");
+    let out = sh_at(&repo, "git push origin develop");
+    let text = text_of(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("booked-hook"), "{text}");
+}
+
+#[test]
+fn a_token_and_a_client_config_hide_the_method() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    fs::write(home.join(".curlrc"), "request = DELETE\n").unwrap();
+    refused(
+        "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
+        here,
+    );
+    allowed("curl -s https://api.github.com/user", here);
+    refused("echo hidden > ~/.curlrc", here);
+    refused("echo hidden > ~/.wgetrc", here);
+    refused(
+        "CURL_HOME=/tmp/curlhome curl -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
+        here,
+    );
+    refused(
+        "WGETRC=/tmp/wgetrc wget -q https://api.github.com/user --header \"Authorization: Bearer $GH_TOKEN\"",
+        here,
+    );
+}
+
+#[test]
+fn send_pack_checks_the_destination_repository() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    refused("git send-pack /tmp/not-the-seat.git develop", here);
+    refused("git send-pack other develop", here);
+    allowed("git send-pack --dry-run origin develop", here);
+    allowed("git push other develop", here);
 }
