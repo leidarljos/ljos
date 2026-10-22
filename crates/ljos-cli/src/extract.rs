@@ -2,12 +2,13 @@
 //! runner ends a session, the hook reads its transcript and keeps up to
 //! [`MAX_PER_SESSION`] sentences that state something durable: a rule
 //! ("always", "never", "must"), a cause ("root cause", "because", "turns
-//! out"), or a fix. Each is written at once as an `agent-derived` lesson
-//! carrying `via:session-end` and the session, so `ljos memories review`
-//! and `ljos memories prune` clean them up later. No model runs: the
-//! extraction is a bounded, deterministic read. A sentence already kept
-//! (by its normalized form) is not written again. `LJOS_EXTRACT=off`
-//! turns it off.
+//! out"), or a fix. Each is written at once as a `note` whose
+//! `source.basis` is `agent`, carrying `via:session-end` and the session.
+//! The read side goes by that stored basis: recall, search and the island
+//! label it an unverified agent note, and no prompt hook hands it on as a
+//! fact or a rule. No model runs: the extraction is a bounded,
+//! deterministic read. A sentence already kept (by its normalized form)
+//! is not written again. `LJOS_EXTRACT=off` turns it off.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
