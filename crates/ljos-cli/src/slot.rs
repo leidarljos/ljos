@@ -5,13 +5,15 @@
 //! before any key is pinned for it.
 //!
 //! A pin alone is what any tracker writer can make, and the author date on
-//! that commit is whatever the writer sets. The seats that stood when
-//! slots began are a list in this binary ([`standing`]). Any other seat
-//! counts toward a push cite only under a slot on that issue
-//! ([`problems`]), on a git tracker and on any other. The slot has to
-//! already be in that issue's own entry in the commit that introduced
-//! the pin. A copy of the line on another issue does not count, and a
-//! git date is not read.
+//! that commit is whatever the writer sets. A seat stands when its name is
+//! on a list in this binary ([`standing`]), or when its pinned key was
+//! already committed when slots began in this tracker ([`stood`]): in the
+//! parents of the commit that brought the first slot note, by commit
+//! order. Any other seat counts toward a push cite only under a slot on
+//! that issue ([`problems`]), on a git tracker and on any other. The slot
+//! has to already be in that issue's own entry in the commit that
+//! introduced the pin. A copy of the line on another issue does not
+//! count, and a git date is not read.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
@@ -40,6 +42,70 @@ pub fn standing(seat: &str) -> bool {
             let line = line.trim();
             !line.is_empty() && !line.starts_with('#') && line == seat
         })
+}
+
+/// The text a slot note carries in a tracker file.
+const SLOT_LINE: &str = "Note: \"slot: ";
+
+/// Where slots began in this tracker, by commit order: the parents of each
+/// commit that brought a slot note into a tree none of its parents held
+/// one in. Empty when no slot is committed yet. `None` when the tracker is
+/// not a git repository.
+#[must_use]
+pub fn starts() -> Option<Vec<Vec<String>>> {
+    if ballot_sig::tracker_git(&["rev-parse", "--is-inside-work-tree"])? != "true" {
+        return None;
+    }
+    let pick = format!("-S{SLOT_LINE}");
+    let log = ballot_sig::tracker_git(&[
+        "--no-pager",
+        "log",
+        "--full-history",
+        "--format=%H %P",
+        pick.as_str(),
+    ])
+    .unwrap_or_default();
+    let held = |commit: &str| {
+        ballot_sig::tracker_git(&["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit])
+            .is_some()
+    };
+    let mut out = Vec::new();
+    for line in log.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(commit) = parts.next() else {
+            continue;
+        };
+        let parents: Vec<String> = parts.map(str::to_string).collect();
+        if held(commit) && !parents.iter().any(|p| held(p)) {
+            out.push(parents);
+        }
+    }
+    Some(out)
+}
+
+/// Whether `seat`'s pin `key` was committed before slots began: its line
+/// is in the pin file of every parent in `starts`. A slot in a root commit
+/// leaves nothing before it. With no slot committed yet, a pin committed at
+/// `HEAD` stood.
+#[must_use]
+pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> bool {
+    if starts.is_empty() {
+        return pin_line_at("HEAD", seat, key);
+    }
+    starts
+        .iter()
+        .all(|parents| !parents.is_empty() && parents.iter().all(|p| pin_line_at(p, seat, key)))
+}
+
+/// Whether `seat`, pinned to `key`, needs no slot and may sign one: it is
+/// on the list, or its pin [`stood`]. `starts` is `None` on a tracker that
+/// is not a git repository, where only the list stands.
+#[must_use]
+pub fn stands(seat: &str, key: Option<&str>, starts: Option<&[Vec<String>]>) -> bool {
+    standing(seat)
+        || key
+            .zip(starts)
+            .is_some_and(|(key, at)| stood(at, seat, key))
 }
 
 /// A slot note's fields.
@@ -151,7 +217,7 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> 
             &mine[..12]
         );
     }
-    if !standing(&launcher) {
+    if !stands(&launcher, Some(pinned), starts().as_deref()) {
         bail!(
             "slot: {launcher} is not a standing seat, so no slot it signs counts; a standing seat launches"
         );
@@ -168,9 +234,9 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> 
     ))
 }
 
-/// Why the run seats among `seats` do not count on `issue`. A seat on the
-/// standing list needs no slot. Any other needs a slot in `notes` that
-/// names it and verifies, signed under the pin of a standing seat.
+/// Why the run seats among `seats` do not count on `issue`. A seat that
+/// `stands` needs no slot. Any other needs a slot in `notes` that names it
+/// and verifies, signed under the pin of a seat that stands.
 /// `before_pin(note, voter)` is whether `note` was already in this
 /// issue's own entry when `voter`'s pin was introduced. `false` refuses
 /// the slot: the key it vouches for is not one the run minted after it.
@@ -180,11 +246,12 @@ pub fn problems(
     seats: &[(&str, &str)],
     notes: &[String],
     pins: &BTreeMap<String, String>,
+    stands: &dyn Fn(&str) -> bool,
     before_pin: &dyn Fn(&str, &str) -> bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
     for (voter, _) in seats {
-        if standing(voter) {
+        if stands(voter) {
             continue;
         }
         let mut why = None;
@@ -202,7 +269,7 @@ pub fn problems(
                 Some(key) if *key != slot.key => Some(format!(
                     "{voter}'s slot is signed by a key other than {launcher}'s pinned one"
                 )),
-                Some(_) if !standing(launcher) => Some(format!(
+                Some(_) if !stands(launcher) => Some(format!(
                     "{voter}'s slot is from {launcher}, which is not a standing seat"
                 )),
                 Some(_) if !before_pin(note, voter) => {
@@ -438,6 +505,7 @@ mod tests {
             &[("inky", "ship"), ("review-r1", "ship")],
             notes,
             &pins,
+            &standing,
             &before_pin,
         )
     }
@@ -486,7 +554,14 @@ mod tests {
     #[test]
     fn a_seat_off_the_list_needs_a_slot_when_the_tracker_has_no_clock() {
         let pins: BTreeMap<String, String> = [("review-r1".to_string(), public(&key(4)))].into();
-        let p = problems("d-1", &[("review-r1", "ship")], &[], &pins, &|_, _| true);
+        let p = problems(
+            "d-1",
+            &[("review-r1", "ship")],
+            &[],
+            &pins,
+            &standing,
+            &|_, _| true,
+        );
         assert_eq!(
             p,
             vec!["review-r1 is not a standing seat, and no slot on d-1 names it"]
