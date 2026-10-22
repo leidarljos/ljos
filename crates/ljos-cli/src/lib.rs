@@ -28952,6 +28952,9 @@ pub(crate) fn test_env_lock() -> EnvLock {
 }
 
 #[cfg(test)]
+pub(crate) use tests::{serve_sync_pack, SyncPack};
+
+#[cfg(test)]
 mod tests {
     /// A guard shim refuses what ljos-policyd denies, with the rule and a
     /// way forward, and runs the real command for everything else.
@@ -43399,6 +43402,76 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
             "the prompt waited {took:?} on a judge"
         );
+    }
+
+    /// How [`serve_sync_pack`] treats a post and a delete. Adopt's checks
+    /// need a pack that lists, keeps, refuses, or answers with the atom it
+    /// already holds.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SyncPack {
+        /// Store a new atom. Delete removes one.
+        Keep,
+        /// POST answers 400 and stores nothing.
+        RefusePosts,
+        /// POST returns the stored atom of the same text and stores nothing.
+        EchoText,
+        /// POST stores. DELETE answers 500 and leaves the atom.
+        FailDeletes,
+    }
+
+    /// The keeping pack, plus the list and delete adopt and import call.
+    /// The same request loop as [`serve_keeping_pack`].
+    pub(crate) fn serve_sync_pack(mode: SyncPack) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if first.contains("POST /v1/atoms/delete") {
+                if mode == SyncPack::FailDeletes {
+                    return (500, r#"{"error":"delete failed"}"#.into());
+                }
+                let id = serde_json::from_str::<Value>(body)
+                    .ok()
+                    .and_then(|v| v["id"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let mut held = slot.lock().unwrap();
+                let before = held.len();
+                held.retain(|atom| atom["id"].as_str() != Some(id.as_str()));
+                if held.len() == before {
+                    return (404, format!(r#"{{"error":"no atom {id}"}}"#));
+                }
+                return (200, format!(r#"{{"deleted":"{id}"}}"#));
+            }
+            if first.contains("POST /v1/atoms") {
+                if mode == SyncPack::RefusePosts {
+                    return (400, r#"{"error":"held as proposal"}"#.into());
+                }
+                let Ok(mut atom) = serde_json::from_str::<Value>(body) else {
+                    return (400, r#"{"error":"atom text is required"}"#.into());
+                };
+                let mut held = slot.lock().unwrap();
+                if mode == SyncPack::EchoText {
+                    if let Some(existing) =
+                        held.iter().find(|stored| stored["text"] == atom["text"])
+                    {
+                        return (200, existing.to_string());
+                    }
+                }
+                atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
+                held.push(atom.clone());
+                return (200, atom.to_string());
+            }
+            if first.contains("GET /v1/atoms") {
+                let held = slot.lock().unwrap().clone();
+                return (200, serde_json::json!({ "atoms": held }).to_string());
+            }
+            if first.contains("GET /v1/status") {
+                return (200, r#"{"version":"0.13.0"}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        (url, stored)
     }
 
     /// A pack that keeps what is posted and answers every search with it.
