@@ -1548,12 +1548,22 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             if host.is_empty() || machine_name(&host) == me {
                 continue;
             }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let rel = format!(".ljos/atoms/{name}");
             if let Some(why) = bad_log_name(&host, &scope_name) {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                out.push_str(&format!("sync: .ljos/atoms/{name} was not read: {why}\n"));
+                out.push_str(&format!("sync: {rel} was not read: {why}\n"));
                 continue;
             }
-            seen.insert((host.clone(), scope_name.clone()));
+            // `host+<primary>` parses as the primary log. Two files for one
+            // sender would both retire against one taken set, so only the
+            // name export writes is read.
+            let [canonical, _] = host_log_rels_for_scope(&host, &scope.name, &scope_name);
+            if canonical != rel || !seen.insert((host.clone(), scope_name.clone())) {
+                out.push_str(&format!(
+                    "sync: {rel} is not a log name; {host}'s {scope_name} log is {canonical}, and this one was left unread\n"
+                ));
+                continue;
+            }
             if !scope_is_configured(scope, &scope_name) {
                 // The scope was removed or renamed. Do not read the log.
                 // Everything previously taken from it retires.
@@ -1565,8 +1575,6 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                 continue;
             }
             let identities = identities_for_open(&scope_name);
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let rel = format!(".ljos/atoms/{name}");
             let Some(bytes) = read_beneath(root, &rel)? else {
                 continue;
             };
