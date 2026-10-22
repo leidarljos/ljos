@@ -4001,4 +4001,234 @@ mod tests {
             );
         }
     }
+
+    /// A live extra-scope log is posted under `sync:<host>+<scope>`, not the
+    /// primary sender.
+    #[test]
+    fn an_extra_scope_log_is_imported_under_its_sender() {
+        let _g = crate::test_env_lock();
+        assert_ne!(host(), "peer");
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let config = home.join(".config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let pack_home = dir.path().join("pack");
+        let (port, _daemon) = spawn_pack(&pack_home);
+        // SAFETY: this test holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PACKSET_WORKSPACE", "import-cloud");
+            std::env::remove_var(WRITE_SCOPE_KEY);
+        }
+        let public = age_keygen(&identity_path());
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let text = "The other host kept this on the cloud.";
+        seal_for(
+            &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
+            &public,
+            &lesson_line(text, "cloud"),
+        );
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("peer: 1 cloud atoms taken, 0 refused, 0 retired"),
+            "{said}"
+        );
+        let client = crate::pack().unwrap();
+        let left = crate::atoms_lean(&client, &client.workspace()).unwrap();
+        let hits: Vec<_> = left.iter().filter(|atom| atom["text"] == text).collect();
+        assert_eq!(hits.len(), 1, "{left:?}");
+        assert!(
+            has_entity(hits[0], "sync:peer+cloud"),
+            "{:?}",
+            hits[0]["entities"]
+        );
+        assert!(
+            !has_entity(hits[0], "sync:peer"),
+            "{:?}",
+            hits[0]["entities"]
+        );
+    }
+
+    /// A VM holds the cloud identity and not the machine key. The cloud log
+    /// is taken. The primary log, sealed to someone else, is not.
+    #[test]
+    fn a_vm_import_with_only_the_cloud_key_takes_the_cloud_log() {
+        let _g = crate::test_env_lock();
+        assert_ne!(host(), "peer");
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let config = home.join(".config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let pack_home = dir.path().join("pack");
+        let (port, _daemon) = spawn_pack(&pack_home);
+        // SAFETY: this test holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PACKSET_WORKSPACE", "vm-cloud-key");
+            std::env::remove_var(WRITE_SCOPE_KEY);
+        }
+        assert!(!identity_path().exists(), "the machine key was invented");
+        let cloud_public = age_keygen(&cloud_identity_path());
+        let other_public = age_keygen(&dir.path().join("other.key"));
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{other_public}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let cloud_text = "The VM kept this on the cloud.";
+        let box_text = "The box kept this on the primary.";
+        seal_for(
+            &root.join(".ljos/atoms/peer.jsonl.age"),
+            &other_public,
+            &lesson_line(box_text, "grokbot"),
+        );
+        seal_for(
+            &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
+            &cloud_public,
+            &lesson_line(cloud_text, "cloud"),
+        );
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("peer's grokbot log is not sealed to this machine"),
+            "{said}"
+        );
+        assert!(
+            said.contains("peer: 1 cloud atoms taken, 0 refused, 0 retired"),
+            "{said}"
+        );
+        let client = crate::pack().unwrap();
+        let left = crate::atoms_lean(&client, &client.workspace()).unwrap();
+        assert!(
+            left.iter()
+                .any(|atom| atom["text"] == cloud_text && has_entity(atom, "sync:peer+cloud")),
+            "{left:?}"
+        );
+        assert!(
+            !left.iter().any(|atom| atom["text"] == box_text),
+            "the primary log was opened without the machine key: {left:?}"
+        );
+        assert!(!identity_path().exists(), "import wrote a machine key");
+    }
+
+    /// The atoms merge driver re-exports `<host>+cloud` from atoms whose
+    /// `scope:` entity is cloud. A grokbot atom and an unscoped atom stay out.
+    #[test]
+    fn the_merge_driver_reexports_an_extra_scope_without_primary_atoms() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let config = home.join(".config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let pack_home = dir.path().join("pack");
+        let (port, _daemon) = spawn_pack(&pack_home);
+        // SAFETY: this test holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PACKSET_WORKSPACE", "merge-cloud");
+            std::env::remove_var(WRITE_SCOPE_KEY);
+        }
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        let git = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let client = crate::pack().unwrap();
+        for (text, entities) in [
+            ("Box memory stays on the box.", vec!["scope:grokbot"]),
+            ("Cloud memory stays on the cloud.", vec!["scope:cloud"]),
+            ("An unscoped atom stays on the box.", vec![]),
+        ] {
+            crate::admit::post_kept(
+                &client,
+                &serde_json::json!({
+                    "kind": "lesson",
+                    "level": "explicit",
+                    "text": text,
+                    "workspace": client.workspace(),
+                    "entities": entities,
+                }),
+            )
+            .unwrap();
+        }
+        let me = host();
+        let cloud_rel = format!(".ljos/atoms/{me}+cloud.jsonl.age");
+        let primary_rel = format!(".ljos/atoms/{me}.jsonl.age");
+        with_fake_age(dir.path(), || {
+            let cloud = root.join(&cloud_rel);
+            std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+            std::fs::write(&cloud, "stale\n").unwrap();
+            crate::tracker_push::merge_atoms_driver(&cloud, &cloud_rel).unwrap();
+            let cloud_text = std::fs::read_to_string(&cloud).unwrap();
+            assert!(
+                cloud_text.contains("Cloud memory stays on the cloud."),
+                "{cloud_text}"
+            );
+            assert!(
+                !cloud_text.contains("Box memory stays on the box."),
+                "{cloud_text}"
+            );
+            assert!(
+                !cloud_text.contains("An unscoped atom stays on the box."),
+                "{cloud_text}"
+            );
+            let primary = root.join(&primary_rel);
+            std::fs::write(&primary, "stale\n").unwrap();
+            crate::tracker_push::merge_atoms_driver(&primary, &primary_rel).unwrap();
+            let primary_text = std::fs::read_to_string(&primary).unwrap();
+            assert!(
+                primary_text.contains("Box memory stays on the box."),
+                "{primary_text}"
+            );
+            assert!(
+                primary_text.contains("An unscoped atom stays on the box."),
+                "{primary_text}"
+            );
+            assert!(
+                !primary_text.contains("Cloud memory stays on the cloud."),
+                "{primary_text}"
+            );
+        });
+    }
 }
