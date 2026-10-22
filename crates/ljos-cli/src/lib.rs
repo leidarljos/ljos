@@ -10479,10 +10479,13 @@ fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit
 
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
-/// order, which carries age. When every hit the writer chose carries a
-/// `rerank_score`, which is null on a hit it did not rerank, they are read
-/// by it. An atom [`search_relevant`] added, which the cross-encoder did
-/// not read, goes in ahead of the first hit its lexical match beats.
+/// order, which carries age. The hits the writer chose that carry a
+/// finite `rerank_score` are read by it. One whose score is null, which
+/// the writer did not rerank, or is not a number, goes in ahead of the
+/// first scored hit its lexical match beats, and so does an atom
+/// [`search_relevant`] added, which the cross-encoder did not read. A
+/// writer that says the cross-encoder ran and scores no hit keeps its
+/// order.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
     let q = query.trim();
     if q.is_empty() {
@@ -10491,27 +10494,31 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
     let (hits, ran) = with_writer(|| {
         let client = pack()?;
         let (body, chosen) = search_relevant(&client, q, limit, true, pack_timeout())?;
-        let mut scored: Vec<(Hit, Option<f64>)> = body["hits"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|v| {
-                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
-                Some((hit, v["rerank_score"].as_f64()))
-            })
-            .collect();
-        let chosen = chosen.min(scored.len());
-        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
-        if scored_all {
-            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        let mut scored: Vec<(Hit, f64)> = Vec::new();
+        let mut unscored: Vec<Hit> = Vec::new();
+        let mut extra: Vec<Hit> = Vec::new();
+        for (i, v) in body["hits"].as_array().into_iter().flatten().enumerate() {
+            let Ok(hit) = serde_json::from_value::<Hit>(v.clone()) else {
+                continue;
+            };
+            match v["rerank_score"].as_f64().filter(|s| s.is_finite()) {
+                _ if i >= chosen => extra.push(hit),
+                Some(score) => scored.push((hit, score)),
+                None => unscored.push(hit),
+            }
         }
-        let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
-        let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
-        if ran && hits.len() > chosen {
-            let extra = hits.split_off(chosen);
-            hits = merge_by_lexical(hits, extra, q);
-        }
+        let ran = !scored.is_empty() || body["rerank"].as_str() == Some("cross-encoder");
+        let hits = if scored.is_empty() {
+            if ran {
+                merge_by_lexical(unscored, extra, q)
+            } else {
+                unscored.into_iter().chain(extra).collect()
+            }
+        } else {
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            unscored.extend(extra);
+            merge_by_lexical(scored.into_iter().map(|(h, _)| h).collect(), unscored, q)
+        };
         keep_origins_of(&client, &hits);
         Ok((hits, ran))
     })?;
@@ -37770,6 +37777,82 @@ mod tests {
         let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
         assert!(!writer_unreachable(&err), "{err:#}");
         assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
+    }
+
+    /// The hits the writer chose are read by their `rerank_score`, highest
+    /// first. One it did not score, null on the wire, goes in ahead of the
+    /// first scored hit its lexical match beats, so a lesson the writer put
+    /// last unscored behind three scored lookalikes still reaches the
+    /// prompt.
+    #[test]
+    fn the_rerank_score_orders_the_hits_and_a_null_one_merges_by_match() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, rerank: Value| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 2, "rerank_score": rerank
+            })
+        };
+        let scored: Vec<Value> = [("Figma", 0.1), ("Grafana", 0.9), ("Sentry", 0.5)]
+            .iter()
+            .map(|(who, score)| {
+                hit(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                    (*score).into(),
+                )
+            })
+            .collect();
+        let mut with_null = scored.clone();
+        with_null.push(hit(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+            Value::Null,
+        ));
+        let cue = "npm: the registry rejected my token";
+        for (hits, want) in [
+            (scored, vec!["Grafana", "Sentry", "Figma"]),
+            (with_null, vec!["old", "Grafana", "Sentry", "Figma"]),
+        ] {
+            let (url, _) = serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                    return (200, status.to_string());
+                }
+                if first.contains("/v1/search") {
+                    let body = serde_json::json!({
+                        "hits": hits, "rank": "relevance", "rerank": "cross-encoder"
+                    });
+                    return (200, body.to_string());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            });
+            let _url = PackUrl::set(&url);
+            let (found, ran) = packset_search_reranked(cue, 20).unwrap();
+            let ids: Vec<&str> = found.iter().filter_map(|h| h.id.as_deref()).collect();
+            assert_eq!(ids, want);
+            assert!(ran);
+            let prompt = HookCall {
+                event: "UserPromptSubmit".into(),
+                cue: cue.into(),
+                session: Some(format!("rerank-score-{}", want.len())),
+                shape: HookShape::default(),
+            };
+            let (note, _) = hook_note(&prompt, 5);
+            assert_eq!(
+                note.contains("CI secret expired"),
+                want[0] == "old",
+                "{note}"
+            );
+        }
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
