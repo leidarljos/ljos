@@ -247,6 +247,22 @@ pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<()
     Ok(())
 }
 
+/// Remove one env-owned wake entry.
+///
+/// Returns whether an env-owned entry was present and removed.
+pub(crate) fn clear_env_webhook(seat: &str) -> Result<bool> {
+    let mut table = load();
+    let remove = table
+        .get(seat)
+        .is_some_and(|wake| wake.source.as_deref() == Some(ENV_SOURCE));
+    if !remove {
+        return Ok(false);
+    }
+    table.remove(seat);
+    save(&table)?;
+    Ok(true)
+}
+
 /// Remove a seat's wake.
 ///
 /// # Errors
