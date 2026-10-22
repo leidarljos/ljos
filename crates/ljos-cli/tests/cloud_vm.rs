@@ -584,6 +584,40 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
 }
 
 #[test]
+fn a_machine_without_cloud_up_keeps_doctor_healthy() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = seat_env(root.path());
+    let laptop = checkout(root.path(), "laptop", &["cursor/probe"]);
+    git(&laptop, &["checkout", "-q", "cursor/probe"]);
+
+    let row = ljos_cli::cloud::guard_row();
+    assert_eq!(row.name, "cloud guard");
+    assert!(!row.ok, "{row:?}");
+    assert_eq!(ljos_cli::doctor_word(&row), "info", "{row:?}");
+    let rows = vec![row];
+    assert!(ljos_cli::failing(&rows).is_empty(), "{rows:?}");
+    assert!(ljos_cli::healthy(&rows), "doctor would exit 1: {rows:?}");
+    assert!(
+        ljos_cli::doctor_summary(&rows).starts_with("ljos is ready"),
+        "{}",
+        ljos_cli::doctor_summary(&rows)
+    );
+    let short = ljos_cli::format_doctor_short(&rows);
+    assert!(!short.contains("cloud guard"), "{short}");
+    assert!(!home.join(".config/ljos/cloud-guard-rules.json").exists());
+
+    for line in [
+        "git push origin +cursor/probe",
+        "git push",
+        "gh pr create --fill",
+        "gh pr merge 7",
+    ] {
+        allowed(line, &laptop);
+    }
+}
+
+#[test]
 fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
