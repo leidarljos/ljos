@@ -15543,18 +15543,23 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     } else {
         p.entities.clone()
     };
+    // The pack cuts its list by a score that decays with age, so ask for
+    // more than are shown and keep the ones that match the domain best.
+    const PER_DOMAIN: usize = 5;
+    let pool = u32::try_from(PER_DOMAIN * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     for cue in &cues {
-        let Ok(hits) = packset_search(cue) else {
+        let Ok(hits) = packset_search_opts(cue, pool, false) else {
             continue;
         };
-        for h in hits.into_iter().take(5) {
-            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || unverified_note_hit(&h) {
-                continue;
-            }
+        let mut hits: Vec<Hit> = hits
+            .into_iter()
+            .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()) && !unverified_note_hit(h))
+            .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+            .collect();
+        sort_by_relevance(&mut hits, cue);
+        for h in hits.into_iter().take(PER_DOMAIN) {
             if let Some(id) = &h.id {
-                if !seen.insert(id.clone()) {
-                    continue;
-                }
+                seen.insert(id.clone());
             }
             lines.push((h.kind == "preference", hit_line(&h, &now)));
         }
@@ -48581,6 +48586,80 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             brief_text.contains("unverified logbook notes"),
             "the tracker recall is not labelled: {brief_text}"
+        );
+    }
+
+    /// Six fresh hits the pack ranks first do not name the persona's
+    /// domain; an old lesson that does sits seventh. A brief that took
+    /// the first five never read it.
+    #[test]
+    fn a_brief_keeps_what_names_the_domain_past_the_fused_cut() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* TODO [#C] Logo legibility review\n:PROPERTIES:\n:ID:         probe-l0g0\n:END:\n",
+        )
+        .unwrap();
+        let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut hits: Vec<Value> = (0..6)
+            .map(|i| {
+                serde_json::json!({"id": format!("fresh{i}"), "kind": "lesson", "score": 2.0,
+                    "text": format!("Brand colours were reviewed in round {i}"), "entities": []})
+            })
+            .collect();
+        hits.push(
+            serde_json::json!({"id": "old", "kind": "lesson", "score": 0.5,
+            "text": "Keep the logo legible at sixteen pixels", "entities": ["logo"],
+            "ts": "2026-07-22T09:00:00.000Z"}),
+        );
+        let (url, _seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-p","kind":"persona","name":"designer","anchor":0.5,"text":"Reads a mark for legibility at small sizes.","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/search") {
+                let limit = line
+                    .split(['?', '&', ' '])
+                    .find_map(|kv| kv.strip_prefix("limit="))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(hits.len());
+                let kept: Vec<&Value> = hits.iter().take(limit).collect();
+                (200, serde_json::json!({ "hits": kept }).to_string())
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let runtime = dir.path().join("run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let brief_text = with_fake_on_path(dir.path(), || {
+            bind_playbook("probe-l0g0", "company-panel").unwrap();
+            brief("designer", "probe-l0g0").unwrap()
+        });
+        assert!(
+            brief_text.contains("Keep the logo legible at sixteen pixels"),
+            "the lesson on the domain was cut: {brief_text}"
         );
     }
 
