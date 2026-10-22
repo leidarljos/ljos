@@ -237,7 +237,9 @@ enum RecordCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
+    /// Remember one lesson. Typed by the person it takes effect at once.
+    /// Under a runner, words from the person's latest prompt are theirs.
+    /// Any other text is an unreviewed note, which the prompt does not treat as a fact.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
@@ -256,7 +258,9 @@ enum Cmd {
         #[arg(long, value_name = "DATE")]
         valid_to: Option<String>,
     },
-    /// Prefer one way over another, as a standing preference. Stored as written.
+    /// Prefer one way over another, as a standing preference. Typed by the
+    /// person, it is theirs. Under a runner, only words from the person's
+    /// latest prompt are theirs; any other text is agent-derived.
     /// `--user` writes a user rule instead: shared by every seat, never reviewed.
     Prefer {
         text: Vec<String>,
@@ -1364,14 +1368,17 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             let text = join(&text);
-            // Under a runner the lesson is the agent's, unless it is the
-            // person's words from their latest prompt: then it stands.
-            let agents =
-                ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
-            let horizon = ljos_cli::remember_horizon(transient, standing, agents);
-            let body = if agents {
-                ljos_cli::packset_write_agent("Remember", &text, as_persona.as_deref(), horizon)?
+            // Under a runner the agent's own words are an unreviewed note.
+            // Words from the person's latest prompt are theirs and stand.
+            // The seat guard lets remember through, so this is the check.
+            let under = ljos_cli::under_a_runner();
+            let body = if under && !ljos_cli::capture::said_in_latest_prompt(&text) {
+                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
+            } else if under {
+                let horizon = transient.then_some(true);
+                ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
             } else {
+                let horizon = ljos_cli::remember_horizon(transient, standing, false);
                 packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
             };
             println!("{}", write_ack(&body));
@@ -1482,7 +1489,7 @@ fn run_command() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
+            let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
             for rule in &rules {
                 println!("{}", write_ack(&write_rule(rule)?));
@@ -2820,7 +2827,10 @@ fn run_command() -> Result<()> {
                     // repeat it and the correction hook does not file it
                     // again as a proposal.
                     let captured = if person {
-                        ljos_cli::capture::note_latest_prompt(&call.cue);
+                        ljos_cli::capture::note_latest_prompt_for(
+                            &call.cue,
+                            call.session.as_deref(),
+                        );
                         ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {
                         None
