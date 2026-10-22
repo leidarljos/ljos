@@ -1,0 +1,1 @@
+`ljos prefer --user --promote` under a runner, and MCP `ljos_prefer` with `user` and `promote`, now refuse a lesson whose text is not in the person's latest prompt, the same check `prefer --user` makes of the words.

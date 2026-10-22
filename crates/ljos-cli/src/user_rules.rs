@@ -432,16 +432,20 @@ pub fn forget(id: &str) -> Result<UserRule> {
 }
 
 /// Read lesson `id` from this seat's pack and copy it into a user rule.
-/// The lesson stays in the pack.
+/// The lesson stays in the pack. Under a runner, or with `person_words`
+/// (the MCP path), the lesson's text must be in the person's latest
+/// prompt, as [`write_preference`] asks of the words.
 ///
 /// # Errors
 ///
-/// The pack does not answer, no such lesson, or [`promote_atom`] refuses it.
+/// The pack does not answer, no such lesson, the text is not the
+/// person's words when they are required, or [`promote_atom`] refuses it.
 pub fn promote_lesson(
     id: &str,
     reason: &str,
     deny_mention: &People,
     deny_reply_to: &People,
+    person_words: bool,
 ) -> Result<UserRule> {
     let id = id.trim();
     if id.is_empty() {
@@ -454,6 +458,10 @@ pub fn promote_lesson(
         .into_iter()
         .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id))
         .with_context(|| format!("prefer: no atom {id} in this seat's pack"))?;
+    if person_words || super::under_a_runner() {
+        let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+        super::refuse_unless_person_words("prefer", text)?;
+    }
     promote_atom(&atom, reason, deny_mention, deny_reply_to)
 }
 
