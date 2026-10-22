@@ -2070,3 +2070,126 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
         "a standing seat dated after slots was refused: {said:?}"
     );
 }
+
+/// Stage `paths` and commit them at author time `unix`.
+fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
+    let mut args = vec!["add", "--"];
+    args.extend_from_slice(paths);
+    git(repo, &args);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-q", "-m", message])
+        .env("GIT_AUTHOR_DATE", format!("@{unix} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{unix} +0000"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "commit {message}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The same slot line, committed earlier on another issue, does not make
+/// this issue's pin look later than the slot. The oldest author time of
+/// the line is before the pin; the gate still refuses.
+#[test]
+fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-slot", "probe-other"]);
+    pin_standing(&repo, "ljosbot");
+    let launcher = ljos_cli::ballot_sig::load_or_create(
+        &ljos_cli::cloud::prepare_seat_key("ljosbot").unwrap(),
+    )
+    .unwrap();
+    let run = "review-replay-0001";
+    let note = ljos_cli::slot::sign(&launcher, "probe-slot", run, "grok", "r1", "ljosbot");
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::note(&layout, "probe-other", &note).unwrap();
+    commit_dated(
+        &repo,
+        &["Software/probe/issues.org"],
+        "note the slot on the other issue",
+        "1700000000",
+    );
+
+    let run_key =
+        ljos_cli::ballot_sig::load_or_create(&ljos_cli::cloud::prepare_seat_key(run).unwrap())
+            .unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&run_key, b"pin");
+    let pins = repo.join(".ljos-seat-keys");
+    let mut text = fs::read_to_string(&pins).unwrap();
+    text.push_str(&format!("{run} {public}\n"));
+    fs::write(&pins, text).unwrap();
+    commit_dated(
+        &repo,
+        &[".ljos-seat-keys"],
+        "pin the run seat",
+        "1792700000",
+    );
+
+    let pick = format!("-S{note}");
+    let times = git(&repo, &["log", "--format=%at", &pick]);
+    let earliest: i64 = times
+        .lines()
+        .filter_map(|t| t.trim().parse().ok())
+        .min()
+        .unwrap();
+    let pin_time: i64 = git(
+        &repo,
+        &[
+            "log",
+            "-1",
+            "--format=%at",
+            &format!("-S{run} {public}"),
+            "--",
+            ".ljos-seat-keys",
+        ],
+    )
+    .trim()
+    .parse()
+    .unwrap();
+    assert!(
+        earliest < pin_time,
+        "the replayed line at {earliest} is not older than the pin at {pin_time}"
+    );
+    assert_eq!(
+        ljos_cli::slot::recorded_before_pin("probe-other", &note, run, &public),
+        Some(true),
+        "the other issue's own entry did not hold the replayed line"
+    );
+    assert_eq!(
+        ljos_cli::slot::recorded_before_pin("probe-slot", &note, run, &public),
+        Some(false),
+        "the replay counted as this issue's slot"
+    );
+
+    vissue_core::ops::note(&layout, "probe-slot", &note).unwrap();
+    std::env::set_var("LJOS_SEAT", run);
+    std::env::set_var("VISSUE_AGENT", run);
+    vissue_core::ops::vote_with(&layout, "probe-slot", Some("ship"), run, Some("none"), None)
+        .unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot("probe-slot").unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+    commit_dated(
+        &repo,
+        &["Software/probe/issues.org"],
+        "slot this issue after the pin",
+        "1792710000",
+    );
+    assert_eq!(
+        ljos_cli::slot::recorded_before_pin("probe-slot", &note, run, &public),
+        Some(false),
+        "a later copy on this issue backdated the pin"
+    );
+    let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
+    let err =
+        ljos_cli::check_seat_signatures("probe-slot", &rows, &std::collections::BTreeSet::new())
+            .unwrap_err();
+    assert!(
+        err.contains("review-replay-0001's key was pinned before its slot"),
+        "{err}"
+    );
+}
