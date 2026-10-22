@@ -4054,8 +4054,8 @@ fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
 }
 
 /// Pin a standing seat with an author date after slots began, and push it.
-/// The list makes the seat standing. The date would refuse it if the gate
-/// still trusted git time.
+/// The list, or a pin committed before the first slot, makes the seat
+/// standing. The date would refuse it if the gate still trusted git time.
 fn pin_standing(repo: &Path, seat: &str) -> String {
     pin_at(repo, seat, "1792700000")
 }
@@ -4138,6 +4138,37 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     assert!(err.contains("does not slot itself"), "{err}");
 }
 
+/// `ridley-review` on run `cafebabe0001abcd` boots as
+/// `ridley-review-cafebabe0001abcd`, and so would a seat already named
+/// that, so the launcher cannot tell from the slot which one it vouches
+/// for. The suffixed name is refused and the bare one is slotted.
+#[test]
+fn a_launcher_does_not_slot_a_seat_that_already_ends_with_the_run_id() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, box_repo) = slot_world(root.path(), &["probe-slot"]);
+    pin_standing(&box_repo, "ljosbot");
+    let err = ljos_cli::slot::write(
+        "probe-slot",
+        "ridley-review-cafebabe0001abcd",
+        "grok-4",
+        "cafebabe0001abcd",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("ridley-review-cafebabe0001abcd already ends with run id cafebabe0001abcd"),
+        "{err}"
+    );
+    assert!(err.contains("ridley-review on that run"), "{err}");
+    let said =
+        ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    assert!(
+        said.contains("slot: ridley-review-cafebabe0001abcd on probe-slot"),
+        "{said}"
+    );
+}
+
 #[test]
 fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     let _g = Guard::new();
@@ -4152,7 +4183,7 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     std::env::set_var("VISSUE_ROOT", &vm);
     std::env::set_var("ISSUE_ROOT", &vm);
     std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
-    let seat = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    let seat = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd").unwrap();
     std::env::set_var("LJOS_SEAT", &seat);
     std::env::set_var("VISSUE_AGENT", &seat);
     let layout = vissue_core::Layout::resolve(None, None).unwrap();
@@ -4173,23 +4204,89 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     let rows = [serde_json::json!({"agent": seat, "choice": "ship"})];
     let personas = std::collections::BTreeSet::new();
     let slotted = ljos_cli::check_seat_signatures("probe-slot", &rows, &personas);
-    assert_eq!(slotted, Ok(Vec::new()));
-    let bare = ljos_cli::check_seat_signatures("probe-bare", &rows, &personas).unwrap_err();
-    assert!(
-        bare.contains(&format!(
-            "{seat} is not a standing seat, and no slot on probe-bare names it"
-        )),
-        "{bare}"
+    assert_eq!(slotted, Ok(ljos_cli::SeatSignatures::default()));
+    let bare = ljos_cli::check_seat_signatures("probe-bare", &rows, &personas).unwrap();
+    assert_eq!(
+        bare.left_out,
+        vec![(
+            seat.clone(),
+            format!("{seat} is not a standing seat, and no slot on probe-bare names it")
+        )]
     );
 }
 
-/// A pin whose author date is before slots began does not make a seat
-/// standing, and a standing seat still launches when its pin is dated after.
+/// Cast and sign `seat`'s ballot for `choice` on `issue`, and push it.
+fn cast(seat: &str, issue: &str, choice: &str) {
+    std::env::set_var("LJOS_SEAT", seat);
+    std::env::set_var("VISSUE_AGENT", seat);
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::vote_with(&layout, issue, Some(choice), seat, Some("none"), None).unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot(issue).unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+    let pushed = ljos_cli::persist_tracker(issue, "voted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+}
+
+/// A box seat off the list whose key was pinned before the first slot
+/// stands without one, and launches. A seat first pinned after the slot
+/// votes against it without a slot: that ballot is left out and named,
+/// and the issue still decides.
+#[test]
+fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-box", "probe-slot"]);
+    pin_standing(&repo, "eessi");
+    pin_standing(&repo, "ljosbot");
+    ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    cast("eessi", "probe-box", "ship");
+    cast("mallory", "probe-box", "hold");
+
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [
+        serde_json::json!({"agent": "eessi", "choice": "ship"}),
+        serde_json::json!({"agent": "mallory", "choice": "hold"}),
+    ];
+    let (words, json) = ljos_cli::push_cite_reading(
+        "probe-box",
+        &rows,
+        &std::collections::BTreeSet::new(),
+        "ljosbot",
+    );
+    assert_eq!(json["push_cite"]["stands"], true, "{words}");
+    assert!(words.contains("decides ship"), "{words}");
+    assert!(words.contains("counted eessi for ship;"), "{words}");
+    assert!(
+        words.contains(
+            "left out: mallory is not a standing seat, and no slot on probe-box names it"
+        ),
+        "{words}"
+    );
+
+    std::env::set_var("LJOS_SEAT", "eessi");
+    std::env::set_var("VISSUE_AGENT", "eessi");
+    let said = ljos_cli::slot::write("probe-box", "ridley-other", "grok-4", "feedface0003abcd");
+    assert!(
+        said.is_ok(),
+        "a seat pinned before slots did not launch: {said:?}"
+    );
+}
+
+/// A pin whose author date is before slots began, committed after the
+/// first slot, does not make a seat standing, and a standing seat still
+/// launches when its pin is dated after.
 #[test]
 fn a_backdated_pin_does_not_make_a_standing_seat() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
-    let (_origin, repo) = slot_world(root.path(), &["probe-bare"]);
+    let (_origin, repo) = slot_world(root.path(), &["probe-bare", "probe-slot"]);
+    pin_standing(&repo, "ljosbot");
+    ljos_cli::slot::write("probe-slot", "ridley-first", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
     let public = pin_at(&repo, "mallory", "1700000000");
     let needle = format!("-Smallory {public}");
     let when = git(
@@ -4231,10 +4328,13 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
     let rows = [serde_json::json!({"agent": "mallory", "choice": "ship"})];
     let bare =
         ljos_cli::check_seat_signatures("probe-bare", &rows, &std::collections::BTreeSet::new())
-            .unwrap_err();
-    assert!(
-        bare.contains("mallory is not a standing seat, and no slot on probe-bare names it"),
-        "{bare}"
+            .unwrap();
+    assert_eq!(
+        bare.left_out,
+        vec![(
+            "mallory".to_string(),
+            "mallory is not a standing seat, and no slot on probe-bare names it".to_string()
+        )]
     );
 
     pin_at(&repo, "inky", "1792700000");
@@ -4361,12 +4461,16 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
         "a later copy on this issue backdated the pin"
     );
     let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
-    let err =
+    let left =
         ljos_cli::check_seat_signatures("probe-slot", &rows, &std::collections::BTreeSet::new())
-            .unwrap_err();
-    assert!(
-        err.contains("review-replay-0001's key was pinned before its slot"),
-        "{err}"
+            .unwrap()
+            .left_out;
+    assert_eq!(
+        left,
+        vec![(
+            run.to_string(),
+            "review-replay-0001's key was pinned before its slot".to_string()
+        )]
     );
 }
 
