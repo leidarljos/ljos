@@ -689,7 +689,7 @@ fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
 }
 
 #[test]
-fn cloud_up_refuses_a_seat_collision_and_keeps_a_hand_set_wake() {
+fn cloud_up_retires_stale_env_wakes_and_keeps_a_hand_set_wake() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -715,6 +715,21 @@ command = \"true\"
 [inky]
 webhook = \"https://old.example/hook\"
 key_env = \"LJOS_WAKE_INKY_KEY\"
+source = \"env\"
+
+[grok-bot]
+webhook = \"https://old.example/grok\"
+key_env = \"LJOS_WAKE_GROK_BOT_KEY\"
+source = \"env\"
+
+[evil]
+webhook = \"https://old.example/evil\"
+key_env = \"LJOS_WAKE_EVIL_KEY\"
+source = \"env\"
+
+[retired]
+webhook = \"https://old.example/retired\"
+key_env = \"LJOS_WAKE_RETIRED_KEY\"
 source = \"env\"
 
 [saddle]
@@ -767,7 +782,9 @@ key_env = \"SADDLE_HAND_KEY\"
         "{said}"
     );
     assert!(
-        said.contains("wake grok-bot: LJOS_WAKE_GROK-BOT_URL and LJOS_WAKE_GROK_BOT_URL name the same seat, so no wake was written"),
+        said.contains(
+            "wake grok-bot: LJOS_WAKE_GROK-BOT_URL and LJOS_WAKE_GROK_BOT_URL name the same seat, so removed the stale wake cloud up wrote"
+        ),
         "{said}"
     );
     assert!(
@@ -778,7 +795,13 @@ key_env = \"SADDLE_HAND_KEY\"
     );
     assert!(
         said.contains(
-            "wake evil: LJOS_WAKE_EVIL_URL is not https, nor http on this machine, so no wake was written"
+            "wake evil: LJOS_WAKE_EVIL_URL is not https, nor http on this machine, so removed the stale wake cloud up wrote"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "wake retired: removed the stale wake cloud up wrote; no LJOS_WAKE_<SEAT>_URL names it now"
         ),
         "{said}"
     );
@@ -798,6 +821,7 @@ key_env = \"SADDLE_HAND_KEY\"
     assert_eq!(table["claude-review"].command.as_deref(), Some("true"));
     assert!(!table.contains_key("grok-bot"), "{table:?}");
     assert!(!table.contains_key("evil"), "{table:?}");
+    assert!(!table.contains_key("retired"), "{table:?}");
     let text = fs::read_to_string(&wakes).unwrap();
     assert!(!text.contains("inky-sender-key"), "{text}");
     ljos_cli::cloud::up(false).unwrap();
