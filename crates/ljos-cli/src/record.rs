@@ -572,8 +572,10 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 /// by another entry's `replaces` never counts. Of what remains, the
 /// latest `cast_at` per key wins, and a latest `withdrawn` contributes no
 /// vote. When one seat appears under a second key on the same question,
-/// only the first key's ballot keeps counting. An ambiguous voter (two
-/// unreplaced ballots in one hour) is dropped on that question only.
+/// only the first key's ballot keeps counting. Two unreplaced ballots in
+/// a voter's latest hour are ambiguous and that voter is dropped on that
+/// question only; a tie in an earlier hour is superseded like any older
+/// ballot.
 ///
 /// # Errors
 ///
@@ -673,18 +675,11 @@ pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String
                 .push((stamp, at));
         }
         for (_, votes) in by_key {
-            let mut seen = BTreeSet::new();
-            let mut ambiguous = false;
-            for (stamp, _) in &votes {
-                if !seen.insert(*stamp) {
-                    ambiguous = true;
-                    break;
-                }
-            }
-            if ambiguous {
+            let Some(latest) = votes.iter().map(|(stamp, _)| *stamp).max() else {
                 continue;
-            }
-            let Some((_, at)) = votes.iter().max_by_key(|(stamp, _)| *stamp) else {
+            };
+            let mut current = votes.iter().filter(|(stamp, _)| *stamp == latest);
+            let (Some((_, at)), None) = (current.next(), current.next()) else {
                 continue;
             };
             let ballot = ballots[*at].0;
@@ -1681,7 +1676,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a same-hour pair hid a later ballot")]
     fn a_later_ballot_stands_past_a_same_hour_pair() {
         let _home = test_home();
         let cast = |stance: &str, hour: u8| {
