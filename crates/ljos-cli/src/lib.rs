@@ -27412,10 +27412,17 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     (!answered && policyd_required()).then(|| Rule {
         pattern: "ljos-policyd".into(),
         verdict: "deny".into(),
-        reason: "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
-                 shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
-            .to_string(),
+        reason: policyd_required_reason(),
     })
+}
+
+/// What a person reads when `POLICYD_REQUIRED` is set and no policyd
+/// answered. A missing file is that absence too: CI and a fresh install
+/// have no binary, and only this switch locks them out.
+fn policyd_required_reason() -> String {
+    "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
+     shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
+        .to_string()
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -27878,6 +27885,9 @@ pub fn tcb_answer_in(
         None => None,
     };
     if !bin.is_file() {
+        if policyd_required() {
+            return format!("deny\t{}", policyd_required_reason());
+        }
         return unhealthy("did not start");
     }
     // A binary just written, by an install or a test, can be busy for a
@@ -42136,6 +42146,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let kept = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
         assert_eq!(kept.verdict, "deny");
         assert_eq!(kept.pattern, "rm-rf-outside-tmp");
+        assert!(take_guard_note().is_none());
+    }
+
+    /// A missing policyd allows the line and says so. CI and a fresh
+    /// install have no binary. `POLICYD_REQUIRED=1` is the switch that
+    /// refuses instead, including when `POLICYD_BIN` names a file that
+    /// is not there.
+    #[test]
+    fn a_missing_policyd_allows_unless_it_is_required() {
+        let _g = env_guard();
+        let home = SeatDir::new("missing-policyd");
+        let missing = home.path().join("no-such-policyd");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", missing.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        unsafe {
+            std::env::remove_var("POLICYD_REQUIRED");
+            std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+        }
+        let _ = take_guard_note();
+        assert!(tcb_verdict("echo hi").is_none(), "a missing policyd allows");
+        let note = take_guard_note().expect("the allow carries a note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(note.contains("did not start"), "{note}");
+        let _req = HoldEnv::set(&[("POLICYD_REQUIRED", "1")]);
+        let rule = tcb_verdict("echo hi").expect("POLICYD_REQUIRED denies");
+        assert_eq!(rule.verdict, "deny");
+        assert!(rule.reason.contains("POLICYD_REQUIRED"), "{}", rule.reason);
+        assert!(rule.reason.contains("cargo install"), "{}", rule.reason);
         assert!(take_guard_note().is_none());
     }
 
