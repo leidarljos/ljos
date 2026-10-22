@@ -6495,6 +6495,33 @@ fn turn_is_new(dir: &Path, session: &str, prompt: &str) -> bool {
     true
 }
 
+/// Every id a hook payload names its conversation by, the one
+/// [`hook_call_as`] picks first. Cursor sends a `session_id` beside the
+/// `conversation_id` its shell is stamped with; Grok says `sessionId`.
+#[must_use]
+pub fn payload_sessions(input: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
+        return Vec::new();
+    };
+    let picked = hook_call_as(input, None).session;
+    let mut out: Vec<String> = picked.into_iter().collect();
+    for key in [
+        "conversation_id",
+        "conversationId",
+        "session_id",
+        "sessionId",
+        "thread_id",
+        "threadId",
+    ] {
+        if let Some(s) = v[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if !out.iter().any(|o| o == s) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// [`hook_call`] with the event the runner's hooks file named, for a
 /// runner whose payload does not carry one.
 #[must_use]
@@ -6540,8 +6567,11 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
     } else {
         &v["tool_input"]
     };
-    let session = v["session_id"]
+    let cursor = matches!(shape, HookShape::Cursor | HookShape::CursorShell);
+    let session = v["conversation_id"]
         .as_str()
+        .filter(|_| cursor)
+        .or_else(|| v["session_id"].as_str())
         .or_else(|| v["sessionId"].as_str())
         .or_else(|| v["conversation_id"].as_str())
         .filter(|s| !s.is_empty())
