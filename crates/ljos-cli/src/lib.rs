@@ -29,6 +29,7 @@ pub mod mail;
 pub mod memories;
 pub mod note_queue;
 pub mod pack_copy;
+pub mod panel_cloud;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
@@ -38,6 +39,7 @@ pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod slot;
 pub mod subagent;
 pub mod sync;
 pub mod tools;
@@ -2244,6 +2246,7 @@ const HARNESS_NAMES: &[&str] = &[
     "claude",
     "claude-code",
     "codex",
+    "cursor-agent",
     "opencode",
     "opencode-ai",
     "agy",
@@ -2251,6 +2254,23 @@ const HARNESS_NAMES: &[&str] = &[
     "grok",
     "gemini",
 ];
+
+/// Whether a process is a harness, by its kernel name or by the program
+/// it was started as: one of [`HARNESS_NAMES`] or a runner in `harnesses`.
+fn is_harness_program(comm: &str, program: &str, harnesses: &[String]) -> bool {
+    let (c, p) = (seat_slug(comm), program_seat(program));
+    HARNESS_NAMES.iter().any(|h| *h == c || *h == p)
+        || harnesses
+            .iter()
+            .any(|h| seat_slug(h) == c || seat_slug(h) == p)
+}
+
+/// Whether the process `pid`, which the kernel names `comm`, is one of
+/// [`HARNESS_NAMES`]. A runner installed as `versions/2.1.266` is known
+/// by the program it was started as ([`program_name`]).
+fn is_harness_process(pid: u32, comm: &str) -> bool {
+    is_harness_program(comm, &program_name(pid, comm), &[])
+}
 
 /// The ancestor to name a seat after, in a chain already cut at the
 /// session: the nearest harness when one is there, so a harness run under
@@ -2260,20 +2280,13 @@ fn pick_program<'a>(
     chain: &'a [(u32, String, String)],
     harnesses: &[String],
 ) -> Option<&'a (u32, String, String)> {
-    let is_harness = |comm: &str, program: &str| {
-        let (c, p) = (seat_slug(comm), program_seat(program));
-        HARNESS_NAMES.iter().any(|h| *h == c || *h == p)
-            || harnesses
-                .iter()
-                .any(|h| seat_slug(h) == c || seat_slug(h) == p)
-    };
     let programs = || {
         chain
             .iter()
             .filter(|(_, comm, _)| !WRAPPERS.contains(&comm.as_str()))
     };
     programs()
-        .find(|(_, comm, program)| is_harness(comm, program))
+        .find(|(_, comm, program)| is_harness_program(comm, program, harnesses))
         .or_else(|| programs().next())
 }
 
@@ -2465,6 +2478,16 @@ pub fn tracker_known_seats() -> std::collections::BTreeSet<String> {
     seats
 }
 
+/// The tracker's `seats` roster alone, without the past claim holders
+/// [`tracker_known_seats`] adds.
+fn tracker_roster() -> std::collections::BTreeSet<String> {
+    let mut seats = std::collections::BTreeSet::new();
+    if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
+        collect_configured_seats(layout.root(), &mut seats);
+    }
+    seats
+}
+
 fn collect_configured_seats(root: &Path, seats: &mut std::collections::BTreeSet<String>) {
     let Ok(text) = std::fs::read_to_string(root.join("vissue.toml")) else {
         return;
@@ -2616,8 +2639,10 @@ fn register_seat(slug: &str) -> Result<(), String> {
 /// Only a name the call passed is checked against the tracker's seats,
 /// to catch a typo. A name from the environment was set by the person
 /// or by `ljos onboard`, and is the seat even when no claim names it
-/// yet. A harness id the tracker does not list is that harness's one
-/// seat here when there is exactly one, else the harness id itself.
+/// yet. A harness id the `seats` roster does not list is that harness's
+/// seat on the roster ([`listed_harness_seat`]), even when an old claim
+/// still names the harness id; with none, the harness's one seat among
+/// the seats the tracker knows, else the harness id itself.
 /// The initialized connection is recognised when it matches the seat
 /// announced at connect, so a write on that connection keeps its seat
 /// when the tracker has only historical holders. A different name still
@@ -2662,7 +2687,12 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     let known = seat_roster(&named_slug);
     // The initialized connection names its own seat even when this tracker
     // has only historical holders. A different name still needs the roster.
-    let slug = if known.contains(&named_slug) {
+    let slug = if let Some(seat) = listed_harness_seat(&named_slug) {
+        bookkeep::log_line(&format!(
+            "note: the roster lists no seat {named_slug}; sitting {seat} for that harness"
+        ));
+        seat
+    } else if known.contains(&named_slug) {
         named_slug
     } else if ANNOUNCED.get().is_some_and(|seat| seat.seat == named_slug) {
         bookkeep::log_line(&format!(
@@ -2694,50 +2724,48 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
     })
 }
 
-/// The one seat in `known` that belongs to `harness`: an id of the
-/// harness ([`harness_ids`]) itself, or joined to a word by a hyphen
-/// (`codex-laptop`, `free-codex`, `free-agy` for `antigravity`). `None`
-/// when no seat or more than one does.
+/// The seat each of [`HARNESS_NAMES`] sits as on a tracker that names a
+/// harness's seat after its runner's command, `free-<command>`:
+/// Antigravity's command is `agy`, Claude Code's is `claude`.
+const HARNESS_SEATS: &[(&str, &str)] = &[
+    ("claude", "free-claude"),
+    ("claude-code", "free-claude"),
+    ("codex", "free-codex"),
+    ("cursor-agent", "free-cursor-agent"),
+    ("opencode", "free-opencode"),
+    ("opencode-ai", "free-opencode"),
+    ("agy", "free-agy"),
+    ("antigravity", "free-agy"),
+    ("grok", "free-grok"),
+    ("gemini", "free-gemini"),
+];
+
+/// The seat in `known` that belongs to `harness`, from [`HARNESS_SEATS`]
+/// alone. A seat a person named after a harness (`claude-reviewer`,
+/// `codex-laptop`) is theirs: a harness id never sits as it, and never
+/// finishes its claims.
 fn harness_seat(harness: &str, known: &std::collections::BTreeSet<String>) -> Option<String> {
-    let ids = harness_ids(harness);
-    let mut mine = known.iter().filter(|s| {
-        ids.iter().any(|id| {
-            *s == id || s.starts_with(&format!("{id}-")) || s.ends_with(&format!("-{id}"))
-        })
-    });
-    let first = mine.next()?;
-    mine.next().is_none().then(|| first.clone())
-}
-
-/// `harness` and the other harness ids its runner goes by: Antigravity's
-/// command is `agy` ([`RUNNER_COMMANDS`]), and a seat is named after either.
-fn harness_ids(harness: &str) -> Vec<&str> {
-    let mut ids = vec![harness];
-    if let Some((name, commands)) = RUNNER_COMMANDS
+    HARNESS_SEATS
         .iter()
-        .find(|(name, commands)| *name == harness || commands.contains(&harness))
-    {
-        ids.extend(
-            std::iter::once(*name)
-                .chain(commands.iter().copied())
-                .filter(|id| *id != harness && HARNESS_NAMES.contains(id)),
-        );
-    }
-    ids
+        .find(|(id, _)| *id == harness)
+        .map(|(_, seat)| (*seat).to_string())
+        .filter(|seat| known.contains(seat))
 }
 
-/// The tracker's seat for a harness id it does not list itself, so a
-/// server `ljos onboard` gave `LJOS_SEAT=antigravity` sits as the
-/// `free-agy` its hooks sit as.
+/// The roster's seat for a harness id the roster does not list itself, so
+/// a server `ljos onboard` gave `LJOS_SEAT=antigravity` sits as the
+/// `free-agy` its hooks sit as. Only the `seats` roster counts: a past
+/// `CLAIMED_BY: antigravity@...` line neither keeps the harness id nor
+/// names its seat.
 fn listed_harness_seat(name: &str) -> Option<String> {
     if !is_harness_name(name) {
         return None;
     }
-    let known = tracker_known_seats();
-    if known.contains(name) {
+    let roster = tracker_roster();
+    if roster.contains(name) {
         return None;
     }
-    harness_seat(name, &known)
+    harness_seat(name, &roster)
 }
 
 /// What a call that named an unknown seat is told: the name, the seat
@@ -11073,7 +11101,9 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok` names the legacy ones.
+/// and every signed seat first pinned after slots began is under a slot
+/// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
+/// names the legacy ones.
 ///
 /// # Errors
 ///
@@ -11094,19 +11124,33 @@ pub fn check_seat_signatures(
     let legacy = |voter: &str, choice: &str| {
         ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
-    let (problems, old) = ballot_sig::seat_check(
+    let notes = ballot_sig::notes_of(&v);
+    let pins = ballot_sig::pins();
+    let (problems, old) = ballot_sig::seat_check(issue, &seats, &notes, &pins, &legacy);
+    if !problems.is_empty() {
+        return Err(format!(
+            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
+            problems.join("; ")
+        ));
+    }
+    let signed: Vec<(&str, &str)> = seats
+        .into_iter()
+        .filter(|(voter, _)| !old.iter().any(|o| o == voter))
+        .collect();
+    let unslotted = slot::problems(
         issue,
-        &seats,
-        &ballot_sig::notes_of(&v),
-        &ballot_sig::pins(),
-        &legacy,
+        &signed,
+        &notes,
+        &pins,
+        &slot::pinned_at,
+        &slot::noted_at,
     );
-    if problems.is_empty() {
+    if unslotted.is_empty() {
         Ok(old)
     } else {
         Err(format!(
-            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
-            problems.join("; ")
+            "a run seat on {issue} is not under a slot, so it decides nothing for a push: {}",
+            unslotted.join("; ")
         ))
     }
 }
@@ -15124,7 +15168,13 @@ fn tags_of(v: &Value) -> Vec<String> {
         .collect()
 }
 
-pub fn panel(issue: &str, out: &Path) -> Result<String> {
+/// The personas a panel seats, and how many the pack holds.
+///
+/// # Errors
+///
+/// No playbook is bound, the pack has no personas, or none of them speaks
+/// to `issue`.
+pub(crate) fn panel_roster(issue: &str) -> Result<(usize, Vec<Persona>)> {
     if bound_playbook(issue).is_none() {
         bail!(
             "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
@@ -15147,11 +15197,16 @@ pub fn panel(issue: &str, out: &Path) -> Result<String> {
             words.join(", ")
         );
     }
+    Ok((all.len(), personas))
+}
+
+pub fn panel(issue: &str, out: &Path) -> Result<String> {
+    let (all, personas) = panel_roster(issue)?;
     std::fs::create_dir_all(out)?;
     let mut lines = vec![format!(
         "{} of {} personas speak to {issue}; briefs in {}; start one subagent per file, each ends with its ballot, then:",
         personas.len(),
-        all.len(),
+        all,
         out.display()
     )];
     for p in &personas {
@@ -20663,6 +20718,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
     });
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
+    // Scope cloud is readable here when cloud up wrote its age identity.
+    // The key is not in the tracker.
+    out.push(cloud::cloud_age_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
     wake_writer();
@@ -21370,7 +21428,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                 && (REQUIRED.contains(&h.name)
                     || h.name == "pack"
                     || h.name == "pack token"
-                    || h.name == "mcp")
+                    || h.name == "mcp"
+                    || h.name == "cloud age")
         })
         .map(|h| h.name)
         .collect()
@@ -21440,6 +21499,9 @@ fn optional_bin(name: &str) -> bool {
 /// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
+    if cloud::cloud_age_is_unset(row.name, &row.state) {
+        return "info";
+    }
     if row.name == "tracker" && names_unpushed(&row.state) {
         return "warn";
     }
@@ -31476,10 +31538,33 @@ mod tests {
             Some("free-codex")
         );
         let two = known(&["free-agy", "antigravity-laptop"]);
-        assert_eq!(harness_seat("antigravity", &two), None);
+        // A seat a person named after the harness is theirs: it neither
+        // takes the harness id nor stands in the way of the harness's seat.
+        assert_eq!(
+            harness_seat("antigravity", &two).as_deref(),
+            Some("free-agy")
+        );
+        assert_eq!(
+            harness_seat("antigravity", &known(&["antigravity-laptop"])),
+            None
+        );
+        assert_eq!(harness_seat("claude", &known(&["claude-reviewer"])), None);
+        assert_eq!(harness_seat("codex", &known(&["codex-laptop"])), None);
+        assert_eq!(
+            harness_seat("claude", &known(&["free-claude-sandbox"])),
+            None
+        );
+        assert_eq!(harness_seat("antigravity", &known(&["agy"])), None);
         // A command that is no harness id names no seat: `code` is not
         // `claude-code`'s.
         assert_eq!(harness_seat("vscode", &known(&["claude-code"])), None);
+        for harness in HARNESS_NAMES {
+            let seat = HARNESS_SEATS.iter().find(|(id, _)| id == harness);
+            assert!(
+                seat.is_some_and(|(_, s)| s.starts_with("free-")),
+                "{harness}"
+            );
+        }
     }
 
     #[test]
@@ -44703,6 +44788,99 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(!text.contains("split-fence"), "{door}: {text}");
             assert!(!text.contains("Ledger intact"), "{door}: {text}");
         }
+    }
+
+    /// `ljos panel ISSUE --cloud` writes one prompt per seated persona.
+    /// The process seat and the tracker URL stay out of the file. The
+    /// brief's pack text stays out too.
+    #[test]
+    fn a_cloud_panel_writes_one_prompt_per_persona() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* TODO [#C] Logo legibility review\n:PROPERTIES:\n:ID:         probe-l0g0\n:END:\n",
+        )
+        .unwrap();
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (url, _seen) = serve_http(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"ada","anchor":0.5,"text":"LEGIBILITY-VIEW-TOKEN ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"bea","anchor":0.4,"text":"LEGIBILITY-VIEW-TOKEN bea","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let runtime = dir.path().join("run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            (
+                "LJOS_TRACKER_REMOTE",
+                "https://tracker.example.invalid/secret-remote.git",
+            ),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let out = dir.path().join("panel");
+        let said = with_fake_on_path(dir.path(), || {
+            bind_playbook("probe-l0g0", "company-panel").unwrap();
+            super::panel_cloud::panel_cloud("probe-l0g0", &out).unwrap()
+        });
+        assert!(said.contains("2 of 2 personas"), "{said}");
+        assert!(said.contains("model grok"), "{said}");
+        assert!(said.contains("model opus"), "{said}");
+        assert!(said.contains("ljos consensus probe-l0g0"), "{said}");
+        let ada = std::fs::read_to_string(out.join("ada.md")).unwrap();
+        let bea = std::fs::read_to_string(out.join("bea.md")).unwrap();
+        for (name, text, model) in [("ada", &ada, "grok"), ("bea", &bea, "opus")] {
+            assert!(
+                text.contains(&format!("LJOS_SEAT={name}\n")),
+                "{name}: {text}"
+            );
+            assert!(
+                text.contains(&format!("VISSUE_AGENT={name}\n")),
+                "{name}: {text}"
+            );
+            assert!(text.contains("LJOS_TRACKER_GIT=push\n"), "{name}: {text}");
+            assert!(
+                text.contains(&format!("slot: {name} model={model}\n")),
+                "{name}: {text}"
+            );
+            assert!(text.contains("ref under cursor/"), "{name}: {text}");
+            assert!(text.contains("gh pr create"), "{name}: {text}");
+            assert!(text.contains("gh pr merge"), "{name}: {text}");
+            assert!(text.contains("force-push"), "{name}: {text}");
+            assert!(
+                text.contains(&format!("ljos brief {name} probe-l0g0")),
+                "{name}: {text}"
+            );
+            assert!(!text.contains("LEGIBILITY-VIEW-TOKEN"), "{name}: {text}");
+            assert!(!text.contains("secret-remote"), "{name}: {text}");
+            assert!(!text.contains("LJOS_SEAT=inky"), "{name}: {text}");
+        }
+        assert_ne!(
+            ada.lines().find(|line| line.starts_with("slot: ")),
+            bea.lines().find(|line| line.starts_with("slot: "))
+        );
+        let n = std::fs::read_dir(&out).unwrap().count();
+        assert_eq!(n, 2, "{said}");
     }
 
     /// The pack's address, its request lines and its posted atoms.

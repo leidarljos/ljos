@@ -56,12 +56,13 @@ pub fn of(pid: u32) -> Option<Proc> {
     })
 }
 
-/// The processes above `pid`, nearest first, up to but not including init.
+/// The processes above `pid`, nearest first, up to and including pid 1:
+/// in a container that may be the harness itself.
 #[must_use]
 pub fn above(pid: u32) -> Vec<Proc> {
     let mut out = Vec::new();
     let mut next = stat(pid).map(|s| s.ppid);
-    while let Some(p) = next.filter(|&p| p > 1 && out.len() < DEPTH) {
+    while let Some(p) = next.filter(|&p| p > 0 && out.len() < DEPTH) {
         let Some(s) = stat(p) else {
             break;
         };
@@ -151,6 +152,10 @@ fn is_wrapper(p: &Proc) -> bool {
     WRAPPERS.contains(&p.comm.as_str())
 }
 
+fn is_harness(p: &Proc) -> bool {
+    crate::is_harness_process(p.pid, &p.comm)
+}
+
 /// The shell that ran the process whose ancestors are `chain`: past any
 /// wrappers, the outermost of the shells nested directly above it, so a
 /// script that starts a fresh `sh -c` per line is still one shell. `None`
@@ -169,15 +174,29 @@ pub fn calling_shell(chain: &[Proc]) -> Option<&Proc> {
     Some(top)
 }
 
-/// The program that ran the process whose ancestors are `chain`: the
-/// nearest one that is neither a shell nor a wrapper. A chain of shells
-/// alone ends at its outermost shell.
+/// Where a chain stops being the hook's own: the person's session, a
+/// terminal or the init system ([`crate::is_session`]), or pid 1 unless
+/// it is a harness. Every sitting in that session shares it, and it
+/// outlives each of them.
+fn ends_the_walk(p: &Proc) -> bool {
+    crate::is_session(&p.comm) || (p.pid == 1 && !is_harness(p))
+}
+
+/// The program that ran the process whose ancestors are `chain`, read up
+/// to the session ([`ends_the_walk`]), which is never the program: the
+/// nearest harness ([`crate::is_harness_process`]), so a `uv`, `npx` or
+/// `node` that only started the hook and exits with it does not outrank
+/// the harness above it; else the nearest one that is neither a shell
+/// nor a wrapper, which keeps a harness that runs as plain `node`; else
+/// the outermost of the shells and wrappers below the session. `None`
+/// when the session ran the process itself.
 #[must_use]
 pub fn runner(chain: &[Proc]) -> Option<&Proc> {
-    chain
-        .iter()
-        .find(|p| !is_shell(p) && !is_wrapper(p))
-        .or_else(|| chain.last())
+    let own = chain.iter().take_while(|p| !ends_the_walk(p));
+    own.clone()
+        .find(|p| is_harness(p))
+        .or_else(|| own.clone().find(|p| !is_shell(p) && !is_wrapper(p)))
+        .or_else(|| own.last())
 }
 
 #[cfg(test)]
@@ -262,5 +281,93 @@ mod tests {
         let shells = [named(4, "sh"), named(5, "bash")];
         assert_eq!(runner(&shells).map(|p| p.pid), Some(5));
         assert_eq!(runner(&[]), None);
+    }
+
+    #[test]
+    fn a_session_above_the_hook_is_never_its_runner() {
+        for session in ["tmux", "tmux: server", "gnome-terminal-", "systemd", "sshd"] {
+            let chain = [named(4, "sh"), named(5, "bash"), named(2, session)];
+            assert_eq!(runner(&chain).map(|p| p.pid), Some(5), "{session}");
+            let chain = [named(4, "sh"), named(2, session), named(10, "claude")];
+            assert_eq!(runner(&chain).map(|p| p.pid), Some(4), "{session}");
+            assert_eq!(runner(&[named(2, session), named(10, "claude")]), None);
+        }
+        let chain = [named(4, "sh"), named(7, "git"), named(2, "kitty")];
+        assert_eq!(runner(&chain).map(|p| p.pid), Some(7));
+    }
+
+    /// A process no kernel runs, so no `/proc` entry names it: pids stop
+    /// below 2^22.
+    fn fake(n: u32, comm: &str) -> Proc {
+        named((1 << 22) + n, comm)
+    }
+
+    #[test]
+    fn a_harness_outranks_a_runtime_that_only_started_the_hook() {
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "uv"),
+            fake(3, "uv"),
+            fake(4, "claude"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[3]));
+        let chain = [fake(1, "sh"), fake(2, "node"), fake(3, "claude")];
+        assert_eq!(runner(&chain), Some(&chain[2]));
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "npx"),
+            fake(3, "bash"),
+            fake(4, "cursor-agent"),
+            fake(5, "tmux"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[3]));
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "uv"),
+            fake(3, "codex"),
+            fake(4, "agy"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[2]), "the nearest harness");
+    }
+
+    #[test]
+    fn a_node_harness_with_no_known_harness_above_is_the_runner() {
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "node"),
+            fake(3, "bash"),
+            fake(4, "tmux"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[1]));
+        assert_eq!(runner(&chain[..2]), Some(&chain[1]));
+        // The walk stops at the session: a harness above it is not read.
+        let chain = [
+            fake(1, "sh"),
+            fake(2, "node"),
+            fake(3, "tmux"),
+            fake(4, "claude"),
+        ];
+        assert_eq!(runner(&chain), Some(&chain[1]));
+    }
+
+    #[test]
+    fn pid_1_is_the_runner_only_as_a_harness() {
+        let chain = [fake(1, "sh"), fake(2, "uv"), named(1, "claude")];
+        assert_eq!(runner(&chain), Some(&chain[2]), "a container's harness");
+        let chain = [fake(1, "sh"), fake(2, "bash"), named(1, "tini")];
+        assert_eq!(runner(&chain), Some(&chain[1]), "an init is no runner");
+        let chain = [fake(1, "sh"), fake(2, "node"), named(1, "dumb-init")];
+        assert_eq!(runner(&chain), Some(&chain[1]));
+        assert_eq!(runner(&[named(1, "tini")]), None);
+    }
+
+    #[test]
+    fn the_walk_reads_up_to_a_process_with_no_parent() {
+        let chain = ancestors();
+        let top = chain.last().expect("the test runner is above this process");
+        assert!(
+            chain.len() == DEPTH || stat(top.pid).is_some_and(|s| s.ppid == 0),
+            "{chain:?}"
+        );
     }
 }
