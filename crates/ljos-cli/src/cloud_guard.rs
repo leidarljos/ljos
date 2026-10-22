@@ -3871,11 +3871,118 @@ fn http_shape(
     }
 }
 
-/// Boolean curl shorts. `G` is `--get` and `I` is `--head`. `q` is
-/// `--disable`. `n` is `--netrc` and is not in this set.
-const CURL_BOOL: &str = "sSfkLvgGIOJiq4";
-/// Curl shorts that take a value. `K` is a config file.
-const CURL_VALUE: &str = "XdHuKoTFAbcemwExUrPQDyYztC";
+/// How curl reads an option, on the command line and in a curlrc alike.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CurlOpt {
+    /// Changes neither the request nor where it goes.
+    Flag,
+    /// Takes a value that changes neither.
+    Value,
+    /// Takes a proxy, a resolver, a socket, or an address map, so the URL
+    /// host is not where the request goes.
+    Route,
+    /// Judged by name in `apply_curl_opt`. True when it takes a value.
+    Own(bool),
+}
+
+impl CurlOpt {
+    fn takes_value(self) -> bool {
+        matches!(self, Self::Value | Self::Route | Self::Own(true))
+    }
+}
+
+/// Curl options by kind, each `long` or `long/short`. A name that is a
+/// prefix of a listed name and is itself a curl option must be listed
+/// too, or its abbreviation would resolve to the wrong option.
+const CURL_FLAG: &str = "\
+    silent/s show-error/S fail/f fail-with-body insecure/k verbose/v compressed \
+    progress-bar/# remote-name/O remote-name-all remote-header-name/J http1.1 http2 \
+    path-as-is no-progress-meter create-dirs ipv4/4 ipv6/6 retry-all-errors include/i \
+    disable/q use-ascii/B list-only/l append/a help/h version/V manual/M \
+    junk-session-cookies/j proxytunnel/p location/L location-trusted";
+const CURL_VALUE: &str = "\
+    output/o retry retry-delay retry-max-time connect-timeout max-time/m max-redirs \
+    user-agent/A referer/e cookie/b cookie-jar/c proxy-user/U cacert capath cert/E key \
+    speed-limit/Y speed-time/y limit-rate output-dir write-out/w user/u oauth2-bearer \
+    dump-header/D continue-at/C range/r time-cond/z telnet-option/t ftp-port/P quote/Q \
+    proto proto-redir proto-default";
+const CURL_ROUTE: &str = "\
+    proxy/x preproxy proxy1.0 socks4 socks4a socks5 socks5-hostname resolve connect-to \
+    doh-url dns-servers unix-socket abstract-unix-socket alt-svc";
+const CURL_OWN_FLAG: &str = "get/G head/I globoff/g netrc/n netrc-optional next/:";
+const CURL_OWN_VALUE: &str = "\
+    request/X data/d data-ascii data-binary data-raw data-urlencode json upload-file/T \
+    form/F form-string header/H url config/K netrc-file variable";
+
+#[derive(Clone, Copy)]
+struct CurlHit {
+    long: &'static str,
+    kind: CurlOpt,
+    /// `--no-` before the name.
+    off: bool,
+}
+
+fn curl_opts() -> impl Iterator<Item = (&'static str, Option<char>, CurlOpt)> {
+    [
+        (CURL_FLAG, CurlOpt::Flag),
+        (CURL_VALUE, CurlOpt::Value),
+        (CURL_ROUTE, CurlOpt::Route),
+        (CURL_OWN_FLAG, CurlOpt::Own(false)),
+        (CURL_OWN_VALUE, CurlOpt::Own(true)),
+    ]
+    .into_iter()
+    .flat_map(|(names, kind)| {
+        names.split_ascii_whitespace().map(move |entry| {
+            let (long, short) = entry.split_once('/').unwrap_or((entry, ""));
+            (long, short.chars().next(), kind)
+        })
+    })
+}
+
+fn curl_short_opt(c: char) -> Option<CurlHit> {
+    curl_opts()
+        .find(|(_, short, _)| *short == Some(c))
+        .map(|(long, _, kind)| CurlHit {
+            long,
+            kind,
+            off: false,
+        })
+}
+
+/// The option curl takes `name` for. Curl takes any prefix that names one
+/// option, and `no-` before a flag turns it off. curl 8.3 fills
+/// `{{name}}` in an `--expand-` option from a `--variable`, so both are
+/// judged as `variable`.
+fn curl_long_opt(name: &str) -> Option<CurlHit> {
+    let name = name.to_ascii_lowercase();
+    if name.starts_with("expand-") {
+        return curl_prefix_opt("variable");
+    }
+    if let Some(hit) = curl_prefix_opt(&name) {
+        return Some(hit);
+    }
+    let hit = curl_prefix_opt(name.strip_prefix("no-")?)?;
+    (!hit.kind.takes_value()).then_some(CurlHit { off: true, ..hit })
+}
+
+fn curl_prefix_opt(word: &str) -> Option<CurlHit> {
+    if word.is_empty() {
+        return None;
+    }
+    let hits: Vec<_> = curl_opts()
+        .filter(|(long, _, _)| long.starts_with(word))
+        .collect();
+    let (long, _, kind) = match hits.iter().find(|(long, _, _)| *long == word) {
+        Some(hit) => *hit,
+        None if hits.len() == 1 => hits[0],
+        None => return None,
+    };
+    Some(CurlHit {
+        long,
+        kind,
+        off: false,
+    })
+}
 
 /// Method, body and host learned from a curl or wget config file.
 #[derive(Default)]
@@ -3888,48 +3995,84 @@ struct Tune {
     github: bool,
     /// A config that applies could not be read.
     unreadable: bool,
+    /// URLs curl will request, from the command line and its configs.
+    urls: Vec<String>,
 }
 
 fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
     let mut tune = Tune::default();
     let mut seen = HashSet::new();
+    let mut opaque = false;
     // `-q` and `--disable` skip the default curlrc only as the first
     // argument. A later one still loads the file, which can set the method.
+    // The command line is read after an opaque file too: it can still
+    // move the target.
     if !curl_rc_skipped(words) {
-        if let Some(shape) = curl_default_files(env, cwd, &mut tune, &mut seen) {
-            return (shape, curl_config_github(words, &tune));
-        }
+        opaque |= curl_default_files(env, cwd, &mut tune, &mut seen).is_some();
     }
     let mut i = 1usize;
     while i < words.len() {
         let word = words[i].as_str();
+        i += 1;
         if word == "--" {
+            tune.urls.extend(words[i..].iter().cloned());
             break;
         }
-        if word.starts_with("--") {
-            match curl_long(words, &mut i, &mut tune, cwd, &mut seen) {
-                Some(shape) => return (shape, curl_config_github(words, &tune)),
-                None => continue,
-            }
-        }
-        if let Some(cluster) = word.strip_prefix('-') {
-            if cluster.is_empty() {
-                i += 1;
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            let Some(hit) = curl_long_opt(name) else {
+                tune.github = true;
                 continue;
-            }
-            if let Some(shape) = curl_cluster(cluster, words, &mut i, &mut tune, cwd, &mut seen) {
-                return (shape, curl_config_github(words, &tune));
-            }
+            };
+            let value = if !hit.kind.takes_value() {
+                None
+            } else if let Some(value) = attached {
+                Some(value.to_string())
+            } else {
+                i += 1;
+                words.get(i - 1).cloned()
+            };
+            opaque |= apply_curl_opt(hit, value.as_deref(), cwd, &mut tune, &mut seen).is_some();
             continue;
         }
-        i += 1;
+        let Some(cluster) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            tune.urls.push(word.to_string());
+            continue;
+        };
+        for (at, c) in cluster.char_indices() {
+            let Some(hit) = curl_short_opt(c) else {
+                tune.github = true;
+                opaque = true;
+                break;
+            };
+            if !hit.kind.takes_value() {
+                opaque |= apply_curl_opt(hit, None, cwd, &mut tune, &mut seen).is_some();
+                continue;
+            }
+            let rest = &cluster[at + c.len_utf8()..];
+            let value = if rest.is_empty() {
+                i += 1;
+                words.get(i - 1).cloned()
+            } else {
+                Some(rest.to_string())
+            };
+            opaque |= apply_curl_opt(hit, value.as_deref(), cwd, &mut tune, &mut seen).is_some();
+            break;
+        }
     }
-    let shape = finish_http(tune.method.as_deref(), tune.body, tune.query, tune.upload);
+    let shape = if opaque {
+        HttpShape::Opaque
+    } else {
+        finish_http(tune.method.as_deref(), tune.body, tune.query, tune.upload)
+    };
     (shape, curl_config_github(words, &tune))
 }
 
 fn curl_config_github(words: &[String], tune: &Tune) -> bool {
-    if tune.github {
+    if tune.github || tune.urls.iter().any(|url| curl_url_github(url)) {
         return true;
     }
     // The file was not readable, so the host it would request is unknown
@@ -3966,217 +4109,6 @@ fn prefixed_or_process(env: &[(String, String)], key: &str) -> Option<String> {
         return Some(value.clone());
     }
     std::env::var(key).ok()
-}
-
-fn curl_long(
-    words: &[String],
-    i: &mut usize,
-    tune: &mut Tune,
-    cwd: Option<&Path>,
-    seen: &mut HashSet<PathBuf>,
-) -> Option<HttpShape> {
-    let word = words[*i].as_str();
-    let (name, attached) = word.split_once('=').unwrap_or((word, ""));
-    let lower = name.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "--netrc" | "--netrc-optional" | "--netrc-file"
-    ) {
-        return Some(HttpShape::Opaque);
-    }
-    if lower == "--config" {
-        let value = flag_value(words, i, attached);
-        return curl_named_file(&value, cwd, tune, seen);
-    }
-    // curl 8.3 expands `{{name}}` in an `--expand-` option from a
-    // `--variable`, which can read a file or the environment.
-    if lower == "--variable" || lower.starts_with("--expand-") {
-        tune.github = true;
-        return Some(HttpShape::Opaque);
-    }
-    if matches!(
-        lower.as_str(),
-        "--data"
-            | "--data-ascii"
-            | "--data-binary"
-            | "--data-raw"
-            | "--data-urlencode"
-            | "--json"
-            | "--upload-file"
-            | "--form"
-            | "--form-string"
-    ) {
-        let value = flag_value(words, i, attached);
-        let uploading = matches!(lower.as_str(), "--upload-file" | "--form" | "--form-string");
-        return if value.starts_with('@') {
-            Some(HttpShape::Opaque)
-        } else if uploading {
-            tune.upload = true;
-            None
-        } else {
-            tune.body = true;
-            None
-        };
-    }
-    if lower == "--request" {
-        let value = flag_value(words, i, attached);
-        tune.method = Some(value.to_ascii_uppercase());
-        return None;
-    }
-    if lower == "--head" {
-        tune.method = Some("HEAD".to_string());
-        *i += 1;
-        return None;
-    }
-    if lower == "--get" {
-        tune.query = true;
-        *i += 1;
-        return None;
-    }
-    if matches!(
-        lower.as_str(),
-        "--header" | "--oauth2-bearer" | "--user" | "--url"
-    ) {
-        let value = flag_value(words, i, attached);
-        if lower == "--url" {
-            note_cfg_url(&value, tune);
-        }
-        return if lower == "--header" && value.starts_with('@') {
-            Some(HttpShape::Opaque)
-        } else {
-            None
-        };
-    }
-    if matches!(
-        lower.as_str(),
-        "--silent"
-            | "--show-error"
-            | "--fail"
-            | "--fail-with-body"
-            | "--insecure"
-            | "--location"
-            | "--location-trusted"
-            | "--verbose"
-            | "--globoff"
-            | "--compressed"
-            | "--progress-bar"
-            | "--remote-name"
-            | "--http1.1"
-            | "--http2"
-            | "--path-as-is"
-            | "--no-progress-meter"
-            | "--create-dirs"
-            | "--ipv4"
-            | "--ipv6"
-            | "--retry-all-errors"
-            | "--remote-header-name"
-    ) {
-        *i += 1;
-        return None;
-    }
-    if matches!(
-        lower.as_str(),
-        "--output"
-            | "--retry"
-            | "--retry-delay"
-            | "--retry-max-time"
-            | "--connect-timeout"
-            | "--max-time"
-            | "--max-redirs"
-            | "--user-agent"
-            | "--referer"
-            | "--cookie"
-            | "--cookie-jar"
-            | "--proxy"
-            | "--proxy-user"
-            | "--cacert"
-            | "--capath"
-            | "--cert"
-            | "--key"
-            | "--speed-limit"
-            | "--speed-time"
-            | "--limit-rate"
-            | "--output-dir"
-            | "--write-out"
-    ) {
-        let _value = flag_value(words, i, attached);
-        return None;
-    }
-    // A long flag this seat has not named is still a read. A write flag
-    // is listed above.
-    *i += 1;
-    None
-}
-
-fn flag_value(words: &[String], i: &mut usize, attached: &str) -> String {
-    if !attached.is_empty() {
-        *i += 1;
-        return attached.to_string();
-    }
-    *i += 1;
-    let value = words.get(*i).cloned().unwrap_or_default();
-    *i += 1;
-    value
-}
-
-fn curl_cluster(
-    cluster: &str,
-    words: &[String],
-    i: &mut usize,
-    tune: &mut Tune,
-    cwd: Option<&Path>,
-    seen: &mut HashSet<PathBuf>,
-) -> Option<HttpShape> {
-    let chars: Vec<char> = cluster.chars().collect();
-    let mut k = 0;
-    while k < chars.len() {
-        let c = chars[k];
-        if CURL_BOOL.contains(c) {
-            if c == 'G' {
-                tune.query = true;
-            }
-            if c == 'I' {
-                tune.method = Some("HEAD".to_string());
-            }
-            k += 1;
-            continue;
-        }
-        if c == 'n' || !CURL_VALUE.contains(c) {
-            return Some(HttpShape::Opaque);
-        }
-        let attached: String = chars[k + 1..].iter().collect();
-        let value = if attached.is_empty() {
-            *i += 1;
-            let value = words.get(*i).cloned().unwrap_or_default();
-            *i += 1;
-            value
-        } else {
-            *i += 1;
-            attached
-        };
-        return match c {
-            'K' => curl_named_file(&value, cwd, tune, seen),
-            'X' => {
-                tune.method = Some(value.to_ascii_uppercase());
-                None
-            }
-            'd' | 'T' | 'F' => {
-                if value.starts_with('@') {
-                    Some(HttpShape::Opaque)
-                } else if c == 'd' {
-                    tune.body = true;
-                    None
-                } else {
-                    tune.upload = true;
-                    None
-                }
-            }
-            'H' if value.starts_with('@') => Some(HttpShape::Opaque),
-            _ => None,
-        };
-    }
-    *i += 1;
-    None
 }
 
 fn curl_named_file(
@@ -4316,9 +4248,19 @@ fn apply_curl_text(
                 tune.github = true;
             }
             CfgLine::Item { name, value } => {
-                if apply_curl_opt(&name, value.as_deref(), cwd, tune, seen).is_some() {
+                let mut chars = name.chars();
+                let hit = match (chars.next(), chars.next()) {
+                    (Some(c), None) => curl_short_opt(c),
+                    _ => curl_long_opt(&name),
+                };
+                // An option this seat does not know, or a line spilled
+                // from the one before, may name the target.
+                let Some(hit) = hit else {
+                    tune.github = true;
                     opaque = true;
-                }
+                    continue;
+                };
+                opaque |= apply_curl_opt(hit, value.as_deref(), cwd, tune, seen).is_some();
             }
         }
     }
@@ -4449,177 +4391,79 @@ fn unquote(raw: &str) -> Option<String> {
 }
 
 fn apply_curl_opt(
-    name: &str,
+    hit: CurlHit,
     value: Option<&str>,
     cwd: Option<&Path>,
     tune: &mut Tune,
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
-    let short = name.chars().count() == 1;
-    match name {
-        "request" | "X" => {
-            let value = value.unwrap_or("");
-            if value.is_empty() {
-                return Some(HttpShape::Opaque);
-            }
-            tune.method = Some(value.to_ascii_uppercase());
-            None
+    let value = value.unwrap_or("");
+    // `--no-get` can turn a query back into a body.
+    if hit.off {
+        return (hit.kind != CurlOpt::Flag).then_some(HttpShape::Opaque);
+    }
+    match hit.kind {
+        CurlOpt::Flag | CurlOpt::Value => return None,
+        CurlOpt::Route => {
+            tune.github = true;
+            return None;
         }
-        "head" | "I" => {
-            tune.method = Some("HEAD".to_string());
-            None
+        CurlOpt::Own(_) => {}
+    }
+    match hit.long {
+        "request" if value.is_empty() => return Some(HttpShape::Opaque),
+        "request" => tune.method = Some(value.to_ascii_uppercase()),
+        "head" => tune.method = Some("HEAD".to_string()),
+        "get" => tune.query = true,
+        "data" | "data-ascii" | "data-binary" | "data-raw" | "data-urlencode" | "json"
+        | "upload-file" | "form" | "form-string" | "header"
+            if value.starts_with('@') =>
+        {
+            return Some(HttpShape::Opaque);
         }
-        "get" | "G" => {
-            tune.query = true;
-            None
-        }
-        "data" | "data-ascii" | "data-binary" | "data-raw" | "data-urlencode" | "json" | "d" => {
-            let value = value.unwrap_or("");
-            if value.starts_with('@') {
-                return Some(HttpShape::Opaque);
-            }
+        "data" | "data-ascii" | "data-binary" | "data-raw" | "data-urlencode" | "json" => {
             tune.body = true;
-            None
         }
-        "upload-file" | "form" | "form-string" | "T" | "F" => {
-            let value = value.unwrap_or("");
-            if value.starts_with('@') {
-                return Some(HttpShape::Opaque);
-            }
-            tune.upload = true;
-            None
-        }
-        "header" | "H" => {
-            let value = value.unwrap_or("");
-            if value.starts_with('@') {
-                Some(HttpShape::Opaque)
-            } else {
-                None
-            }
-        }
-        "config" | "K" => {
-            let value = value.unwrap_or("");
-            curl_named_file(value, cwd, tune, seen)
-        }
-        "url" | "proxy" | "x" => {
-            if let Some(value) = value {
-                note_cfg_url(value, tune);
-            }
-            None
-        }
-        "netrc" | "netrc-optional" | "netrc-file" | "n" => Some(HttpShape::Opaque),
-        _ if short && curl_short_benign(name) => None,
-        _ if !short && curl_long_benign(name) => None,
-        // An option this seat does not know, `variable`, an `expand-`
-        // option, or a line spilled from the one before may name the target.
-        _ => {
+        "upload-file" | "form" | "form-string" => tune.upload = true,
+        "header" if header_sets_host(value) => tune.github = true,
+        "url" => tune.urls.push(value.to_string()),
+        "config" => return curl_named_file(value, cwd, tune, seen),
+        "netrc" | "netrc-optional" | "netrc-file" | "next" => return Some(HttpShape::Opaque),
+        "variable" => {
             tune.github = true;
-            Some(HttpShape::Opaque)
+            return Some(HttpShape::Opaque);
         }
+        _ => {}
     }
+    None
 }
 
-fn curl_short_benign(name: &str) -> bool {
-    matches!(
-        name,
-        "s" | "S"
-            | "f"
-            | "k"
-            | "L"
-            | "v"
-            | "g"
-            | "O"
-            | "J"
-            | "i"
-            | "4"
-            | "6"
-            | "q"
-            | "o"
-            | "A"
-            | "b"
-            | "c"
-            | "e"
-            | "m"
-            | "u"
-            | "U"
-            | "r"
-            | "w"
-            | "x"
-            | "y"
-            | "Y"
-            | "z"
-            | "C"
-            | "E"
-            | "P"
-            | "Q"
-            | "D"
-    )
+/// A `Host:` header sends the request to whatever host it names on the
+/// peer the URL reaches.
+fn header_sets_host(value: &str) -> bool {
+    value
+        .trim_start()
+        .get(..5)
+        .is_some_and(|name| name.eq_ignore_ascii_case("host:"))
 }
 
-fn curl_long_benign(name: &str) -> bool {
-    matches!(
-        name,
-        "silent"
-            | "show-error"
-            | "fail"
-            | "fail-with-body"
-            | "insecure"
-            | "location"
-            | "location-trusted"
-            | "verbose"
-            | "globoff"
-            | "compressed"
-            | "progress-bar"
-            | "remote-name"
-            | "http1.1"
-            | "http2"
-            | "path-as-is"
-            | "no-progress-meter"
-            | "create-dirs"
-            | "ipv4"
-            | "ipv6"
-            | "retry-all-errors"
-            | "remote-header-name"
-            | "output"
-            | "retry"
-            | "retry-delay"
-            | "retry-max-time"
-            | "connect-timeout"
-            | "max-time"
-            | "max-redirs"
-            | "user-agent"
-            | "referer"
-            | "cookie"
-            | "cookie-jar"
-            | "proxy"
-            | "proxy-user"
-            | "cacert"
-            | "capath"
-            | "cert"
-            | "key"
-            | "speed-limit"
-            | "speed-time"
-            | "limit-rate"
-            | "output-dir"
-            | "write-out"
-            | "user"
-            | "oauth2-bearer"
-            | "disable"
-            | "include"
-            | "dump-header"
-    )
-}
-
-fn note_cfg_url(value: &str, tune: &mut Tune) {
-    if value.contains('$') || value.contains('`') || value.contains("{{") {
-        tune.github = true;
-        return;
+/// Whether a URL curl requests may reach GitHub: its host is GitHub, an
+/// address, or a name the shell has not expanded yet. Curl takes a word
+/// without a scheme as a URL.
+fn curl_url_github(url: &str) -> bool {
+    let url = url
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if unreadable_token(auth) || auth.contains("{{") {
+        return true;
     }
-    if let Some(host) = host_in_url(value).or_else(|| schemeless_host(value)) {
-        if is_github_host(&host) {
-            tune.github = true;
-        }
-    }
+    let hostport = auth.rsplit_once('@').map_or(auth, |(_, host)| host);
+    let host = strip_host_port(hostport)
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    is_github_host(&host) || address_host(&host)
 }
 
 fn resolve_cfg(value: &str, cwd: Option<&Path>) -> PathBuf {
@@ -4860,10 +4704,7 @@ fn wget_key_moves_target(key: &str, value: &str) -> bool {
     match key {
         "input" | "inputmetalink" | "base" | "httpproxy" | "httpsproxy" | "ftpproxy"
         | "useproxy" => true,
-        "header" => value
-            .trim_start()
-            .get(..5)
-            .is_some_and(|name| name.eq_ignore_ascii_case("host:")),
+        "header" => header_sets_host(value),
         _ => false,
     }
 }
