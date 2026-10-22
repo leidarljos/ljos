@@ -32570,8 +32570,8 @@ pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
 const CAPTURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// [`run_captured`] with `VISSUE_AGENT` set to `identity`, for a tracker
-/// write whose output the caller has to hand on. `None` leaves the
-/// environment as it is.
+/// write whose output the caller has to hand on. `None` is the seat a
+/// [`Seated`] guard holds, else the environment as it is.
 pub fn run_captured_as(
     bin: &str,
     args: &[impl AsRef<str>],
@@ -32597,7 +32597,10 @@ fn run_captured_within(
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(&path);
-    if let Some(who) = identity {
+    if let Some(who) = identity
+        .map(str::to_string)
+        .or_else(|| seated().map(|s| s.seat))
+    {
         cmd.env("VISSUE_AGENT", who);
     }
     bind_connection_env(&mut cmd);
