@@ -1,0 +1,1 @@
+A preference whose `valid_to` has passed, or a tombstone, is no longer shown as the person's while its review is still due. The session preface, the cold prompt, issue recall and the search labels read it as not held, as the pack's by-id read does.

@@ -1,0 +1,1 @@
+A search hit, an island row or an activate row that puts the person's id on other words is no longer labelled the person's. Each origin is kept with the kind and text of the record it was read from, and a row whose kind or text differs is an unverified agent note in the prompt, `ljos search`, `ljos island`, the timeline and MCP.
