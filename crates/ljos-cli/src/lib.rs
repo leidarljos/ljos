@@ -48040,6 +48040,314 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(tip.contains(&id2), "{tip}");
     }
 
+    /// A cloud finish with a signing key leaves the link sidecars export
+    /// wrote. The pinned deedar signs `links=` over `sources`, `supersedes`
+    /// and `successor`, and `check` fails when those bytes change. The bag
+    /// then imports into a store that lists the key, with no
+    /// `--allow-unsigned-head`.
+    #[test]
+    fn a_signed_cloud_finish_bag_checks_and_imports() {
+        let bin_dir = deedimport_deedar();
+        let _g = env_guard();
+        let _path = super::prepend_path(&bin_dir);
+        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        let store = dir.path().join("store");
+        let home = dir.path().join("home");
+        let config = dir.path().join("config");
+        let runtime = dir.path().join("run");
+        let state = dir.path().join("state");
+        let key_path = dir.path().join("host.key");
+        for path in [&project, &home, &config, &runtime, &state] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        // A 32-byte seed, outside the store. `off` is what the unsigned test
+        // uses; this one has to sign.
+        std::fs::write(&key_path, [7u8; 32]).unwrap();
+        let key_s = key_path.to_str().unwrap().to_string();
+        let v1 = dir.path().join("v1.txt");
+        let v2 = dir.path().join("v2.txt");
+        let base_file = dir.path().join("base.txt");
+        let made_file = dir.path().join("made.txt");
+        std::fs::write(&v1, b"version one\n").unwrap();
+        std::fs::write(&v2, b"version two\n").unwrap();
+        std::fs::write(&base_file, b"carried from this\n").unwrap();
+        std::fs::write(&made_file, b"made from the other\n").unwrap();
+        let store_url = format!("file://{}", store.display());
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+            ("XDG_DATA_HOME", dir.path().join("data").to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("DEEDAR_URL", store_url.as_str()),
+            ("DEEDAR_HOST_SIGNING_KEY", key_s.as_str()),
+            ("PACKSET_URL", "off"),
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_SEAT", "cloudseat"),
+            ("LJOS_TRACKER_GIT", "off"),
+        ]);
+        let deedar = |args: &[&str]| -> String {
+            let out = std::process::Command::new("deedar")
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("deedar {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "deedar {args:?}\n{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("deedar stdout: {e}"))
+        };
+        let host = deedar(&["host"]);
+        assert!(
+            host.contains("a signer"),
+            "the fresh store should list the signing key: {host}"
+        );
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v1.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v1",
+        ]);
+        let id1 = accession_of(&made);
+        let sha1 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v2.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v2",
+            "--supersedes",
+            &id1,
+        ]);
+        let id2 = accession_of(&made);
+        let sha2 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            base_file.to_str().unwrap(),
+            "--agent",
+            "otherseat",
+            "--name",
+            "note-base",
+        ]);
+        let base_id = accession_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            made_file.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-made",
+            "--input",
+            &base_id,
+        ]);
+        let made_id = accession_of(&made);
+        let made_sha = digest_of(&made);
+        let proved = deedar(&["log", "prove", &base_id]);
+        let base_digest = proved
+            .lines()
+            .find_map(|line| line.strip_prefix("digest="))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("no digest in {proved}"))
+            .to_string();
+        std::fs::write(
+            project.join("issues.org"),
+            format!(
+                "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\
+                 * STARTED [#B] Cloud finish\n:PROPERTIES:\n:ID:         probe-sig1\n\
+                 :DEEDS:      {id1} {id2} {made_id}\n:END:\n"
+            ),
+        )
+        .unwrap();
+        let git = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap_or_else(|e| panic!("git init: {e}"));
+        assert!(
+            git.status.success(),
+            "git init\n{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let recv = dir.path().join("recv");
+        let recv_url = format!("file://{}", recv.display());
+        let side = dir.path().join("base-bag");
+        deedar(&["export", "--into", side.to_str().unwrap(), &base_id]);
+        // The receiver is a fresh store opened with the same key, so its
+        // layout lists that signer. Import then needs no unsigned flag.
+        let opened = std::process::Command::new("deedar")
+            .args(["host"])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", key_s.as_str())
+            .output()
+            .unwrap_or_else(|e| panic!("deedar host: {e}"));
+        assert!(
+            opened.status.success(),
+            "deedar host\n{}{}",
+            String::from_utf8_lossy(&opened.stderr),
+            String::from_utf8_lossy(&opened.stdout)
+        );
+        let opened = String::from_utf8(opened.stdout).unwrap();
+        assert!(opened.contains("a signer"), "{opened}");
+        let imported_base = std::process::Command::new("deedar")
+            .args(["import", side.to_str().unwrap()])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", key_s.as_str())
+            .output()
+            .unwrap_or_else(|e| panic!("deedar import base: {e}"));
+        assert!(
+            imported_base.status.success(),
+            "deedar import base\n{}{}",
+            String::from_utf8_lossy(&imported_base.stderr),
+            String::from_utf8_lossy(&imported_base.stdout)
+        );
+        // What export writes before finish touches the bag. The published
+        // sidecars and head have to match it byte for byte.
+        let plain = dir.path().join("plain-bag");
+        deedar(&[
+            "export",
+            "--into",
+            plain.to_str().unwrap(),
+            &id1,
+            &id2,
+            &made_id,
+        ]);
+        assert!(plain.join(&id2).join("supersedes").is_file());
+        assert!(plain.join(&id1).join("successor").is_file());
+        assert!(plain.join(&made_id).join("sources").is_file());
+        cloud::ensure_cloud_guard_rules().unwrap_or_else(|e| panic!("cloud guard: {e:#}"));
+        let (said, paths) = deedbag::on_finish("probe-sig1");
+        assert!(
+            said.contains(
+                "deeds: exported 3 deeds cited by cloudseat into .ljos/deeds/cloudseat\n"
+            ),
+            "{said}"
+        );
+        assert_eq!(paths, vec![".ljos/deeds/cloudseat".to_string()]);
+        let bag = root.join(".ljos").join("deeds").join("cloudseat");
+        assert!(
+            !bag.join(&base_id).exists(),
+            "an uncarried source was exported"
+        );
+        for id in [&id1, &id2, &made_id] {
+            for kind in ["sources", "supersedes", "successor"] {
+                let exported = plain.join(id).join(kind);
+                let published = bag.join(id).join(kind);
+                assert_eq!(
+                    published.is_file(),
+                    exported.is_file(),
+                    "{id} {kind}: finish changed whether the sidecar exists"
+                );
+                if exported.is_file() {
+                    assert_eq!(
+                        std::fs::read(&published).unwrap(),
+                        std::fs::read(&exported).unwrap(),
+                        "{id} {kind} was rewritten after export"
+                    );
+                }
+            }
+        }
+        let head = std::fs::read_to_string(bag.join("head")).unwrap();
+        assert_eq!(
+            head.as_str(),
+            std::fs::read_to_string(plain.join("head")).unwrap(),
+            "finish rewrote the signed head"
+        );
+        assert!(
+            head.split_whitespace()
+                .any(|field| field.starts_with("links=")),
+            "{head}"
+        );
+        let link = std::fs::read_to_string(bag.join(&id2).join("supersedes")).unwrap();
+        let mut lines = link.lines();
+        assert_eq!(lines.next(), Some(id1.as_str()), "{link}");
+        let digest = lines
+            .next()
+            .unwrap_or_else(|| panic!("no digest in {link}"));
+        assert!(digest.starts_with("sha256:"), "{link}");
+        assert_eq!(digest.len(), "sha256:".len() + 64, "{link}");
+        assert!(lines.next().is_none(), "{link}");
+        let next = std::fs::read_to_string(bag.join(&id1).join("successor")).unwrap();
+        let mut lines = next.lines();
+        assert_eq!(lines.next(), Some(id2.as_str()), "{next}");
+        let digest = lines
+            .next()
+            .unwrap_or_else(|| panic!("no digest in {next}"));
+        assert!(digest.starts_with("sha256:"), "{next}");
+        assert_eq!(digest.len(), "sha256:".len() + 64, "{next}");
+        assert!(lines.next().is_none(), "{next}");
+        assert_eq!(
+            std::fs::read_to_string(bag.join(&made_id).join("sources")).unwrap(),
+            format!("{base_id}\t{base_digest}\n")
+        );
+        assert_eq!(
+            std::fs::read(bag.join(&made_id).join("bytes").join(&made_sha)).unwrap(),
+            b"made from the other\n".to_vec()
+        );
+        let checked = deedar(&["check", bag.to_str().unwrap()]);
+        assert!(checked.contains("3 deeds proven"), "{checked}");
+        assert!(checked.contains("(accepted)"), "{checked}");
+        let imported = std::process::Command::new("deedar")
+            .args(["import", bag.to_str().unwrap()])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", key_s.as_str())
+            .output()
+            .unwrap_or_else(|e| panic!("deedar import: {e}"));
+        assert!(
+            imported.status.success(),
+            "deedar import\n{}{}",
+            String::from_utf8_lossy(&imported.stderr),
+            String::from_utf8_lossy(&imported.stdout)
+        );
+        let report = String::from_utf8_lossy(&imported.stdout);
+        assert!(report.contains("(accepted)"), "{report}");
+        assert!(report.contains("imported 3 deeds"), "{report}");
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&sha1)).unwrap(),
+            b"version one\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&sha2)).unwrap(),
+            b"version two\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&made_sha)).unwrap(),
+            b"made from the other\n".to_vec()
+        );
+        let current = std::process::Command::new("deedar")
+            .args(["current", &id1])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", key_s.as_str())
+            .output()
+            .unwrap_or_else(|e| panic!("deedar current: {e}"));
+        assert!(
+            current.status.success(),
+            "deedar current\n{}{}",
+            String::from_utf8_lossy(&current.stderr),
+            String::from_utf8_lossy(&current.stdout)
+        );
+        let tip = String::from_utf8_lossy(&current.stdout);
+        assert!(tip.contains(&id2), "{tip}");
+    }
+
     /// deedar at the commit in `.github/deedar-pin`, whose import reads
     /// `bytes/` and digest sidecars. CI builds that same file. The binary
     /// is installed on PATH the way CI installs deedar. A failed build
