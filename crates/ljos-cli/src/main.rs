@@ -2935,10 +2935,8 @@ fn run_command() -> Result<()> {
             // the tally.
             ljos_cli::bind_settle_ballots(&mut steps, &ballots);
             // First what the push gate decides: seat ballots only.
-            let names: std::collections::BTreeSet<String> =
-                personas.iter().map(|p| p.name.trim().to_string()).collect();
             let (gate, gate_json) =
-                ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
+                ljos_cli::push_cite_reading_on_roster(&id, &ballots, &ljos_cli::seat_name());
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             let discount = settle_discount(&atoms).map(|(discount, line)| {

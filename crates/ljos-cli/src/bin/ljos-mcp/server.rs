@@ -2185,10 +2185,8 @@ impl LjosServer {
         .map_err(refused)?;
         ljos_cli::bind_settle_ballots(&mut steps, &ballots);
         let mut out = Vec::new();
-        let names: std::collections::BTreeSet<String> =
-            personas.iter().map(|p| p.name.trim().to_string()).collect();
         let (gate, gate_json) =
-            ljos_cli::push_cite_reading(&args.issue, &ballots, &names, &ljos_cli::seat_name());
+            ljos_cli::push_cite_reading_on_roster(&args.issue, &ballots, &ljos_cli::seat_name());
         out.push(Said {
             text: gate,
             aside: None,

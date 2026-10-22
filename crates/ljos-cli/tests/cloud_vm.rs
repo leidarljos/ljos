@@ -4554,6 +4554,27 @@ fn duplicate_ballots_from_one_session_have_one_push_verdict() {
     assert!(err.contains("ljosbot"), "{err}");
 }
 
+/// A tracker under `root` where `inky`, pinned before any slot, voted
+/// ship on `probe-cite` and nobody voted on `probe-none`, read through a
+/// stub `vissue`, with `ljosbot` pushing.
+fn cite_world(root: &Path) {
+    let (_origin, repo) = slot_world(root, &["probe-cite", "probe-none"]);
+    pin_standing(&repo, "inky");
+    cast("inky", "probe-cite", "ship");
+
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\n[ \"$1\" = vote ] || exit 1\nif [ \"$2\" = probe-cite ]; then\n  printf '%s\\n' '[{\"agent\":\"inky\",\"choice\":\"ship\"}]'\nelse\n  echo '[]'\nfi\n",
+    );
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("PACKSET_WORKSPACE", "seat");
+    std::env::set_var("LJOS_GUARD", "on");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+}
+
 /// The push gate runs a push whose `LJOS_CITE` stands: another seat's
 /// signed ballot decides the issue. The same push citing an issue no
 /// ballot decides is denied, and says why.
@@ -4561,22 +4582,8 @@ fn duplicate_ballots_from_one_session_have_one_push_verdict() {
 fn the_push_gate_denies_a_cite_that_does_not_stand() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
-    let (_origin, repo) = slot_world(root.path(), &["probe-cite", "probe-none"]);
-    pin_standing(&repo, "inky");
-    cast("inky", "probe-cite", "ship");
-
-    let bin = root.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    executable(
-        &bin.join("vissue"),
-        "#!/bin/sh\n[ \"$1\" = vote ] || exit 1\nif [ \"$2\" = probe-cite ]; then\n  printf '%s\\n' '[{\"agent\":\"inky\",\"choice\":\"ship\"}]'\nelse\n  echo '[]'\nfi\n",
-    );
-    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    cite_world(root.path());
     std::env::set_var("PACKSET_URL", serve_empty_pack());
-    std::env::set_var("PACKSET_WORKSPACE", "seat");
-    std::env::set_var("LJOS_GUARD", "on");
-    std::env::set_var("LJOS_SEAT", "ljosbot");
-    std::env::set_var("VISSUE_AGENT", "ljosbot");
 
     let stands = ljos_cli::cite_stands("probe-cite");
     assert!(stands.is_ok(), "{stands:?}");
@@ -4592,4 +4599,35 @@ fn the_push_gate_denies_a_cite_that_does_not_stand() {
         "{}",
         refused.reason
     );
+}
+
+/// The push gate and the push cite `ljos consensus` prints read the
+/// roster the same way. A pack that does not answer leaves the cite
+/// standing on nothing in both, for the same reason, since a persona's
+/// ballot cannot be told from a seat's. A pack off on purpose is an empty
+/// roster in both.
+#[test]
+fn the_gate_and_consensus_agree_when_the_roster_is_not_readable() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    cite_world(root.path());
+    let rows = [serde_json::json!({"agent": "inky", "choice": "ship"})];
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let down = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    std::env::set_var("PACKSET_URL", &down);
+
+    let why = ljos_cli::cite_stands("probe-cite").unwrap_err();
+    assert!(why.contains("the roster is not readable"), "{why}");
+    let (words, json) = ljos_cli::push_cite_reading_on_roster("probe-cite", &rows, "ljosbot");
+    assert_eq!(json["push_cite"]["stands"], false, "{words}");
+    assert_eq!(json["push_cite"]["refusal"], why.as_str(), "{words}");
+    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None);
+    assert_eq!(refused.map(|r| r.verdict), Some("deny".to_string()));
+
+    std::env::set_var("PACKSET_URL", "off");
+    let stands = ljos_cli::cite_stands("probe-cite");
+    assert!(stands.is_ok(), "{stands:?}");
+    let (words, json) = ljos_cli::push_cite_reading_on_roster("probe-cite", &rows, "ljosbot");
+    assert_eq!(json["push_cite"]["stands"], true, "{words}");
 }
