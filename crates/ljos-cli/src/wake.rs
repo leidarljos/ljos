@@ -35,6 +35,9 @@ pub const WAKE_TIMEOUT_SECS: u64 = 30;
 /// How long a webhook post may take, in seconds.
 const WEBHOOK_TIMEOUT_SECS: u64 = 10;
 
+/// `source` on a wake `ljos cloud up` wrote from `LJOS_WAKE_<SEAT>_URL`.
+pub(crate) const ENV_SOURCE: &str = "env";
+
 /// One seat's wake: a command or a webhook.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Wake {
@@ -54,6 +57,10 @@ pub struct Wake {
     /// Seconds before a command is stopped. Absent: [`WAKE_TIMEOUT_SECS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Who wrote this entry. [`ENV_SOURCE`] is `ljos cloud up`. Absent means
+    /// a person set it, and a later `cloud up` leaves it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// The message a wake is about.
@@ -196,6 +203,32 @@ pub fn set_webhook(
     );
     save(&table)?;
     Ok(format!("wake {seat}: posts to {url} {}\n", reaches(seat)))
+}
+
+/// Write the webhook `ljos cloud up` owns for `seat`.
+///
+/// A later run may replace it. [`set_webhook`] leaves `source` empty, so
+/// a wake set by hand is not this one.
+///
+/// # Errors
+///
+/// The URL is not https, and not http on localhost or a loopback
+/// address, or `wake.toml` cannot be written.
+pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<()> {
+    let url = url.trim();
+    check_webhook(url)?;
+    let mut table = load();
+    table.insert(
+        seat.to_string(),
+        Wake {
+            webhook: Some(url.to_string()),
+            key_env: Some(key_env.to_string()),
+            source: Some(ENV_SOURCE.to_string()),
+            ..Wake::default()
+        },
+    );
+    save(&table)?;
+    Ok(())
 }
 
 /// Remove a seat's wake.
