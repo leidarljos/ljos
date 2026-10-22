@@ -48,6 +48,7 @@ pub mod sync;
 pub mod tools;
 mod tracker_push;
 pub mod tree_cleanup;
+pub mod turn_record;
 pub mod upgrade;
 pub mod user_rules;
 pub mod wake;
