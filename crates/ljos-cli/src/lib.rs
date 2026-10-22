@@ -30051,11 +30051,41 @@ fn proven_request(
 }
 
 /// Whether the listing at `client` asks for this seat's token, the same
-/// check [`atom_now`] makes of a by-id read.
+/// check [`atom_now`] makes of a by-id read. The answer is remembered per
+/// pack base for the life of this process: a second `ljos rules` does not
+/// prove the listing again.
 fn listing_asks(client: &PacksetClient) -> bool {
-    let base = client.base().trim_end_matches('/');
-    let url = format!("{base}/v1/atoms");
-    proven_request("the listing", base, proof_timeout(), || ureq::get(&url)).is_ok()
+    let base = client.base().trim_end_matches('/').to_string();
+    cached_listing_asks(&base, || {
+        let url = format!("{base}/v1/atoms");
+        proven_request("the listing", &base, proof_timeout(), || ureq::get(&url)).is_ok()
+    })
+}
+
+fn listing_cache() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, bool>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// The cached answer for `base`, proving at most once. A trailing slash is
+/// not a different base. Both answers are kept: a pack that does not ask
+/// is not proved again either.
+fn cached_listing_asks(base: &str, prove: impl FnOnce() -> bool) -> bool {
+    let key = base.trim_end_matches('/').to_string();
+    {
+        let cache = listing_cache()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(answer) = cache.get(&key) {
+            return *answer;
+        }
+    }
+    let proved = prove();
+    let mut cache = listing_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    *cache.entry(key).or_insert(proved)
 }
 
 /// Atom `id` as this seat's pack answers for it now, both requests inside
@@ -47244,6 +47274,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             no_terminal.0 && !no_terminal.1,
             "a variable with no terminal was not a runner: {no_terminal:?}"
         );
+    }
+
+    /// One proof per pack base, for the life of the process. A second call,
+    /// with or without a trailing slash, does not prove again, and a
+    /// negative answer is kept too.
+    #[test]
+    fn listing_asks_is_answered_once_per_base() {
+        let mut once = 0;
+        let first = super::cached_listing_asks("http://listing-asks.test.invalid/one/", || {
+            once += 1;
+            true
+        });
+        let again = super::cached_listing_asks("http://listing-asks.test.invalid/one", || {
+            once += 1;
+            false
+        });
+        assert!(first && again);
+        assert_eq!(once, 1);
+        let mut other = 0;
+        let second = super::cached_listing_asks("http://listing-asks.test.invalid/two", || {
+            other += 1;
+            false
+        });
+        let second_again =
+            super::cached_listing_asks("http://listing-asks.test.invalid/two/", || {
+                other += 1;
+                true
+            });
+        assert!(!second && !second_again);
+        assert_eq!(other, 1);
     }
 
     /// The test process is not a detached shell, so a runner-shaped cgroup
