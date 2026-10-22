@@ -256,7 +256,9 @@ enum Cmd {
         #[arg(long, value_name = "DATE")]
         valid_to: Option<String>,
     },
-    /// Prefer one way over another, as a standing preference. Stored as written.
+    /// Prefer one way over another, as a standing preference. Typed by the
+    /// person, it is theirs. Under a runner, only words from the person's
+    /// latest prompt are theirs; any other text is agent-derived.
     /// `--user` writes a user rule instead: shared by every seat, never reviewed.
     Prefer {
         text: Vec<String>,
@@ -1468,7 +1470,7 @@ fn run_command() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
+            let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
             for rule in &rules {
                 println!("{}", write_ack(&write_rule(rule)?));

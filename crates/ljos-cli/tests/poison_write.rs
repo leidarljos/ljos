@@ -127,6 +127,29 @@ fn text_of(out: &std::process::Output) -> String {
     )
 }
 
+fn note_prompt(seat: &Seat, prompt: &str) {
+    let payload = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "person-1",
+        "prompt": prompt,
+    })
+    .to_string();
+    let mut child = seat
+        .command(&["hook"], false)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+}
+
 /// `ljos prefer` under a runner must not stamp a planted sentence as the
 /// person's words. The prompt never said it.
 #[test]
@@ -148,5 +171,25 @@ fn a_runner_prefer_of_a_plant_is_not_user_declared() {
     assert!(
         !tags.contains("via:prompt"),
         "a plant carried the person's tag: {pref}"
+    );
+}
+
+/// Words the person just said stay theirs, including the prompt tag.
+#[test]
+fn a_runner_prefer_of_the_persons_words_stays_theirs() {
+    let seat = Seat::new();
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    note_prompt(&seat, &format!("From now on: {said}"));
+    let out = seat.command(&["prefer", said], true).output().unwrap();
+    assert!(out.status.success(), "prefer failed\n{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    let pref = atoms
+        .iter()
+        .find(|atom| atom["text"] == said && atom["kind"] == "preference")
+        .unwrap_or_else(|| panic!("the person's preference was not stored\n{atoms:?}"));
+    assert_eq!(pref["origin"], "user-declared", "{pref}");
+    assert!(
+        pref["entities"].to_string().contains("via:prompt"),
+        "{pref}"
     );
 }
