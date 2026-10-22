@@ -1,0 +1,15 @@
+tokenizer: o200k_base
+text: initialize instructions, and the tools/list result object as the server sent it
+total: the two token counts added
+core.tools: 21
+core.tokens: 8045
+core.instructions_tokens: 215
+core.tools_tokens: 7830
+core.sha256: 80fd71ed6e80be33c8f4a1057c1627d0a71d649dd7b707af3ec54a662a7d3622
+core.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor
+all.tools: 50
+all.tokens: 16641
+all.instructions_tokens: 215
+all.tools_tokens: 16426
+all.sha256: d2a7321789cd1de44ac00a09f9dd77961fd18a8ce185f6d0b35c786ca8baeb7e
+all.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks

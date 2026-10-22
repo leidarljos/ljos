@@ -409,13 +409,13 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 ## MCP
 
 `ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which runs
-the `ljos-mcp` installed beside it. By default it lists twenty core tools,
+the `ljos-mcp` installed beside it. By default it lists twenty-one core tools,
 guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
-`search`, `start`, `guard_check`, `file`, `note`, `recall`, `sitting`,
+`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
-Every listed tool costs its description and schema on every session: 7,702
-tokens for the core set against 16,298 for all forty-nine (o200k_base
+Every listed tool costs its description and schema on every session: 8,045
+tokens for the core set against 16,641 for all fifty (o200k_base
 count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads
