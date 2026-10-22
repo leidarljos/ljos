@@ -310,6 +310,27 @@ fn doctor_does_not_read_a_log_past_its_limit() {
     }
 }
 
+/// Bytes a send set aside beside the queue are a `warn` the short doctor
+/// shows, naming the file, and doctor leaves that file as it was.
+#[test]
+fn doctor_names_queue_bytes_a_send_set_aside() {
+    let home = Home::new();
+    std::fs::write(home.queue(), QUEUE_ROW).expect("queue");
+    let aside = home
+        .root()
+        .join("state/ljos/note-queue.jsonl.2026-10-22.damaged");
+    std::fs::write(&aside, b"{\"issue\":\"ljos-new\",\"te\n").expect("set aside");
+    let before = home.tree();
+    let (_, out) = home.doctor(&[]).expect("doctor hung");
+    assert_eq!(home.tree(), before, "{out}");
+    let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
+    assert!(
+        line.starts_with("warn\tnote queue\tset aside: ")
+            && line.contains(&aside.display().to_string()),
+        "{line}"
+    );
+}
+
 /// Another process holding the note-queue lock does not hold doctor: it
 /// tries the lock once, says the queue is busy in a row the short doctor
 /// shows, and says so no longer once the lock is let go. A queue dated a

@@ -146,6 +146,27 @@ fn damaged_file(dir: &Path) -> PathBuf {
     ))
 }
 
+/// The damaged files a rewrite left in `dir`, with their sizes, oldest
+/// day first. Listed without following a link and without opening one.
+#[must_use]
+pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(PathBuf, u64)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let dated = name.strip_prefix("note-queue.jsonl.")?;
+            dated.strip_suffix(".damaged")?;
+            Some((entry.path(), entry.metadata().ok()?.len()))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// Add `unread` to the day's damaged file and put it on disk, before the
 /// rewrite that leaves those bytes out of the queue.
 fn set_aside(dir: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
