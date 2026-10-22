@@ -153,13 +153,16 @@ it can see one.
 The runners from Copilot down call ``ljos hook --runner NAME``. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
-The relay denies when the inner hook crashes, exits non-zero without
-an answer, or runs past ``GUARD_TIMEOUT``, which is 5 seconds unless
-``LJOS_GUARD_TIMEOUT`` names another number of seconds. It also denies
-when the inner hook says ``ljos-policyd`` did not start, gave no verdict
-or ran out of time. The reason names the failure and says to run
-``ljos doctor``. ``LJOS_GUARD_FAIL_OPEN=1`` restores the old
-allow-with-note behavior while the seat is repaired.
+On a tool call, the relay denies when the inner hook crashes, exits
+non-zero without an answer, or runs past ``GUARD_TIMEOUT``, which is 5
+seconds unless ``LJOS_GUARD_TIMEOUT`` names another number of seconds.
+It also denies when the inner hook says ``ljos-policyd`` did not start,
+gave no verdict or ran out of time. The reason names the failure and
+says to run ``ljos doctor``. ``LJOS_GUARD_FAIL_OPEN=1`` restores the old
+allow-with-note behavior while the seat is repaired. On any other
+event, such as a prompt, the relay waits 9 seconds, past the inner
+hook's own 8 second deadline, and a fault lets the event through with
+a note that the guard is unhealthy.
 
 When a hook fails
 -----------------
